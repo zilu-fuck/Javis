@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
@@ -291,7 +292,12 @@ fn fetch_web_source(request: WebSourceRequest) -> Result<WebSource, String> {
         return Err("Only http and https URLs are supported.".to_string());
     }
 
-    let mut response = ureq::get(&request.url)
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(15)))
+        .build();
+    let agent = ureq::Agent::new_with_config(config);
+    let mut response = agent
+        .get(&request.url)
         .header("User-Agent", "Javis/0.1")
         .call()
         .map_err(|error| error.to_string())?;
@@ -537,7 +543,7 @@ fn search_with_agent_chrome(query: &str, max_results: usize) -> Result<Vec<WebSe
         .ok_or_else(|| "Agent Chrome executable was not found.".to_string())?;
     let profile = create_agent_chrome_profile_dir()?;
     let search_url = format!(
-        "https://duckduckgo.com/html/?q={}",
+        "https://www.bing.com/search?q={}",
         percent_encode_query(query)
     );
     let user_data_dir = format!("--user-data-dir={}", profile.to_string_lossy());
@@ -573,7 +579,7 @@ fn search_with_agent_chrome(query: &str, max_results: usize) -> Result<Vec<WebSe
     }
 
     let html = String::from_utf8_lossy(&output.stdout);
-    let results = parse_duckduckgo_html_results(&html, max_results);
+    let results = parse_bing_html_results(&html, max_results);
     if results.is_empty() {
         return Err("Agent Chrome returned no parseable search results.".to_string());
     }
@@ -687,32 +693,50 @@ fn run_command_with_timeout(
     }
 }
 
-fn parse_duckduckgo_html_results(html: &str, max_results: usize) -> Vec<WebSearchResult> {
+fn parse_bing_html_results(html: &str, max_results: usize) -> Vec<WebSearchResult> {
     let fetched_at = format_system_time(SystemTime::now());
     let mut results = Vec::new();
     let mut remaining = html;
 
     while results.len() < max_results {
-        let Some(link_index) = remaining.find("result__a") else {
+        let Some(block_index) = remaining.find("<li class=\"b_algo\"") else {
             break;
         };
-        remaining = &remaining[link_index..];
-        let Some(href) = extract_html_attribute(remaining, "href") else {
-            remaining = &remaining["result__a".len()..];
+        remaining = &remaining[block_index..];
+        let next_block_index = remaining[1..]
+            .find("<li class=\"b_algo\"")
+            .map(|index| index + 1)
+            .unwrap_or(remaining.len());
+        let block = &remaining[..next_block_index];
+
+        let Some(h2_index) = block.find("<h2") else {
+            remaining = &remaining[next_block_index..];
             continue;
         };
-        let Some(close_index) = remaining.find('>') else {
-            break;
+        let h2 = &block[h2_index..];
+        let Some(anchor_index) = h2.find("<a") else {
+            remaining = &remaining[next_block_index..];
+            continue;
         };
-        let after_link = &remaining[close_index + 1..];
+        let anchor = &h2[anchor_index..];
+        let Some(href) = extract_html_attribute(anchor, "href") else {
+            remaining = &remaining[next_block_index..];
+            continue;
+        };
+        let Some(close_index) = anchor.find('>') else {
+            remaining = &remaining[next_block_index..];
+            continue;
+        };
+        let after_link = &anchor[close_index + 1..];
         let Some(end_index) = after_link.find("</a>") else {
-            break;
+            remaining = &remaining[next_block_index..];
+            continue;
         };
         let title = html_to_text(&after_link[..end_index]);
-        let excerpt = extract_result_snippet(after_link)
+        let excerpt = extract_bing_snippet(block)
             .filter(|snippet| !snippet.is_empty())
             .unwrap_or_else(|| title.clone());
-        if let Some(url) = normalize_duckduckgo_url(&href) {
+        if let Some(url) = normalize_bing_url(&href) {
             results.push(WebSearchResult {
                 url,
                 title: (!title.is_empty()).then_some(title),
@@ -721,18 +745,20 @@ fn parse_duckduckgo_html_results(html: &str, max_results: usize) -> Vec<WebSearc
                 provider: Some("agent-chrome".to_string()),
             });
         }
-        remaining = &after_link[end_index..];
+        remaining = &remaining[next_block_index..];
     }
 
     results
 }
 
-fn extract_result_snippet(value: &str) -> Option<String> {
-    let index = value.find("result__snippet")?;
+fn extract_bing_snippet(value: &str) -> Option<String> {
+    let index = value.find("b_caption")?;
     let snippet = &value[index..];
-    let close_index = snippet.find('>')?;
-    let after_tag = &snippet[close_index + 1..];
-    let end_index = after_tag.find("</a>").or_else(|| after_tag.find("</div>"))?;
+    let paragraph_index = snippet.find("<p")?;
+    let paragraph = &snippet[paragraph_index..];
+    let close_index = paragraph.find('>')?;
+    let after_tag = &paragraph[close_index + 1..];
+    let end_index = after_tag.find("</p>").or_else(|| after_tag.find("</div>"))?;
     Some(html_to_text(&after_tag[..end_index]))
 }
 
@@ -744,14 +770,25 @@ fn extract_html_attribute(value: &str, attribute: &str) -> Option<String> {
     Some(html_decode(&rest[..end]))
 }
 
-fn normalize_duckduckgo_url(value: &str) -> Option<String> {
+fn normalize_bing_url(value: &str) -> Option<String> {
+    if let Some(index) = value.find("u=") {
+        let encoded = &value[index + "u=".len()..];
+        let end = encoded.find('&').unwrap_or(encoded.len());
+        let encoded = encoded[..end].trim_start_matches("a1");
+        if !encoded.is_empty() {
+            let mut padded = encoded.replace('-', "+").replace('_', "/");
+            while padded.len() % 4 != 0 {
+                padded.push('=');
+            }
+            if let Ok(decoded) = STANDARD.decode(padded) {
+                if let Ok(url) = String::from_utf8(decoded) {
+                    return Some(url);
+                }
+            }
+        }
+    }
     if value.starts_with("http://") || value.starts_with("https://") {
         return Some(value.to_string());
-    }
-    if let Some(index) = value.find("uddg=") {
-        let encoded = &value[index + "uddg=".len()..];
-        let end = encoded.find('&').unwrap_or(encoded.len());
-        return Some(percent_decode(&encoded[..end]));
     }
     None
 }
@@ -767,24 +804,6 @@ fn percent_encode_query(value: &str) -> String {
             _ => format!("%{byte:02X}").chars().collect(),
         })
         .collect()
-}
-
-fn percent_decode(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut output = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&value[index + 1..index + 3], 16) {
-                output.push(byte);
-                index += 3;
-                continue;
-            }
-        }
-        output.push(if bytes[index] == b'+' { b' ' } else { bytes[index] });
-        index += 1;
-    }
-    String::from_utf8_lossy(&output).to_string()
 }
 
 fn downloads_directory() -> Result<PathBuf, String> {
@@ -1492,15 +1511,19 @@ mod tests {
     }
 
     #[test]
-    fn parses_agent_chrome_duckduckgo_results() {
+    fn parses_agent_chrome_bing_results() {
         let html = r#"
-          <a rel="nofollow" class="result__a" href="https://example.com/alpha">Alpha &amp; Docs</a>
-          <a class="result__snippet">Useful alpha evidence.</a>
-          <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fbeta&amp;rut=1">Beta</a>
-          <a class="result__snippet">Useful beta evidence.</a>
+          <li class="b_algo">
+            <h2><a href="https://example.com/alpha">Alpha &amp; Docs</a></h2>
+            <div class="b_caption"><p>Useful alpha evidence.</p></div>
+          </li>
+          <li class="b_algo">
+            <h2><a href="https://www.bing.com/ck/a?!&&p=1&u=a1aHR0cHM6Ly9leGFtcGxlLmNvbS9iZXRh&ntb=1">Beta</a></h2>
+            <div class="b_caption"><p>Useful beta evidence.</p></div>
+          </li>
         "#;
 
-        let results = parse_duckduckgo_html_results(html, 3);
+        let results = parse_bing_html_results(html, 3);
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].url, "https://example.com/alpha");
@@ -1515,7 +1538,6 @@ mod tests {
         let encoded = percent_encode_query("opencode intellisearch/Rust");
 
         assert_eq!(encoded, "opencode+intellisearch%2FRust");
-        assert_eq!(percent_decode(&encoded), "opencode intellisearch/Rust");
     }
 
     #[test]

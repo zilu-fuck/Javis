@@ -82,6 +82,14 @@ function Eval-Js($socket, [ref]$id, $expression) {
   } | Out-Null
 }
 
+function Get-PageText($socket, [ref]$id) {
+  $response = Invoke-Cdp $socket $id "Runtime.evaluate" @{
+    expression = "document.body.innerText"
+    returnByValue = $true
+  }
+  return $response.result.result.value
+}
+
 function Submit-Goal($socket, [ref]$id, $goal) {
   $jsonGoal = $goal | ConvertTo-Json -Compress
   $expression = @"
@@ -115,10 +123,14 @@ function Wait-ForText($socket, [ref]$id, $text, $seconds) {
     }
     Start-Sleep -Milliseconds 500
   }
-  throw "Timed out waiting for text: $text"
+  $pageText = Get-PageText $socket $id
+  if ($pageText.Length -gt 2000) {
+    $pageText = $pageText.Substring(0, 2000)
+  }
+  throw "Timed out waiting for text: $text`nCurrent page text:`n$pageText"
 }
 
-function Run-LiveSmoke($port, $goal, $provider, $screenshot, $disableGithubCli) {
+function Run-LiveSmoke($port, $goal, $provider, $screenshot, $disableGithubCli, $providerWaitSeconds) {
   $process = $null
   $socket = $null
   $previousWebviewArgs = [Environment]::GetEnvironmentVariable("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "Process")
@@ -140,7 +152,7 @@ function Run-LiveSmoke($port, $goal, $provider, $screenshot, $disableGithubCli) 
     Eval-Js $socket ([ref]$id) "localStorage.clear(); location.reload();"
     Start-Sleep -Seconds 2
     Submit-Goal $socket ([ref]$id) $goal
-    Wait-ForText $socket ([ref]$id) $provider 45 | Out-Null
+    Wait-ForText $socket ([ref]$id) $provider $providerWaitSeconds | Out-Null
     Wait-ForText $socket ([ref]$id) "searched sources include URL and excerpt" 45 | Out-Null
     Capture-Window $appProcess.MainWindowHandle (Join-Path $qaDir $screenshot)
   }
@@ -164,6 +176,7 @@ function Run-LiveSmoke($port, $goal, $provider, $screenshot, $disableGithubCli) 
   }
 }
 
-Run-LiveSmoke 9224 "research" "github-cli" "14-search-live-github-cli-smoke.png" $false
+Run-LiveSmoke 9224 "research" "github-cli" "14-search-live-github-cli-smoke.png" $false 45
+Run-LiveSmoke 9225 "research" "agent-chrome" "15-search-live-agent-chrome-smoke.png" $true 90
 
 Get-ChildItem $qaDir -Filter "*live-*.png" | Sort-Object Name | Select-Object Name,Length

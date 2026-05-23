@@ -17,6 +17,10 @@ export function createSourceBackedReport(
   }));
 
   const missingEvidenceCount = rows.filter((row) => !row.evidence).length;
+  const comparisonNote =
+    rows.length >= 3
+      ? " The report compares the available sources for overlap and differences."
+      : "";
 
   return {
     title: "Source-backed research report",
@@ -24,7 +28,7 @@ export function createSourceBackedReport(
       rows.length > 0
         ? `Collected ${rows.length} public source(s)${
             options.providerSummary ? ` via ${options.providerSummary}` : ""
-          }. Claims below are limited to fetched source excerpts.`
+          }. Claims below are limited to fetched source excerpts.${comparisonNote}`
         : "No public source was collected, so no claims are verified.",
     rows,
     unknowns:

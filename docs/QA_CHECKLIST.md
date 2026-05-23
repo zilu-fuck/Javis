@@ -16,7 +16,7 @@ selection, generalized confirmed-write approvals, and release rollback notes.
 - Create a screenshot folder such as `docs/qa/2026-05-23/`.
 - For repeatable search-backed research evidence, build the release app and run
   `docs/qa/2026-05-23/research-search-qa.ps1`.
-- For live `github-cli` provider smoke evidence, run
+- For live `github-cli` and Agent Chrome provider smoke evidence, run
   `docs/qa/2026-05-23/research-live-smoke-qa.ps1`.
 
 ## Required Screenshots
@@ -80,9 +80,8 @@ exist:
 - Run `research-search-qa.ps1` to capture repeatable fixture evidence for
   `github-cli`, `agent-chrome`, weak evidence, failed fetch, and no-results
   states.
-- Run `research-live-smoke-qa.ps1` to capture live `github-cli` provider smoke
-  evidence. Live Agent Chrome fallback smoke remains a separate public-provider
-  check.
+- Run `research-live-smoke-qa.ps1` to capture live `github-cli` and Agent Chrome
+  provider smoke evidence.
 - After Code Agent integration, verify Javis can use `opencode-intellisearch`
   through the OpenCode plugin path.
 - Verify the source list shows provider metadata.

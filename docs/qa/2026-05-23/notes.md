@@ -43,7 +43,8 @@ Command status:
 - `pnpm --filter @javis/desktop tauri build`: pass
 - `native-qa.ps1`: pass
 - `research-search-qa.ps1`: pass
-- `research-live-smoke-qa.ps1`: pass for live `github-cli` smoke.
+- `research-live-smoke-qa.ps1`: pass for live `github-cli` and Agent Chrome
+  smoke.
 - `git diff --check` output contains only Git LF-to-CRLF working-copy warnings;
   the command exited successfully.
 
@@ -70,6 +71,8 @@ Evidence:
   the UI showed the no-results failure state.
 - `14-search-live-github-cli-smoke.png`: live `github-cli` provider smoke using
   public GitHub repository search.
+- `15-search-live-agent-chrome-smoke.png`: live `agent-chrome` provider smoke
+  using public Bing search results.
 - `qa-contact-sheet.png`: contact sheet for visual review.
 - Packaged artifacts:
   - `apps/desktop/src-tauri/target/release/bundle/msi/Javis_0.1.0_x64_en-US.msi`
@@ -94,6 +97,7 @@ Scenario status:
 | Search failed fetch | Pass | Missing searched source produced a failed search state with manual URL fallback guidance. |
 | Search no results | Pass | Empty fixture search produced `Research search returned no sources`. |
 | Live github-cli search smoke | Pass | Live `gh search repos research` path returned public sources and displayed `github-cli` provider metadata. |
+| Live Agent Chrome search smoke | Pass | Live Bing search path returned public sources and displayed `agent-chrome` provider metadata. |
 
 Manual QA verdict: pass for the documented MVP release scenarios.
 
@@ -109,10 +113,10 @@ Notes:
   repeatable without relying on live public search availability. It verifies the
   packaged release executable's fixture-driven search UI/backend flow, provider
   metadata display, source fetching, weak evidence, failed fetch, and no-results
-  states. Live `github-cli` and Agent Chrome provider smoke QA remains separate
-  product-readiness work.
-- `research-live-smoke-qa.ps1` covers live `github-cli` provider smoke only.
-  Live Agent Chrome fallback smoke still needs a stable public-provider pass.
+  states. Live `github-cli` and Agent Chrome provider smoke QA now has separate
+  passing evidence.
+- `research-live-smoke-qa.ps1` covers live `github-cli` and Agent Chrome
+  provider smoke.
 - Security/permissions review applies because PDF confirmed-write code changed.
   `SECURITY_MODEL.md` and `PERMISSIONS.md` were reviewed against the current
   implementation; Rust tests cover move success, conflict skip, missing

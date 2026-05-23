@@ -446,6 +446,7 @@ describe("createFileScanTaskRuntime", () => {
     expect(fetchWebSource).toHaveBeenCalledTimes(3);
     expect(finalSnapshot.researchReport?.rows).toHaveLength(3);
     expect(finalSnapshot.researchReport?.summary).toContain("via test-search");
+    expect(finalSnapshot.researchReport?.summary).toContain("compares the available sources");
     expect(finalSnapshot.researchReport?.unknowns).not.toContain(
       "Automated public web search is not integrated yet; add URLs manually for broader coverage.",
     );

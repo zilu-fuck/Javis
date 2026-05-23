@@ -20,6 +20,7 @@ docs/qa/YYYY-MM-DD/
   12-search-failed-fetch-state.png
   13-search-no-results-state.png
   14-search-live-github-cli-smoke.png
+  15-search-live-agent-chrome-smoke.png
 ```
 
 Do not commit screenshots that expose private file paths, credentials, or

@@ -45,7 +45,8 @@ Status: complete for the 2026-05-23 QA pass.
   from `github-cli` or IntelliSearch to embedded Chrome.
 - Add tests and QA screenshots for `github-cli` success, IntelliSearch success
   after Code Agent integration, Chrome fallback, weak evidence, failed fetch,
-  and no-results states.
+  and no-results states. Live `github-cli` and Agent Chrome smoke evidence are
+  already captured.
 
 ## Milestone 2: Code Agent
 
