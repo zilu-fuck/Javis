@@ -4,6 +4,7 @@ use std::{
     io::Read,
     path::{Path, PathBuf},
     process::Command,
+    sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -15,6 +16,59 @@ struct MarkdownDocument {
     size_bytes: u64,
     heading: Option<String>,
     excerpt: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileOrganizationPlan {
+    approval_id: String,
+    directory_path: String,
+    file_count: usize,
+    dry_run: FileDryRunSummary,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileDryRunSummary {
+    operation: String,
+    affected_paths: Vec<PlannedPathOperation>,
+    risk_summary: String,
+    reversible: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlannedPathOperation {
+    source: String,
+    target: String,
+    action: String,
+    conflict: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecuteFileOrganizationRequest {
+    approval_id: String,
+    operations: Vec<PlannedPathOperation>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileOrganizationExecution {
+    attempted_count: usize,
+    moved_count: usize,
+    skipped_count: usize,
+    failed_count: usize,
+    results: Vec<FileOperationResult>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileOperationResult {
+    source: String,
+    target: String,
+    status: String,
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -50,8 +104,38 @@ struct WebSource {
     fetched_at: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectInspection {
+    workspace_path: String,
+    package_manager: Option<String>,
+    scripts: Vec<ProjectScript>,
+    recommended_start_command: Option<String>,
+    recommended_test_command: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectScript {
+    name: String,
+    command: String,
+}
+
+#[derive(Default)]
+struct PdfOrganizationApprovalState {
+    pending: Option<PendingPdfOrganizationApproval>,
+}
+
+struct PendingPdfOrganizationApproval {
+    approval_id: String,
+    operations: Vec<PlannedPathOperation>,
+    approved: bool,
+}
+
 #[tauri::command]
-fn scan_markdown_documents(workspace_path: Option<String>) -> Result<Vec<MarkdownDocument>, String> {
+fn scan_markdown_documents(
+    workspace_path: Option<String>,
+) -> Result<Vec<MarkdownDocument>, String> {
     let workspace = resolve_workspace_path(workspace_path)?;
     let mut documents = Vec::new();
     scan_directory(&workspace, &workspace, &mut documents)?;
@@ -61,13 +145,112 @@ fn scan_markdown_documents(workspace_path: Option<String>) -> Result<Vec<Markdow
 }
 
 #[tauri::command]
+fn plan_pdf_organization(
+    approval_state: tauri::State<'_, Mutex<PdfOrganizationApprovalState>>,
+) -> Result<FileOrganizationPlan, String> {
+    let directory = downloads_directory()?;
+    let mut operations = Vec::new();
+
+    for entry in fs::read_dir(&directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| !extension.eq_ignore_ascii_case("pdf"))
+            .unwrap_or(true)
+        {
+            continue;
+        }
+
+        let category = infer_pdf_category(&path);
+        let target = directory.join(category).join(
+            path.file_name()
+                .ok_or_else(|| "PDF path does not include a file name.".to_string())?,
+        );
+        let conflict = target
+            .exists()
+            .then(|| "Target file already exists; default plan will not overwrite.".to_string());
+
+        operations.push(PlannedPathOperation {
+            source: normalize_path(&path),
+            target: normalize_path(&target),
+            action: "move".to_string(),
+            conflict,
+        });
+    }
+
+    operations.sort_by(|left, right| left.source.cmp(&right.source));
+    let approval_id = create_approval_id();
+    replace_pending_pdf_approval(&approval_state, &approval_id, &operations)?;
+
+    Ok(FileOrganizationPlan {
+        approval_id,
+        directory_path: normalize_path(&directory),
+        file_count: operations.len(),
+        dry_run: FileDryRunSummary {
+            operation: "Organize PDF files by filename topic".to_string(),
+            affected_paths: operations,
+            risk_summary: "Preview only. Files move only after the current dry-run is approved."
+                .to_string(),
+            reversible: true,
+        },
+    })
+}
+
+#[tauri::command]
+fn approve_pdf_organization(
+    approval_id: String,
+    approval_state: tauri::State<'_, Mutex<PdfOrganizationApprovalState>>,
+) -> Result<(), String> {
+    approve_pending_pdf_organization(&approval_state, &approval_id)
+}
+
+#[tauri::command]
+fn execute_pdf_organization(
+    request: ExecuteFileOrganizationRequest,
+    approval_state: tauri::State<'_, Mutex<PdfOrganizationApprovalState>>,
+) -> Result<FileOrganizationExecution, String> {
+    let downloads = downloads_directory()?;
+    let mut results = Vec::new();
+    let operations = take_approved_pdf_operations(&approval_state, request)?;
+
+    for operation in operations {
+        results.push(execute_pdf_move_operation(&downloads, operation));
+    }
+
+    let moved_count = results
+        .iter()
+        .filter(|result| result.status == "moved")
+        .count();
+    let skipped_count = results
+        .iter()
+        .filter(|result| result.status == "skipped")
+        .count();
+    let failed_count = results
+        .iter()
+        .filter(|result| result.status == "failed")
+        .count();
+
+    Ok(FileOrganizationExecution {
+        attempted_count: results.len(),
+        moved_count,
+        skipped_count,
+        failed_count,
+        results,
+    })
+}
+
+#[tauri::command]
 fn run_read_only_command(request: ShellCommandRequest) -> Result<ShellCommandOutput, String> {
     if !is_allowed_read_only_command(&request.program, &request.args) {
         return Err("Command is not in the first-version read-only allowlist.".to_string());
     }
 
     let cwd = resolve_workspace_path(request.workspace_path)?;
-    let output = Command::new(&request.program)
+    let executable = resolve_command_program(&request.program);
+    let output = Command::new(executable)
         .args(&request.args)
         .current_dir(&cwd)
         .output()
@@ -108,6 +291,39 @@ fn fetch_web_source(request: WebSourceRequest) -> Result<WebSource, String> {
     })
 }
 
+#[tauri::command]
+fn inspect_project(workspace_path: Option<String>) -> Result<ProjectInspection, String> {
+    let workspace = resolve_workspace_path(workspace_path)?;
+    let package_json_path = workspace.join("package.json");
+    let package_json = fs::read_to_string(&package_json_path).map_err(|error| error.to_string())?;
+    let value = serde_json::from_str::<serde_json::Value>(&package_json)
+        .map_err(|error| error.to_string())?;
+    let scripts = value
+        .get("scripts")
+        .and_then(|scripts| scripts.as_object())
+        .map(|scripts| {
+            scripts
+                .iter()
+                .filter_map(|(name, command)| {
+                    command.as_str().map(|command| ProjectScript {
+                        name: name.clone(),
+                        command: command.to_string(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let package_manager = detect_package_manager(&workspace);
+    let runner = package_manager.as_deref().unwrap_or("pnpm");
+
+    Ok(ProjectInspection {
+        workspace_path: workspace.to_string_lossy().to_string(),
+        recommended_start_command: recommend_script(&scripts, runner, &["dev", "start"]),
+        recommended_test_command: recommend_script(&scripts, runner, &["typecheck", "test"]),
+        package_manager,
+        scripts,
+    })
+}
 
 fn is_allowed_read_only_command(program: &str, args: &[String]) -> bool {
     let normalized_program = program.to_ascii_lowercase();
@@ -117,9 +333,28 @@ fn is_allowed_read_only_command(program: &str, args: &[String]) -> bool {
         (normalized_program.as_str(), normalized_args.as_slice()),
         ("node", ["--version"])
             | ("pnpm", ["--version"])
+            | ("pnpm", ["typecheck"])
+            | ("pnpm", ["test"])
+            | ("npm", ["run", "typecheck"])
+            | ("npm", ["test"])
+            | ("yarn", ["typecheck"])
+            | ("yarn", ["test"])
             | ("cargo", ["--version"])
             | ("git", ["status", "--short"])
     )
+}
+
+#[cfg(windows)]
+fn resolve_command_program(program: &str) -> String {
+    match program.to_ascii_lowercase().as_str() {
+        "npm" | "pnpm" | "yarn" => format!("{program}.cmd"),
+        _ => program.to_string(),
+    }
+}
+
+#[cfg(not(windows))]
+fn resolve_command_program(program: &str) -> String {
+    program.to_string()
 }
 
 fn resolve_workspace_path(workspace_path: Option<String>) -> Result<PathBuf, String> {
@@ -135,6 +370,260 @@ fn resolve_workspace_path(workspace_path: Option<String>) -> Result<PathBuf, Str
     }
 
     Ok(current_dir)
+}
+
+fn detect_package_manager(workspace: &Path) -> Option<String> {
+    if workspace.join("pnpm-lock.yaml").exists() {
+        return Some("pnpm".to_string());
+    }
+    if workspace.join("yarn.lock").exists() {
+        return Some("yarn".to_string());
+    }
+    if workspace.join("package-lock.json").exists() {
+        return Some("npm".to_string());
+    }
+    None
+}
+
+fn recommend_script(scripts: &[ProjectScript], runner: &str, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        scripts
+            .iter()
+            .any(|script| script.name == *name)
+            .then(|| format!("{} {}", runner, name))
+    })
+}
+
+fn downloads_directory() -> Result<PathBuf, String> {
+    let home = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .ok_or_else(|| "Could not resolve the user home directory.".to_string())?;
+    let downloads = home.join("Downloads");
+    if downloads.is_dir() {
+        return Ok(downloads);
+    }
+    Err("Downloads directory was not found.".to_string())
+}
+
+fn create_approval_id() -> String {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("pdf-approval-{suffix}")
+}
+
+fn replace_pending_pdf_approval(
+    approval_state: &Mutex<PdfOrganizationApprovalState>,
+    approval_id: &str,
+    operations: &[PlannedPathOperation],
+) -> Result<(), String> {
+    let mut state = approval_state
+        .lock()
+        .map_err(|_| "PDF approval state could not be locked.".to_string())?;
+    state.pending = Some(PendingPdfOrganizationApproval {
+        approval_id: approval_id.to_string(),
+        operations: operations.to_vec(),
+        approved: false,
+    });
+    Ok(())
+}
+
+fn approve_pending_pdf_organization(
+    approval_state: &Mutex<PdfOrganizationApprovalState>,
+    approval_id: &str,
+) -> Result<(), String> {
+    let mut state = approval_state
+        .lock()
+        .map_err(|_| "PDF approval state could not be locked.".to_string())?;
+    let Some(pending) = state.pending.as_mut() else {
+        return Err("No pending PDF organization approval exists.".to_string());
+    };
+    if pending.approval_id != approval_id {
+        return Err("PDF organization approval id does not match the pending dry-run.".to_string());
+    }
+    pending.approved = true;
+    Ok(())
+}
+
+fn take_approved_pdf_operations(
+    approval_state: &Mutex<PdfOrganizationApprovalState>,
+    request: ExecuteFileOrganizationRequest,
+) -> Result<Vec<PlannedPathOperation>, String> {
+    let mut state = approval_state
+        .lock()
+        .map_err(|_| "PDF approval state could not be locked.".to_string())?;
+    let Some(pending) = state.pending.as_ref() else {
+        return Err("No approved PDF organization dry-run is pending.".to_string());
+    };
+    if pending.approval_id != request.approval_id {
+        return Err("PDF organization approval id does not match the pending dry-run.".to_string());
+    }
+    if !pending.approved {
+        return Err("PDF organization dry-run has not been approved.".to_string());
+    }
+    if pending.operations != request.operations {
+        return Err(
+            "Approved PDF organization operations do not match the current dry-run.".to_string(),
+        );
+    }
+    let operations = request.operations;
+    state.pending = None;
+    Ok(operations)
+}
+
+fn infer_pdf_category(path: &Path) -> &'static str {
+    let name = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if name.contains("invoice") || name.contains("receipt") || name.contains("bill") {
+        return "Finance";
+    }
+    if name.contains("paper") || name.contains("research") || name.contains("report") {
+        return "Research";
+    }
+    if name.contains("manual") || name.contains("guide") || name.contains("docs") {
+        return "Manuals";
+    }
+    "Unsorted"
+}
+
+fn normalize_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn execute_pdf_move_operation(
+    downloads: &Path,
+    operation: PlannedPathOperation,
+) -> FileOperationResult {
+    if operation.action != "move" {
+        return file_operation_result(operation, "failed", "Only move operations are supported.");
+    }
+
+    if operation.conflict.is_some() {
+        return file_operation_result(
+            operation,
+            "skipped",
+            "Dry-run marked this operation as conflicting; skipped by default.",
+        );
+    }
+
+    let source = PathBuf::from(&operation.source);
+    let target = PathBuf::from(&operation.target);
+
+    if has_parent_dir_component(&source) || has_parent_dir_component(&target) {
+        return file_operation_result(
+            operation,
+            "failed",
+            "Parent directory traversal is not allowed.",
+        );
+    }
+
+    let source_canonical = match fs::canonicalize(&source) {
+        Ok(path) => path,
+        Err(error) => {
+            return file_operation_result(
+                operation,
+                "failed",
+                &format!("Source cannot be read: {error}"),
+            );
+        }
+    };
+    let downloads_canonical = match fs::canonicalize(downloads) {
+        Ok(path) => path,
+        Err(error) => {
+            return file_operation_result(
+                operation,
+                "failed",
+                &format!("Downloads directory cannot be verified: {error}"),
+            );
+        }
+    };
+
+    if !source_canonical.starts_with(&downloads_canonical) || !target.starts_with(downloads) {
+        return file_operation_result(
+            operation,
+            "failed",
+            "Source and target must both stay inside Downloads.",
+        );
+    }
+
+    if !target_parent_stays_in_downloads(&target, &downloads_canonical) {
+        return file_operation_result(
+            operation,
+            "failed",
+            "Target parent directory could not be verified inside Downloads.",
+        );
+    }
+
+    if source_canonical
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| !extension.eq_ignore_ascii_case("pdf"))
+        .unwrap_or(true)
+    {
+        return file_operation_result(operation, "failed", "Only PDF files can be moved.");
+    }
+
+    if target.exists() {
+        return file_operation_result(operation, "skipped", "Target already exists.");
+    }
+
+    if let Some(parent) = target.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            return file_operation_result(
+                operation,
+                "failed",
+                &format!("Target directory could not be created: {error}"),
+            );
+        }
+    }
+
+    match fs::rename(&source_canonical, &target) {
+        Ok(()) => file_operation_result(operation, "moved", "File moved successfully."),
+        Err(error) => file_operation_result(operation, "failed", &format!("Move failed: {error}")),
+    }
+}
+
+fn target_parent_stays_in_downloads(target: &Path, downloads_canonical: &Path) -> bool {
+    let Some(mut candidate) = target.parent() else {
+        return false;
+    };
+
+    loop {
+        if candidate.exists() {
+            return fs::canonicalize(candidate)
+                .map(|path| path.starts_with(downloads_canonical))
+                .unwrap_or(false);
+        }
+
+        let Some(parent) = candidate.parent() else {
+            return false;
+        };
+        candidate = parent;
+    }
+}
+
+fn has_parent_dir_component(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+}
+
+fn file_operation_result(
+    operation: PlannedPathOperation,
+    status: &str,
+    message: &str,
+) -> FileOperationResult {
+    FileOperationResult {
+        source: operation.source,
+        target: operation.target,
+        status: status.to_string(),
+        message: message.to_string(),
+    }
 }
 
 fn scan_directory(
@@ -282,14 +771,326 @@ fn html_to_text(content: &str) -> String {
         .replace("&gt;", ">")
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execute_pdf_move_moves_file_inside_downloads() {
+        let root = create_test_directory("move-success");
+        let source = root.join("paper.pdf");
+        let target = root.join("Research").join("paper.pdf");
+        fs::write(&source, b"pdf").expect("write source pdf");
+
+        let result = execute_pdf_move_operation(
+            &root,
+            PlannedPathOperation {
+                source: normalize_path(&source),
+                target: normalize_path(&target),
+                action: "move".to_string(),
+                conflict: None,
+            },
+        );
+
+        assert_eq!(result.status, "moved");
+        assert!(!source.exists());
+        assert!(target.exists());
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn execute_pdf_move_skips_conflicting_target() {
+        let root = create_test_directory("move-conflict");
+        let source = root.join("paper.pdf");
+        let target = root.join("Research").join("paper.pdf");
+        fs::create_dir_all(target.parent().expect("target parent")).expect("create target parent");
+        fs::write(&source, b"source").expect("write source pdf");
+        fs::write(&target, b"target").expect("write target pdf");
+
+        let result = execute_pdf_move_operation(
+            &root,
+            PlannedPathOperation {
+                source: normalize_path(&source),
+                target: normalize_path(&target),
+                action: "move".to_string(),
+                conflict: Some("Target file already exists.".to_string()),
+            },
+        );
+
+        assert_eq!(result.status, "skipped");
+        assert!(source.exists());
+        assert!(target.exists());
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn execute_pdf_move_rejects_non_pdf_source() {
+        let root = create_test_directory("move-non-pdf");
+        let source = root.join("notes.txt");
+        let target = root.join("Research").join("notes.txt");
+        fs::write(&source, b"text").expect("write source text");
+
+        let result = execute_pdf_move_operation(
+            &root,
+            PlannedPathOperation {
+                source: normalize_path(&source),
+                target: normalize_path(&target),
+                action: "move".to_string(),
+                conflict: None,
+            },
+        );
+
+        assert_eq!(result.status, "failed");
+        assert_eq!(result.message, "Only PDF files can be moved.");
+        assert!(source.exists());
+        assert!(!target.exists());
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn execute_pdf_move_rejects_parent_directory_traversal() {
+        let root = create_test_directory("move-traversal");
+        let source = root.join("paper.pdf");
+        let target = root.join("Research").join("..").join("paper.pdf");
+        fs::write(&source, b"pdf").expect("write source pdf");
+
+        let result = execute_pdf_move_operation(
+            &root,
+            PlannedPathOperation {
+                source: normalize_path(&source),
+                target: normalize_path(&target),
+                action: "move".to_string(),
+                conflict: None,
+            },
+        );
+
+        assert_eq!(result.status, "failed");
+        assert_eq!(result.message, "Parent directory traversal is not allowed.");
+        assert!(source.exists());
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn execute_pdf_move_rejects_target_outside_downloads() {
+        let root = create_test_directory("move-target-outside");
+        let outside = create_test_directory("move-target-outside-other");
+        let source = root.join("paper.pdf");
+        let target = outside.join("paper.pdf");
+        fs::write(&source, b"pdf").expect("write source pdf");
+
+        let result = execute_pdf_move_operation(
+            &root,
+            PlannedPathOperation {
+                source: normalize_path(&source),
+                target: normalize_path(&target),
+                action: "move".to_string(),
+                conflict: None,
+            },
+        );
+
+        assert_eq!(result.status, "failed");
+        assert_eq!(
+            result.message,
+            "Source and target must both stay inside Downloads."
+        );
+        assert!(source.exists());
+        assert!(!target.exists());
+        fs::remove_dir_all(root).expect("cleanup test directory");
+        fs::remove_dir_all(outside).expect("cleanup outside directory");
+    }
+
+    #[test]
+    fn execute_pdf_move_rejects_source_outside_downloads() {
+        let root = create_test_directory("move-source-outside");
+        let outside = create_test_directory("move-source-outside-other");
+        let source = outside.join("paper.pdf");
+        let target = root.join("Research").join("paper.pdf");
+        fs::write(&source, b"pdf").expect("write outside source pdf");
+
+        let result = execute_pdf_move_operation(
+            &root,
+            PlannedPathOperation {
+                source: normalize_path(&source),
+                target: normalize_path(&target),
+                action: "move".to_string(),
+                conflict: None,
+            },
+        );
+
+        assert_eq!(result.status, "failed");
+        assert_eq!(
+            result.message,
+            "Source and target must both stay inside Downloads."
+        );
+        assert!(source.exists());
+        assert!(!target.exists());
+        fs::remove_dir_all(root).expect("cleanup test directory");
+        fs::remove_dir_all(outside).expect("cleanup outside directory");
+    }
+
+    #[test]
+    fn execute_pdf_move_rejects_non_move_operations() {
+        let root = create_test_directory("move-copy-rejected");
+        let source = root.join("paper.pdf");
+        let target = root.join("Research").join("paper.pdf");
+        fs::write(&source, b"pdf").expect("write source pdf");
+
+        let result = execute_pdf_move_operation(
+            &root,
+            PlannedPathOperation {
+                source: normalize_path(&source),
+                target: normalize_path(&target),
+                action: "copy".to_string(),
+                conflict: None,
+            },
+        );
+
+        assert_eq!(result.status, "failed");
+        assert_eq!(result.message, "Only move operations are supported.");
+        assert!(source.exists());
+        assert!(!target.exists());
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn pdf_operations_require_approval_before_execution() {
+        let approval_state = Mutex::new(PdfOrganizationApprovalState::default());
+        let operations = vec![planned_pdf_operation()];
+        replace_pending_pdf_approval(&approval_state, "approval-1", &operations)
+            .expect("store pending approval");
+
+        let result = take_approved_pdf_operations(
+            &approval_state,
+            ExecuteFileOrganizationRequest {
+                approval_id: "approval-1".to_string(),
+                operations,
+            },
+        );
+
+        assert_eq!(
+            result.expect_err("approval should be required"),
+            "PDF organization dry-run has not been approved."
+        );
+    }
+
+    #[test]
+    fn pdf_operations_must_match_the_approved_dry_run() {
+        let approval_state = Mutex::new(PdfOrganizationApprovalState::default());
+        let operations = vec![planned_pdf_operation()];
+        replace_pending_pdf_approval(&approval_state, "approval-1", &operations)
+            .expect("store pending approval");
+        approve_pending_pdf_organization(&approval_state, "approval-1").expect("approve plan");
+        let mut changed_operations = operations;
+        changed_operations[0].target = "C:/Users/example/Downloads/Other/paper.pdf".to_string();
+
+        let result = take_approved_pdf_operations(
+            &approval_state,
+            ExecuteFileOrganizationRequest {
+                approval_id: "approval-1".to_string(),
+                operations: changed_operations,
+            },
+        );
+
+        assert_eq!(
+            result.expect_err("changed operations should be rejected"),
+            "Approved PDF organization operations do not match the current dry-run."
+        );
+    }
+
+    #[test]
+    fn approved_pdf_operations_are_one_time_use() {
+        let approval_state = Mutex::new(PdfOrganizationApprovalState::default());
+        let operations = vec![planned_pdf_operation()];
+        replace_pending_pdf_approval(&approval_state, "approval-1", &operations)
+            .expect("store pending approval");
+        approve_pending_pdf_organization(&approval_state, "approval-1").expect("approve plan");
+
+        let approved_operations = take_approved_pdf_operations(
+            &approval_state,
+            ExecuteFileOrganizationRequest {
+                approval_id: "approval-1".to_string(),
+                operations: operations.clone(),
+            },
+        )
+        .expect("approved operations");
+        let second_result = take_approved_pdf_operations(
+            &approval_state,
+            ExecuteFileOrganizationRequest {
+                approval_id: "approval-1".to_string(),
+                operations,
+            },
+        );
+
+        assert_eq!(approved_operations.len(), 1);
+        assert_eq!(
+            second_result.expect_err("approval should be consumed"),
+            "No approved PDF organization dry-run is pending."
+        );
+    }
+
+    #[test]
+    fn execute_pdf_move_reports_missing_source() {
+        let root = create_test_directory("move-missing-source");
+        let source = root.join("missing.pdf");
+        let target = root.join("Research").join("missing.pdf");
+
+        let result = execute_pdf_move_operation(
+            &root,
+            PlannedPathOperation {
+                source: normalize_path(&source),
+                target: normalize_path(&target),
+                action: "move".to_string(),
+                conflict: None,
+            },
+        );
+
+        assert_eq!(result.status, "failed");
+        assert!(result.message.starts_with("Source cannot be read:"));
+        assert!(!target.exists());
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolves_windows_package_manager_shims() {
+        assert_eq!(resolve_command_program("pnpm"), "pnpm.cmd");
+        assert_eq!(resolve_command_program("npm"), "npm.cmd");
+        assert_eq!(resolve_command_program("node"), "node");
+    }
+
+    fn create_test_directory(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("javis-{name}-{unique}"));
+        fs::create_dir_all(&root).expect("create test directory");
+        root
+    }
+
+    fn planned_pdf_operation() -> PlannedPathOperation {
+        PlannedPathOperation {
+            source: "C:/Users/example/Downloads/paper.pdf".to_string(),
+            target: "C:/Users/example/Downloads/Research/paper.pdf".to_string(),
+            action: "move".to_string(),
+            conflict: None,
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(Mutex::new(PdfOrganizationApprovalState::default()))
         .invoke_handler(tauri::generate_handler![
             scan_markdown_documents,
             run_read_only_command,
-            fetch_web_source
+            fetch_web_source,
+            inspect_project,
+            plan_pdf_organization,
+            approve_pdf_organization,
+            execute_pdf_organization
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

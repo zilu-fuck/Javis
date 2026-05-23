@@ -2,13 +2,17 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { createFileScanTaskRuntime, createInitialTaskSnapshot } from "@javis/core";
 import type {
+  FileOrganizationExecution,
+  FileOrganizationPlan,
   MarkdownDocument,
+  PlannedPathOperation,
+  ProjectInspection,
   ShellCommandOutput,
   ShellCommandRequest,
   WebSource,
   WebSourceRequest,
 } from "@javis/tools";
-import { JavisWorkbench } from "@javis/ui";
+import { JavisWorkbench, zhCNWorkbenchLocale } from "@javis/ui";
 import "./App.css";
 
 function App() {
@@ -18,10 +22,25 @@ function App() {
         fileTool: {
           scanMarkdownDocuments: () =>
             invoke<MarkdownDocument[]>("scan_markdown_documents", { workspacePath: null }),
+          planPdfOrganization: () =>
+            invoke<FileOrganizationPlan>("plan_pdf_organization"),
+          executePdfOrganization: async (
+            operations: PlannedPathOperation[],
+            approvalId: string,
+          ) => {
+            await invoke("approve_pdf_organization", { approvalId });
+            return invoke<FileOrganizationExecution>("execute_pdf_organization", {
+              request: { approvalId, operations },
+            });
+          },
         },
         shellTool: {
           runReadOnlyCommand: (request: ShellCommandRequest) =>
             invoke<ShellCommandOutput>("run_read_only_command", { request }),
+        },
+        projectTool: {
+          inspectProject: () =>
+            invoke<ProjectInspection>("inspect_project", { workspacePath: null }),
         },
         webTool: {
           fetchWebSource: (request: WebSourceRequest) =>
@@ -32,7 +51,7 @@ function App() {
   );
   const [task, setTask] = useState(createInitialTaskSnapshot);
   const [draftGoal, setDraftGoal] = useState(
-    "检查当前项目，告诉我怎么启动，并尝试跑一次测试",
+    "检查当前项目，说明如何启动，并运行一次检查",
   );
 
   useEffect(() => {
@@ -54,7 +73,9 @@ function App() {
   return (
     <JavisWorkbench
       draftGoal={draftGoal}
+      locale={zhCNWorkbenchLocale}
       onDraftGoalChange={setDraftGoal}
+      onPermissionDecision={runtime.resolvePermission}
       onSubmitGoal={submitGoal}
       task={task}
     />

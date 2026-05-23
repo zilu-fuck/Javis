@@ -1,0 +1,87 @@
+
+> javis@0.1.0 check E:\Javis
+> pnpm typecheck && pnpm test && pnpm --filter @javis/desktop build && pnpm rust:check
+
+
+> javis@0.1.0 typecheck E:\Javis
+> pnpm -r typecheck
+
+Scope: 4 of 5 workspace projects
+packages/tools typecheck$ tsc --noEmit
+packages/ui typecheck$ tsc --noEmit
+packages/tools typecheck: Done
+packages/ui typecheck: Done
+packages/core typecheck$ tsc --noEmit
+packages/core typecheck: Done
+
+> javis@0.1.0 test E:\Javis
+> pnpm -r --if-present test && pnpm rust:test
+
+Scope: 4 of 5 workspace projects
+packages/ui test$ vitest run
+packages/ui test:  RUN  v4.1.7 E:/Javis/packages/ui
+packages/ui test:  Test Files  1 passed (1)
+packages/ui test:       Tests  2 passed (2)
+packages/ui test:    Start at  21:09:46
+packages/ui test:    Duration  420ms (transform 106ms, setup 0ms, import 186ms, tests 19ms, environment 0ms)
+packages/ui test: Done
+packages/core test$ vitest run
+packages/core test:  RUN  v4.1.7 E:/Javis/packages/core
+packages/core test:  Test Files  1 passed (1)
+packages/core test:       Tests  14 passed (14)
+packages/core test:    Start at  21:09:47
+packages/core test:    Duration  1.39s (transform 130ms, setup 0ms, import 229ms, tests 936ms, environment 0ms)
+packages/core test: Done
+
+> javis@0.1.0 rust:test E:\Javis
+> cd apps/desktop/src-tauri && cargo test
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.06s
+     Running unittests src\lib.rs (target\debug\deps\javis_desktop_lib-99fb485e52f06829.exe)
+
+running 12 tests
+test tests::approved_pdf_operations_are_one_time_use ... ok
+test tests::pdf_operations_must_match_the_approved_dry_run ... ok
+test tests::pdf_operations_require_approval_before_execution ... ok
+test tests::resolves_windows_package_manager_shims ... ok
+test tests::execute_pdf_move_reports_missing_source ... ok
+test tests::execute_pdf_move_rejects_non_move_operations ... ok
+test tests::execute_pdf_move_rejects_parent_directory_traversal ... ok
+test tests::execute_pdf_move_skips_conflicting_target ... ok
+test tests::execute_pdf_move_rejects_non_pdf_source ... ok
+test tests::execute_pdf_move_rejects_target_outside_downloads ... ok
+test tests::execute_pdf_move_rejects_source_outside_downloads ... ok
+test tests::execute_pdf_move_moves_file_inside_downloads ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src\main.rs (target\debug\deps\javis_desktop-edf344e81cd22da0.exe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests javis_desktop_lib
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+> @javis/desktop@0.1.0 build E:\Javis\apps\desktop
+> tsc && vite build
+
+[36mvite v7.3.3 [32mbuilding client environment for production...[36m[39m
+transforming...
+[32m✓[39m 41 modules transformed.
+rendering chunks...
+computing gzip size...
+[2mdist/[22m[32mindex.html                 [39m[1m[2m  0.40 kB[22m[1m[22m[2m │ gzip:  0.27 kB[22m
+[2mdist/[22m[35massets/index-OtEFf8YT.css  [39m[1m[2m  5.31 kB[22m[1m[22m[2m │ gzip:  1.52 kB[22m
+[2mdist/[22m[36massets/index-C67xPMfp.js   [39m[1m[2m229.63 kB[22m[1m[22m[2m │ gzip: 69.15 kB[22m
+[32m✓ built in 743ms[39m
+
+> javis@0.1.0 rust:check E:\Javis
+> cd apps/desktop/src-tauri && cargo check
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.05s

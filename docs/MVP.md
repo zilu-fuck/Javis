@@ -1,319 +1,93 @@
-# Javis MVP 规格
+# MVP Specification
 
-## MVP 定义
+This document defines the historical MVP target for Javis. Implementation
+status is tracked in `MVP_STATUS.md`. The active project target is now complete
+product usability, defined in `PRODUCT_READINESS.md`.
 
-Javis 第一版要证明一件事：用户可以在桌面 UI 中输入一个目标，系统能把目标拆成可见步骤，调度多个 Agent 和模型完成任务，并用 Verifier 给出可检查的完成证据。
+## Product Promise
 
-第一版采用：
+Javis should let a user give a local desktop task, watch how the system plans
+and executes it, approve risky actions, and see verification evidence before
+the task is considered done.
 
-```text
-TypeScript + React + Tauri
-```
+The MVP does not try to be a general autonomous agent. It proves the workbench,
+tool boundary, permission flow, and verification loop. Code Agent, persistence,
+and automated public search are roadmap milestones, not blockers for the MVP
+defined here.
 
-桌面 UI 是主入口，布局参考 Codex 工作台：左侧工作区与历史，中间任务线程，右侧 Agent / Context Inspector，底部 Activity / Logs / Confirmations。
+## Primary Scenarios
 
-MVP 的核心闭环：
+### 1. Local Markdown Scan
 
-```text
-用户输入
-  -> Commander 理解目标并生成计划
-  -> Model Router 选择模型
-  -> Worker Agents 执行
-  -> Tool Layer 调用本地或网络能力
-  -> Verifier 检查结果
-  -> UI 展示步骤、日志、确认项和最终结果
-```
+User asks Javis to find and summarize Markdown documents in the workspace.
 
-## 非目标
+Acceptance criteria:
 
-第一版不做以下内容：
+- The task routes to the File Agent.
+- The file scan is read-only.
+- Results include path, modified time, size, and purpose.
+- Verifier reports whether all records contain required evidence.
 
-- 不做插件市场。
-- 不做跨设备控制。
-- 不做后台静默自动化。
-- 不做可拖拽编辑的复杂 Agent 编排器。
-- 不做长期记忆、向量数据库或复杂知识库。
-- 不做无确认的批量删除、移动、覆盖或危险命令执行。
-- 不把 opencode 作为整个系统底层，只把它作为 Code Agent 后端。
+### 2. Project Inspection
 
-## 必须演示的场景
+User asks Javis how to run or test the current project.
 
-第一版必须至少稳定演示 4 个场景：
+Acceptance criteria:
 
-1. 本地文件扫描与摘要。
-2. 资料搜集并生成带来源的报告。
-3. 代码项目检查与测试执行。
-4. 高风险文件操作 dry-run 与确认。
+- Project Tool inspects package scripts.
+- Shell Agent runs allowlisted read-only checks.
+- Recommended start and test/check commands are shown when available.
+- Failed checks produce a failed verification state.
 
-这些场景覆盖 Javis 的基本能力：本地工具、联网研究、代码 Agent、权限确认、多 Agent 协作和结果验证。
+### 3. Source-Backed Research
 
-## 场景 1：本地文件扫描与摘要
+User provides public URLs and asks for a short report.
 
-### 用户输入
+Acceptance criteria:
 
-```text
-帮我找出当前项目中最近修改过的文档，并总结每个文档的用途
-```
+- Each provided URL is fetched once through the Web Tool.
+- Report rows contain claim, source URL, and excerpt evidence.
+- Unknowns are listed when sources are missing or fewer than three sources are
+  available.
+- No unsupported claim is marked as verified.
 
-### 执行流程
+### 4. PDF Organization With Confirmation
 
-1. Commander 判断这是本地文件分析任务。
-2. File Agent 扫描当前工作区下的 Markdown 文档。
-3. File Agent 读取文件名、修改时间和关键内容片段。
-4. Model Router 为摘要步骤选择低成本或长上下文模型。
-5. Commander 汇总为文档清单和用途说明。
-6. Verifier 检查输出中的路径是否真实存在，修改时间是否来自文件系统。
-7. UI 在 Main Thread 展示结果，在 Activity 区展示扫描日志。
+User asks Javis to organize PDFs in Downloads.
 
-### 验收标准
+Acceptance criteria:
 
-- 输出包含真实文件路径。
-- 输出包含每个文件的修改时间。
-- 输出包含每个文件 1-3 句用途摘要。
-- 不读取工作区之外的文件，除非用户明确指定。
-- Verifier 能标记每个文件为 `verified` 或说明无法验证的原因。
+- File Agent creates a dry-run before any move.
+- UI displays source paths, target paths, conflicts, and risk summary.
+- Deny performs no write.
+- Approve executes only the approved PDF move operations.
+- Conflicts are skipped by default.
+- Verifier reports moved, skipped, and failed counts.
 
-## 场景 2：资料搜集并生成报告
+## Non-Goals For The MVP
 
-### 用户输入
+- Autonomous browser purchasing, messaging, or account changes.
+- Plugin marketplace.
+- Cross-device control.
+- Long-term memory or vector database.
+- Editable agent graph.
+- General shell execution.
+- Silent filesystem writes.
 
-```text
-搜集 MiniMax Mavis 和腾讯 Marvis 的公开信息，整理成一份对比报告
-```
+## Success Criteria
 
-### 执行流程
+The MVP is complete when:
 
-1. Commander 判断这是研究任务。
-2. Research Agent 生成检索关键词和需要对比的维度。
-3. Browser / Web Tool 搜索并打开公开来源。
-4. Research Agent 提取事实、发布时间、产品定位和能力差异。
-5. Commander 生成 Markdown 报告。
-6. Verifier 检查每个关键结论是否有来源链接支撑。
-7. UI 展示报告正文、来源列表和验证状态。
+- All primary scenarios above are implemented with the documented MVP scope.
+- `pnpm check` passes.
+- Manual QA has screenshots for the required states in `QA_CHECKLIST.md`.
+- The security model is documented and reflected in implementation.
+- Current docs no longer contain encoding-corrupted operational guidance.
 
-### 验收标准
+## Current Status
 
-- 报告至少包含 3 个可访问来源。
-- 关键结论后有来源链接。
-- 明确区分事实、推断和未知信息。
-- 输出包含对比表或结构化对比段落。
-- 如果搜索失败，系统要说明失败原因，并允许用户重试或手动补充来源。
-
-## 场景 3：代码项目检查与测试执行
-
-### 用户输入
-
-```text
-检查当前项目，告诉我怎么启动，并尝试跑一次测试
-```
-
-### 执行流程
-
-1. Commander 判断这是代码项目任务。
-2. Project Tool 识别项目类型、包管理器和可用脚本。
-3. Shell Agent 执行只读检查命令，例如列目录、读取配置、查看脚本。
-4. Code Agent 通过 opencode 后端读取项目上下文并解释项目结构。
-5. Shell Agent 在权限允许范围内运行测试或等价检查命令。
-6. Verifier 检查命令退出码、测试输出和关键日志。
-7. Commander 总结启动方式、测试结果和下一步建议。
-
-### 验收标准
-
-- 能识别项目技术栈或说明无法识别。
-- 能列出推荐启动命令。
-- 能实际运行一次测试或检查命令。
-- 输出包含命令、退出码和结果摘要。
-- 如果测试失败，必须说明失败位置和下一步排查方向。
-- 不自动修改代码，除非用户明确要求。
-
-## 场景 4：高风险文件操作 dry-run 与确认
-
-### 用户输入
-
-```text
-帮我把 Downloads 里的 PDF 按主题整理到不同文件夹
-```
-
-### 执行流程
-
-1. Commander 判断这是文件整理任务，风险等级为写入类。
-2. File Agent 扫描目标目录中的 PDF。
-3. File Agent 根据文件名和可读取的元信息生成分类建议。
-4. Commander 生成 dry-run 计划，不移动任何文件。
-5. Verifier 检查计划是否包含源路径、目标路径和冲突说明。
-6. UI 显示确认卡片，用户可以批准、拒绝或中止。
-7. 只有用户批准后，File Agent 才执行移动操作。
-8. Verifier 再次检查文件是否到达目标路径。
-
-### 验收标准
-
-- 未经确认不得移动、删除或覆盖文件。
-- dry-run 计划必须列出每个文件的源路径和目标路径。
-- 如果目标文件已存在，必须标记冲突并默认不覆盖。
-- 用户拒绝后，系统不做任何写入操作。
-- 执行后必须输出成功、失败和跳过的文件清单。
-
-## 里程碑拆分
-
-### Milestone 1：桌面壳与工作台布局
-
-目标：
-
-- 创建 Tauri + React + TypeScript 项目。
-- 实现 Codex 风格工作台布局。
-- Main Thread 支持用户输入和任务消息。
-- 右侧能展示只读 Agent 状态。
-- 底部能展示 Activity 日志。
-
-验证：
-
-- 应用能在 Windows 启动。
-- 用户能输入一句任务。
-- UI 能显示任务线程、Agent 状态和日志区域。
-
-### Milestone 2：核心类型与任务生命周期
-
-目标：
-
-- 定义 `Task`、`AgentRun`、`ToolCall`、`ModelProfile`、`VerificationResult`。
-- 实现最小 Commander。
-- 实现任务状态流转：`created`、`planning`、`running`、`verifying`、`done`、`failed`。
-- UI 能订阅并展示状态变化。
-
-验证：
-
-- 一次模拟任务能完整走完生命周期。
-- 状态变化能同步显示在 Main Thread、Agent Inspector 和 Activity 区。
-
-### Milestone 3：文件与 Shell 工具
-
-目标：
-
-- 实现只读 File Tool：列目录、查找文件、读取文本文件。
-- 实现受限 Shell Tool：执行允许范围内的命令并捕获输出。
-- 实现场景 1 的本地文件扫描与摘要。
-
-验证：
-
-- 文件扫描结果使用真实路径和修改时间。
-- Shell 命令输出包含退出码。
-- Verifier 能检查文件路径是否存在。
-
-### Milestone 4：研究工具与报告输出
-
-目标：
-
-- 实现 Web / Browser Tool 的最小搜索与来源采集。
-- 实现 Research Agent。
-- 实现场景 2 的对比报告。
-
-验证：
-
-- 报告含来源链接。
-- Verifier 能检查关键结论是否绑定来源。
-- 搜索失败时能给出明确降级信息。
-
-### Milestone 5：Code Agent 与 opencode 后端
-
-目标：
-
-- 接入 opencode SDK 或 opencode server。
-- 实现 Code Agent 的项目阅读和测试解释能力。
-- 实现场景 3 的项目检查与测试执行。
-
-验证：
-
-- 能识别当前项目的启动或测试命令。
-- 能运行测试或等价检查。
-- 能将失败日志交给 Code Agent 解释。
-
-### Milestone 6：权限确认与 dry-run
-
-目标：
-
-- 实现权限等级：`read`、`preview`、`confirmed-write`、`dangerous`。
-- 实现确认卡片。
-- 实现场景 4 的文件整理 dry-run。
-
-验证：
-
-- 写入类操作在用户确认前不会执行。
-- 用户拒绝后不会产生文件变更。
-- 批量移动能输出执行结果和验证结果。
-
-## 第一版完成标准
-
-第一版完成必须同时满足：
-
-- 桌面应用可以稳定启动。
-- 用户能从 UI 发起任务，而不是只通过 CLI。
-- 至少 4 个必须演示场景可以跑通。
-- 每个任务都有可见步骤、Agent 状态、工具日志和最终结果。
-- 文件写入、移动、删除、覆盖类操作默认需要确认。
-- 研究报告必须带来源。
-- 代码任务必须能展示命令输出和退出码。
-- Verifier 能为成功或失败给出可检查依据。
-- README 和核心文档能指导新开发者启动项目并理解 MVP 范围。
-
-## 风险与降级方案
-
-### Tauri 原生能力接入慢
-
-风险：文件系统、命令执行、权限桥接需要更多时间。
-
-降级：
-
-- 第一版先支持用户选择的工作区目录。
-- 只开放必要的文件读取和命令执行能力。
-- 写入能力只在 Milestone 6 引入。
-
-### 多 Agent 编排过早复杂化
-
-风险：为了做完整编排器拖慢 MVP。
-
-降级：
-
-- 第一版用固定 Agent 流程，不做可编辑 Agent 图。
-- Commander 使用规则式调度。
-- Agent Graph 只做状态展示。
-
-### 多模型接入不稳定
-
-风险：不同模型 provider 的 API、流式输出和错误格式差异较大。
-
-降级：
-
-- 第一版先支持 OpenAI-compatible 接口。
-- Model Router 先用配置和规则选择模型。
-- 本地模型、视觉模型和高级路由后置。
-
-### Web 搜索质量不稳定
-
-风险：搜索结果不可访问、来源质量不稳定或页面抓取失败。
-
-降级：
-
-- 报告中明确标注无法验证的信息。
-- 允许用户手动粘贴来源链接。
-- Verifier 只通过可访问来源的结论。
-
-### opencode 接入成本高
-
-风险：SDK、server 或权限模型接入比预期复杂。
-
-降级：
-
-- Code Agent 第一版先读取项目文件和运行测试。
-- opencode 先作为可选后端。
-- 保留接口，等接入稳定后替换内部实现。
-
-### 文件操作风险
-
-风险：批量移动、覆盖或删除造成用户数据损失。
-
-降级：
-
-- 第一版不实现删除。
-- 覆盖默认禁止。
-- 移动操作必须 dry-run，并由用户逐次确认。
-- 失败时保留完整日志，方便人工恢复。
+See `MVP_STATUS.md` for the live status matrix. At the time of this document,
+Markdown scan, project inspection, manual URL research, and PDF organization are
+implemented and verified for the baseline. Automated search, Code Agent,
+persistence, workspace selection, and product release hardening are required for
+the current complete-product target.

@@ -8,10 +8,14 @@
     "desktop:dev": "pnpm --filter @javis/desktop tauri dev",
     "build": "pnpm -r build",
     "desktop:build": "pnpm --filter @javis/desktop tauri build",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "rust:check": "cd apps/desktop/src-tauri && cargo check",
+    "rust:test": "cd apps/desktop/src-tauri && cargo test",
+    "test": "pnpm -r --if-present test && pnpm rust:test",
+    "check": "pnpm typecheck && pnpm test && pnpm --filter @javis/desktop build && pnpm rust:check"
   },
   "devDependencies": {
-    "typescript": "~5.8.3"
+    "typescript": "~5.8.3",
+    "vitest": "^4.1.7"
   }
 }
-

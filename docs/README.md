@@ -1,22 +1,38 @@
-# Javis 文档索引
+# Javis Documentation
 
-这里集中放 Javis 的产品、架构、工程和安全文档。文档按“先定方向，再定接口，再定实现边界”的顺序组织。
+This directory collects product, architecture, security, and implementation
+notes for Javis. The current target is a complete usable desktop product; the
+MVP documents remain as baseline acceptance records.
 
-## 已有文档
+## Start Here
 
-- [架构设计](ARCHITECTURE.md)：系统模块、Agent 分工、任务生命周期和里程碑。
-- [技术栈决策](TECH_STACK.md)：TypeScript、React、Tauri、opencode 等技术选择。
-- [桌面布局设计](UI_LAYOUT.md)：参考 Codex 的桌面工作台布局。
+- [Product Readiness](PRODUCT_READINESS.md): the current complete-product
+  target, blockers, and gap matrix.
+- [MVP Status](MVP_STATUS.md): completed MVP baseline and what it covers.
+- [Development Guide](DEVELOPMENT.md): how to run, verify, and extend the
+  project.
+- [Troubleshooting](TROUBLESHOOTING.md): common local development, Tauri, and
+  QA capture issues.
+- [Security Model](SECURITY_MODEL.md): permission levels and filesystem safety
+  rules used by the current implementation.
+- [Manual QA Checklist](QA_CHECKLIST.md): desktop scenarios and screenshots to
+  capture before release. See [QA Evidence](qa/README.md) for screenshot folder
+  conventions.
+- [Release Guide](RELEASE.md): build, QA evidence, and release note checklist.
+- [Roadmap](ROADMAP.md): milestones toward complete product usability.
 
-## 第一阶段补充文档
+## Design And Reference Documents
 
-- [MVP 规格](MVP.md)：第一版要演示什么、如何验收、哪些暂不做。
-- [核心契约](CORE_CONTRACTS.md)：Task、Agent、ToolCall、PermissionRequest 等核心类型和事件流。
-- [权限与安全](PERMISSIONS.md)：文件、命令、浏览器、opencode 等能力的权限边界。
-- [工程结构](PROJECT_STRUCTURE.md)：Tauri + React + TypeScript 的目录结构和依赖方向。
+- [Architecture](ARCHITECTURE.md)
+- [Tech Stack](TECH_STACK.md)
+- [Marvis Technical Support Notes](MARVIS_TECH_SUPPORT.md)
+- [UI Layout](UI_LAYOUT.md)
+- [MVP Specification](MVP.md)
+- [Core Contracts](CORE_CONTRACTS.md)
+- [Permissions and Safety](PERMISSIONS.md)
+- [Project Structure](PROJECT_STRUCTURE.md)
 
-## 阅读顺序
-
-1. 先读 [架构设计](ARCHITECTURE.md) 和 [技术栈决策](TECH_STACK.md)，理解项目方向。
-2. 再读 [桌面布局设计](UI_LAYOUT.md)，理解第一版桌面体验。
-3. 开始实现前读 [MVP 规格](MVP.md)、[核心契约](CORE_CONTRACTS.md)、[权限与安全](PERMISSIONS.md) 和 [工程结构](PROJECT_STRUCTURE.md)。
+The documents above should be normalized against `PRODUCT_READINESS.md`. If
+behavior and design diverge, update `PRODUCT_READINESS.md`, `MVP_STATUS.md`
+when the baseline changes, and the relevant reference document in the same
+change.

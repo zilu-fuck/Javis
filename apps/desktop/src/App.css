@@ -2,8 +2,8 @@
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
-  color: #202124;
-  background: #f4f2ed;
+  color: #171717;
+  background: #f6f6f3;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -25,14 +25,45 @@ textarea {
   font: inherit;
 }
 
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+button:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid #111111;
+  outline-offset: 2px;
+}
+
 .javis-shell {
   display: grid;
-  grid-template-columns: 236px minmax(420px, 1fr) 340px;
-  grid-template-rows: 1fr 188px;
+  grid-template-columns: 220px minmax(420px, 1fr) 336px;
+  grid-template-rows: 1fr 196px;
   width: 100vw;
   height: 100vh;
   overflow: hidden;
-  background: #f4f2ed;
+  background: #f6f6f3;
+}
+
+.javis-shell.inspector-collapsed {
+  grid-template-columns: 220px minmax(420px, 1fr) 44px;
+}
+
+.javis-shell.inspector-open {
+  grid-template-columns: 220px minmax(420px, 1fr) 336px;
+}
+
+.javis-shell.activity-collapsed {
+  grid-template-rows: 1fr 42px;
+}
+
+.javis-shell.activity-open {
+  grid-template-rows: 1fr 196px;
 }
 
 .javis-sidebar,
@@ -41,57 +72,244 @@ textarea {
 .javis-activity {
   min-width: 0;
   min-height: 0;
-  border-color: #d9d5cc;
+  border-color: #e3e1dc;
 }
 
 .javis-sidebar {
   grid-row: 1 / 3;
-  padding: 16px 12px;
-  border-right: 1px solid #d9d5cc;
-  background: #ece8df;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  gap: 18px;
+  height: calc(100vh - 24px);
+  margin: 12px;
+  padding: 24px 12px 12px;
+  border: 1px solid #ecebe7;
+  border-radius: 20px;
+  background: #fbfbfa;
+  box-shadow: 0 18px 42px rgba(17, 17, 17, 0.04);
 }
 
 .javis-brand {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 4px 8px 18px;
-  font-weight: 700;
+  padding: 8px 6px 4px;
+  color: #171717;
+  font-weight: 800;
+  font-size: 25px;
+  line-height: 30px;
 }
 
-.javis-brand-mark {
+.javis-sidebar-search {
   display: grid;
-  width: 28px;
-  height: 28px;
-  place-items: center;
-  border-radius: 7px;
-  color: #ffffff;
-  background: #1f5f5b;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  border: 1px solid #e3e1dc;
+  border-radius: 10px;
+  padding: 0 11px;
+  color: #8b8983;
+  background: #ffffff;
+  font-size: 13px;
+}
+
+.javis-sidebar-search input {
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  color: #2f2e2a;
+  background: transparent;
+  font-size: 12px;
+}
+
+.javis-sidebar-search input::placeholder {
+  color: #a5a29a;
 }
 
 .javis-nav {
   display: grid;
-  gap: 6px;
+  gap: 22px;
+  align-content: start;
+  overflow: auto;
+  padding-bottom: 10px;
+  scrollbar-width: none;
+}
+
+.javis-nav::-webkit-scrollbar {
+  display: none;
+}
+
+.javis-nav-group {
+  display: grid;
+  gap: 4px;
+}
+
+.javis-nav-group.primary {
+  gap: 3px;
+}
+
+.javis-nav-section {
+  margin: 0 0 8px;
+  padding: 0 8px;
+  color: #7a776f;
+  font-size: 12px;
+  line-height: 16px;
 }
 
 .javis-nav-item {
-  padding: 9px 10px;
-  border-radius: 7px;
-  color: #4b4944;
+  display: grid;
+  grid-template-columns: 18px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 8px 9px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: #20201d;
   font-size: 14px;
+  line-height: 18px;
 }
 
 .javis-nav-item.active {
-  color: #161614;
-  background: #ffffff;
-  box-shadow: inset 0 0 0 1px #ddd8ce;
+  color: #171717;
+  border-color: #ecebe7;
+  background: #f0efec;
+}
+
+.javis-nav-icon {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  color: #111111;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.javis-nav-caret {
+  color: #77736b;
+  font-size: 14px;
+}
+
+.javis-sidebar-footer {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 9px;
+  min-height: 44px;
+  border-top: 1px solid #ecebe7;
+  padding: 10px 8px 0;
+  color: #20201d;
+  font-size: 14px;
+}
+
+.javis-avatar {
+  display: inline-grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 999px;
+  color: #ffffff;
+  background: #4f73a8;
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.javis-device-mark {
+  color: #55524c;
+  font-size: 16px;
 }
 
 .javis-main {
   display: grid;
   grid-template-rows: auto 1fr auto;
-  border-right: 1px solid #d9d5cc;
-  background: #fbfaf7;
+  border-right: 1px solid #e3e1dc;
+  background: #fbfbf8;
+}
+
+.javis-main.new-chat {
+  grid-template-rows: 1fr;
+}
+
+.javis-new-chat {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 34px;
+  min-height: 0;
+  padding: 48px 32px 118px;
+}
+
+.javis-new-chat h1 {
+  margin: 0;
+  color: #171717;
+  font-size: 28px;
+  font-weight: 760;
+  line-height: 38px;
+  text-align: center;
+}
+
+.javis-new-chat-composer {
+  display: grid;
+  width: min(728px, 100%);
+  min-height: 140px;
+  border: 1px solid #dedbd2;
+  border-radius: 18px;
+  background: #ffffff;
+  box-shadow: 0 18px 48px rgba(17, 17, 17, 0.08);
+  overflow: hidden;
+}
+
+.javis-new-chat-composer textarea {
+  min-height: 86px;
+  resize: none;
+  border: 0;
+  padding: 18px 18px 10px;
+  color: #171717;
+  background: transparent;
+  font-size: 15px;
+  line-height: 24px;
+  outline: 0;
+}
+
+.javis-new-chat-composer textarea::placeholder {
+  color: #89857d;
+}
+
+.javis-new-chat-actions {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  padding: 8px 12px 12px;
+  color: #6f6b63;
+  font-size: 13px;
+}
+
+.javis-attach-button,
+.javis-send-button {
+  display: inline-flex;
+  width: 34px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  font-weight: 700;
+}
+
+.javis-attach-button {
+  border: 1px solid #dedbd2;
+  color: #3b3935;
+  background: #ffffff;
+}
+
+.javis-send-button {
+  border: 1px solid #111111;
+  color: #ffffff;
+  background: #111111;
 }
 
 .javis-thread-header,
@@ -101,90 +319,206 @@ textarea {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  min-height: 68px;
   padding: 14px 18px;
-  border-bottom: 1px solid #e2ded5;
+  border-bottom: 1px solid #e6e4df;
+  background: rgba(251, 251, 248, 0.96);
 }
 
 .javis-eyebrow {
   margin: 0 0 2px;
-  color: #77736b;
-  font-size: 12px;
+  color: #6f6b63;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: uppercase;
 }
 
 .javis-title {
   margin: 0;
+  color: #111111;
   font-size: 17px;
+  font-weight: 720;
   line-height: 24px;
 }
 
 .javis-thread {
   display: grid;
   align-content: start;
-  gap: 14px;
+  gap: 12px;
   overflow: auto;
   padding: 18px;
+  scrollbar-color: #c9c6be transparent;
+}
+
+.javis-message,
+.javis-plan,
+.javis-documents,
+.javis-confirmation {
+  border: 1px solid #e1ded6;
+  border-radius: 8px;
+  background: #ffffff;
 }
 
 .javis-message {
   max-width: 760px;
-  padding: 14px 15px;
-  border: 1px solid #e2ded5;
-  border-radius: 8px;
-  background: #ffffff;
+  padding: 13px 14px;
 }
 
 .javis-message.user {
   justify-self: end;
-  border-color: #b9cec7;
-  background: #eef7f4;
+  border-color: #d8d5cd;
+  background: #f4f3ee;
 }
 
 .javis-message-title {
   margin: 0 0 6px;
-  font-size: 13px;
-  font-weight: 700;
+  color: #171717;
+  font-size: 12px;
+  font-weight: 720;
 }
 
 .javis-message-body {
   margin: 0;
-  color: #383632;
+  color: #2f2e2a;
   font-size: 14px;
   line-height: 22px;
 }
 
-.javis-task-status {
+.javis-task-status,
+.javis-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
   border-radius: 999px;
-  padding: 4px 9px;
-  color: #24514d;
-  background: #e2f1ed;
+  color: #315f58;
+  background: #e8f2ef;
   font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  white-space: nowrap;
 }
 
-.javis-plan {
-  display: grid;
-  gap: 10px;
-  max-width: 760px;
-  padding: 14px 15px;
-  border: 1px solid #e2ded5;
-  border-radius: 8px;
-  background: #ffffff;
+.javis-task-status {
+  padding: 4px 10px;
 }
 
-.javis-documents {
+.javis-status {
+  padding: 3px 8px;
+}
+
+.javis-plan,
+.javis-documents,
+.javis-confirmation {
   display: grid;
   gap: 10px;
   max-width: 860px;
-  padding: 14px 15px;
-  border: 1px solid #e2ded5;
-  border-radius: 8px;
+  padding: 14px;
+}
+
+.javis-plan {
+  max-width: 760px;
+}
+
+.javis-confirmation {
+  border-color: #ddbf7c;
+  background: #fffaf0;
+}
+
+.javis-confirmation-header,
+.javis-confirmation-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.javis-confirmation-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.javis-confirmation-actions button,
+.javis-composer button {
+  min-height: 36px;
+  border: 1px solid #111111;
+  border-radius: 7px;
+  color: #ffffff;
+  background: #111111;
+  font-weight: 650;
+}
+
+.javis-confirmation-actions button {
+  min-width: 84px;
+  padding: 8px 12px;
+}
+
+.javis-confirmation-actions button + button {
+  color: #2f2e2a;
+  border-color: #d8d4c8;
   background: #ffffff;
+}
+
+.javis-confirmation-actions span {
+  color: #6f6b63;
+  font-size: 12px;
+}
+
+.javis-confirmation-actions.compact {
+  margin-top: 8px;
+}
+
+.javis-confirmation-actions.compact button {
+  min-width: 72px;
+  min-height: 30px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.javis-dry-run-list {
+  display: grid;
+  gap: 8px;
+  max-height: 220px;
+  overflow: auto;
+  scrollbar-color: #c9c0ac transparent;
+}
+
+.javis-dry-run-item {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid #eadfc7;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.javis-dry-run-item strong,
+.javis-document strong,
+.javis-plan-step strong,
+.javis-agent-name,
+.javis-log strong {
+  color: #171717;
+}
+
+.javis-dry-run-item p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #4b4943;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.javis-dry-run-item span {
+  color: #8a5a18;
+  font-size: 12px;
 }
 
 .javis-document {
   display: grid;
-  gap: 4px;
+  gap: 5px;
   padding: 10px 0;
-  border-top: 1px solid #eee9df;
+  border-top: 1px solid #eeece7;
 }
 
 .javis-document:first-of-type {
@@ -195,20 +529,28 @@ textarea {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  color: #25231f;
+  color: #171717;
   font-size: 13px;
+}
+
+.javis-document-row strong,
+.javis-log-row strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .javis-document p {
   margin: 0;
-  color: #4c4942;
+  overflow-wrap: anywhere;
+  color: #4b4943;
   font-size: 13px;
-  line-height: 19px;
+  line-height: 20px;
 }
 
 .javis-document span {
   color: #77736b;
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .javis-plan-step {
@@ -222,6 +564,7 @@ textarea {
   margin: 3px 0 0;
   color: #625e56;
   font-size: 13px;
+  line-height: 20px;
 }
 
 .javis-composer {
@@ -229,32 +572,64 @@ textarea {
   grid-template-columns: 1fr auto;
   gap: 10px;
   padding: 14px 18px;
-  border-top: 1px solid #e2ded5;
-  background: #ffffff;
+  border-top: 1px solid #e6e4df;
+  background: #fbfbf8;
 }
 
 .javis-composer textarea {
-  height: 44px;
+  height: 72px;
   resize: none;
-  border: 1px solid #d8d3ca;
+  border: 1px solid #d8d5cd;
   border-radius: 8px;
-  padding: 10px 12px;
-  color: #25231f;
-  background: #fbfaf7;
+  padding: 11px 12px;
+  color: #171717;
+  background: #ffffff;
+  line-height: 21px;
+  box-shadow: 0 1px 2px rgba(17, 17, 17, 0.04);
+}
+
+.javis-composer textarea::placeholder {
+  color: #918d84;
 }
 
 .javis-composer button {
-  border: 0;
-  border-radius: 8px;
-  padding: 0 16px;
-  color: #ffffff;
-  background: #1f5f5b;
+  min-width: 76px;
+  padding: 0 17px;
 }
 
 .javis-inspector {
   display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: 1fr;
+  background: #f6f5f1;
+}
+
+.javis-inspector-toggle {
+  align-self: start;
+  justify-self: center;
+  display: flex;
+  width: 30px;
+  min-height: 148px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 12px 6px;
+  border: 1px solid #d8d5cd;
+  border-radius: 999px;
+  padding: 10px 5px;
+  color: #2f2e2a;
+  background: #ffffff;
+  font-size: 12px;
+  font-weight: 650;
+  writing-mode: vertical-rl;
+}
+
+.javis-inspector-panel {
+  display: grid;
   grid-template-rows: auto 1fr;
-  background: #f7f5ef;
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid #e3e1dc;
 }
 
 .javis-agent-list,
@@ -264,15 +639,20 @@ textarea {
   align-content: start;
   overflow: auto;
   padding: 14px;
+  scrollbar-color: #c9c6be transparent;
+}
+
+.javis-agent,
+.javis-log {
+  border: 1px solid #e1ded6;
+  border-radius: 8px;
+  background: #ffffff;
 }
 
 .javis-agent {
   display: grid;
   gap: 8px;
   padding: 12px;
-  border: 1px solid #dfdad1;
-  border-radius: 8px;
-  background: #ffffff;
 }
 
 .javis-agent-row,
@@ -284,22 +664,16 @@ textarea {
 }
 
 .javis-agent-name {
+  min-width: 0;
   font-size: 14px;
-  font-weight: 700;
-}
-
-.javis-status {
-  border-radius: 999px;
-  padding: 3px 8px;
-  color: #1f5f5b;
-  background: #e2f1ed;
-  font-size: 12px;
+  font-weight: 720;
 }
 
 .javis-agent-task,
 .javis-log-detail {
   margin: 0;
-  color: #625e56;
+  overflow-wrap: anywhere;
+  color: #4b4943;
   font-size: 13px;
   line-height: 19px;
 }
@@ -308,24 +682,70 @@ textarea {
   grid-column: 2 / 4;
   display: grid;
   grid-template-rows: auto 1fr;
-  border-top: 1px solid #d9d5cc;
-  background: #efebe3;
+  border-top: 1px solid #e3e1dc;
+  background: #f1f0eb;
+}
+
+.javis-activity-toggle {
+  justify-self: start;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  margin: 5px 14px;
+  border: 1px solid #d8d5cd;
+  border-radius: 999px;
+  padding: 5px 10px;
+  color: #2f2e2a;
+  background: #ffffff;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.javis-activity-count {
+  display: inline-flex;
+  min-width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: #315f58;
+  background: #e8f2ef;
+  font-size: 11px;
+}
+
+.javis-activity-panel {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
 }
 
 .javis-log {
   padding: 10px 12px;
-  border: 1px solid #ddd8ce;
-  border-radius: 8px;
-  background: #fbfaf7;
+}
+
+.javis-log-confirmation {
+  border-color: #ddbf7c;
+  background: #fffaf0;
 }
 
 .javis-log-kind {
+  flex: 0 0 auto;
   color: #77736b;
   font-size: 12px;
 }
 
 @media (max-width: 1100px) {
   .javis-shell {
+    grid-template-columns: 210px minmax(420px, 1fr) 300px;
+  }
+
+  .javis-shell.inspector-collapsed {
+    grid-template-columns: 210px minmax(420px, 1fr) 44px;
+  }
+
+  .javis-shell.inspector-open {
     grid-template-columns: 210px minmax(420px, 1fr) 300px;
   }
 }

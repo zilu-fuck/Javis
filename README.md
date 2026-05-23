@@ -1,90 +1,120 @@
 # Javis
 
-Javis 是一个以桌面 UI 为主的多模型、多 Agent 协作助手。它的目标不是做一个只会聊天的 AI，而是做一个能理解目标、拆解任务、调度不同模型和 Agent、调用本地工具、验证结果，并在关键操作前向用户确认的个人工作伙伴。
-
-第一版技术路线确定为：
-
-```text
-TypeScript + React + Tauri
-```
-
-## 项目愿景
-
-Javis 结合两类产品思路：
-
-- 类 Mavis：多 Agent 组队，适合长任务、复杂任务、研究任务和代码任务。
-- 类 Marvis：贴近个人电脑，能处理文件、应用、浏览器、系统和跨设备工作流。
-
-最终形态是一个本地优先的桌面 Jarvis：
-
-- 能把一句自然语言请求拆成可执行步骤。
-- 能选择不同模型处理不同子任务，而不是固定依赖单一模型。
-- 能让多个 Agent 分工协作，并由 Verifier 检查结果。
-- 能操作本地文件、命令行、浏览器和常用应用。
-- 能用图形化方式展示 Agent、任务流、执行日志和确认动作。
-- 对高风险动作默认请求确认。
-
-## 核心原则
-
-1. 桌面优先：主入口是桌面应用，不把 CLI 当成主要体验。
-2. 本地优先：能在本地完成的任务优先本地完成。
-3. 多模型协作：不同模型承担不同角色，例如规划、代码、视觉、总结、长上下文处理。
-4. 多 Agent 分工：主控 Agent 不直接做所有事，而是负责拆解、调度和汇总。
-5. 可视化执行：用户应能看见任务步骤、Agent 状态、工具调用和验证结果。
-6. 可验证：每个任务都要有明确的完成标准，并尽量由独立 Verifier 检查。
-7. 可控：文件删除、移动、批量改写、执行命令等动作必须有权限边界。
-8. 简单起步：第一版先做真正可用的核心闭环，不追求全能。
-
-## MVP 目标
-
-第一版只追求一个可靠闭环：
+Javis is a desktop-first multi-agent assistant prototype built with TypeScript,
+React, and Tauri. The project focuses on a visible, auditable task loop:
 
 ```text
-用户目标
-  -> Commander 拆解
-  -> Model Router 选择模型
-  -> Worker Agents 执行
-  -> Tool Layer 调用本地能力
-  -> Verifier 检查
-  -> 桌面 UI 展示结果和确认项
+user goal -> Commander plan -> worker tools -> verifier -> desktop UI result
 ```
 
-MVP 应支持：
+The current project goal is a complete usable desktop product. The verified MVP
+workbench is the foundation, not the finish line. Javis remains local-first and
+conservative around filesystem writes: high-risk actions must create a dry-run
+plan and wait for explicit user approval before execution.
 
-- 桌面聊天入口。
-- 图形化 Agent 状态和任务步骤。
-- 本地文件搜索、读取、摘要和整理计划。
-- 命令行执行与结果解释。
-- 网页资料搜集与来源整理。
-- 项目代码阅读、修改建议、测试执行。
-- 高风险操作前的 dry-run 和用户确认。
-- 任务执行日志和结果报告。
+## Current Status
 
-## 暂不做
+Implemented foundation:
 
-- 不做不可控的后台自动操作。
-- 不做没有确认的批量删除、移动或覆盖。
-- 不先做复杂插件市场。
-- 不先做跨设备控制。
-- 不承诺所有应用都能被稳定操控。
+- Desktop workbench layout with sidebar, main thread, agent inspector, and
+  activity / confirmations area.
+- Read-only Markdown document scan with summaries and verification.
+- Project inspection that detects package scripts, recommends start/check
+  commands, and runs allowlisted read-only checks.
+- URL-based research collection with a source-backed report and explicit
+  unknown/unverified notes.
+- PDF organization dry-run for `Downloads`, confirmation cards, approved
+  move execution, conflict skipping, and execution verification.
 
-## 文档
+Current product-readiness gaps:
 
-- [文档索引](docs/README.md)
-- [架构设计](docs/ARCHITECTURE.md)
-- [技术栈决策](docs/TECH_STACK.md)
-- [桌面布局设计](docs/UI_LAYOUT.md)
-- [MVP 规格](docs/MVP.md)
-- [核心契约](docs/CORE_CONTRACTS.md)
-- [权限与安全](docs/PERMISSIONS.md)
-- [工程结构](docs/PROJECT_STRUCTURE.md)
+- Automated public search is not wired in yet.
+- Code Agent / opencode is not integrated yet.
+- Task history is in memory only.
+- Workspace selection, release signing/versioning, and broader write-tool
+  permission enforcement are not complete yet.
+- Core runtime is being split into focused modules. Agent definitions, plans,
+  route detection, and research report helpers have been extracted; the main
+  runtime flow still lives in `packages/core/src/index.ts`.
 
-## 建议开发顺序
+See [Product Readiness](docs/PRODUCT_READINESS.md) for the current target and
+[MVP Status](docs/MVP_STATUS.md) for the completed baseline acceptance matrix.
 
-1. 建立 Tauri + React + TypeScript 项目骨架。
-2. 做出 Codex 风格的桌面主界面：侧边栏、主对话区、Agent 面板、任务日志。
-3. 建立 Task、Agent、Model、Tool、VerificationResult 基础接口。
-4. 接入文件、命令行、网页搜索这三类基础工具。
-5. 实现 Commander、Worker、Verifier 的最小协作流程。
-6. 增加本地任务历史和用户确认机制。
-7. 接入 opencode 作为 Code Agent 的后端能力。
+## Requirements
+
+- Node.js and pnpm
+- Rust toolchain
+- Windows is the primary target for the current Tauri desktop build
+
+## Quick Start
+
+Install dependencies:
+
+```sh
+pnpm install
+```
+
+Run the Tauri desktop app:
+
+```sh
+pnpm dev
+```
+
+Run a frontend-only Vite preview:
+
+```sh
+pnpm --filter @javis/desktop dev
+```
+
+## Verification
+
+Run the full local check:
+
+```sh
+pnpm check
+```
+
+Individual checks:
+
+```sh
+pnpm typecheck
+pnpm --filter @javis/desktop build
+pnpm rust:check
+pnpm rust:test
+```
+
+## Repository Layout
+
+```text
+apps/desktop          Tauri + React desktop shell
+packages/core         task runtime, planning, agent state, verification
+packages/tools        tool contracts and shared tool result types
+packages/ui           reusable workbench UI components
+docs                  product, architecture, security, and status docs
+```
+
+## Safety Model
+
+Javis separates preview actions from writes:
+
+- `read`: may execute immediately and must log results.
+- `preview`: creates a plan or dry-run without changing local state.
+- `confirmed_write`: requires an explicit current permission request.
+- `dangerous`: rejected by default for the first version.
+
+The PDF organization flow demonstrates this model: it first lists source and
+target paths, marks conflicts, waits for approval, then moves only the files in
+the approved dry-run plan.
+
+## Documentation
+
+- [Documentation Index](docs/README.md)
+- [Development Guide](docs/DEVELOPMENT.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Product Readiness](docs/PRODUCT_READINESS.md)
+- [MVP Status](docs/MVP_STATUS.md)
+- [Security Model](docs/SECURITY_MODEL.md)
+- [Manual QA Checklist](docs/QA_CHECKLIST.md)
+- [Release Guide](docs/RELEASE.md)
+- [Roadmap](docs/ROADMAP.md)
+- [Contributing](CONTRIBUTING.md)
