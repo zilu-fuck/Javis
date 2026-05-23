@@ -39,6 +39,13 @@ export interface WorkbenchCommand {
   stderr: string;
 }
 
+export interface WorkbenchSource {
+  url: string;
+  title?: string;
+  excerpt: string;
+  fetchedAt: string;
+}
+
 export interface WorkbenchTask {
   title: string;
   userGoal: string;
@@ -49,6 +56,7 @@ export interface WorkbenchTask {
   logs: WorkbenchLogEntry[];
   documents?: WorkbenchDocument[];
   commands?: WorkbenchCommand[];
+  sources?: WorkbenchSource[];
   verificationSummary?: string;
 }
 
@@ -148,6 +156,22 @@ export function JavisWorkbench({
                   </div>
                   <p>{command.stdout || command.stderr || "(empty output)"}</p>
                   <span>cwd: {command.cwd}</span>
+                </article>
+              ))}
+            </section>
+          ) : null}
+
+          {task.sources && task.sources.length > 0 ? (
+            <section className="javis-documents" aria-label="Research sources">
+              <p className="javis-message-title">Research Sources</p>
+              {task.sources.map((source) => (
+                <article className="javis-document" key={source.url}>
+                  <div className="javis-document-row">
+                    <strong>{source.title || source.url}</strong>
+                    <span>{formatModifiedTime(source.fetchedAt)}</span>
+                  </div>
+                  <p>{source.excerpt}</p>
+                  <span>{source.url}</span>
                 </article>
               ))}
             </section>

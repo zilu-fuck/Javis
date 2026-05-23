@@ -1,7 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { createFileScanTaskRuntime, createInitialTaskSnapshot } from "@javis/core";
-import type { MarkdownDocument, ShellCommandOutput, ShellCommandRequest } from "@javis/tools";
+import type {
+  MarkdownDocument,
+  ShellCommandOutput,
+  ShellCommandRequest,
+  WebSource,
+  WebSourceRequest,
+} from "@javis/tools";
 import { JavisWorkbench } from "@javis/ui";
 import "./App.css";
 
@@ -16,6 +22,10 @@ function App() {
         shellTool: {
           runReadOnlyCommand: (request: ShellCommandRequest) =>
             invoke<ShellCommandOutput>("run_read_only_command", { request }),
+        },
+        webTool: {
+          fetchWebSource: (request: WebSourceRequest) =>
+            invoke<WebSource>("fetch_web_source", { request }),
         },
       }),
     [],

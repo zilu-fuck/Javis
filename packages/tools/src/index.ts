@@ -34,6 +34,21 @@ export interface ShellTool {
   runReadOnlyCommand(request: ShellCommandRequest): Promise<ShellCommandOutput>;
 }
 
+export interface WebSourceRequest {
+  url: string;
+}
+
+export interface WebSource {
+  url: string;
+  title?: string;
+  excerpt: string;
+  fetchedAt: string;
+}
+
+export interface WebTool {
+  fetchWebSource(request: WebSourceRequest): Promise<WebSource>;
+}
+
 export interface ToolDescriptor {
   name: string;
   permissionLevel: PermissionLevel;
@@ -50,6 +65,11 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     name: "shell.run",
     permissionLevel: "preview",
     summary: "Preview shell commands before execution.",
+  },
+  {
+    name: "web.fetchSource",
+    permissionLevel: "read",
+    summary: "Fetch a user-provided public web source URL.",
   },
 ];
 

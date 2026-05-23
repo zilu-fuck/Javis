@@ -3,6 +3,8 @@ import type {
   MarkdownDocumentSummary,
   ShellCommandOutput,
   ShellTool,
+  WebSource,
+  WebTool,
 } from "@javis/tools";
 import { summarizeMarkdownDocuments } from "@javis/tools";
 
@@ -230,6 +232,7 @@ export interface TaskSnapshot {
   logs: TaskLogEntry[];
   documents?: MarkdownDocumentSummary[];
   commands?: ShellCommandOutput[];
+  sources?: WebSource[];
   verificationSummary?: string;
 }
 
@@ -243,6 +246,7 @@ export interface TaskRuntime {
 export interface FileScanRuntimeOptions {
   fileTool: FileTool;
   shellTool?: ShellTool;
+  webTool?: WebTool;
   delayMs?: number;
 }
 
@@ -267,6 +271,13 @@ const demoAgents: Agent[] = [
     displayName: "Shell Agent",
     description: "Read-only command execution",
     allowedToolNames: ["shell.runReadOnlyCommand"],
+  },
+  {
+    id: "agent-research",
+    kind: "research",
+    displayName: "Research Agent",
+    description: "Public source collection",
+    allowedToolNames: ["web.fetchSource"],
   },
   {
     id: "agent-verifier",
@@ -307,6 +318,7 @@ export function createInitialTaskSnapshot(): TaskSnapshot {
 export function createFileScanTaskRuntime({
   fileTool,
   shellTool,
+  webTool,
   delayMs = 250,
 }: FileScanRuntimeOptions): TaskRuntime {
   let snapshot = createInitialTaskSnapshot();
@@ -520,6 +532,10 @@ export function createFileScanTaskRuntime({
       }
       timers.clear();
       const taskId = `task-${Date.now()}`;
+      if (webTool && extractUrls(userGoal).length > 0) {
+        void runResearchSourceTask(taskId, userGoal, webTool);
+        return;
+      }
       if (shellTool && isProjectInspectionGoal(userGoal)) {
         void runProjectInspectionTask(taskId, userGoal, shellTool);
         return;
@@ -680,6 +696,125 @@ export function createFileScanTaskRuntime({
       });
     }
   }
+
+  async function runResearchSourceTask(taskId: ID, userGoal: string, activeWebTool: WebTool) {
+    const urls = extractUrls(userGoal);
+    const plan = createResearchSourcePlan();
+
+    emit({
+      id: taskId,
+      title: "Collecting research sources",
+      userGoal,
+      status: "planning",
+      commanderMessage:
+        "Commander found user-provided URLs and prepared read-only source collection.",
+      plan,
+      agents: [
+        commanderSnapshot("planning", "Create research source plan"),
+        researchSnapshot("queued", `Waiting to fetch ${urls.length} source(s)`),
+        verifierSnapshot("queued", "Waiting for source evidence"),
+      ],
+      logs: [
+        {
+          id: `${taskId}-created`,
+          kind: "event",
+          title: "task.created",
+          detail: "Desktop UI passed the research goal to Core.",
+        },
+      ],
+    });
+
+    await wait();
+
+    emit({
+      ...snapshot,
+      status: "running",
+      commanderMessage: "Research Agent is fetching public sources provided by the user.",
+      plan: markStep(snapshot.plan, "step-fetch-sources", "running"),
+      agents: [
+        commanderSnapshot("completed", "Plan submitted"),
+        researchSnapshot("running", "Fetching public URL sources"),
+        verifierSnapshot("queued", "Waiting for sources"),
+      ],
+      logs: appendLog(snapshot, {
+        id: `${taskId}-sources-started`,
+        kind: "tool",
+        title: "tool_call.planned",
+        detail: `Fetching ${urls.length} URL(s) with read permission.`,
+      }),
+    });
+
+    try {
+      const sources = await Promise.all(
+        urls.map((url) => activeWebTool.fetchWebSource({ url })),
+      );
+
+      emit({
+        ...snapshot,
+        title: "Drafting source-backed report",
+        status: "verifying",
+        commanderMessage:
+          "Research Agent collected sources. Verifier is checking that every source has a URL and excerpt.",
+        plan: markStep(snapshot.plan, "step-fetch-sources", "completed", "step-verify-sources", "running"),
+        agents: [
+          commanderSnapshot("completed", "Waiting for verification"),
+          researchSnapshot("completed", `Fetched ${sources.length} source(s)`),
+          verifierSnapshot("verifying", "Checking source evidence"),
+        ],
+        sources,
+        logs: appendLog(snapshot, {
+          id: `${taskId}-sources-done`,
+          kind: "tool",
+          title: "tool_call.updated",
+          detail: `web.fetchSource completed for ${sources.length} source(s).`,
+        }),
+      });
+
+      await wait();
+
+      const validCount = sources.filter((source) => source.url && source.excerpt).length;
+      emit({
+        ...snapshot,
+        title: "Research sources collected",
+        status: "completed",
+        commanderMessage:
+          "Source collection completed. This is the Milestone 4 fallback path for user-provided URLs before search provider integration.",
+        plan: snapshot.plan.map((step) => ({ ...step, status: "completed" })),
+        agents: [
+          commanderSnapshot("completed", "Task finished"),
+          researchSnapshot("completed", "Source collection completed"),
+          verifierSnapshot("completed", "Verification passed"),
+        ],
+        logs: appendLog(snapshot, {
+          id: `${taskId}-done`,
+          kind: "verification",
+          title: "task.completed",
+          detail: `Verifier checked ${validCount}/${sources.length} source records.`,
+        }),
+        verificationSummary: `verified: ${validCount}/${sources.length} sources include URL and excerpt.`,
+      });
+    } catch (error) {
+      emit({
+        ...snapshot,
+        title: "Research source collection failed",
+        status: "failed",
+        commanderMessage:
+          "Research Agent could not fetch the provided source. Search provider integration remains a later step.",
+        plan: markStep(snapshot.plan, "step-fetch-sources", "failed"),
+        agents: [
+          commanderSnapshot("completed", "Plan submitted"),
+          researchSnapshot("failed", "Source fetch failed"),
+          verifierSnapshot("cancelled", "No source to verify"),
+        ],
+        logs: appendLog(snapshot, {
+          id: `${taskId}-failed`,
+          kind: "tool",
+          title: "task.failed",
+          detail: error instanceof Error ? error.message : String(error),
+        }),
+      });
+    }
+  }
 }
 
 function createFileScanPlan(): TaskStep[] {
@@ -727,6 +862,25 @@ function createProjectInspectionPlan(): TaskStep[] {
   ];
 }
 
+function createResearchSourcePlan(): TaskStep[] {
+  return [
+    {
+      id: "step-fetch-sources",
+      title: "Research Agent fetches user-provided source URLs",
+      assignedAgentKind: "research",
+      status: "pending",
+      successCriteria: "Each source returns URL, title or excerpt, and fetched timestamp.",
+    },
+    {
+      id: "step-verify-sources",
+      title: "Verifier checks source evidence",
+      assignedAgentKind: "verifier",
+      status: "pending",
+      successCriteria: "Final result only verifies sources with retrievable excerpts.",
+    },
+  ];
+}
+
 function commanderSnapshot(status: AgentRunStatus, task: string): AgentSnapshot {
   return createAgentSnapshot(demoAgents[0], status, task);
 }
@@ -739,8 +893,12 @@ function shellSnapshot(status: AgentRunStatus, task: string): AgentSnapshot {
   return createAgentSnapshot(demoAgents[2], status, task);
 }
 
-function verifierSnapshot(status: AgentRunStatus, task: string): AgentSnapshot {
+function researchSnapshot(status: AgentRunStatus, task: string): AgentSnapshot {
   return createAgentSnapshot(demoAgents[3], status, task);
+}
+
+function verifierSnapshot(status: AgentRunStatus, task: string): AgentSnapshot {
+  return createAgentSnapshot(demoAgents[4], status, task);
 }
 
 function createAgentSnapshot(agent: Agent, status: AgentRunStatus, task: string): AgentSnapshot {
@@ -777,4 +935,8 @@ function markStep(
 
 function isProjectInspectionGoal(userGoal: string): boolean {
   return /项目|启动|测试|环境|命令|project|test|start|environment/i.test(userGoal);
+}
+
+function extractUrls(value: string): string[] {
+  return Array.from(value.matchAll(/https?:\/\/[^\s)]+/g), (match) => match[0]);
 }

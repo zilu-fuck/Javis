@@ -35,6 +35,21 @@ struct ShellCommandOutput {
     stderr: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WebSourceRequest {
+    url: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebSource {
+    url: String,
+    title: Option<String>,
+    excerpt: String,
+    fetched_at: String,
+}
+
 #[tauri::command]
 fn scan_markdown_documents(workspace_path: Option<String>) -> Result<Vec<MarkdownDocument>, String> {
     let workspace = resolve_workspace_path(workspace_path)?;
@@ -68,6 +83,31 @@ fn run_read_only_command(request: ShellCommandRequest) -> Result<ShellCommandOut
         stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
     })
 }
+
+#[tauri::command]
+fn fetch_web_source(request: WebSourceRequest) -> Result<WebSource, String> {
+    if !request.url.starts_with("https://") && !request.url.starts_with("http://") {
+        return Err("Only http and https URLs are supported.".to_string());
+    }
+
+    let mut response = ureq::get(&request.url)
+        .header("User-Agent", "Javis/0.1")
+        .call()
+        .map_err(|error| error.to_string())?;
+    let body = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|error| error.to_string())?;
+    let plain_text = html_to_text(&body);
+
+    Ok(WebSource {
+        url: request.url,
+        title: extract_title(&body),
+        excerpt: plain_text.chars().take(600).collect(),
+        fetched_at: format_system_time(SystemTime::now()),
+    })
+}
+
 
 fn is_allowed_read_only_command(program: &str, args: &[String]) -> bool {
     let normalized_program = program.to_ascii_lowercase();
@@ -204,13 +244,52 @@ fn first_excerpt(content: &str) -> Option<String> {
         .map(|line| line.chars().take(180).collect())
 }
 
+fn extract_title(content: &str) -> Option<String> {
+    let lower = content.to_lowercase();
+    let start = lower.find("<title>")?;
+    let end = lower[start..].find("</title>")? + start;
+    Some(
+        content[start + "<title>".len()..end]
+            .replace('\n', " ")
+            .trim()
+            .to_string(),
+    )
+    .filter(|title| !title.is_empty())
+}
+
+fn html_to_text(content: &str) -> String {
+    let mut output = String::with_capacity(content.len());
+    let mut in_tag = false;
+
+    for character in content.chars() {
+        match character {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                output.push(' ');
+            }
+            _ if !in_tag => output.push(character),
+            _ => {}
+        }
+    }
+
+    output
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             scan_markdown_documents,
-            run_read_only_command
+            run_read_only_command,
+            fetch_web_source
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
