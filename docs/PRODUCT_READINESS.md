@@ -19,7 +19,7 @@ history intact.
 | Desktop workbench | Installable app with stable task thread, logs, agent state, and permission UI. | MVP implemented and packaged on Windows. |
 | File and project understanding | Read project files safely, summarize relevant documents, inspect scripts, and recommend/run checks. | MVP implemented with Markdown scan and allowlisted checks. |
 | Research | Search or collect public sources, fetch evidence, compare at least three sources, cite excerpts, and label unknowns. | Partial. User-provided URL flow works; automated search has `github-cli` and Agent Chrome provider paths. Fixture QA covers success/failure states, live `github-cli` plus Agent Chrome smoke QA passes, and source-comparison summaries now call out overlap and differences. |
-| Code Agent | Inspect code, propose changes, produce diffs, apply approved edits, and run verification. | Missing. opencode/backend integration is not implemented. |
+| Code Agent | Inspect code, propose changes, produce diffs, apply approved edits, and run verification. | Partial. Core can route code review goals to a Code Agent scaffold that lists changed files, shows a diff preview, asks before continuing, and runs read-only `git diff --check`; opencode/backend integration and approved edit application are not implemented. |
 | Persistence | Save task history, results, permission decisions as scoped records, and allow deletion. | Partial. Completed, failed, and cancelled task snapshots are stored locally with sidebar restore and delete controls; pending approvals are not persisted. |
 | Workspace management | Select and remember workspaces without relying on the launch directory. | Missing. Current workspace resolution is basic. |
 | Permission enforcement | Confirmed writes require visible approval and native enforcement for the current dry-run. | Implemented for PDF organization; needs to generalize to future write tools. |
@@ -30,7 +30,8 @@ history intact.
 
 Do not call Javis a complete usable product while any of these are true:
 
-- Code Agent / opencode integration is missing.
+- Code Agent can only review the current local diff; opencode integration,
+  proposed edits, and approved edit application are missing.
 - Task history persistence is limited to local completed/failed/cancelled
   snapshots and needs broader QA across app restart and future storage
   migrations.
@@ -44,7 +45,8 @@ Do not call Javis a complete usable product while any of these are true:
 
 The project has a verified MVP foundation. The next stage is product completion:
 
-1. Add Code Agent with diff preview, approval, apply, and verification.
+1. Extend Code Agent from diff preview and read-only verification to proposed
+   edits, approved apply, and opencode-backed implementation workflows.
 2. Harden local persistence across app restart, storage migration, and future
    scoped permission records.
 3. Add workspace selection.

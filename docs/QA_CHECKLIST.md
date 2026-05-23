@@ -5,8 +5,9 @@ commands, Core routing, or permission flows.
 
 The scenarios below are the verified MVP baseline. A complete product release
 must also cover the product-readiness scenarios in `PRODUCT_READINESS.md`,
-including automated research search, Code Agent edits, persistence, workspace
-selection, generalized confirmed-write approvals, and release rollback notes.
+including automated research search, Code Agent approved edits, persistence,
+workspace selection, generalized confirmed-write approvals, and release rollback
+notes.
 
 ## Setup
 
@@ -40,7 +41,7 @@ exist:
 - IntelliSearch-backed research completed state after Code Agent integration.
 - Agent Chrome fallback research completed state.
 - Search failure or no-results state.
-- Code Agent diff preview before approval.
+- Code Agent diff preview before continuing to read-only verification.
 - Code Agent approved edit result with verification output.
 - Code Agent denied no-op result.
 - Task history after app restart.
@@ -98,6 +99,19 @@ exist:
 - Deny once and verify no files moved.
 - Approve once and verify only the listed PDF paths moved.
 - Re-run with a target conflict and verify the conflict is skipped.
+
+### Code Agent Diff Preview
+
+- Create a small local code change without committing it.
+- Submit: `Review code changes`.
+- Verify changed files and the diff preview are shown before any verification
+  command runs.
+- Deny once and verify no verification command runs.
+- Approve once and verify `git diff --check` runs through the Shell Agent.
+- Verify the final state distinguishes a clean diff check from a failed diff
+  check.
+- Do not treat this scenario as approved edit QA; proposed edits and patch
+  application are still future Code Agent work.
 
 ### Product Readiness Scenarios
 

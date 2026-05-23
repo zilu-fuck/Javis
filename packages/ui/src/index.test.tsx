@@ -123,6 +123,42 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).toContain("Deep research plugin for OpenCode.");
   });
 
+  it("renders code review diff preview", () => {
+    const html = renderWorkbench({
+      title: "Code review preview ready",
+      userGoal: "Review code changes",
+      status: "waiting_permission",
+      commanderMessage: "Diff preview is ready.",
+      plan: [],
+      agents: [],
+      logs: [],
+      codeReviewPreview: {
+        workspacePath: "E:/Javis",
+        changedFiles: ["packages/core/src/index.ts", "packages/ui/src/index.tsx"],
+        diffStat: "2 files changed, 10 insertions(+), 4 deletions(-)",
+        diff: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts",
+      },
+      permissionRequest: {
+        id: "permission-2",
+        level: "preview",
+        title: "Approve code review continuation",
+        reason: "Review the current diff preview before running a read-only verification check.",
+        status: "pending",
+        dryRun: {
+          operation: "Run git diff --check after diff review",
+          affectedPaths: [],
+          riskSummary: "Read-only review of changed files before verification.",
+          reversible: true,
+        },
+      },
+    });
+
+    expect(html).toContain("Code Review");
+    expect(html).toContain("Changed files");
+    expect(html).toContain("packages/core/src/index.ts");
+    expect(html).toContain("git diff --check");
+  });
+
   it("renders task history entries with delete controls", () => {
     const html = renderToStaticMarkup(
       <JavisWorkbench

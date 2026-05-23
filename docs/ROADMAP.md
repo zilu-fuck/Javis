@@ -50,7 +50,8 @@ Status: complete for the 2026-05-23 QA pass.
 
 ## Milestone 2: Code Agent
 
-- Add a `CodeTool` interface.
+- Add a `CodeTool` interface. Initial inspect-only diff preview is
+  implemented.
 - Integrate opencode as an optional backend.
 - Treat opencode as an extensible kernel:
   - use MCP for memory, search, indexing, and other external capabilities
@@ -61,9 +62,12 @@ Status: complete for the 2026-05-23 QA pass.
 - Keep opencode under Javis permission rules:
   - read project context
   - produce analysis
-  - produce diff preview
+  - produce diff preview (initial current-diff preview is implemented)
   - ask for confirmation before applying edits
   - run checks through Shell Tool policy
+- Route code review goals through the Code Agent scaffold. Initial routing,
+  changed-file listing, preview approval, and read-only `git diff --check`
+  verification are implemented.
 - Add tests around rejected dangerous commands and approved edit application.
 - Add QA for inspect-only, diff preview, approved edit, denied edit, and failed
   verification states.

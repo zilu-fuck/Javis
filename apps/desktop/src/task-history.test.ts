@@ -89,6 +89,25 @@ describe("task history persistence", () => {
     expect(history[0]?.title).toBe("Updated task");
   });
 
+  it("keeps code review previews in completed task history", () => {
+    const storage = createMemoryStorage();
+    const task = {
+      ...createTask("task-1000"),
+      codeReviewPreview: {
+        workspacePath: "E:/Javis",
+        changedFiles: ["packages/core/src/index.ts"],
+        diffStat: "1 file changed",
+        diff: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts",
+      },
+    } satisfies TaskSnapshot;
+
+    saveTaskHistory(storage, [task]);
+    const loaded = loadTaskHistory(storage);
+
+    expect(loaded[0]?.codeReviewPreview?.changedFiles).toEqual(["packages/core/src/index.ts"]);
+    expect(loaded[0]?.codeReviewPreview?.diff).toContain("diff --git");
+  });
+
   it("returns stable timestamps from task ids when available", () => {
     expect(getTaskUpdatedAt(createTask("task-1000"))).toBe("1970-01-01T00:00:01.000Z");
   });

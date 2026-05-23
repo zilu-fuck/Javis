@@ -1,4 +1,6 @@
 import type {
+  CodeReviewPreview,
+  CodeTool,
   FileOrganizationExecution,
   FileOrganizationPlan,
   FileTool,
@@ -13,6 +15,7 @@ import type {
   WebTool,
 } from "@javis/tools";
 import {
+  codeSnapshot,
   commanderSnapshot,
   demoAgents,
   fileSnapshot,
@@ -22,6 +25,7 @@ import {
 } from "./agents";
 import { runFileScanTask } from "./file-scan-flow";
 import {
+  createCodeReviewPlan,
   createPdfOrganizationPlan,
   createProjectInspectionPlan,
   createResearchSearchPlan,
@@ -32,6 +36,7 @@ import { createSourceBackedReport } from "./research";
 import {
   createRecommendedCommandRequest,
   extractUrls,
+  isCodeReviewGoal,
   isPdfOrganizationGoal,
   isProjectInspectionGoal,
   isResearchGoal,
@@ -265,6 +270,7 @@ export interface TaskSnapshot {
   commands?: ShellCommandOutput[];
   fileOrganizationExecution?: FileOrganizationExecution;
   fileOrganizationPlan?: FileOrganizationPlan;
+  codeReviewPreview?: CodeReviewPreview;
   permissionRequest?: ToolPermissionRequest;
   project?: ProjectInspection;
   researchReport?: ResearchReport;
@@ -282,6 +288,7 @@ export interface TaskRuntime {
 
 export interface FileScanRuntimeOptions {
   fileTool: FileTool;
+  codeTool?: CodeTool;
   projectTool?: ProjectTool;
   shellTool?: ShellTool;
   webTool?: WebTool;
@@ -317,6 +324,7 @@ export function createInitialTaskSnapshot(): TaskSnapshot {
 
 export function createFileScanTaskRuntime({
   fileTool,
+  codeTool,
   projectTool,
   shellTool,
   webTool,
@@ -350,6 +358,10 @@ export function createFileScanTaskRuntime({
       }
       if (shellTool && projectTool && isProjectInspectionGoal(userGoal)) {
         void runProjectInspectionTask(taskId, userGoal, shellTool, projectTool);
+        return;
+      }
+      if (codeTool && shellTool && isCodeReviewGoal(userGoal)) {
+        void runCodeReviewTask(taskId, userGoal, codeTool, shellTool);
         return;
       }
       if (fileTool.planPdfOrganization && isPdfOrganizationGoal(userGoal)) {
@@ -846,6 +858,279 @@ export function createFileScanTaskRuntime({
           kind: "tool",
           title: "task.failed",
           detail: message,
+        }),
+      });
+    }
+  }
+
+  async function runCodeReviewTask(taskId: ID, userGoal: string, activeCodeTool: CodeTool, activeShellTool: ShellTool) {
+    const plan = createCodeReviewPlan();
+
+    emit({
+      id: taskId,
+      title: "Reviewing code changes",
+      userGoal,
+      status: "planning",
+      commanderMessage:
+        "Commander identified a code review goal and will collect a diff preview before read-only verification.",
+      plan,
+      agents: [
+        commanderSnapshot("planning", "Create code review plan"),
+        codeSnapshot("queued", "Waiting for repository diff preview"),
+        verifierSnapshot("queued", "Waiting for diff evidence"),
+      ],
+      logs: [
+        {
+          id: `${taskId}-created`,
+          kind: "event",
+          title: "task.created",
+          detail: "Desktop UI passed the code review goal to Core.",
+        },
+      ],
+    });
+
+    await wait();
+
+    emit({
+      ...snapshot,
+      status: "running",
+      commanderMessage: "Code Agent is gathering changed files and a diff preview from the current workspace.",
+      plan: markStep(snapshot.plan, "step-inspect-code", "running"),
+      agents: [
+        commanderSnapshot("completed", "Plan submitted"),
+        codeSnapshot("running", "Collecting repository diff preview"),
+        verifierSnapshot("queued", "Waiting for diff evidence"),
+      ],
+      logs: appendLog(snapshot, {
+        id: `${taskId}-preview-started`,
+        kind: "tool",
+        title: "tool_call.planned",
+        detail: "code.inspectRepository and read-only git checks collect the current diff preview.",
+      }),
+    });
+
+    try {
+      const codeReviewPreview = await activeCodeTool.inspectRepository();
+      const changedFileCount = codeReviewPreview.changedFiles.length;
+      if (changedFileCount === 0 && !codeReviewPreview.diff.trim()) {
+        emit({
+          ...snapshot,
+          title: "No code changes found",
+          status: "completed",
+          commanderMessage:
+            "Code Agent did not find local code changes, so no review or verification step was needed.",
+          plan: snapshot.plan.map((step) => ({
+            ...step,
+            status: step.id === "step-inspect-code" ? "completed" : "skipped",
+          })),
+          agents: [
+            commanderSnapshot("completed", "Task finished"),
+            codeSnapshot("completed", "No local diff"),
+            verifierSnapshot("completed", "Verified no-op result"),
+          ],
+          codeReviewPreview,
+          logs: appendLog(snapshot, {
+            id: `${taskId}-no-diff`,
+            kind: "verification",
+            title: "task.completed",
+            detail: "Repository diff preview was empty, so no confirmation was needed.",
+          }),
+          verificationSummary: "verified: no local code changes were found.",
+        });
+        return;
+      }
+
+      const permissionRequest: ToolPermissionRequest = {
+        id: `${taskId}-permission`,
+        level: "preview",
+        title: "Approve code review continuation",
+        reason: "Review the current diff preview before running a read-only verification check.",
+        dryRun: {
+          operation: "Run git diff --check after diff review",
+          affectedPaths: codeReviewPreview.changedFiles.map((file) => ({
+            source: file,
+            target: file,
+            action: "modify",
+          })),
+          riskSummary: "Read-only review of changed files before verification.",
+          reversible: true,
+        },
+        status: "pending",
+        createdAt: new Date().toISOString(),
+      };
+
+      emit({
+        ...snapshot,
+        title: "Code review preview ready",
+        status: "waiting_permission",
+        commanderMessage:
+          "Diff preview is ready. Review the changed files before approving the read-only verification check.",
+        plan: markStep(snapshot.plan, "step-inspect-code", "completed", "step-review-code", "running"),
+        agents: [
+          commanderSnapshot("waiting_permission", "Waiting for code review approval"),
+          codeSnapshot("completed", "Repository diff preview collected"),
+          verifierSnapshot("queued", "Waiting for approval"),
+        ],
+        codeReviewPreview,
+        permissionRequest,
+        logs: appendLog(snapshot, {
+          id: `${taskId}-permission-requested`,
+          kind: "permission",
+          title: "permission.requested",
+          detail: `${changedFileCount} changed file(s) require review before verification continues.`,
+        }),
+      });
+
+      pendingPermissionHandler = async (decision) => {
+        const resolvedRequest: ToolPermissionRequest = {
+          ...permissionRequest,
+          status: decision,
+          resolvedAt: new Date().toISOString(),
+        };
+        pendingPermissionHandler = undefined;
+
+        if (decision === "denied") {
+          emit({
+            ...snapshot,
+            title: "Code review denied",
+            status: "completed",
+            commanderMessage:
+              "Permission was denied. Javis kept the diff preview read-only and did not run verification.",
+            plan: snapshot.plan.map((step) => ({
+              ...step,
+              status: step.id === "step-verify-code" ? "skipped" : "completed",
+            })),
+            agents: [
+              commanderSnapshot("completed", "Permission decision recorded"),
+              codeSnapshot("completed", "Diff preview kept read-only"),
+              verifierSnapshot("completed", "Verified denial record"),
+            ],
+            codeReviewPreview,
+            permissionRequest: resolvedRequest,
+            logs: appendLog(snapshot, {
+              id: `${taskId}-permission-denied`,
+              kind: "permission",
+              title: "permission.resolved",
+              detail: `User denied ${permissionRequest.id}; no verification command was run.`,
+            }),
+            verificationSummary: "verified: code review was denied and no read-only verification command was executed.",
+          });
+          return;
+        }
+
+        emit({
+          ...snapshot,
+          title: "Running code review verification",
+          status: "running",
+          commanderMessage:
+            "Code Agent will run a read-only diff check against the current repository state.",
+          plan: markStep(snapshot.plan, "step-review-code", "completed", "step-verify-code", "running"),
+          agents: [
+            commanderSnapshot("completed", "Permission decision recorded"),
+            codeSnapshot("running", "Running read-only diff verification"),
+            verifierSnapshot("queued", "Waiting for diff check result"),
+          ],
+          codeReviewPreview,
+          permissionRequest: resolvedRequest,
+          logs: appendLog(snapshot, {
+            id: `${taskId}-verify-started`,
+            kind: "permission",
+            title: "permission.resolved",
+            detail: `User approved ${permissionRequest.id}; running git diff --check.`,
+          }),
+        });
+
+        try {
+          const verification = await activeShellTool.runReadOnlyCommand({
+            program: "git",
+            args: ["diff", "--check"],
+            workspacePath: null,
+          });
+          const verificationStatus = verification.exitCode === 0 ? "completed" : "failed";
+
+          emit({
+            ...snapshot,
+            title:
+              verificationStatus === "completed"
+                ? "Code review completed"
+                : "Code review verification failed",
+            status: verificationStatus,
+            commanderMessage:
+              verificationStatus === "completed"
+                ? "Code Agent reviewed the current diff and the read-only verification check passed."
+                : "Code Agent reviewed the current diff, but the read-only verification check failed.",
+            plan:
+              verificationStatus === "completed"
+                ? snapshot.plan.map((step) => ({ ...step, status: "completed" }))
+                : markStep(snapshot.plan, "step-verify-code", "failed"),
+            agents: [
+              commanderSnapshot(
+                verificationStatus === "completed" ? "completed" : "failed",
+                verificationStatus === "completed" ? "Task finished" : "Verification failed",
+              ),
+              codeSnapshot("completed", "Diff preview reviewed"),
+              verifierSnapshot(
+                verificationStatus === "completed" ? "completed" : "failed",
+                `${verification.exitCode ?? "unknown"} diff check exit code`,
+              ),
+            ],
+            codeReviewPreview,
+            commands: [verification],
+            permissionRequest: resolvedRequest,
+            logs: appendLog(snapshot, {
+              id: `${taskId}-done`,
+              kind: "verification",
+              title:
+                verificationStatus === "completed" ? "task.completed" : "verification.failed",
+              detail: `Verifier checked the repository diff with exit code ${verification.exitCode ?? "unknown"}.`,
+            }),
+            verificationSummary:
+              verificationStatus === "completed"
+                ? `verified: ${changedFileCount} changed file(s) reviewed and git diff --check passed.`
+                : `failed: ${changedFileCount} changed file(s) reviewed and git diff --check returned exit code ${verification.exitCode ?? "unknown"}.`,
+          });
+        } catch (error) {
+          emit({
+            ...snapshot,
+            title: "Code review verification failed",
+            status: "failed",
+            commanderMessage:
+              "Code Agent reviewed the diff preview, but the read-only verification command failed to run.",
+            plan: markStep(snapshot.plan, "step-verify-code", "failed"),
+            agents: [
+              commanderSnapshot("completed", "Permission decision recorded"),
+              codeSnapshot("completed", "Diff preview reviewed"),
+              verifierSnapshot("failed", "Verification command failed"),
+            ],
+            codeReviewPreview,
+            permissionRequest: resolvedRequest,
+            logs: appendLog(snapshot, {
+              id: `${taskId}-failed`,
+              kind: "tool",
+              title: "task.failed",
+              detail: error instanceof Error ? error.message : String(error),
+            }),
+          });
+        }
+      };
+    } catch (error) {
+      emit({
+        ...snapshot,
+        title: "Code review preview failed",
+        status: "failed",
+        commanderMessage:
+          "Code Agent could not collect a diff preview. Check repository access or try a narrower code review goal.",
+        plan: markStep(snapshot.plan, "step-inspect-code", "failed"),
+        agents: [
+          commanderSnapshot("completed", "Plan submitted"),
+          codeSnapshot("failed", "Diff preview unavailable"),
+          verifierSnapshot("cancelled", "No diff to verify"),
+        ],
+        logs: appendLog(snapshot, {
+          id: `${taskId}-failed`,
+          kind: "tool",
+          title: "task.failed",
+          detail: error instanceof Error ? error.message : String(error),
         }),
       });
     }

@@ -116,6 +116,17 @@ export interface ResearchReport {
   unknowns: string[];
 }
 
+export interface CodeReviewPreview {
+  workspacePath: string;
+  changedFiles: string[];
+  diffStat: string;
+  diff: string;
+}
+
+export interface CodeTool {
+  inspectRepository(): Promise<CodeReviewPreview>;
+}
+
 export interface WebTool {
   fetchWebSource(request: WebSourceRequest): Promise<WebSource>;
   searchWeb?(request: WebSearchRequest): Promise<WebSearchResult[]>;

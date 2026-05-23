@@ -52,6 +52,32 @@ export function createProjectInspectionPlan(): TaskStep[] {
   ];
 }
 
+export function createCodeReviewPlan(): TaskStep[] {
+  return [
+    {
+      id: "step-inspect-code",
+      title: "Code Agent inspects repository diff and changed files",
+      assignedAgentKind: "code",
+      status: "pending",
+      successCriteria: "Return changed file names, diff summary, and a readable patch preview.",
+    },
+    {
+      id: "step-review-code",
+      title: "User reviews the diff preview and chooses whether to continue",
+      assignedAgentKind: "commander",
+      status: "pending",
+      successCriteria: "Approve or deny the current code review preview.",
+    },
+    {
+      id: "step-verify-code",
+      title: "Verifier checks read-only diff evidence",
+      assignedAgentKind: "verifier",
+      status: "pending",
+      successCriteria: "Final result explains whether the repository diff was reviewed and checked.",
+    },
+  ];
+}
+
 export function createPdfOrganizationPlan(): TaskStep[] {
   return [
     {

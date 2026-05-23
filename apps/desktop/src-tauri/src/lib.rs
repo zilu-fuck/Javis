@@ -418,6 +418,9 @@ fn is_allowed_read_only_command(program: &str, args: &[String]) -> bool {
             | ("yarn", ["test"])
             | ("cargo", ["--version"])
             | ("git", ["status", "--short"])
+            | ("git", ["diff", "--stat"])
+            | ("git", ["diff", "--unified=1"])
+            | ("git", ["diff", "--check"])
     )
 }
 
@@ -1485,6 +1488,22 @@ mod tests {
         assert_eq!(resolve_command_program("pnpm"), "pnpm.cmd");
         assert_eq!(resolve_command_program("npm"), "npm.cmd");
         assert_eq!(resolve_command_program("node"), "node");
+    }
+
+    #[test]
+    fn allows_read_only_code_review_git_commands() {
+        assert!(is_allowed_read_only_command(
+            "git",
+            &["diff".to_string(), "--stat".to_string()]
+        ));
+        assert!(is_allowed_read_only_command(
+            "git",
+            &["diff".to_string(), "--unified=1".to_string()]
+        ));
+        assert!(is_allowed_read_only_command(
+            "git",
+            &["diff".to_string(), "--check".to_string()]
+        ));
     }
 
     #[test]

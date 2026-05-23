@@ -37,6 +37,7 @@ describe("createFileScanTaskRuntime", () => {
       "agent-commander",
       "agent-file",
       "agent-shell",
+      "agent-code",
       "agent-research",
       "agent-verifier",
     ]);
@@ -123,6 +124,89 @@ describe("createFileScanTaskRuntime", () => {
     expect(finalSnapshot.title).toBe("Project environment check failed");
     expect(finalSnapshot.verificationSummary).toContain("failed");
     expect(finalSnapshot.logs[finalSnapshot.logs.length - 1]?.title).toBe("verification.failed");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("routes code review goals through a diff preview and read-only verification", async () => {
+    const preview = {
+      workspacePath: "E:/Javis",
+      changedFiles: ["packages/core/src/index.ts", "packages/ui/src/index.tsx"],
+      diffStat: "2 files changed, 10 insertions(+), 4 deletions(-)",
+      diff: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts",
+    };
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+      },
+      codeTool: {
+        inspectRepository: vi.fn(async () => preview),
+      },
+      shellTool: {
+        runReadOnlyCommand: vi.fn(async (request: ShellCommandRequest) => ({
+          command: [request.program, ...request.args].join(" "),
+          cwd: "E:/Javis",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        })),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("Review code changes");
+    await waitForStatus(snapshots, "waiting_permission");
+    runtime.resolvePermission("approved");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(finalSnapshot.codeReviewPreview).toEqual(preview);
+    expect(finalSnapshot.commands).toHaveLength(1);
+    expect(finalSnapshot.commands?.[0]?.command).toBe("git diff --check");
+    expect(finalSnapshot.verificationSummary).toContain("git diff --check passed");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("keeps denied code review permissions as a read-only no-op", async () => {
+    const runReadOnlyCommand = vi.fn(async (request: ShellCommandRequest) => ({
+      command: [request.program, ...request.args].join(" "),
+      cwd: "E:/Javis",
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+      },
+      codeTool: {
+        inspectRepository: vi.fn(async () => ({
+          workspacePath: "E:/Javis",
+          changedFiles: ["packages/core/src/index.ts"],
+          diffStat: "1 file changed",
+          diff: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts",
+        })),
+      },
+      shellTool: {
+        runReadOnlyCommand,
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("Review code changes");
+    await waitForStatus(snapshots, "waiting_permission");
+    runtime.resolvePermission("denied");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(runReadOnlyCommand).not.toHaveBeenCalled();
+    expect(finalSnapshot.permissionRequest?.status).toBe("denied");
+    expect(finalSnapshot.verificationSummary).toContain("no read-only verification command was executed");
 
     unsubscribe();
     runtime.dispose();

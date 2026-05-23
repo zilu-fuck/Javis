@@ -16,6 +16,12 @@ export function isResearchGoal(userGoal: string): boolean {
   );
 }
 
+export function isCodeReviewGoal(userGoal: string): boolean {
+  return /code review|review code|review changes|changed files|change set|diff|patch|source changes|\u4ee3\u7801\u5ba1\u67e5|\u5ba1\u67e5\u4ee3\u7801|\u53d8\u66f4|\u5dee\u5f02|\u8865\u4e01/i.test(
+    userGoal,
+  );
+}
+
 export function isPdfOrganizationGoal(userGoal: string): boolean {
   return /pdf|downloads|download|organize|move|sort|\u6574\u7406|\u79fb\u52a8|\u5206\u7c7b/i.test(
     userGoal,

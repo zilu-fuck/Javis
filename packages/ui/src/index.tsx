@@ -101,6 +101,13 @@ export interface WorkbenchResearchReport {
   unknowns: string[];
 }
 
+export interface WorkbenchCodeReviewPreview {
+  workspacePath: string;
+  changedFiles: string[];
+  diffStat: string;
+  diff: string;
+}
+
 export interface WorkbenchHistoryEntry {
   id: string;
   title: string;
@@ -123,6 +130,7 @@ export interface WorkbenchTask {
   fileOrganizationExecution?: WorkbenchFileOrganizationExecution;
   permissionRequest?: WorkbenchPermissionRequest;
   project?: WorkbenchProject;
+  codeReviewPreview?: WorkbenchCodeReviewPreview;
   researchReport?: WorkbenchResearchReport;
   sources?: WorkbenchSource[];
   verificationSummary?: string;
@@ -154,6 +162,8 @@ export interface WorkbenchLocale {
     approve: string;
     commandResults: string;
     commander: string;
+    codeReview: string;
+    changedFiles: string;
     currentTask: string;
     deny: string;
     deleteHistoryEntry: string;
@@ -215,6 +225,8 @@ export const zhCNWorkbenchLocale: WorkbenchLocale = {
     approve: "批准",
     commandResults: "只读命令",
     commander: "指挥官",
+    codeReview: "代码审查",
+    changedFiles: "已变更文件",
     currentTask: "当前任务",
     deny: "拒绝",
     deleteHistoryEntry: "删除历史",
@@ -361,6 +373,8 @@ const defaultWorkbenchLocale: WorkbenchLocale = {
     approve: "Approve",
     commandResults: "Read-only Commands",
     commander: "Commander",
+    codeReview: "Code Review",
+    changedFiles: "Changed files",
     currentTask: "Current task",
     deny: "Deny",
     deleteHistoryEntry: "Delete history",
@@ -430,6 +444,7 @@ export function JavisWorkbench({
     !task.fileOrganizationExecution &&
     !task.permissionRequest &&
     !task.project &&
+    !task.codeReviewPreview &&
     !task.researchReport &&
     !task.sources &&
     !task.verificationSummary;
@@ -625,6 +640,38 @@ export function JavisWorkbench({
                   <span>cwd: {command.cwd}</span>
                 </article>
               ))}
+            </section>
+          ) : null}
+
+          {task.codeReviewPreview ? (
+            <section className="javis-documents" aria-label={labels.codeReview}>
+              <p className="javis-message-title">{labels.codeReview}</p>
+              <article className="javis-document">
+                <div className="javis-document-row">
+                  <strong>{task.codeReviewPreview.workspacePath}</strong>
+                  <span>
+                    {labels.changedFiles}: {task.codeReviewPreview.changedFiles.length}
+                  </span>
+                </div>
+                {task.codeReviewPreview.diffStat ? (
+                  <p>{task.codeReviewPreview.diffStat}</p>
+                ) : (
+                  <p>{labels.emptyOutput}</p>
+                )}
+              </article>
+              {task.codeReviewPreview.changedFiles.map((file) => (
+                <article className="javis-document" key={file}>
+                  <div className="javis-document-row">
+                    <strong>{file}</strong>
+                    <span>{labels.changedFiles}</span>
+                  </div>
+                </article>
+              ))}
+              <article className="javis-document">
+                <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                  {task.codeReviewPreview.diff || labels.emptyOutput}
+                </pre>
+              </article>
             </section>
           ) : null}
 

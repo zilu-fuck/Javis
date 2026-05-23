@@ -120,6 +120,9 @@ export function sanitizeTaskSnapshot(value: unknown): TaskSnapshot | null {
   if (isProjectInspection(value.project)) {
     snapshot.project = value.project;
   }
+  if (isCodeReviewPreview(value.codeReviewPreview)) {
+    snapshot.codeReviewPreview = value.codeReviewPreview;
+  }
   if (isResearchReport(value.researchReport)) {
     snapshot.researchReport = value.researchReport;
   }
@@ -309,6 +312,17 @@ function isProjectInspection(value: unknown): value is TaskSnapshot["project"] {
         isString(script.name) &&
         isString(script.command),
     )
+  );
+}
+
+function isCodeReviewPreview(value: unknown): value is TaskSnapshot["codeReviewPreview"] {
+  return (
+    isRecord(value) &&
+    isString(value.workspacePath) &&
+    Array.isArray(value.changedFiles) &&
+    value.changedFiles.every(isString) &&
+    isString(value.diffStat) &&
+    isString(value.diff)
   );
 }
 

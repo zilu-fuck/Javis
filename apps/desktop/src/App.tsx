@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { createFileScanTaskRuntime, createInitialTaskSnapshot } from "@javis/core";
 import type {
+  CodeReviewPreview,
   FileOrganizationExecution,
   FileOrganizationPlan,
   MarkdownDocument,
@@ -28,8 +29,11 @@ type PersistedTaskSnapshot = ReturnType<typeof createInitialTaskSnapshot>;
 
 function App() {
   const runtime = useMemo(
-    () =>
-      createFileScanTaskRuntime({
+    () => {
+      const runReadOnlyCommand = (request: ShellCommandRequest) =>
+        invoke<ShellCommandOutput>("run_read_only_command", { request });
+
+      return createFileScanTaskRuntime({
         fileTool: {
           scanMarkdownDocuments: () =>
             invoke<MarkdownDocument[]>("scan_markdown_documents", { workspacePath: null }),
@@ -46,8 +50,29 @@ function App() {
           },
         },
         shellTool: {
-          runReadOnlyCommand: (request: ShellCommandRequest) =>
-            invoke<ShellCommandOutput>("run_read_only_command", { request }),
+          runReadOnlyCommand,
+        },
+        codeTool: {
+          inspectRepository: async (): Promise<CodeReviewPreview> => {
+            const [status, diffStat, diff] = await Promise.all([
+              runReadOnlyCommand({ program: "git", args: ["status", "--short"], workspacePath: null }),
+              runReadOnlyCommand({ program: "git", args: ["diff", "--stat"], workspacePath: null }),
+              runReadOnlyCommand({ program: "git", args: ["diff", "--unified=1"], workspacePath: null }),
+            ]);
+
+            for (const output of [status, diffStat, diff]) {
+              if (output.exitCode !== 0) {
+                throw new Error(output.stderr || output.stdout || `${output.command} failed`);
+              }
+            }
+
+            return {
+              workspacePath: status.cwd,
+              changedFiles: parseGitStatusFiles(status.stdout),
+              diffStat: diffStat.stdout,
+              diff: diff.stdout,
+            };
+          },
         },
         projectTool: {
           inspectProject: () =>
@@ -59,7 +84,8 @@ function App() {
           searchWeb: (request: WebSearchRequest) =>
             invoke<WebSearchResult[]>("search_web_sources", { request }),
         },
-      }),
+      });
+    },
     [],
   );
   const [task, setTask] = useState(createInitialTaskSnapshot);
@@ -129,6 +155,15 @@ function App() {
       task={task}
     />
   );
+}
+
+function parseGitStatusFiles(output: string): string[] {
+  return output
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .map((line) => line.slice(3).trim())
+    .filter(Boolean);
 }
 
 export default App;

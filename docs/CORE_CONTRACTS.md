@@ -44,11 +44,12 @@ Current built-in agents:
 - `commander`
 - `file`
 - `shell`
+- `code`
 - `research`
 - `verifier`
 
-Placeholder agent kinds also exist for future browser and code work. Agent
-snapshots are display state; they are not independent processes in the MVP.
+Placeholder agent kinds also exist for future browser work. Agent snapshots are
+display state; they are not independent processes in the MVP.
 
 ## Tool Contracts
 
@@ -104,6 +105,18 @@ when available. Fallback results should include provider metadata such as
 `github-cli`, `opencode-intellisearch`, or `agent-chrome` so the UI and logs can
 show which path produced the evidence.
 
+### Code Tool
+
+Supports:
+
+- `inspectRepository()`
+
+It returns the workspace path, changed files, diff stat, and a bounded diff
+preview for the current local repository state. The first implementation is
+inspect-only: it does not propose new edits, apply patches, or call opencode.
+Core treats the preview as a `preview` permission step before running read-only
+verification.
+
 ## Permission Contract
 
 Permission levels:
@@ -132,6 +145,8 @@ Each completed route must produce evidence:
 - Markdown scan: path, modified time, size, purpose.
 - Project inspection: command outputs and exit codes.
 - Research: source URLs and excerpt-backed report rows.
+- Code review: workspace path, changed files, diff preview, permission
+  decision, and read-only `git diff --check` output.
 - PDF organization: dry-run, permission decision, execution counts.
 
 Verifier output is currently a summary string and logs in the snapshot. A richer

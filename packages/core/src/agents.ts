@@ -23,6 +23,13 @@ export const demoAgents: Agent[] = [
     allowedToolNames: ["shell.runReadOnlyCommand"],
   },
   {
+    id: "agent-code",
+    kind: "code",
+    displayName: "Code Agent",
+    description: "Repository diff preview and verification",
+    allowedToolNames: ["code.inspectRepository", "shell.runReadOnlyCommand"],
+  },
+  {
     id: "agent-research",
     kind: "research",
     displayName: "Research Agent",
@@ -50,12 +57,16 @@ export function shellSnapshot(status: AgentRunStatus, task: string): AgentSnapsh
   return createAgentSnapshot(demoAgents[2], status, task);
 }
 
-export function researchSnapshot(status: AgentRunStatus, task: string): AgentSnapshot {
+export function codeSnapshot(status: AgentRunStatus, task: string): AgentSnapshot {
   return createAgentSnapshot(demoAgents[3], status, task);
 }
 
-export function verifierSnapshot(status: AgentRunStatus, task: string): AgentSnapshot {
+export function researchSnapshot(status: AgentRunStatus, task: string): AgentSnapshot {
   return createAgentSnapshot(demoAgents[4], status, task);
+}
+
+export function verifierSnapshot(status: AgentRunStatus, task: string): AgentSnapshot {
+  return createAgentSnapshot(demoAgents[5], status, task);
 }
 
 function createAgentSnapshot(agent: Agent, status: AgentRunStatus, task: string): AgentSnapshot {
