@@ -19,7 +19,7 @@ This file remains the baseline record for what the verified MVP already covers.
 | Project inspection and check run | Implemented | Project scripts are inspected, start/check commands are recommended, and allowlisted checks are executed with exit codes and output. |
 | High-risk file dry-run and confirmation | Implemented | PDF organization creates a dry-run, asks for approval, executes approved matching moves with a one-time approval id, skips conflicts, and reports moved/skipped/failed results. |
 | Code Agent / opencode backend | Deferred | Current project inspection does not call opencode; Code Agent is Milestone C. |
-| Persistent task history | Deferred | Runtime state is in-memory only; persistence is Milestone D. |
+| Persistent task history | Partial post-MVP | Completed, failed, and cancelled task snapshots now persist locally with sidebar restore/delete. Restart QA and storage migration hardening remain product-readiness work. |
 | Core runtime tests | Implemented for MVP | Route selection, permission state changes, research reporting, selected failure paths, file-scan failure, PDF no-op/preview/execution failures, and native PDF safety boundaries have focused coverage. |
 
 ## Scenario Details
@@ -141,7 +141,7 @@ for a complete product release:
 
 - Automated search integration.
 - Code Agent / opencode integration.
-- Persistent task history.
+- Persistence hardening across app restart and storage migrations.
 - Workspace selection.
 - Generalized confirmed-write enforcement for all write-capable tools.
 - Signed/versioned release builds with rollback notes.

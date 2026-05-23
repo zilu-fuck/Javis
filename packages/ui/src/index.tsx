@@ -101,7 +101,16 @@ export interface WorkbenchResearchReport {
   unknowns: string[];
 }
 
+export interface WorkbenchHistoryEntry {
+  id: string;
+  title: string;
+  status: string;
+  userGoal: string;
+  updatedAt: string;
+}
+
 export interface WorkbenchTask {
+  id?: string;
   title: string;
   userGoal: string;
   status: string;
@@ -122,8 +131,11 @@ export interface WorkbenchTask {
 export interface JavisWorkbenchProps {
   task: WorkbenchTask;
   draftGoal: string;
+  historyEntries?: WorkbenchHistoryEntry[];
   locale?: WorkbenchLocale;
   onDraftGoalChange: (nextGoal: string) => void;
+  onDeleteHistoryEntry?: (id: string) => void;
+  onSelectHistoryEntry?: (id: string) => void;
   onPermissionDecision?: (decision: "approved" | "denied") => void;
   onSubmitGoal: () => void;
 }
@@ -144,6 +156,7 @@ export interface WorkbenchLocale {
     commander: string;
     currentTask: string;
     deny: string;
+    deleteHistoryEntry: string;
     documents: string;
     emptyOutput: string;
     executionTimeline: string;
@@ -152,6 +165,7 @@ export interface WorkbenchLocale {
     fileOrganizationResult: string;
     gallery: string;
     history: string;
+    historyEmpty: string;
     localKnowledgeBase: string;
     mainThread: string;
     markdownDocuments: string;
@@ -203,6 +217,7 @@ export const zhCNWorkbenchLocale: WorkbenchLocale = {
     commander: "指挥官",
     currentTask: "当前任务",
     deny: "拒绝",
+    deleteHistoryEntry: "删除历史",
     documents: "文档",
     emptyOutput: "（无输出）",
     executionTimeline: "执行时间线",
@@ -211,6 +226,7 @@ export const zhCNWorkbenchLocale: WorkbenchLocale = {
     fileOrganizationResult: "文件整理结果",
     gallery: "图库",
     history: "历史",
+    historyEmpty: "暂无历史",
     localKnowledgeBase: "本地知识库",
     mainThread: "主线程",
     markdownDocuments: "Markdown 文档",
@@ -347,6 +363,7 @@ const defaultWorkbenchLocale: WorkbenchLocale = {
     commander: "Commander",
     currentTask: "Current task",
     deny: "Deny",
+    deleteHistoryEntry: "Delete history",
     documents: "Documents",
     emptyOutput: "(empty output)",
     executionTimeline: "Execution timeline",
@@ -355,6 +372,7 @@ const defaultWorkbenchLocale: WorkbenchLocale = {
     fileOrganizationResult: "File Organization Result",
     gallery: "Gallery",
     history: "History",
+    historyEmpty: "No history yet",
     localKnowledgeBase: "Local knowledge base",
     mainThread: "Main Thread",
     markdownDocuments: "Markdown Documents",
@@ -392,8 +410,11 @@ const defaultWorkbenchLocale: WorkbenchLocale = {
 export function JavisWorkbench({
   task,
   draftGoal,
+  historyEntries = [],
   locale = defaultWorkbenchLocale,
   onDraftGoalChange,
+  onDeleteHistoryEntry,
+  onSelectHistoryEntry,
   onPermissionDecision,
   onSubmitGoal,
 }: JavisWorkbenchProps) {
@@ -473,10 +494,39 @@ export function JavisWorkbench({
           </div>
           <div className="javis-nav-group">
             <p className="javis-nav-section">{labels.history}</p>
-            <div className="javis-nav-item">
-              <span className="javis-nav-icon">◒</span>
-              <span>{labels.office}</span>
-            </div>
+            {historyEntries.length > 0 ? (
+              historyEntries.map((entry) => (
+                <div className="javis-history-entry" key={entry.id}>
+                  <button
+                    className="javis-history-select"
+                    onClick={() => onSelectHistoryEntry?.(entry.id)}
+                    type="button"
+                  >
+                    <span className="javis-nav-icon">◒</span>
+                    <span>
+                      <strong>{translateWorkbenchText(entry.title, locale)}</strong>
+                      <small>
+                        {translateWorkbenchText(entry.status, locale)} · {formatModifiedTime(entry.updatedAt)}
+                      </small>
+                    </span>
+                  </button>
+                  <button
+                    aria-label={`${labels.deleteHistoryEntry}: ${entry.title}`}
+                    className="javis-history-delete"
+                    onClick={() => onDeleteHistoryEntry?.(entry.id)}
+                    title={labels.deleteHistoryEntry}
+                    type="button"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))
+            ) : (
+              <div className="javis-nav-item muted">
+                <span className="javis-nav-icon">○</span>
+                <span>{labels.historyEmpty}</span>
+              </div>
+            )}
           </div>
         </nav>
         <div className="javis-sidebar-footer">

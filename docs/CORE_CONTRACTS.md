@@ -16,6 +16,10 @@ A task is the user-visible unit of work. It has:
 - Optional result sections such as documents, commands, sources, research
   report, project inspection, permission request, or file organization result.
 
+The desktop app persists completed, failed, and cancelled task snapshots for
+sidebar history restore. Pending permission requests are not persisted because
+confirmed-write approvals are scoped to the current in-memory dry-run.
+
 Current statuses:
 
 ```text

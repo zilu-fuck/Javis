@@ -30,7 +30,8 @@ Current product-readiness gaps:
 
 - Automated public search is not wired in yet.
 - Code Agent / opencode is not integrated yet.
-- Task history is in memory only.
+- Completed, failed, and cancelled task history is stored locally with sidebar
+  restore and deletion; broader persistence QA is still needed.
 - Workspace selection, release signing/versioning, and broader write-tool
   permission enforcement are not complete yet.
 - Core runtime is being split into focused modules. Agent definitions, plans,

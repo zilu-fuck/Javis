@@ -122,6 +122,42 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).toContain("github-cli");
     expect(html).toContain("Deep research plugin for OpenCode.");
   });
+
+  it("renders task history entries with delete controls", () => {
+    const html = renderToStaticMarkup(
+      <JavisWorkbench
+        draftGoal="Inspect project"
+        historyEntries={[
+          {
+            id: "history-1",
+            title: "Project environment inspected",
+            status: "completed",
+            userGoal: "Inspect project",
+            updatedAt: "2026-05-23T00:00:00.000Z",
+          },
+        ]}
+        onDeleteHistoryEntry={vi.fn()}
+        onDraftGoalChange={vi.fn()}
+        onSelectHistoryEntry={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={{
+          title: "Ready",
+          userGoal: "Waiting for a task",
+          status: "created",
+          commanderMessage:
+            "Javis desktop is ready. Enter a goal to start the Core event stream.",
+          plan: [],
+          agents: [],
+          logs: [],
+        }}
+      />,
+    );
+
+    expect(html).toContain("Project environment inspected");
+    expect(html).toContain("completed");
+    expect(html).toContain("aria-label=\"Delete history: Project environment inspected\"");
+    expect(html).not.toContain("No history yet");
+  });
 });
 
 function renderWorkbench(task: WorkbenchTask): string {

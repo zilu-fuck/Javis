@@ -69,10 +69,11 @@ Status: complete for the 2026-05-23 QA pass.
 
 ## Milestone 3: Persistence And Workspace Management
 
-- Store task history locally.
+- Store task history locally. Initial completed/failed/cancelled snapshot
+  persistence is implemented in the desktop app.
 - Store permission decisions only as scoped records, never as broad reusable
   approval.
-- Add a clear history deletion path.
+- Add a clear history deletion path. Initial sidebar deletion is implemented.
 - Add workspace selection and remembered recent workspaces.
 - Avoid storing secrets, tokens, raw cookies, or private keys.
 

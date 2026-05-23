@@ -171,7 +171,9 @@ Adoption rules:
 
 - Routing is rule-based instead of model-based.
 - Research requires user-provided URLs instead of automated search.
-- Task history is in memory only.
+- Completed, failed, and cancelled task history has an initial local snapshot
+  store in the desktop app; broader restart QA and storage migration hardening
+  are still needed.
 - Permission decisions are per-task and not persisted.
 - The runtime is not fully modular yet.
 
