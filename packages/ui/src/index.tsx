@@ -1,9 +1,18 @@
+import type { FormEvent } from "react";
+
 export interface WorkbenchAgent {
   id: string;
   name: string;
   role: string;
   status: string;
   task: string;
+}
+
+export interface WorkbenchStep {
+  id: string;
+  title: string;
+  status: string;
+  successCriteria?: string;
 }
 
 export interface WorkbenchLogEntry {
@@ -16,16 +25,32 @@ export interface WorkbenchLogEntry {
 export interface WorkbenchTask {
   title: string;
   userGoal: string;
+  status: string;
   commanderMessage: string;
+  plan: WorkbenchStep[];
   agents: WorkbenchAgent[];
   logs: WorkbenchLogEntry[];
+  verificationSummary?: string;
 }
 
 export interface JavisWorkbenchProps {
   task: WorkbenchTask;
+  draftGoal: string;
+  onDraftGoalChange: (nextGoal: string) => void;
+  onSubmitGoal: () => void;
 }
 
-export function JavisWorkbench({ task }: JavisWorkbenchProps) {
+export function JavisWorkbench({
+  task,
+  draftGoal,
+  onDraftGoalChange,
+  onSubmitGoal,
+}: JavisWorkbenchProps) {
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    onSubmitGoal();
+  }
+
   return (
     <div className="javis-shell">
       <aside className="javis-sidebar">
@@ -44,8 +69,11 @@ export function JavisWorkbench({ task }: JavisWorkbenchProps) {
 
       <main className="javis-main">
         <header className="javis-thread-header">
-          <p className="javis-eyebrow">Main Thread</p>
-          <h1 className="javis-title">{task.title}</h1>
+          <div>
+            <p className="javis-eyebrow">Main Thread</p>
+            <h1 className="javis-title">{task.title}</h1>
+          </div>
+          <span className="javis-task-status">{task.status}</span>
         </header>
 
         <section className="javis-thread" aria-label="Task thread">
@@ -57,11 +85,38 @@ export function JavisWorkbench({ task }: JavisWorkbenchProps) {
             <p className="javis-message-title">Commander</p>
             <p className="javis-message-body">{task.commanderMessage}</p>
           </article>
+
+          {task.plan.length > 0 ? (
+            <section className="javis-plan" aria-label="Task plan">
+              <p className="javis-message-title">Plan</p>
+              {task.plan.map((step) => (
+                <div className="javis-plan-step" key={step.id}>
+                  <span className="javis-status">{step.status}</span>
+                  <div>
+                    <strong>{step.title}</strong>
+                    {step.successCriteria ? <p>{step.successCriteria}</p> : null}
+                  </div>
+                </div>
+              ))}
+            </section>
+          ) : null}
+
+          {task.verificationSummary ? (
+            <article className="javis-message">
+              <p className="javis-message-title">Verifier</p>
+              <p className="javis-message-body">{task.verificationSummary}</p>
+            </article>
+          ) : null}
         </section>
 
-        <form className="javis-composer">
-          <textarea aria-label="Task input" placeholder="Ask Javis to do something..." />
-          <button type="button">Send</button>
+        <form className="javis-composer" onSubmit={handleSubmit}>
+          <textarea
+            aria-label="Task input"
+            onChange={(event) => onDraftGoalChange(event.currentTarget.value)}
+            placeholder="Ask Javis to do something..."
+            value={draftGoal}
+          />
+          <button type="submit">Send</button>
         </form>
       </main>
 
@@ -104,4 +159,3 @@ export function JavisWorkbench({ task }: JavisWorkbenchProps) {
     </div>
   );
 }
-
