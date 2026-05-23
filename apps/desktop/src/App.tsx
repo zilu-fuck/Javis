@@ -1,13 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
-import { createDemoTaskRuntime, createInitialTaskSnapshot } from "@javis/core";
+import { invoke } from "@tauri-apps/api/core";
+import { createFileScanTaskRuntime, createInitialTaskSnapshot } from "@javis/core";
 import { JavisWorkbench } from "@javis/ui";
 import "./App.css";
 
 function App() {
-  const runtime = useMemo(() => createDemoTaskRuntime(), []);
+  const runtime = useMemo(
+    () =>
+      createFileScanTaskRuntime({
+        fileTool: {
+          scanMarkdownDocuments: () => invoke("scan_markdown_documents"),
+        },
+      }),
+    [],
+  );
   const [task, setTask] = useState(createInitialTaskSnapshot);
   const [draftGoal, setDraftGoal] = useState(
-    "帮我找出当前项目中最近修改过的文档，并总结每个文档的用途",
+    "Find the Markdown documents in the current workspace and summarize what each one is for.",
   );
 
   useEffect(() => {

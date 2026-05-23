@@ -22,6 +22,15 @@ export interface WorkbenchLogEntry {
   detail: string;
 }
 
+export interface WorkbenchDocument {
+  path: string;
+  modifiedAt: string;
+  sizeBytes: number;
+  heading?: string;
+  excerpt?: string;
+  purpose: string;
+}
+
 export interface WorkbenchTask {
   title: string;
   userGoal: string;
@@ -30,6 +39,7 @@ export interface WorkbenchTask {
   plan: WorkbenchStep[];
   agents: WorkbenchAgent[];
   logs: WorkbenchLogEntry[];
+  documents?: WorkbenchDocument[];
   verificationSummary?: string;
 }
 
@@ -101,6 +111,23 @@ export function JavisWorkbench({
             </section>
           ) : null}
 
+          {task.documents && task.documents.length > 0 ? (
+            <section className="javis-documents" aria-label="Scanned documents">
+              <p className="javis-message-title">Markdown Documents</p>
+              {task.documents.map((document) => (
+                <article className="javis-document" key={document.path}>
+                  <div className="javis-document-row">
+                    <strong>{document.path}</strong>
+                    <span>{formatSize(document.sizeBytes)}</span>
+                  </div>
+                  <p>{document.purpose}</p>
+                  {document.excerpt ? <p>{document.excerpt}</p> : null}
+                  <span>modified: {formatModifiedTime(document.modifiedAt)}</span>
+                </article>
+              ))}
+            </section>
+          ) : null}
+
           {task.verificationSummary ? (
             <article className="javis-message">
               <p className="javis-message-title">Verifier</p>
@@ -158,4 +185,27 @@ export function JavisWorkbench({
       </section>
     </div>
   );
+}
+
+function formatSize(sizeBytes: number) {
+  if (sizeBytes < 1024) {
+    return `${sizeBytes} B`;
+  }
+  if (sizeBytes < 1024 * 1024) {
+    return `${(sizeBytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatModifiedTime(modifiedAt: string) {
+  const date = new Date(modifiedAt);
+  if (!Number.isNaN(date.getTime())) {
+    return date.toLocaleString();
+  }
+
+  const seconds = Number(modifiedAt);
+  if (!Number.isFinite(seconds)) {
+    return modifiedAt;
+  }
+  return new Date(seconds * 1000).toLocaleString();
 }

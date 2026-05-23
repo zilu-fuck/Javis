@@ -1,5 +1,21 @@
 export type PermissionLevel = "read" | "preview" | "confirmed_write" | "dangerous";
 
+export interface MarkdownDocument {
+  path: string;
+  modifiedAt: string;
+  sizeBytes: number;
+  heading?: string;
+  excerpt?: string;
+}
+
+export interface MarkdownDocumentSummary extends MarkdownDocument {
+  purpose: string;
+}
+
+export interface FileTool {
+  scanMarkdownDocuments(): Promise<MarkdownDocument[]>;
+}
+
 export interface ToolDescriptor {
   name: string;
   permissionLevel: PermissionLevel;
@@ -8,9 +24,9 @@ export interface ToolDescriptor {
 
 export const initialToolDescriptors: ToolDescriptor[] = [
   {
-    name: "file.search",
+    name: "file.scanMarkdownDocuments",
     permissionLevel: "read",
-    summary: "Search files inside the active workspace.",
+    summary: "Scan Markdown documents inside the active workspace.",
   },
   {
     name: "shell.run",
@@ -18,3 +34,34 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Preview shell commands before execution.",
   },
 ];
+
+export function summarizeMarkdownDocuments(
+  documents: MarkdownDocument[],
+): MarkdownDocumentSummary[] {
+  return documents.map((document) => ({
+    ...document,
+    purpose: inferMarkdownPurpose(document),
+  }));
+}
+
+function inferMarkdownPurpose(document: MarkdownDocument): string {
+  const normalizedPath = document.path.replace(/\\/g, "/").toLowerCase();
+
+  if (normalizedPath.endsWith("readme.md")) {
+    return "Project or module entry document.";
+  }
+
+  if (normalizedPath.includes("/docs/")) {
+    return `Project design document: ${document.heading ?? "untitled topic"}.`;
+  }
+
+  if (document.heading) {
+    return `Markdown document about "${document.heading}".`;
+  }
+
+  if (document.excerpt) {
+    return `Content note: ${document.excerpt}`;
+  }
+
+  return "Markdown document without enough visible content to infer a precise purpose.";
+}

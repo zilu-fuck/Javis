@@ -17,6 +17,9 @@ importers:
       '@javis/core':
         specifier: workspace:*
         version: link:../../packages/core
+      '@javis/tools':
+        specifier: workspace:*
+        version: link:../../packages/tools
       '@javis/ui':
         specifier: workspace:*
         version: link:../../packages/ui
@@ -53,6 +56,10 @@ importers:
         version: 7.3.3
 
   packages/core:
+    dependencies:
+      '@javis/tools':
+        specifier: workspace:*
+        version: link:../tools
     devDependencies:
       typescript:
         specifier: ~5.8.3

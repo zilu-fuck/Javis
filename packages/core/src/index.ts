@@ -1,3 +1,6 @@
+import type { FileTool, MarkdownDocumentSummary } from "@javis/tools";
+import { summarizeMarkdownDocuments } from "@javis/tools";
+
 export type ID = string;
 export type ISODateTime = string;
 
@@ -220,6 +223,7 @@ export interface TaskSnapshot {
   plan: TaskStep[];
   agents: AgentSnapshot[];
   logs: TaskLogEntry[];
+  documents?: MarkdownDocumentSummary[];
   verificationSummary?: string;
 }
 
@@ -230,26 +234,31 @@ export interface TaskRuntime {
   dispose(): void;
 }
 
+export interface FileScanRuntimeOptions {
+  fileTool: FileTool;
+  delayMs?: number;
+}
+
 const demoAgents: Agent[] = [
   {
     id: "agent-commander",
     kind: "commander",
     displayName: "Commander",
-    description: "任务拆解与调度",
+    description: "Task planning and orchestration",
     allowedToolNames: [],
   },
   {
     id: "agent-file",
     kind: "file",
     displayName: "File Agent",
-    description: "本地文件工具",
-    allowedToolNames: ["file.search"],
+    description: "Read-only local document scanning",
+    allowedToolNames: ["file.scanMarkdownDocuments"],
   },
   {
     id: "agent-verifier",
     kind: "verifier",
     displayName: "Verifier",
-    description: "结果验证",
+    description: "Evidence and completion checks",
     allowedToolNames: [],
   },
 ];
@@ -258,150 +267,227 @@ export function createInitialTaskSnapshot(): TaskSnapshot {
   return {
     id: "task-idle",
     title: "Ready",
-    userGoal: "等待用户输入任务",
+    userGoal: "Waiting for a task",
     status: "created",
-    commanderMessage: "Javis 桌面工作台已准备好。输入一个目标后，Core 会发送任务事件流。",
+    commanderMessage:
+      "Javis desktop is ready. Enter a goal to start the Core event stream.",
     plan: [],
     agents: demoAgents.map((agent) => ({
       id: agent.id,
       name: agent.displayName,
       role: agent.description,
       status: "queued",
-      task: "等待任务",
+      task: "Waiting",
     })),
     logs: [
       {
         id: "log-ready",
         kind: "event",
         title: "Runtime ready",
-        detail: "Core runtime 已创建，等待 startTask。",
+        detail: "Core runtime is ready for startTask.",
       },
     ],
   };
 }
 
-export function createDemoTaskRuntime(delayMs = 650): TaskRuntime {
+export function createFileScanTaskRuntime({
+  fileTool,
+  delayMs = 250,
+}: FileScanRuntimeOptions): TaskRuntime {
   let snapshot = createInitialTaskSnapshot();
   const listeners = new Set<(nextSnapshot: TaskSnapshot) => void>();
-  const timers: ReturnType<typeof setTimeout>[] = [];
+  const timers = new Set<ReturnType<typeof setTimeout>>();
+  let disposed = false;
 
   function emit(nextSnapshot: TaskSnapshot) {
+    if (disposed) {
+      return;
+    }
     snapshot = nextSnapshot;
     for (const listener of listeners) {
       listener(snapshot);
     }
   }
 
-  function schedule(index: number, update: () => TaskSnapshot) {
-    timers.push(
-      setTimeout(() => {
-        emit(update());
-      }, delayMs * index),
-    );
+  function wait() {
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        timers.delete(timer);
+        resolve();
+      }, delayMs);
+      timers.add(timer);
+    });
   }
 
-  function start(userGoal: string) {
-    for (const timer of timers.splice(0)) {
-      clearTimeout(timer);
-    }
-
-    const taskId = `task-${Date.now()}`;
-    const plan = createDemoPlan();
+  async function runFileScanTask(taskId: ID, userGoal: string) {
+    const plan = createFileScanPlan();
 
     emit({
       id: taskId,
-      title: "Planning task",
+      title: "Scanning workspace documents",
       userGoal,
-      status: "created",
-      commanderMessage: "Commander 已接收目标，正在创建任务。",
-      plan: [],
-      agents: createAgentSnapshots("queued", "等待 Commander 分配步骤"),
+      status: "planning",
+      commanderMessage:
+        "Commander identified a local document scan and prepared a read-only File Tool call.",
+      plan,
+      agents: [
+        commanderSnapshot("planning", "Create document scan plan"),
+        fileSnapshot("queued", "Waiting for file.scanMarkdownDocuments"),
+        verifierSnapshot("queued", "Waiting for file scan results"),
+      ],
       logs: [
         {
           id: `${taskId}-created`,
           kind: "event",
           title: "task.created",
-          detail: "UI 已把用户目标交给 Core。",
+          detail: "Desktop UI passed the user goal to Core.",
+        },
+        {
+          id: `${taskId}-plan`,
+          kind: "plan",
+          title: "task.plan_updated",
+          detail:
+            "Plan includes read-only Markdown scan, purpose summary, and result verification.",
         },
       ],
     });
 
-    schedule(1, () => ({
-      ...snapshot,
-      title: "Planning task",
-      status: "planning",
-      commanderMessage: "Commander 正在拆解任务，并为 Worker Agent 准备步骤。",
-      plan,
-      agents: [
-        commanderSnapshot("planning", "生成任务计划"),
-        fileSnapshot("queued", "等待本地扫描步骤"),
-        verifierSnapshot("queued", "等待 Worker 结果"),
-      ],
-      logs: appendLog(snapshot, {
-        id: `${taskId}-plan`,
-        kind: "plan",
-        title: "task.plan_updated",
-        detail: "生成 3 个步骤：规划、模拟工具调用、验证结果。",
-      }),
-    }));
+    await wait();
 
-    schedule(2, () => ({
+    emit({
       ...snapshot,
-      title: "Running task",
+      title: "Scanning workspace documents",
       status: "running",
-      commanderMessage: "File Agent 正在执行只读模拟工具调用。真实文件工具将在 Milestone 3 接入。",
-      plan: markStep(snapshot.plan, "step-read", "running"),
+      commanderMessage:
+        "File Agent is scanning Markdown documents through the Tauri desktop bridge.",
+      plan: markStep(snapshot.plan, "step-scan-markdown", "running"),
       agents: [
-        commanderSnapshot("completed", "计划已提交"),
-        fileSnapshot("running", "模拟 file.search read 工具调用"),
-        verifierSnapshot("queued", "等待验证"),
+        commanderSnapshot("completed", "Plan submitted"),
+        fileSnapshot("running", "Running read-only Markdown scan"),
+        verifierSnapshot("queued", "Waiting for scan results"),
       ],
       logs: appendLog(snapshot, {
-        id: `${taskId}-tool`,
+        id: `${taskId}-tool-planned`,
         kind: "tool",
-        title: "tool_call.updated",
-        detail: "file.search 以 read 权限完成模拟调用，没有修改本地文件。",
+        title: "tool_call.planned",
+        detail:
+          "file.scanMarkdownDocuments uses read permission and does not modify local files.",
       }),
-    }));
+    });
 
-    schedule(3, () => ({
-      ...snapshot,
-      title: "Verifying task",
-      status: "verifying",
-      commanderMessage: "Verifier 正在检查事件、计划和工具输出是否完整。",
-      plan: markStep(snapshot.plan, "step-read", "completed", "step-verify", "running"),
-      agents: [
-        commanderSnapshot("completed", "等待验证结论"),
-        fileSnapshot("completed", "模拟工具调用完成"),
-        verifierSnapshot("verifying", "检查状态流转和日志证据"),
-      ],
-      logs: appendLog(snapshot, {
-        id: `${taskId}-verifying`,
-        kind: "verification",
-        title: "verification.started",
-        detail: "Verifier 正在检查 mock task 是否满足 Milestone 2 验收。",
-      }),
-    }));
+    try {
+      const documents = summarizeMarkdownDocuments(await fileTool.scanMarkdownDocuments());
 
-    schedule(4, () => ({
-      ...snapshot,
-      title: "Task completed",
-      status: "completed",
-      commanderMessage: "模拟任务已完成。Main Thread、Agent Inspector 和 Activity 区都已收到状态更新。",
-      plan: snapshot.plan.map((step) => ({ ...step, status: "completed" })),
-      agents: [
-        commanderSnapshot("completed", "任务完成"),
-        fileSnapshot("completed", "只读工具模拟完成"),
-        verifierSnapshot("completed", "验证通过"),
-      ],
-      logs: appendLog(snapshot, {
-        id: `${taskId}-done`,
-        kind: "verification",
-        title: "task.completed",
-        detail: "状态流转完成：created -> planning -> running -> verifying -> completed。",
-      }),
-      verificationSummary: "verified: mock task lifecycle completed with visible evidence.",
-    }));
+      emit({
+        ...snapshot,
+        title: "Summarizing workspace documents",
+        status: "running",
+        commanderMessage: `File Agent found ${documents.length} Markdown documents and generated purpose summaries.`,
+        plan: markStep(snapshot.plan, "step-scan-markdown", "completed", "step-summarize", "running"),
+        agents: [
+          commanderSnapshot("completed", "Plan submitted"),
+          fileSnapshot("completed", `Found ${documents.length} Markdown documents`),
+          verifierSnapshot("queued", "Waiting for verification"),
+        ],
+        documents,
+        logs: appendLog(snapshot, {
+          id: `${taskId}-tool-done`,
+          kind: "tool",
+          title: "tool_call.updated",
+          detail: `file.scanMarkdownDocuments succeeded with ${documents.length} records.`,
+        }),
+      });
+
+      await wait();
+
+      emit({
+        ...snapshot,
+        title: "Verifying workspace documents",
+        status: "verifying",
+        commanderMessage:
+          "Verifier is checking that each result includes a path, modified time, size, and purpose.",
+        plan: markStep(snapshot.plan, "step-summarize", "completed", "step-verify-docs", "running"),
+        agents: [
+          commanderSnapshot("completed", "Waiting for verification"),
+          fileSnapshot("completed", "Document scan and summaries completed"),
+          verifierSnapshot("verifying", "Checking document result fields"),
+        ],
+        logs: appendLog(snapshot, {
+          id: `${taskId}-verify`,
+          kind: "verification",
+          title: "verification.started",
+          detail:
+            "Checking each document record for path, modifiedAt, sizeBytes, and purpose.",
+        }),
+      });
+
+      await wait();
+
+      const validCount = documents.filter(
+        (document) =>
+          Boolean(document.path) &&
+          Boolean(document.modifiedAt) &&
+          document.sizeBytes >= 0 &&
+          Boolean(document.purpose),
+      ).length;
+      const verificationStatus = validCount === documents.length ? "completed" : "failed";
+
+      emit({
+        ...snapshot,
+        title:
+          verificationStatus === "completed"
+            ? "Workspace documents scanned"
+            : "Document scan verification failed",
+        status: verificationStatus,
+        commanderMessage:
+          verificationStatus === "completed"
+            ? "Document scan completed with read-only filesystem evidence."
+            : "Document scan finished, but Verifier found incomplete records.",
+        plan:
+          verificationStatus === "completed"
+            ? snapshot.plan.map((step) => ({ ...step, status: "completed" }))
+            : markStep(snapshot.plan, "step-verify-docs", "failed"),
+        agents: [
+          commanderSnapshot("completed", "Task finished"),
+          fileSnapshot("completed", "Read-only scan completed"),
+          verifierSnapshot(
+            verificationStatus === "completed" ? "completed" : "failed",
+            `${validCount}/${documents.length} records verified`,
+          ),
+        ],
+        logs: appendLog(snapshot, {
+          id: `${taskId}-done`,
+          kind: "verification",
+          title:
+            verificationStatus === "completed"
+              ? "verification.completed"
+              : "verification.failed",
+          detail: `Verifier checked ${validCount}/${documents.length} document records.`,
+        }),
+        verificationSummary: `${verificationStatus === "completed" ? "verified" : "failed"}: ${validCount}/${documents.length} documents include path, modified time, size, and purpose.`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      emit({
+        ...snapshot,
+        title: "Document scan failed",
+        status: "failed",
+        commanderMessage:
+          "File Agent scan failed. The task stopped without running any write operation.",
+        plan: markStep(snapshot.plan, "step-scan-markdown", "failed"),
+        agents: [
+          commanderSnapshot("completed", "Plan submitted"),
+          fileSnapshot("failed", "Scan failed"),
+          verifierSnapshot("cancelled", "No result to verify"),
+        ],
+        logs: appendLog(snapshot, {
+          id: `${taskId}-failed`,
+          kind: "tool",
+          title: "task.failed",
+          detail: message,
+        }),
+      });
+    }
   }
 
   return {
@@ -413,50 +499,49 @@ export function createDemoTaskRuntime(delayMs = 650): TaskRuntime {
         listeners.delete(listener);
       };
     },
-    start,
-    dispose() {
-      for (const timer of timers.splice(0)) {
+    start(userGoal) {
+      for (const timer of timers) {
         clearTimeout(timer);
       }
+      timers.clear();
+      const taskId = `task-${Date.now()}`;
+      void runFileScanTask(taskId, userGoal);
+    },
+    dispose() {
+      disposed = true;
+      for (const timer of timers) {
+        clearTimeout(timer);
+      }
+      timers.clear();
       listeners.clear();
     },
   };
 }
 
-function createDemoPlan(): TaskStep[] {
+function createFileScanPlan(): TaskStep[] {
   return [
     {
-      id: "step-plan",
-      title: "Commander 生成任务计划",
-      assignedAgentKind: "commander",
-      status: "completed",
-      successCriteria: "UI 能看到计划步骤",
-    },
-    {
-      id: "step-read",
-      title: "File Agent 执行只读模拟工具调用",
+      id: "step-scan-markdown",
+      title: "File Agent scans workspace Markdown documents",
       assignedAgentKind: "file",
       status: "pending",
-      successCriteria: "Activity 区能看到 tool_call 事件",
+      successCriteria: "Return real file paths, modified times, and file sizes.",
     },
     {
-      id: "step-verify",
-      title: "Verifier 检查任务状态流转",
+      id: "step-summarize",
+      title: "Commander summarizes document purpose",
+      assignedAgentKind: "commander",
+      status: "pending",
+      successCriteria: "Each document has a one-line purpose summary.",
+    },
+    {
+      id: "step-verify-docs",
+      title: "Verifier checks scan evidence",
       assignedAgentKind: "verifier",
       status: "pending",
-      successCriteria: "最终状态为 completed 并给出验证摘要",
+      successCriteria: "Final result includes verifiable evidence from the file scan.",
     },
   ];
-}
-
-function createAgentSnapshots(status: AgentRunStatus, task: string): AgentSnapshot[] {
-  return demoAgents.map((agent) => ({
-    id: agent.id,
-    name: agent.displayName,
-    role: agent.description,
-    status,
-    task,
-  }));
 }
 
 function commanderSnapshot(status: AgentRunStatus, task: string): AgentSnapshot {

@@ -6,6 +6,9 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "dependencies": {
+    "@javis/tools": "workspace:*"
+  },
   "scripts": {
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit"
@@ -14,4 +17,3 @@
     "typescript": "~5.8.3"
   }
 }
-
