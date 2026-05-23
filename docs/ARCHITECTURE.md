@@ -170,7 +170,9 @@ Adoption rules:
 ## Current Tradeoffs
 
 - Routing is rule-based instead of model-based.
-- Research requires user-provided URLs instead of automated search.
+- Search-backed research is wired through `github-cli` and Agent Chrome
+  fallback, but product QA evidence and source-comparison polish are still
+  incomplete.
 - Completed, failed, and cancelled task history has an initial local snapshot
   store in the desktop app; broader restart QA and storage migration hardening
   are still needed.

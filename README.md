@@ -28,7 +28,8 @@ Implemented foundation:
 
 Current product-readiness gaps:
 
-- Automated public search is not wired in yet.
+- Search-backed research is wired through `github-cli` and Agent Chrome
+  fallback; product QA evidence is still incomplete.
 - Code Agent / opencode is not integrated yet.
 - Completed, failed, and cancelled task history is stored locally with sidebar
   restore and deletion; broader persistence QA is still needed.

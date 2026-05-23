@@ -393,6 +393,9 @@ describe("createFileScanTaskRuntime", () => {
     expect(finalSnapshot.researchReport?.unknowns).toContain(
       "Only 2 source(s) were provided; the MVP scenario expects at least 3 for a full comparison report.",
     );
+    expect(finalSnapshot.researchReport?.unknowns).toContain(
+      "No search provider was used because source URLs were provided directly.",
+    );
     expect(finalSnapshot.verificationSummary).toContain("report claims include source evidence");
 
     unsubscribe();
@@ -442,6 +445,10 @@ describe("createFileScanTaskRuntime", () => {
     });
     expect(fetchWebSource).toHaveBeenCalledTimes(3);
     expect(finalSnapshot.researchReport?.rows).toHaveLength(3);
+    expect(finalSnapshot.researchReport?.summary).toContain("via test-search");
+    expect(finalSnapshot.researchReport?.unknowns).not.toContain(
+      "Automated public web search is not integrated yet; add URLs manually for broader coverage.",
+    );
     expect(finalSnapshot.sources?.map((source) => source.provider)).toEqual([
       "test-search",
       "test-search",
@@ -555,8 +562,92 @@ describe("createFileScanTaskRuntime", () => {
 
     expect(finalSnapshot.sources).toHaveLength(1);
     expect(finalSnapshot.sources?.[0]?.provider).toBe("github-cli");
+    expect(finalSnapshot.researchReport?.unknowns).toContain(
+      "1 searched source candidate(s) could not be fetched.",
+    );
     expect(finalSnapshot.logs.some((log) => log.title.includes("web.fetchSource failed"))).toBe(true);
     expect(finalSnapshot.verificationSummary).toContain("1 searched source fetch(es) failed");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("keeps fetched provider metadata when search candidates omit provider", async () => {
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+      },
+      webTool: {
+        searchWeb: vi.fn(async () => [
+          {
+            url: "https://example.test/alpha",
+            title: "Alpha",
+            excerpt: "Alpha candidate.",
+            fetchedAt: "2026-05-23T00:00:00.000Z",
+          },
+        ]),
+        fetchWebSource: vi.fn(async ({ url }: { url: string }) => ({
+          url,
+          title: "Alpha source",
+          excerpt: "Alpha fetched evidence.",
+          fetchedAt: "2026-05-23T00:00:00.000Z",
+          provider: "agent-chrome",
+        })),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("Research provider fallback");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(finalSnapshot.sources?.[0]?.provider).toBe("agent-chrome");
+    expect(finalSnapshot.researchReport?.unknowns).toContain(
+      "Only 1 source(s) were fetched from search results; product research expects at least 3 for a full comparison report.",
+    );
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("marks search-backed research failed when searched sources lack excerpt evidence", async () => {
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+      },
+      webTool: {
+        searchWeb: vi.fn(async () => [
+          {
+            url: "https://example.test/weak",
+            title: "Weak",
+            excerpt: "Weak candidate.",
+            fetchedAt: "2026-05-23T00:00:00.000Z",
+            provider: "agent-chrome",
+          },
+        ]),
+        fetchWebSource: vi.fn(async ({ url }: { url: string }) => ({
+          url,
+          title: "Weak source",
+          excerpt: "",
+          fetchedAt: "2026-05-23T00:00:00.000Z",
+        })),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("Research weak searched sources");
+
+    const finalSnapshot = await waitForStatus(snapshots, "failed");
+
+    expect(finalSnapshot.title).toBe("Research source verification failed");
+    expect(finalSnapshot.sources?.[0]?.provider).toBe("agent-chrome");
+    expect(finalSnapshot.researchReport?.summary).toContain("via agent-chrome");
+    expect(finalSnapshot.researchReport?.unknowns).toContain(
+      "1 source(s) did not return enough text evidence.",
+    );
+    expect(finalSnapshot.verificationSummary).toContain("failed: 0/1 searched sources");
 
     unsubscribe();
     runtime.dispose();

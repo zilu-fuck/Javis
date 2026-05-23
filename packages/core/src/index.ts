@@ -955,10 +955,13 @@ export function createFileScanTaskRuntime({
       });
 
       const fetchResults = await Promise.allSettled<WebSource>(
-        urls.map(async (url) => ({
-          ...(await activeWebTool.fetchWebSource({ url })),
-          provider: providerByUrl.get(url),
-        })),
+        urls.map(async (url) => {
+          const source = await activeWebTool.fetchWebSource({ url });
+          return {
+            ...source,
+            provider: providerByUrl.get(url) ?? source.provider,
+          };
+        }),
       );
       const sources = fetchResults
         .flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
@@ -970,7 +973,12 @@ export function createFileScanTaskRuntime({
           `Search found ${urls.length} candidate source(s), but none could be fetched.`,
         );
       }
-      const researchReport = createSourceBackedReport(sources);
+      const providerSummary = summarizeSearchProviders(selectedResults);
+      const researchReport = createSourceBackedReport(sources, {
+        failedFetchCount: failedFetches.length,
+        providerSummary,
+        sourceMode: "search",
+      });
 
       emit({
         ...snapshot,
@@ -1124,7 +1132,9 @@ export function createFileScanTaskRuntime({
       const sources = await Promise.all(
         urls.map((url) => activeWebTool.fetchWebSource({ url })),
       );
-      const researchReport = createSourceBackedReport(sources);
+      const researchReport = createSourceBackedReport(sources, {
+        sourceMode: "manual",
+      });
 
       emit({
         ...snapshot,
@@ -1167,7 +1177,7 @@ export function createFileScanTaskRuntime({
         status: verificationStatus,
         commanderMessage:
           verificationStatus === "completed"
-            ? "Research Agent produced a source-backed report from user-provided URLs. Search provider integration remains a later step."
+            ? "Research Agent produced a source-backed report from user-provided URLs. Search-backed source discovery is available for research goals without URLs."
             : "Research Agent fetched the provided URLs, but Verifier found missing source evidence.",
         plan:
           verificationStatus === "completed"
@@ -1200,7 +1210,7 @@ export function createFileScanTaskRuntime({
         title: "Research source collection failed",
         status: "failed",
         commanderMessage:
-          "Research Agent could not fetch the provided source. Search provider integration remains a later step.",
+          "Research Agent could not fetch the provided source. Add alternate URLs manually or try a search-backed research goal.",
         plan: markStep(snapshot.plan, "step-fetch-sources", "failed"),
         agents: [
           commanderSnapshot("completed", "Plan submitted"),

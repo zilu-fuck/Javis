@@ -68,9 +68,10 @@ privileged commands are outside the MVP permission model.
 
 ## Web Policy
 
-The Web Tool fetches user-provided public URLs. It should preserve source URL,
-title when available, fetched timestamp, and excerpt. Automated search is a
-future feature and must preserve the same evidence model.
+The Web Tool fetches user-provided public URLs and may search for public source
+candidates through configured read-only providers. It should preserve source
+URL, title when available, fetched timestamp, excerpt, and provider metadata
+when search is used.
 
 ## UI Requirements
 

@@ -15,7 +15,7 @@ This file remains the baseline record for what the verified MVP already covers.
 | --- | --- | --- |
 | Desktop workbench shell | Implemented | Sidebar, main thread, agent inspector, activity log, composer, and confirmation cards render in the desktop UI. |
 | Local file scan and summary | Implemented | Markdown documents are scanned through Tauri, summarized in `packages/tools`, displayed in the UI, and verified for path/time/size/purpose fields. |
-| Research report with sources | Implemented for MVP | User-provided URLs are fetched and converted into a source-backed report. Automated public search is deferred to Milestone B. |
+| Research report with sources | Implemented for MVP | User-provided URLs are fetched and converted into a source-backed report. Search-backed research is wired post-MVP, but product QA evidence is still incomplete. |
 | Project inspection and check run | Implemented | Project scripts are inspected, start/check commands are recommended, and allowlisted checks are executed with exit codes and output. |
 | High-risk file dry-run and confirmation | Implemented | PDF organization creates a dry-run, asks for approval, executes approved matching moves with a one-time approval id, skips conflicts, and reports moved/skipped/failed results. |
 | Code Agent / opencode backend | Deferred | Current project inspection does not call opencode; Code Agent is Milestone C. |
@@ -139,7 +139,7 @@ The documented MVP release criteria are complete for the 2026-05-23 QA pass:
 Remaining work is not blocking for the verified MVP baseline, but it is blocking
 for a complete product release:
 
-- Automated search integration.
+- Search-backed research product QA evidence and source-comparison polish.
 - Code Agent / opencode integration.
 - Persistence hardening across app restart and storage migrations.
 - Workspace selection.
