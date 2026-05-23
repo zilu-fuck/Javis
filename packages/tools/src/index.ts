@@ -182,6 +182,11 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Inspect package scripts and recommend start/test commands.",
   },
   {
+    name: "code.inspectRepository",
+    permissionLevel: "preview",
+    summary: "Collect changed files, diff summary, and diff preview without applying edits.",
+  },
+  {
     name: "file.planPdfOrganization",
     permissionLevel: "preview",
     summary: "Create a dry-run plan for organizing PDF files without moving them.",

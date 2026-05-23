@@ -1507,6 +1507,22 @@ mod tests {
     }
 
     #[test]
+    fn rejects_write_capable_code_review_git_commands() {
+        assert!(!is_allowed_read_only_command(
+            "git",
+            &["reset".to_string(), "--hard".to_string()]
+        ));
+        assert!(!is_allowed_read_only_command(
+            "git",
+            &["checkout".to_string(), "--".to_string(), "src/lib.rs".to_string()]
+        ));
+        assert!(!is_allowed_read_only_command(
+            "git",
+            &["diff".to_string(), "--output=patch.diff".to_string()]
+        ));
+    }
+
+    #[test]
     fn maps_github_results_to_search_results() {
         let results = github_items_to_search_results(
             vec![GithubSearchItem {
