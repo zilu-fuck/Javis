@@ -31,6 +31,14 @@ export interface WorkbenchDocument {
   purpose: string;
 }
 
+export interface WorkbenchCommand {
+  command: string;
+  cwd: string;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+}
+
 export interface WorkbenchTask {
   title: string;
   userGoal: string;
@@ -40,6 +48,7 @@ export interface WorkbenchTask {
   agents: WorkbenchAgent[];
   logs: WorkbenchLogEntry[];
   documents?: WorkbenchDocument[];
+  commands?: WorkbenchCommand[];
   verificationSummary?: string;
 }
 
@@ -123,6 +132,22 @@ export function JavisWorkbench({
                   <p>{document.purpose}</p>
                   {document.excerpt ? <p>{document.excerpt}</p> : null}
                   <span>modified: {formatModifiedTime(document.modifiedAt)}</span>
+                </article>
+              ))}
+            </section>
+          ) : null}
+
+          {task.commands && task.commands.length > 0 ? (
+            <section className="javis-documents" aria-label="Command results">
+              <p className="javis-message-title">Read-only Commands</p>
+              {task.commands.map((command) => (
+                <article className="javis-document" key={command.command}>
+                  <div className="javis-document-row">
+                    <strong>{command.command}</strong>
+                    <span>exit: {command.exitCode ?? "unknown"}</span>
+                  </div>
+                  <p>{command.stdout || command.stderr || "(empty output)"}</p>
+                  <span>cwd: {command.cwd}</span>
                 </article>
               ))}
             </section>

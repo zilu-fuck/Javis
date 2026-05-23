@@ -1,8 +1,9 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
+    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -16,6 +17,24 @@ struct MarkdownDocument {
     excerpt: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShellCommandRequest {
+    program: String,
+    args: Vec<String>,
+    workspace_path: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShellCommandOutput {
+    command: String,
+    cwd: String,
+    exit_code: Option<i32>,
+    stdout: String,
+    stderr: String,
+}
+
 #[tauri::command]
 fn scan_markdown_documents(workspace_path: Option<String>) -> Result<Vec<MarkdownDocument>, String> {
     let workspace = resolve_workspace_path(workspace_path)?;
@@ -24,6 +43,43 @@ fn scan_markdown_documents(workspace_path: Option<String>) -> Result<Vec<Markdow
     documents.sort_by(|left, right| right.modified_at.cmp(&left.modified_at));
     documents.truncate(50);
     Ok(documents)
+}
+
+#[tauri::command]
+fn run_read_only_command(request: ShellCommandRequest) -> Result<ShellCommandOutput, String> {
+    if !is_allowed_read_only_command(&request.program, &request.args) {
+        return Err("Command is not in the first-version read-only allowlist.".to_string());
+    }
+
+    let cwd = resolve_workspace_path(request.workspace_path)?;
+    let output = Command::new(&request.program)
+        .args(&request.args)
+        .current_dir(&cwd)
+        .output()
+        .map_err(|error| error.to_string())?;
+
+    Ok(ShellCommandOutput {
+        command: format!("{} {}", request.program, request.args.join(" "))
+            .trim()
+            .to_string(),
+        cwd: cwd.to_string_lossy().to_string(),
+        exit_code: output.status.code(),
+        stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+    })
+}
+
+fn is_allowed_read_only_command(program: &str, args: &[String]) -> bool {
+    let normalized_program = program.to_ascii_lowercase();
+    let normalized_args = args.iter().map(String::as_str).collect::<Vec<_>>();
+
+    matches!(
+        (normalized_program.as_str(), normalized_args.as_slice()),
+        ("node", ["--version"])
+            | ("pnpm", ["--version"])
+            | ("cargo", ["--version"])
+            | ("git", ["status", "--short"])
+    )
 }
 
 fn resolve_workspace_path(workspace_path: Option<String>) -> Result<PathBuf, String> {
@@ -152,7 +208,10 @@ fn first_excerpt(content: &str) -> Option<String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![scan_markdown_documents])
+        .invoke_handler(tauri::generate_handler![
+            scan_markdown_documents,
+            run_read_only_command
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

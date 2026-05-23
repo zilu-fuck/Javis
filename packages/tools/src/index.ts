@@ -16,6 +16,24 @@ export interface FileTool {
   scanMarkdownDocuments(): Promise<MarkdownDocument[]>;
 }
 
+export interface ShellCommandRequest {
+  program: string;
+  args: string[];
+  workspacePath?: string | null;
+}
+
+export interface ShellCommandOutput {
+  command: string;
+  cwd: string;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+export interface ShellTool {
+  runReadOnlyCommand(request: ShellCommandRequest): Promise<ShellCommandOutput>;
+}
+
 export interface ToolDescriptor {
   name: string;
   permissionLevel: PermissionLevel;

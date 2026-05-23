@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { createFileScanTaskRuntime, createInitialTaskSnapshot } from "@javis/core";
+import type { MarkdownDocument, ShellCommandOutput, ShellCommandRequest } from "@javis/tools";
 import { JavisWorkbench } from "@javis/ui";
 import "./App.css";
 
@@ -9,14 +10,19 @@ function App() {
     () =>
       createFileScanTaskRuntime({
         fileTool: {
-          scanMarkdownDocuments: () => invoke("scan_markdown_documents"),
+          scanMarkdownDocuments: () =>
+            invoke<MarkdownDocument[]>("scan_markdown_documents", { workspacePath: null }),
+        },
+        shellTool: {
+          runReadOnlyCommand: (request: ShellCommandRequest) =>
+            invoke<ShellCommandOutput>("run_read_only_command", { request }),
         },
       }),
     [],
   );
   const [task, setTask] = useState(createInitialTaskSnapshot);
   const [draftGoal, setDraftGoal] = useState(
-    "Find the Markdown documents in the current workspace and summarize what each one is for.",
+    "检查当前项目，告诉我怎么启动，并尝试跑一次测试",
   );
 
   useEffect(() => {

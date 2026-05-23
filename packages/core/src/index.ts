@@ -1,4 +1,9 @@
-import type { FileTool, MarkdownDocumentSummary } from "@javis/tools";
+import type {
+  FileTool,
+  MarkdownDocumentSummary,
+  ShellCommandOutput,
+  ShellTool,
+} from "@javis/tools";
 import { summarizeMarkdownDocuments } from "@javis/tools";
 
 export type ID = string;
@@ -224,6 +229,7 @@ export interface TaskSnapshot {
   agents: AgentSnapshot[];
   logs: TaskLogEntry[];
   documents?: MarkdownDocumentSummary[];
+  commands?: ShellCommandOutput[];
   verificationSummary?: string;
 }
 
@@ -236,6 +242,7 @@ export interface TaskRuntime {
 
 export interface FileScanRuntimeOptions {
   fileTool: FileTool;
+  shellTool?: ShellTool;
   delayMs?: number;
 }
 
@@ -253,6 +260,13 @@ const demoAgents: Agent[] = [
     displayName: "File Agent",
     description: "Read-only local document scanning",
     allowedToolNames: ["file.scanMarkdownDocuments"],
+  },
+  {
+    id: "agent-shell",
+    kind: "shell",
+    displayName: "Shell Agent",
+    description: "Read-only command execution",
+    allowedToolNames: ["shell.runReadOnlyCommand"],
   },
   {
     id: "agent-verifier",
@@ -292,6 +306,7 @@ export function createInitialTaskSnapshot(): TaskSnapshot {
 
 export function createFileScanTaskRuntime({
   fileTool,
+  shellTool,
   delayMs = 250,
 }: FileScanRuntimeOptions): TaskRuntime {
   let snapshot = createInitialTaskSnapshot();
@@ -505,6 +520,10 @@ export function createFileScanTaskRuntime({
       }
       timers.clear();
       const taskId = `task-${Date.now()}`;
+      if (shellTool && isProjectInspectionGoal(userGoal)) {
+        void runProjectInspectionTask(taskId, userGoal, shellTool);
+        return;
+      }
       void runFileScanTask(taskId, userGoal);
     },
     dispose() {
@@ -516,6 +535,151 @@ export function createFileScanTaskRuntime({
       listeners.clear();
     },
   };
+
+  async function runProjectInspectionTask(taskId: ID, userGoal: string, activeShellTool: ShellTool) {
+    const plan = createProjectInspectionPlan();
+
+    emit({
+      id: taskId,
+      title: "Inspecting project environment",
+      userGoal,
+      status: "planning",
+      commanderMessage:
+        "Commander identified a project inspection task and prepared read-only Shell Tool calls.",
+      plan,
+      agents: [
+        commanderSnapshot("planning", "Create project inspection plan"),
+        fileSnapshot("queued", "No file scan needed"),
+        shellSnapshot("queued", "Waiting for read-only commands"),
+        verifierSnapshot("queued", "Waiting for command results"),
+      ],
+      logs: [
+        {
+          id: `${taskId}-created`,
+          kind: "event",
+          title: "task.created",
+          detail: "Desktop UI passed the project inspection goal to Core.",
+        },
+      ],
+    });
+
+    await wait();
+
+    emit({
+      ...snapshot,
+      status: "running",
+      commanderMessage: "Shell Agent is running allowlisted read-only commands.",
+      plan: markStep(snapshot.plan, "step-read-env", "running"),
+      agents: [
+        commanderSnapshot("completed", "Plan submitted"),
+        fileSnapshot("queued", "No file scan needed"),
+        shellSnapshot("running", "Running node/pnpm/git read-only checks"),
+        verifierSnapshot("queued", "Waiting for command results"),
+      ],
+      logs: appendLog(snapshot, {
+        id: `${taskId}-commands-started`,
+        kind: "tool",
+        title: "tool_call.planned",
+        detail: "Planned node --version, pnpm --version, and git status --short.",
+      }),
+    });
+
+    try {
+      const commands = await Promise.all([
+        activeShellTool.runReadOnlyCommand({
+          program: "node",
+          args: ["--version"],
+          workspacePath: null,
+        }),
+        activeShellTool.runReadOnlyCommand({
+          program: "pnpm",
+          args: ["--version"],
+          workspacePath: null,
+        }),
+        activeShellTool.runReadOnlyCommand({
+          program: "git",
+          args: ["status", "--short"],
+          workspacePath: null,
+        }),
+      ]);
+
+      emit({
+        ...snapshot,
+        title: "Verifying project environment",
+        status: "verifying",
+        commanderMessage: "Verifier is checking command exit codes and output summaries.",
+        plan: markStep(snapshot.plan, "step-read-env", "completed", "step-verify-env", "running"),
+        agents: [
+          commanderSnapshot("completed", "Waiting for verification"),
+          fileSnapshot("queued", "No file scan needed"),
+          shellSnapshot("completed", "Read-only commands completed"),
+          verifierSnapshot("verifying", "Checking exit codes"),
+        ],
+        commands,
+        logs: [
+          ...appendLog(snapshot, {
+            id: `${taskId}-commands-done`,
+            kind: "tool",
+            title: "tool_call.updated",
+            detail: `Shell Tool completed ${commands.length} read-only commands.`,
+          }),
+          ...commands.map((command, index) => ({
+            id: `${taskId}-command-${index}`,
+            kind: "tool" as const,
+            title: command.command,
+            detail: `exit=${command.exitCode ?? "unknown"} stdout=${command.stdout || "(empty)"}`,
+          })),
+        ],
+      });
+
+      await wait();
+
+      const passingCount = commands.filter((command) => command.exitCode === 0).length;
+      emit({
+        ...snapshot,
+        title: "Project environment inspected",
+        status: "completed",
+        commanderMessage:
+          "Project inspection completed through the Tauri desktop process and a read-only command allowlist.",
+        plan: snapshot.plan.map((step) => ({ ...step, status: "completed" })),
+        agents: [
+          commanderSnapshot("completed", "Task finished"),
+          fileSnapshot("queued", "No file scan needed"),
+          shellSnapshot("completed", "Read-only command checks completed"),
+          verifierSnapshot("completed", "Verification passed"),
+        ],
+        logs: appendLog(snapshot, {
+          id: `${taskId}-done`,
+          kind: "verification",
+          title: "task.completed",
+          detail: `Verifier checked ${passingCount}/${commands.length} command results.`,
+        }),
+        verificationSummary: `verified: ${passingCount}/${commands.length} read-only commands exited successfully.`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      emit({
+        ...snapshot,
+        title: "Project inspection failed",
+        status: "failed",
+        commanderMessage:
+          "Shell Agent inspection failed. The task stopped without running any write operation.",
+        plan: markStep(snapshot.plan, "step-read-env", "failed"),
+        agents: [
+          commanderSnapshot("completed", "Plan submitted"),
+          fileSnapshot("queued", "No file scan needed"),
+          shellSnapshot("failed", "Read-only command failed"),
+          verifierSnapshot("cancelled", "No result to verify"),
+        ],
+        logs: appendLog(snapshot, {
+          id: `${taskId}-failed`,
+          kind: "tool",
+          title: "task.failed",
+          detail: message,
+        }),
+      });
+    }
+  }
 }
 
 function createFileScanPlan(): TaskStep[] {
@@ -544,6 +708,25 @@ function createFileScanPlan(): TaskStep[] {
   ];
 }
 
+function createProjectInspectionPlan(): TaskStep[] {
+  return [
+    {
+      id: "step-read-env",
+      title: "Shell Agent runs read-only project checks",
+      assignedAgentKind: "shell",
+      status: "pending",
+      successCriteria: "Return command, cwd, exit code, stdout, and stderr.",
+    },
+    {
+      id: "step-verify-env",
+      title: "Verifier checks command outputs",
+      assignedAgentKind: "verifier",
+      status: "pending",
+      successCriteria: "Final result explains whether the environment checks succeeded.",
+    },
+  ];
+}
+
 function commanderSnapshot(status: AgentRunStatus, task: string): AgentSnapshot {
   return createAgentSnapshot(demoAgents[0], status, task);
 }
@@ -552,8 +735,12 @@ function fileSnapshot(status: AgentRunStatus, task: string): AgentSnapshot {
   return createAgentSnapshot(demoAgents[1], status, task);
 }
 
-function verifierSnapshot(status: AgentRunStatus, task: string): AgentSnapshot {
+function shellSnapshot(status: AgentRunStatus, task: string): AgentSnapshot {
   return createAgentSnapshot(demoAgents[2], status, task);
+}
+
+function verifierSnapshot(status: AgentRunStatus, task: string): AgentSnapshot {
+  return createAgentSnapshot(demoAgents[3], status, task);
 }
 
 function createAgentSnapshot(agent: Agent, status: AgentRunStatus, task: string): AgentSnapshot {
@@ -586,4 +773,8 @@ function markStep(
     }
     return step;
   });
+}
+
+function isProjectInspectionGoal(userGoal: string): boolean {
+  return /项目|启动|测试|环境|命令|project|test|start|environment/i.test(userGoal);
 }
