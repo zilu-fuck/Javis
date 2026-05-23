@@ -63,8 +63,9 @@ Implemented flow:
 
 Limitations:
 
-- No search provider is integrated yet; manual URL input is the accepted MVP
-  research workflow.
+- Search-backed research is now wired behind the optional `searchWeb` contract,
+  with a `github-cli` primary path and Agent Chrome fallback in the desktop
+  bridge. The verified MVP baseline still accepts manual URL input.
 - The MVP scenario expects at least three accessible sources for a full
   comparison report; fewer sources are explicitly marked as incomplete.
 

@@ -32,6 +32,9 @@ Additional product-release screenshots are required once the related features
 exist:
 
 - Search-backed research completed state with at least three sources.
+- `github-cli` research completed state.
+- IntelliSearch-backed research completed state after Code Agent integration.
+- Agent Chrome fallback research completed state.
 - Search failure or no-results state.
 - Code Agent diff preview before approval.
 - Code Agent approved edit result with verification output.
@@ -63,6 +66,20 @@ exist:
 - Verify each URL is fetched once.
 - Verify the report only makes claims backed by source excerpts.
 - Verify the report lists unknowns when fewer than three sources are provided.
+
+### Search-Backed Research
+
+- Submit a research task without URLs.
+- Verify Javis uses `github-cli` when available.
+- Verify Javis falls back to `agent-chrome` when `github-cli` is unavailable or
+  returns no usable results.
+- After Code Agent integration, verify Javis can use `opencode-intellisearch`
+  through the OpenCode plugin path.
+- Verify the source list shows provider metadata.
+- Verify the report includes at least three excerpt-backed sources when results
+  are available.
+- Verify no-results and failed-fetch paths produce failed verification states
+  with useful messages.
 
 ### PDF Organization
 

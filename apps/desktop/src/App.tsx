@@ -11,6 +11,8 @@ import type {
   ShellCommandRequest,
   WebSource,
   WebSourceRequest,
+  WebSearchRequest,
+  WebSearchResult,
 } from "@javis/tools";
 import { JavisWorkbench, zhCNWorkbenchLocale } from "@javis/ui";
 import "./App.css";
@@ -45,6 +47,8 @@ function App() {
         webTool: {
           fetchWebSource: (request: WebSourceRequest) =>
             invoke<WebSource>("fetch_web_source", { request }),
+          searchWeb: (request: WebSearchRequest) =>
+            invoke<WebSearchResult[]>("search_web_sources", { request }),
         },
       }),
     [],

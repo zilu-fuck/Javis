@@ -97,6 +97,31 @@ describe("JavisWorkbench permission cards", () => {
     expect(deniedHtml).toContain("Status: denied");
     expect(deniedHtml).toContain("No write operation executed");
   });
+
+  it("renders research source provider metadata", () => {
+    const html = renderWorkbench({
+      title: "Research sources collected",
+      userGoal: "Research Javis search integration",
+      status: "completed",
+      commanderMessage: "Research Agent produced a source-backed report.",
+      plan: [],
+      agents: [],
+      logs: [],
+      sources: [
+        {
+          url: "https://github.com/expert-vision-software/opencode-intellisearch",
+          title: "opencode-intellisearch",
+          excerpt: "Deep research plugin for OpenCode.",
+          fetchedAt: "2026-05-23T00:00:00.000Z",
+          provider: "github-cli",
+        },
+      ],
+    });
+
+    expect(html).toContain("opencode-intellisearch");
+    expect(html).toContain("github-cli");
+    expect(html).toContain("Deep research plugin for OpenCode.");
+  });
 });
 
 function renderWorkbench(task: WorkbenchTask): string {

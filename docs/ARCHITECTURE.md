@@ -72,6 +72,36 @@ package directly.
 commands. Rust code applies low-level safety checks before returning results to
 the TypeScript runtime.
 
+### Search Backends
+
+Research source discovery uses a staged backend strategy:
+
+1. The current desktop bridge uses `github-cli` repository search as the first
+   available technical-search provider.
+2. Once Code Agent / OpenCode is integrated,
+   `expert-vision-software/opencode-intellisearch` becomes the preferred
+   provider for OpenCode-backed technical and code research. Javis should
+   connect to it through the narrowest available OpenCode/plugin adapter, or MCP
+   when that preserves auditable source metadata.
+3. An embedded Chrome instance dedicated to the agent is the fallback provider.
+   It is used only when the primary provider is unavailable, returns no usable
+   results, or cannot satisfy the query.
+
+The embedded Chrome fallback must use an isolated profile controlled by Javis,
+not the user's normal browser profile. It must not read cookies, passwords,
+private keys, browser history, or account sessions. It is limited to read-only
+public source discovery and retrieval unless a future safety design explicitly
+expands that boundary.
+
+The IntelliSearch adapter must not call package internals directly. Installation
+(`bunx opencode-intellisearch install --scope local`) changes OpenCode
+configuration and must be treated as a confirmed-write setup step. Runtime
+search should go through OpenCode, for example an `opencode run --dir
+<workspace> --format json` invocation that triggers `/search-intelligently`.
+The `opencode-intellisearch` provider label is reserved for results that came
+through that plugin path. Plain `gh search repos` results must be labelled
+`github-cli`.
+
 ## Dependency Direction
 
 ```text
@@ -106,10 +136,13 @@ safe boundary that fits the task.
 Preferred extension paths:
 
 - MCP tools for external capabilities such as cross-session project memory,
-  public web search, indexing, and source retrieval. Candidate memory tools
-  include Python ecosystem services such as Muninn and JavaScript ecosystem
-  tools such as `@opencode-manager/memory`, provided they fit the local-first
-  security model.
+  public web search, indexing, and source retrieval.
+  `expert-vision-software/opencode-intellisearch` is the preferred
+  OpenCode-side search plugin for technical and code research after Code Agent
+  integration, when it can fit this boundary. Candidate memory tools include
+  Python ecosystem services such as Muninn and JavaScript ecosystem tools such
+  as `@opencode-manager/memory`, provided they fit the local-first security
+  model.
 - OpenCode plugins for agent workflow behavior. FullAutoAgent-style plugins can
   provide autonomous workflow state machines, while Systematic-style plugins can
   add structured engineering procedures without pushing that logic into Javis

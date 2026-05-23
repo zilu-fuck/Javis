@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    fs,
+    env, fs,
     io::Read,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Output, Stdio},
     sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Serialize)]
@@ -95,6 +96,13 @@ struct WebSourceRequest {
     url: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WebSearchRequest {
+    query: String,
+    max_results: Option<usize>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WebSource {
@@ -102,6 +110,16 @@ struct WebSource {
     title: Option<String>,
     excerpt: String,
     fetched_at: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WebSearchResult {
+    url: String,
+    title: Option<String>,
+    excerpt: String,
+    fetched_at: String,
+    provider: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -292,6 +310,26 @@ fn fetch_web_source(request: WebSourceRequest) -> Result<WebSource, String> {
 }
 
 #[tauri::command]
+fn search_web_sources(request: WebSearchRequest) -> Result<Vec<WebSearchResult>, String> {
+    let query = request.query.trim();
+    if query.is_empty() {
+        return Err("Search query cannot be empty.".to_string());
+    }
+    let max_results = request.max_results.unwrap_or(3).clamp(1, 10);
+
+    match search_with_github_cli(query, max_results) {
+        Ok(results) if !results.is_empty() => Ok(results),
+        Ok(_) => search_with_agent_chrome(query, max_results)
+            .map_err(|error| format!("GitHub CLI returned no results; Chrome fallback failed: {error}")),
+        Err(primary_error) => search_with_agent_chrome(query, max_results).map_err(|fallback_error| {
+            format!(
+                "GitHub CLI search failed: {primary_error}; Chrome fallback failed: {fallback_error}"
+            )
+        }),
+    }
+}
+
+#[tauri::command]
 fn inspect_project(workspace_path: Option<String>) -> Result<ProjectInspection, String> {
     let workspace = resolve_workspace_path(workspace_path)?;
     let package_json_path = workspace.join("package.json");
@@ -392,6 +430,290 @@ fn recommend_script(scripts: &[ProjectScript], runner: &str, names: &[&str]) -> 
             .any(|script| script.name == *name)
             .then(|| format!("{} {}", runner, name))
     })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GithubSearchItem {
+    full_name: String,
+    description: Option<String>,
+    url: String,
+    updated_at: Option<String>,
+}
+
+fn search_with_github_cli(
+    query: &str,
+    max_results: usize,
+) -> Result<Vec<WebSearchResult>, String> {
+    let limit = max_results.to_string();
+    let args = [
+            "search",
+            "repos",
+            query,
+            "--limit",
+            &limit,
+            "--json",
+            "fullName,description,url,updatedAt",
+    ];
+    let output = run_command_with_timeout(
+        resolve_command_program("gh"),
+        &args,
+        Duration::from_secs(12),
+    )
+    .map_err(|error| format!("GitHub CLI is unavailable: {error}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "GitHub CLI search failed without stderr.".to_string()
+        } else {
+            stderr
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let items = serde_json::from_str::<Vec<GithubSearchItem>>(&stdout)
+        .map_err(|error| format!("GitHub CLI search returned invalid JSON: {error}"))?;
+    Ok(github_items_to_search_results(items, max_results))
+}
+
+fn github_items_to_search_results(
+    items: Vec<GithubSearchItem>,
+    max_results: usize,
+) -> Vec<WebSearchResult> {
+    let fetched_at = format_system_time(SystemTime::now());
+    items
+        .into_iter()
+        .take(max_results)
+        .filter(|item| item.url.starts_with("https://"))
+        .map(|item| WebSearchResult {
+            url: item.url,
+            title: Some(item.full_name),
+            excerpt: item
+                .description
+                .filter(|description| !description.trim().is_empty())
+                .unwrap_or_else(|| "GitHub repository result from gh search.".to_string()),
+            fetched_at: item.updated_at.unwrap_or_else(|| fetched_at.clone()),
+            provider: Some("github-cli".to_string()),
+        })
+        .collect()
+}
+
+fn search_with_agent_chrome(query: &str, max_results: usize) -> Result<Vec<WebSearchResult>, String> {
+    let chrome = resolve_agent_chrome_program()
+        .ok_or_else(|| "Agent Chrome executable was not found.".to_string())?;
+    let profile = create_agent_chrome_profile_dir()?;
+    let search_url = format!(
+        "https://duckduckgo.com/html/?q={}",
+        percent_encode_query(query)
+    );
+    let user_data_dir = format!("--user-data-dir={}", profile.to_string_lossy());
+    let args = [
+            "--headless=new",
+            "--disable-gpu",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-sync",
+            "--disable-extensions",
+            "--incognito",
+            &user_data_dir,
+            "--dump-dom",
+            &search_url,
+    ];
+    let output = run_command_with_timeout(
+        chrome.to_string_lossy().to_string(),
+        &args,
+        Duration::from_secs(20),
+    );
+    let _ = fs::remove_dir_all(&profile);
+
+    let output = output.map_err(|error| format!("Agent Chrome failed to start: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "Agent Chrome search failed without stderr.".to_string()
+        } else {
+            stderr
+        });
+    }
+
+    let html = String::from_utf8_lossy(&output.stdout);
+    let results = parse_duckduckgo_html_results(&html, max_results);
+    if results.is_empty() {
+        return Err("Agent Chrome returned no parseable search results.".to_string());
+    }
+    Ok(results)
+}
+
+fn resolve_agent_chrome_program() -> Option<PathBuf> {
+    if let Some(path) = env::var_os("JAVIS_AGENT_CHROME_PATH").map(PathBuf::from) {
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    let mut candidates = Vec::new();
+    if let Some(program_files) = env::var_os("PROGRAMFILES").map(PathBuf::from) {
+        candidates.push(program_files.join("Google/Chrome/Application/chrome.exe"));
+        candidates.push(program_files.join("Microsoft/Edge/Application/msedge.exe"));
+    }
+    if let Some(program_files_x86) = env::var_os("PROGRAMFILES(X86)").map(PathBuf::from) {
+        candidates.push(program_files_x86.join("Google/Chrome/Application/chrome.exe"));
+        candidates.push(program_files_x86.join("Microsoft/Edge/Application/msedge.exe"));
+    }
+    if let Some(local_app_data) = env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+        candidates.push(local_app_data.join("Google/Chrome/Application/chrome.exe"));
+    }
+
+    candidates.into_iter().find(|path| path.exists())
+}
+
+fn create_agent_chrome_profile_dir() -> Result<PathBuf, String> {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let directory = env::temp_dir().join(format!("javis-agent-chrome-{suffix}"));
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    Ok(directory)
+}
+
+fn run_command_with_timeout(
+    program: String,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<Output, String> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    let start = SystemTime::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().map_err(|error| error.to_string()),
+            Ok(None) => {
+                let elapsed = SystemTime::now()
+                    .duration_since(start)
+                    .unwrap_or_default();
+                if elapsed >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("Command timed out after {} seconds.", timeout.as_secs()));
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.to_string());
+            }
+        }
+    }
+}
+
+fn parse_duckduckgo_html_results(html: &str, max_results: usize) -> Vec<WebSearchResult> {
+    let fetched_at = format_system_time(SystemTime::now());
+    let mut results = Vec::new();
+    let mut remaining = html;
+
+    while results.len() < max_results {
+        let Some(link_index) = remaining.find("result__a") else {
+            break;
+        };
+        remaining = &remaining[link_index..];
+        let Some(href) = extract_html_attribute(remaining, "href") else {
+            remaining = &remaining["result__a".len()..];
+            continue;
+        };
+        let Some(close_index) = remaining.find('>') else {
+            break;
+        };
+        let after_link = &remaining[close_index + 1..];
+        let Some(end_index) = after_link.find("</a>") else {
+            break;
+        };
+        let title = html_to_text(&after_link[..end_index]);
+        let excerpt = extract_result_snippet(after_link)
+            .filter(|snippet| !snippet.is_empty())
+            .unwrap_or_else(|| title.clone());
+        if let Some(url) = normalize_duckduckgo_url(&href) {
+            results.push(WebSearchResult {
+                url,
+                title: (!title.is_empty()).then_some(title),
+                excerpt,
+                fetched_at: fetched_at.clone(),
+                provider: Some("agent-chrome".to_string()),
+            });
+        }
+        remaining = &after_link[end_index..];
+    }
+
+    results
+}
+
+fn extract_result_snippet(value: &str) -> Option<String> {
+    let index = value.find("result__snippet")?;
+    let snippet = &value[index..];
+    let close_index = snippet.find('>')?;
+    let after_tag = &snippet[close_index + 1..];
+    let end_index = after_tag.find("</a>").or_else(|| after_tag.find("</div>"))?;
+    Some(html_to_text(&after_tag[..end_index]))
+}
+
+fn extract_html_attribute(value: &str, attribute: &str) -> Option<String> {
+    let pattern = format!("{attribute}=\"");
+    let start = value.find(&pattern)? + pattern.len();
+    let rest = &value[start..];
+    let end = rest.find('"')?;
+    Some(html_decode(&rest[..end]))
+}
+
+fn normalize_duckduckgo_url(value: &str) -> Option<String> {
+    if value.starts_with("http://") || value.starts_with("https://") {
+        return Some(value.to_string());
+    }
+    if let Some(index) = value.find("uddg=") {
+        let encoded = &value[index + "uddg=".len()..];
+        let end = encoded.find('&').unwrap_or(encoded.len());
+        return Some(percent_decode(&encoded[..end]));
+    }
+    None
+}
+
+fn percent_encode_query(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                vec![byte as char]
+            }
+            b' ' => vec!['+'],
+            _ => format!("%{byte:02X}").chars().collect(),
+        })
+        .collect()
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&value[index + 1..index + 3], 16) {
+                output.push(byte);
+                index += 3;
+                continue;
+            }
+        }
+        output.push(if bytes[index] == b'+' { b' ' } else { bytes[index] });
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).to_string()
 }
 
 fn downloads_directory() -> Result<PathBuf, String> {
@@ -766,9 +1088,26 @@ fn html_to_text(content: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+        .pipe_html_decode()
+}
+
+trait HtmlDecode {
+    fn pipe_html_decode(self) -> String;
+}
+
+impl HtmlDecode for String {
+    fn pipe_html_decode(self) -> String {
+        html_decode(&self)
+    }
+}
+
+fn html_decode(value: &str) -> String {
+    value
         .replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
 }
 
 #[cfg(test)]
@@ -1058,6 +1397,56 @@ mod tests {
         assert_eq!(resolve_command_program("node"), "node");
     }
 
+    #[test]
+    fn maps_github_results_to_search_results() {
+        let results = github_items_to_search_results(
+            vec![GithubSearchItem {
+                full_name: "expert-vision-software/opencode-intellisearch".to_string(),
+                description: Some("Deep research plugin for OpenCode.".to_string()),
+                url: "https://github.com/expert-vision-software/opencode-intellisearch"
+                    .to_string(),
+                updated_at: Some("2026-05-23T00:00:00Z".to_string()),
+            }],
+            3,
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].url,
+            "https://github.com/expert-vision-software/opencode-intellisearch"
+        );
+        assert_eq!(results[0].provider.as_deref(), Some("github-cli"));
+        assert_eq!(results[0].title.as_deref(), Some("expert-vision-software/opencode-intellisearch"));
+        assert_eq!(results[0].excerpt, "Deep research plugin for OpenCode.");
+    }
+
+    #[test]
+    fn parses_agent_chrome_duckduckgo_results() {
+        let html = r#"
+          <a rel="nofollow" class="result__a" href="https://example.com/alpha">Alpha &amp; Docs</a>
+          <a class="result__snippet">Useful alpha evidence.</a>
+          <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fbeta&amp;rut=1">Beta</a>
+          <a class="result__snippet">Useful beta evidence.</a>
+        "#;
+
+        let results = parse_duckduckgo_html_results(html, 3);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].url, "https://example.com/alpha");
+        assert_eq!(results[0].title.as_deref(), Some("Alpha & Docs"));
+        assert_eq!(results[0].excerpt, "Useful alpha evidence.");
+        assert_eq!(results[0].provider.as_deref(), Some("agent-chrome"));
+        assert_eq!(results[1].url, "https://example.com/beta");
+    }
+
+    #[test]
+    fn percent_encoding_round_trips_search_queries() {
+        let encoded = percent_encode_query("opencode intellisearch/Rust");
+
+        assert_eq!(encoded, "opencode+intellisearch%2FRust");
+        assert_eq!(percent_decode(&encoded), "opencode intellisearch/Rust");
+    }
+
     fn create_test_directory(name: &str) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1087,6 +1476,7 @@ pub fn run() {
             scan_markdown_documents,
             run_read_only_command,
             fetch_web_source,
+            search_web_sources,
             inspect_project,
             plan_pdf_organization,
             approve_pdf_organization,

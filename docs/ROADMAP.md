@@ -21,13 +21,30 @@ Status: complete for the 2026-05-23 QA pass.
 - Add a search provider abstraction.
 - Evaluate maintained search tools and providers before implementing search
   logic directly.
-- Prefer MCP-backed search integration when it can preserve source URL, title,
-  fetched timestamp, excerpt, and error evidence.
+- Use a staged search backend:
+  - current desktop bridge: `github-cli` repository search, then embedded Agent
+    Chrome fallback
+  - product Code Agent path: `expert-vision-software/opencode-intellisearch`
+    through OpenCode/plugin boundaries
+  - final fallback: embedded Chrome when the primary provider is unavailable,
+    returns no usable results, or cannot satisfy the query
+- Adapt IntelliSearch only through OpenCode/plugin boundaries first; prefer MCP
+  or other narrow adapters only when they preserve source URL, title, fetched
+  timestamp, excerpt, and error evidence.
+- Treat `bunx opencode-intellisearch install --scope local` as a confirmed-write
+  setup step because it modifies OpenCode configuration.
+- Reserve the `opencode-intellisearch` provider label for results produced
+  through the OpenCode plugin path; label direct GitHub CLI repository search as
+  `github-cli`.
+- Keep embedded Chrome isolated from the user's normal browser profile and use
+  it only for read-only public source discovery and retrieval.
 - Fetch and compare at least three accessible public sources by default.
 - Preserve source URL, title, fetched timestamp, and excerpt.
 - Clearly label unsupported or unverifiable claims.
-- Add retry and manual-source fallback UI.
-- Add tests and QA screenshots for search success, weak evidence, failed fetch,
+- Add retry, manual-source fallback UI, and clear messaging when Javis switches
+  from `github-cli` or IntelliSearch to embedded Chrome.
+- Add tests and QA screenshots for `github-cli` success, IntelliSearch success
+  after Code Agent integration, Chrome fallback, weak evidence, failed fetch,
   and no-results states.
 
 ## Milestone 2: Code Agent

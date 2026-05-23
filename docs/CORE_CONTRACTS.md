@@ -88,10 +88,17 @@ Supports:
 timestamp.
 
 `searchWeb` is the search-provider extension point for product research. It is
-optional because the desktop app has not selected a real provider yet. Core may
-use it when injected by a future MCP adapter, plugin, or native provider, but it
-must remain read-only and return auditable public source candidates with URL,
-title or excerpt, fetched timestamp, and provider metadata when available.
+optional because providers can vary by desktop environment. The current
+provider order is `github-cli` first, then an embedded Chrome instance dedicated
+to the agent as fallback. After Code Agent / OpenCode integration,
+`expert-vision-software/opencode-intellisearch` should become the preferred
+technical and code research provider through an OpenCode plugin adapter. Core
+may use `searchWeb` when injected by an OpenCode plugin adapter, MCP adapter, or
+native provider, but it must remain read-only and return auditable public source
+candidates with URL, title or excerpt, fetched timestamp, and provider metadata
+when available. Fallback results should include provider metadata such as
+`github-cli`, `opencode-intellisearch`, or `agent-chrome` so the UI and logs can
+show which path produced the evidence.
 
 ## Permission Contract
 

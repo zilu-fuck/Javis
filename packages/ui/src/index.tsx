@@ -87,6 +87,7 @@ export interface WorkbenchSource {
   title?: string;
   excerpt: string;
   fetchedAt: string;
+  provider?: string;
 }
 
 export interface WorkbenchResearchReport {
@@ -705,6 +706,7 @@ export function JavisWorkbench({
                   </div>
                   <p>{translateWorkbenchText(source.excerpt, locale)}</p>
                   <span>{source.url}</span>
+                  {source.provider ? <span>{source.provider}</span> : null}
                 </article>
               ))}
             </section>

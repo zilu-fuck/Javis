@@ -24,6 +24,23 @@ Tauri currently exposes:
 - `approve_pdf_organization`: records approval for the current PDF dry-run id.
 - `execute_pdf_organization`: confirmed-write PDF moves from an approved plan.
 
+## Search And Browser Isolation
+
+Automated technical and code research currently uses `github-cli` search when
+available. After Code Agent / OpenCode integration, it should prefer
+`expert-vision-software/opencode-intellisearch` through an OpenCode/plugin
+adapter. If the primary provider is unavailable or insufficient, Javis may use
+an embedded Chrome instance dedicated to the agent as a fallback search backend.
+
+The embedded Chrome fallback must:
+
+- use an isolated Javis-controlled profile
+- avoid the user's normal Chrome profile and account sessions
+- avoid reading cookies, passwords, private keys, browser history, or credential
+  stores
+- perform only read-only public source discovery and retrieval
+- log when fallback occurs and which sources came from the fallback path
+
 ## Shell Rules
 
 Only allowlisted commands can run through the current shell bridge. The

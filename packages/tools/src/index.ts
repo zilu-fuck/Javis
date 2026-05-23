@@ -95,6 +95,7 @@ export interface WebSource {
   title?: string;
   excerpt: string;
   fetchedAt: string;
+  provider?: string;
 }
 
 export interface WebSearchRequest {
@@ -102,9 +103,7 @@ export interface WebSearchRequest {
   maxResults?: number;
 }
 
-export interface WebSearchResult extends WebSource {
-  provider?: string;
-}
+export interface WebSearchResult extends WebSource {}
 
 export interface ResearchReport {
   title: string;

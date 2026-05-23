@@ -442,6 +442,11 @@ describe("createFileScanTaskRuntime", () => {
     });
     expect(fetchWebSource).toHaveBeenCalledTimes(3);
     expect(finalSnapshot.researchReport?.rows).toHaveLength(3);
+    expect(finalSnapshot.sources?.map((source) => source.provider)).toEqual([
+      "test-search",
+      "test-search",
+      "test-search",
+    ]);
     expect(finalSnapshot.verificationSummary).toContain("searched sources include URL and excerpt");
 
     unsubscribe();
@@ -501,6 +506,57 @@ describe("createFileScanTaskRuntime", () => {
 
     expect(finalSnapshot.title).toBe("Research search failed");
     expect(finalSnapshot.logs[finalSnapshot.logs.length - 1]?.detail).toBe("search unavailable");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("keeps successful searched sources when one fetch fails", async () => {
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+      },
+      webTool: {
+        searchWeb: vi.fn(async () => [
+          {
+            url: "https://example.test/alpha",
+            title: "Alpha",
+            excerpt: "Alpha candidate.",
+            fetchedAt: "2026-05-23T00:00:00.000Z",
+            provider: "github-cli",
+          },
+          {
+            url: "https://example.test/missing",
+            title: "Missing",
+            excerpt: "Missing candidate.",
+            fetchedAt: "2026-05-23T00:00:00.000Z",
+            provider: "github-cli",
+          },
+        ]),
+        fetchWebSource: vi.fn(async ({ url }: { url: string }) => {
+          if (url.includes("missing")) {
+            throw new Error("source unavailable");
+          }
+          return {
+            url,
+            title: "Alpha source",
+            excerpt: "Alpha fetched evidence.",
+            fetchedAt: "2026-05-23T00:00:00.000Z",
+          };
+        }),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("Research partial source failures");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(finalSnapshot.sources).toHaveLength(1);
+    expect(finalSnapshot.sources?.[0]?.provider).toBe("github-cli");
+    expect(finalSnapshot.logs.some((log) => log.title.includes("web.fetchSource failed"))).toBe(true);
+    expect(finalSnapshot.verificationSummary).toContain("1 searched source fetch(es) failed");
 
     unsubscribe();
     runtime.dispose();

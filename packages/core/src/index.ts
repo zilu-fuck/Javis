@@ -926,7 +926,13 @@ export function createFileScanTaskRuntime({
         return;
       }
 
-      const urls = Array.from(new Set(searchResults.map((result) => result.url))).slice(0, 3);
+      const selectedResults = Array.from(
+        new Map(searchResults.map((result) => [result.url, result])).values(),
+      ).slice(0, 3);
+      const urls = selectedResults.map((result) => result.url);
+      const providerByUrl = new Map(
+        selectedResults.map((result) => [result.url, result.provider]),
+      );
 
       emit({
         ...snapshot,
@@ -944,13 +950,26 @@ export function createFileScanTaskRuntime({
           id: `${taskId}-search-done`,
           kind: "tool",
           title: "tool_call.updated",
-          detail: `web.search returned ${searchResults.length} source candidate(s).`,
+          detail: `web.search returned ${searchResults.length} source candidate(s) from ${summarizeSearchProviders(searchResults)}.`,
         }),
       });
 
-      const sources = await Promise.all(
-        urls.map((url) => activeWebTool.fetchWebSource({ url })),
+      const fetchResults = await Promise.allSettled<WebSource>(
+        urls.map(async (url) => ({
+          ...(await activeWebTool.fetchWebSource({ url })),
+          provider: providerByUrl.get(url),
+        })),
       );
+      const sources = fetchResults
+        .flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+      const failedFetches = fetchResults
+        .map((result, index) => ({ result, url: urls[index] }))
+        .filter((entry): entry is { result: PromiseRejectedResult; url: string } => entry.result.status === "rejected");
+      if (sources.length === 0) {
+        throw new Error(
+          `Search found ${urls.length} candidate source(s), but none could be fetched.`,
+        );
+      }
       const researchReport = createSourceBackedReport(sources);
 
       emit({
@@ -967,12 +986,22 @@ export function createFileScanTaskRuntime({
         ],
         sources,
         researchReport,
-        logs: appendLog(snapshot, {
-          id: `${taskId}-sources-done`,
-          kind: "tool",
-          title: "tool_call.updated",
-          detail: `web.fetchSource completed for ${sources.length} searched source(s).`,
-        }),
+        logs: [
+          ...appendLog(snapshot, {
+            id: `${taskId}-sources-done`,
+            kind: "tool",
+            title: "tool_call.updated",
+            detail: `web.fetchSource completed for ${sources.length}/${urls.length} searched source(s).`,
+          }),
+          ...failedFetches.map((entry, index) => ({
+            id: `${taskId}-source-fetch-failed-${index}`,
+            kind: "tool" as const,
+            title: `web.fetchSource failed: ${entry.url}`,
+            detail: entry.result.reason instanceof Error
+              ? entry.result.reason.message
+              : String(entry.result.reason),
+          })),
+        ],
       });
 
       await wait();
@@ -1019,7 +1048,7 @@ export function createFileScanTaskRuntime({
           detail: `Verifier checked ${validCount}/${sources.length} source records and ${reportEvidenceCount}/${researchReport.rows.length} report claims.`,
         }),
         researchReport: snapshot.researchReport,
-        verificationSummary: `${verificationStatus === "completed" ? "verified" : "failed"}: ${validCount}/${sources.length} searched sources include URL and excerpt; ${reportEvidenceCount}/${researchReport.rows.length} report claims include source evidence.`,
+        verificationSummary: `${verificationStatus === "completed" ? "verified" : "failed"}: ${validCount}/${sources.length} searched sources include URL and excerpt; ${reportEvidenceCount}/${researchReport.rows.length} report claims include source evidence; ${failedFetches.length} searched source fetch(es) failed.`,
       });
     } catch (error) {
       emit({
@@ -1187,4 +1216,11 @@ export function createFileScanTaskRuntime({
       });
     }
   }
+}
+
+function summarizeSearchProviders(sources: WebSource[]): string {
+  const providers = Array.from(
+    new Set(sources.map((source) => source.provider).filter(Boolean)),
+  );
+  return providers.length > 0 ? providers.join(", ") : "unknown provider";
 }
