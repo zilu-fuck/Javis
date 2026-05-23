@@ -14,6 +14,8 @@ selection, generalized confirmed-write approvals, and release rollback notes.
 - Run `pnpm check` and keep the command output with the QA notes.
 - Start the desktop app with `pnpm dev`.
 - Create a screenshot folder such as `docs/qa/2026-05-23/`.
+- For repeatable search-backed research evidence, build the release app and run
+  `docs/qa/2026-05-23/research-search-qa.ps1`.
 
 ## Required Screenshots
 
@@ -73,6 +75,9 @@ exist:
 - Verify Javis uses `github-cli` when available.
 - Verify Javis falls back to `agent-chrome` when `github-cli` is unavailable or
   returns no usable results.
+- Run `research-search-qa.ps1` to capture repeatable fixture evidence for
+  `github-cli`, `agent-chrome`, weak evidence, failed fetch, and no-results
+  states.
 - After Code Agent integration, verify Javis can use `opencode-intellisearch`
   through the OpenCode plugin path.
 - Verify the source list shows provider metadata.

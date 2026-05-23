@@ -112,7 +112,7 @@ struct WebSource {
     fetched_at: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WebSearchResult {
     url: String,
@@ -317,6 +317,22 @@ fn search_web_sources(request: WebSearchRequest) -> Result<Vec<WebSearchResult>,
     }
     let max_results = request.max_results.unwrap_or(3).clamp(1, 10);
 
+    // QA-only fixture hook for repeatable release screenshots. It requires a
+    // second explicit mode flag so a stale fixture path cannot silently replace
+    // normal product search.
+    if env_flag_enabled("JAVIS_QA_MODE") {
+        if let Some(path) = env::var_os("JAVIS_SEARCH_FIXTURE_PATH").map(PathBuf::from) {
+            return search_with_fixture_file(&path, max_results);
+        }
+    } else if env::var_os("JAVIS_SEARCH_FIXTURE_PATH").is_some() {
+        return Err("Search fixtures require JAVIS_QA_MODE=1.".to_string());
+    }
+
+    if env_flag_enabled("JAVIS_SEARCH_DISABLE_GITHUB_CLI") {
+        return search_with_agent_chrome(query, max_results)
+            .map_err(|error| format!("GitHub CLI search disabled; Chrome fallback failed: {error}"));
+    }
+
     match search_with_github_cli(query, max_results) {
         Ok(results) if !results.is_empty() => Ok(results),
         Ok(_) => search_with_agent_chrome(query, max_results)
@@ -327,6 +343,23 @@ fn search_web_sources(request: WebSearchRequest) -> Result<Vec<WebSearchResult>,
             )
         }),
     }
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    env::var(name)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+fn search_with_fixture_file(
+    path: &Path,
+    max_results: usize,
+) -> Result<Vec<WebSearchResult>, String> {
+    let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let mut results = serde_json::from_str::<Vec<WebSearchResult>>(&content)
+        .map_err(|error| format!("Search fixture returned invalid JSON: {error}"))?;
+    results.truncate(max_results);
+    Ok(results)
 }
 
 #[tauri::command]
@@ -1445,6 +1478,78 @@ mod tests {
 
         assert_eq!(encoded, "opencode+intellisearch%2FRust");
         assert_eq!(percent_decode(&encoded), "opencode intellisearch/Rust");
+    }
+
+    #[test]
+    fn reads_boolean_environment_flags() {
+        let key = "JAVIS_TEST_BOOLEAN_FLAG";
+        env::remove_var(key);
+        assert!(!env_flag_enabled(key));
+
+        env::set_var(key, "1");
+        assert!(env_flag_enabled(key));
+
+        env::set_var(key, "true");
+        assert!(env_flag_enabled(key));
+
+        env::set_var(key, "0");
+        assert!(!env_flag_enabled(key));
+
+        env::remove_var(key);
+    }
+
+    #[test]
+    fn reads_search_fixture_results() {
+        let root = create_test_directory("search-fixture");
+        let fixture = root.join("search.json");
+        fs::write(
+            &fixture,
+            r#"[
+              {
+                "url": "http://127.0.0.1:8765/alpha.html",
+                "title": "Alpha",
+                "excerpt": "Alpha evidence",
+                "fetchedAt": "2026-05-23T00:00:00.000Z",
+                "provider": "github-cli"
+              },
+              {
+                "url": "http://127.0.0.1:8765/beta.html",
+                "title": "Beta",
+                "excerpt": "Beta evidence",
+                "fetchedAt": "2026-05-23T00:00:00.000Z",
+                "provider": "github-cli"
+              }
+            ]"#,
+        )
+        .expect("write fixture");
+
+        let results = search_with_fixture_file(&fixture, 1).expect("fixture results");
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title.as_deref(), Some("Alpha"));
+        assert_eq!(results[0].provider.as_deref(), Some("github-cli"));
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn search_fixture_path_requires_qa_mode() {
+        let root = create_test_directory("search-fixture-guard");
+        let fixture = root.join("search.json");
+        fs::write(&fixture, "[]").expect("write fixture");
+        env::set_var("JAVIS_SEARCH_FIXTURE_PATH", &fixture);
+        env::remove_var("JAVIS_QA_MODE");
+
+        let result = search_web_sources(WebSearchRequest {
+            query: "fixture guard".to_string(),
+            max_results: Some(1),
+        });
+
+        assert_eq!(
+            result.expect_err("fixture should require qa mode"),
+            "Search fixtures require JAVIS_QA_MODE=1."
+        );
+        env::remove_var("JAVIS_SEARCH_FIXTURE_PATH");
+        fs::remove_dir_all(root).expect("cleanup test directory");
     }
 
     fn create_test_directory(name: &str) -> PathBuf {

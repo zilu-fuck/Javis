@@ -14,6 +14,11 @@ docs/qa/YYYY-MM-DD/
   05-pdf-permission-card.png
   06-pdf-approved-result.png
   07-pdf-denied-result.png
+  09-search-github-cli-completed.png
+  10-search-agent-chrome-fallback-completed.png
+  11-search-weak-evidence-failed.png
+  12-search-failed-fetch-state.png
+  13-search-no-results-state.png
 ```
 
 Do not commit screenshots that expose private file paths, credentials, or

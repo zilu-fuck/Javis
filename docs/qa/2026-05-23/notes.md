@@ -14,6 +14,7 @@ Scope:
 - Full native Tauri release build QA.
 - Packaged Tauri build evidence.
 - Permission and confirmed-write review for PDF organization.
+- Search-backed research product QA fixture pass.
 
 Commands:
 
@@ -22,6 +23,7 @@ pnpm check
 git diff --check
 pnpm --filter @javis/desktop tauri build
 powershell -ExecutionPolicy Bypass -File docs/qa/2026-05-23/native-qa.ps1
+powershell -ExecutionPolicy Bypass -File docs/qa/2026-05-23/research-search-qa.ps1
 ```
 
 Command output:
@@ -30,6 +32,7 @@ Command output:
 - `git-diff-check.txt`
 - `tauri-build.txt`
 - `native-qa-output.txt`
+- `research-search-qa-output.txt`
 
 Command status:
 
@@ -37,6 +40,7 @@ Command status:
 - `git diff --check`: pass
 - `pnpm --filter @javis/desktop tauri build`: pass
 - `native-qa.ps1`: pass
+- `research-search-qa.ps1`: pass
 - `git diff --check` output contains only Git LF-to-CRLF working-copy warnings;
   the command exited successfully.
 
@@ -51,6 +55,16 @@ Evidence:
 - `06b-pdf-conflict-skipped.png`: PDF target conflict skipped without overwrite.
 - `07-pdf-denied-result.png`: denied PDF move left files unchanged.
 - `08-failed-verification-state.png`: expected failed verification for an empty source.
+- `09-search-github-cli-completed.png`: search-backed research completed with
+  three fixture sources labelled `github-cli`.
+- `10-search-agent-chrome-fallback-completed.png`: search-backed research
+  completed with three fixture sources labelled `agent-chrome`.
+- `11-search-weak-evidence-failed.png`: searched source with empty evidence
+  produced failed verification.
+- `12-search-failed-fetch-state.png`: searched source candidate fetch failure
+  produced a failed search state with fallback guidance.
+- `13-search-no-results-state.png`: search provider returned no candidates and
+  the UI showed the no-results failure state.
 - `qa-contact-sheet.png`: contact sheet for visual review.
 - Packaged artifacts:
   - `apps/desktop/src-tauri/target/release/bundle/msi/Javis_0.1.0_x64_en-US.msi`
@@ -69,6 +83,11 @@ Scenario status:
 | PDF conflict skip | Pass | Existing target caused `0 moved, 1 skipped`; no overwrite occurred. |
 | PDF denied no-op | Pass | Denial recorded and no write was executed. |
 | Failed verification state | Pass | Empty local source produced the expected failed verification state. |
+| Search-backed research with github-cli provider | Pass | Fixture search returned three local public sources labelled `github-cli`; report completed with provider metadata. |
+| Search-backed research with Agent Chrome provider | Pass | Fixture search returned three local public sources labelled `agent-chrome`; report completed with provider metadata. |
+| Search weak evidence | Pass | Empty searched source produced failed verification with `0/1 searched sources`. |
+| Search failed fetch | Pass | Missing searched source produced a failed search state with manual URL fallback guidance. |
+| Search no results | Pass | Empty fixture search produced `Research search returned no sources`. |
 
 Manual QA verdict: pass for the documented MVP release scenarios.
 
@@ -79,6 +98,13 @@ Notes:
   release-window screenshots.
 - The failed verification screenshot is intentional and covers the failure-state
   requirement in `docs/QA_CHECKLIST.md`.
+- `research-search-qa.ps1` uses the `JAVIS_QA_MODE=1` +
+  `JAVIS_SEARCH_FIXTURE_PATH` QA-only bridge to make search provider states
+  repeatable without relying on live public search availability. It verifies the
+  packaged release executable's fixture-driven search UI/backend flow, provider
+  metadata display, source fetching, weak evidence, failed fetch, and no-results
+  states. Live `github-cli` and Agent Chrome provider smoke QA remains separate
+  product-readiness work.
 - Security/permissions review applies because PDF confirmed-write code changed.
   `SECURITY_MODEL.md` and `PERMISSIONS.md` were reviewed against the current
   implementation; Rust tests cover move success, conflict skip, missing
