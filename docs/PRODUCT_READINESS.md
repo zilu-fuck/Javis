@@ -18,7 +18,7 @@ history intact.
 | --- | --- | --- |
 | Desktop workbench | Installable app with stable task thread, logs, agent state, and permission UI. | MVP implemented and packaged on Windows. |
 | File and project understanding | Read project files safely, summarize relevant documents, inspect scripts, and recommend/run checks. | MVP implemented with Markdown scan and allowlisted checks. |
-| Research | Search or collect public sources, fetch evidence, compare at least three sources, cite excerpts, and label unknowns. | Partial. User-provided URL flow works; automated search has `github-cli` and Agent Chrome provider paths, and repeatable fixture QA evidence covers success/failure states. Live provider smoke QA is still needed. |
+| Research | Search or collect public sources, fetch evidence, compare at least three sources, cite excerpts, and label unknowns. | Partial. User-provided URL flow works; automated search has `github-cli` and Agent Chrome provider paths. Fixture QA covers success/failure states, and live `github-cli` smoke QA passes. Live Agent Chrome smoke QA is still needed. |
 | Code Agent | Inspect code, propose changes, produce diffs, apply approved edits, and run verification. | Missing. opencode/backend integration is not implemented. |
 | Persistence | Save task history, results, permission decisions as scoped records, and allow deletion. | Partial. Completed, failed, and cancelled task snapshots are stored locally with sidebar restore and delete controls; pending approvals are not persisted. |
 | Workspace management | Select and remember workspaces without relying on the launch directory. | Missing. Current workspace resolution is basic. |
@@ -30,8 +30,8 @@ history intact.
 
 Do not call Javis a complete usable product while any of these are true:
 
-- Search-backed research has fixture QA evidence, but still needs live
-  `github-cli` and Agent Chrome smoke QA against public sources.
+- Search-backed research has fixture QA evidence and live `github-cli` smoke
+  evidence, but still needs live Agent Chrome smoke QA against public sources.
 - Code Agent / opencode integration is missing.
 - Task history persistence is limited to local completed/failed/cancelled
   snapshots and needs broader QA across app restart and future storage
@@ -46,7 +46,7 @@ Do not call Javis a complete usable product while any of these are true:
 
 The project has a verified MVP foundation. The next stage is product completion:
 
-1. Finish live-provider research smoke QA and source comparison polish.
+1. Finish live Agent Chrome research smoke QA and source comparison polish.
 2. Add Code Agent with diff preview, approval, apply, and verification.
 3. Harden local persistence across app restart, storage migration, and future
    scoped permission records.

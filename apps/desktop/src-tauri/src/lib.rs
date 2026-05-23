@@ -558,7 +558,7 @@ fn search_with_agent_chrome(query: &str, max_results: usize) -> Result<Vec<WebSe
     let output = run_command_with_timeout(
         chrome.to_string_lossy().to_string(),
         &args,
-        Duration::from_secs(20),
+        Duration::from_secs(35),
     );
     let _ = fs::remove_dir_all(&profile);
 
@@ -624,11 +624,45 @@ fn run_command_with_timeout(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| error.to_string())?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Command stdout pipe was unavailable.".to_string())?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Command stderr pipe was unavailable.".to_string())?;
+    let stdout_reader = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        stdout
+            .read_to_end(&mut buffer)
+            .map(|_| buffer)
+            .map_err(|error| error.to_string())
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut buffer = Vec::new();
+        stderr
+            .read_to_end(&mut buffer)
+            .map(|_| buffer)
+            .map_err(|error| error.to_string())
+    });
     let start = SystemTime::now();
 
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => return child.wait_with_output().map_err(|error| error.to_string()),
+            Ok(Some(status)) => {
+                let stdout = stdout_reader
+                    .join()
+                    .map_err(|_| "Command stdout reader panicked.".to_string())??;
+                let stderr = stderr_reader
+                    .join()
+                    .map_err(|_| "Command stderr reader panicked.".to_string())??;
+                return Ok(Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
             Ok(None) => {
                 let elapsed = SystemTime::now()
                     .duration_since(start)
@@ -636,6 +670,8 @@ fn run_command_with_timeout(
                 if elapsed >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
+                    let _ = stdout_reader.join();
+                    let _ = stderr_reader.join();
                     return Err(format!("Command timed out after {} seconds.", timeout.as_secs()));
                 }
                 thread::sleep(Duration::from_millis(50));
@@ -643,6 +679,8 @@ fn run_command_with_timeout(
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
                 return Err(error.to_string());
             }
         }

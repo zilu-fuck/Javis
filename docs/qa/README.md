@@ -19,6 +19,7 @@ docs/qa/YYYY-MM-DD/
   11-search-weak-evidence-failed.png
   12-search-failed-fetch-state.png
   13-search-no-results-state.png
+  14-search-live-github-cli-smoke.png
 ```
 
 Do not commit screenshots that expose private file paths, credentials, or
