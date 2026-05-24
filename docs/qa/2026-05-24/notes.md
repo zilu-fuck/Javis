@@ -9,7 +9,8 @@ Scope:
 - Workspace native directory picker readiness.
 - Recent workspace persistence after a real packaged desktop app restart.
 - Code Agent opencode proposal/apply QA through the packaged desktop app.
-- Durable PDF approval restore/approve QA through the packaged desktop app.
+- Durable PDF approval restore approve/deny/expiry QA through the packaged
+  desktop app.
 
 Commands:
 
@@ -41,8 +42,9 @@ Command status:
   proposal generation but did not return a parseable patch proposal before any
   write approval was requested; live smoke still needs to be rerun after
   fallback hardening with temporary credentials.
-- `pdf-durable-approval-qa.ps1`: pass for restored PDF approval and approved
-  execution after packaged app restart.
+- `pdf-durable-approval-qa.ps1`: pass for restored PDF approval approve,
+  restored deny, and expired-record fail-closed behavior after packaged app
+  restart.
 
 Evidence:
 
@@ -72,15 +74,22 @@ Evidence:
   pending PDF organization approval from `javis.approvalRecords.v1`.
 - `22-pdf-durable-approval-approved.png`: approving the restored card completes
   the PDF organization task.
+- `23-pdf-durable-approval-deny-restored.png`: packaged app relaunch restores a
+  separate pending PDF organization approval for the deny path.
+- `24-pdf-durable-approval-denied.png`: denying the restored card completes
+  without moving or modifying the PDF.
+- `25-pdf-durable-approval-expired.png`: packaged app relaunch marks an expired
+  pending durable approval as expired without restoring a permission card.
 - `pdf-durable-approval-qa-output.txt`: confirms the source PDF no longer
-  exists, the approved target PDF exists, and the durable approval record is
-  resolved as `approved` with the expected preview hash.
+  exists and the approved target PDF exists for approve, the source remains and
+  no target exists for deny and expiry, and durable approval records resolve as
+  `approved`, `denied`, and `expired` with expected preview hashes.
 
 Manual QA verdict: pass for workspace selection, recent-workspace restart
 persistence, fixture-backed Code Agent proposal/apply safety, and durable PDF
-approval restore/approve. Live DeepSeek-compatible provider QA remains open
-until the hardened fallback path is rerun with temporary credentials. PDF
-approval deny/expiry restart coverage remains open.
+approval restore approve/deny/expiry. Live DeepSeek-compatible provider QA
+remains open until the hardened fallback path is rerun with temporary
+credentials.
 
 Notes:
 
@@ -98,8 +107,9 @@ Notes:
   temporary repository after the pass.
 - `pdf-durable-approval-qa.ps1` creates a temporary PDF under Downloads,
   injects a scoped pending durable approval record, restarts the packaged app,
-  approves the restored card, verifies the move, captures screenshots, and
-  removes the temporary files.
+  exercises approve, deny, and expired-record paths, verifies the file effects
+  and durable record status for each path, captures screenshots, and removes
+  the temporary files.
 - During this QA pass, `git status --short` parsing truncated paths with a
   leading status-space (for example ` M src/message.txt`). The parser now reads
   the path after the two status columns, and a regression test covers that

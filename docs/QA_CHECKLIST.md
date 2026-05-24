@@ -167,9 +167,11 @@ exist:
   target path.
 - Verify `javis.approvalRecords.v1` records the approval as `approved` with the
   same `previewHash`.
-- Capture screenshots for the restored card and approved completion state.
-- Add separate deny/expiry restart coverage before treating Milestone A as
-  fully closed.
+- Deny a restored card and verify the source PDF remains in place, no target
+  PDF is created, and the durable record is `denied`.
+- Inject an expired pending approval and verify no approval card is restored,
+  no file is moved, and the durable record is `expired`.
+- Capture screenshots for restored, approved, denied, and expired states.
 
 ### Product Readiness Scenarios
 

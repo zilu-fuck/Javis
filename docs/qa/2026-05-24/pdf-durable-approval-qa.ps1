@@ -4,10 +4,9 @@ $qaDir = $PSScriptRoot
 $repoRoot = (Resolve-Path (Join-Path $qaDir "..\..\..")).Path
 $exe = Join-Path $repoRoot "apps\desktop\src-tauri\target\release\javis-desktop.exe"
 $storageKey = "javis.approvalRecords.v1"
+$taskHistoryKey = "javis.taskHistory.v1"
 $downloads = Join-Path $env:USERPROFILE "Downloads"
-$qaSource = Join-Path $downloads "javis-durable-approval-qa.pdf"
 $qaTargetDir = Join-Path $downloads "JavisDurableApprovalQa"
-$qaTarget = Join-Path $qaTargetDir "javis-durable-approval-qa.pdf"
 
 if (!(Test-Path $exe)) {
   throw "Release executable not found. Run pnpm --filter @javis/desktop tauri build first."
@@ -166,6 +165,13 @@ function Normalize-PathForJavis($path) {
   return $path.Replace("\", "/")
 }
 
+function New-QaPaths($name) {
+  return [pscustomobject]@{
+    Source = Join-Path $downloads "$name.pdf"
+    Target = Join-Path $qaTargetDir "$name.pdf"
+  }
+}
+
 function New-DryRunBindingHash($dryRun) {
   $normalized = [ordered]@{
     operation = $dryRun.operation
@@ -187,9 +193,8 @@ function New-DryRunBindingHash($dryRun) {
   return [PdfDurableApprovalQaHash]::CreateDryRunBindingHash($payload)
 }
 
-function New-ApprovalRecord($approvalId, $source, $target) {
+function New-ApprovalRecord($approvalId, $source, $target, $expiresAt) {
   $createdAt = "2026-05-24T00:00:00.000Z"
-  $expiresAt = "2099-01-01T00:00:00.000Z"
   $dryRun = [ordered]@{
     operation = "Organize PDF files by filename topic"
     affectedPaths = @(
@@ -232,65 +237,204 @@ function New-ApprovalRecord($approvalId, $source, $target) {
   }
 }
 
+function Get-StoredApprovalRecord($socket, [ref]$id) {
+  $storageJson = $storageKey | ConvertTo-Json -Compress
+  $response = Eval-Js $socket $id @"
+(() => {
+  const raw = localStorage.getItem($storageJson);
+  if (!raw) {
+    return null;
+  }
+  const parsed = JSON.parse(raw);
+  return parsed.records && parsed.records[0] ? parsed.records[0] : null;
+})()
+"@
+  return $response.result.result.value
+}
+
+function Test-PageTextIncludes($socket, [ref]$id, $text) {
+  $jsonText = $text | ConvertTo-Json -Compress
+  $response = Eval-Js $socket $id "document.body.innerText.includes($jsonText)"
+  return $response.result.result.value -eq $true
+}
+
+function Inject-ApprovalRecord($approvalId, $source, $target, $expiresAt, $port) {
+  $session = Start-JavisWithCdp $port
+  try {
+    $id = $session.Id
+    $recordJson = (New-ApprovalRecord $approvalId $source $target $expiresAt) | ConvertTo-Json -Depth 12 -Compress
+    $recordJsonLiteral = $recordJson | ConvertTo-Json -Compress
+    Eval-Js $session.Socket ([ref]$id) @"
+(() => {
+  localStorage.removeItem('$taskHistoryKey');
+  localStorage.setItem('$storageKey', $recordJsonLiteral);
+  return localStorage.getItem('$storageKey');
+})()
+"@ | Out-Null
+  } finally {
+    Stop-Javis $session
+  }
+}
+
+function Run-ApproveScenario {
+  $paths = New-QaPaths "javis-durable-approval-approve-qa"
+  Remove-Item -LiteralPath $paths.Source -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $paths.Target -Force -ErrorAction SilentlyContinue
+  [System.IO.File]::WriteAllText($paths.Source, "%PDF-1.4`n% Javis durable approval approve QA`n")
+  Inject-ApprovalRecord "pdf-approval-durable-approve-qa" $paths.Source $paths.Target "2099-01-01T00:00:00.000Z" 9231
+
+  $session = Start-JavisWithCdp 9232
+  try {
+    $id = $session.Id
+    Wait-ForText $session.Socket ([ref]$id) "PDF organization approval needed" 30 | Out-Null
+    Wait-ForText $session.Socket ([ref]$id) "javis-durable-approval-approve-qa.pdf" 10 | Out-Null
+    Capture-Window $session.Process.MainWindowHandle (Join-Path $qaDir "21-pdf-durable-approval-restored.png")
+    Click-PendingPermissionButton $session.Socket ([ref]$id) "Approve"
+    Wait-ForText $session.Socket ([ref]$id) "PDF organization completed" 30 | Out-Null
+    Capture-Window $session.Process.MainWindowHandle (Join-Path $qaDir "22-pdf-durable-approval-approved.png")
+    $storedRecord = Get-StoredApprovalRecord $session.Socket ([ref]$id)
+
+    if (Test-Path $paths.Source) {
+      throw "Approve QA source still exists after restored approval execution."
+    }
+    if (!(Test-Path $paths.Target)) {
+      throw "Approve QA target was not created by restored approval execution."
+    }
+    if ($storedRecord.status -ne "approved" -or $storedRecord.decision -ne "approved") {
+      throw "Approve QA durable approval record was not resolved as approved."
+    }
+
+    return [pscustomobject]@{
+      Decision = "approved"
+      Source = $paths.Source
+      Target = $paths.Target
+      SourceExistsAfterDecision = Test-Path $paths.Source
+      TargetExistsAfterDecision = Test-Path $paths.Target
+      StoredStatus = $storedRecord.status
+      PreviewHash = $storedRecord.previewHash
+      Screenshots = @(
+        "21-pdf-durable-approval-restored.png",
+        "22-pdf-durable-approval-approved.png"
+      )
+    }
+  } finally {
+    Stop-Javis $session
+  }
+}
+
+function Run-DenyScenario {
+  $paths = New-QaPaths "javis-durable-approval-deny-qa"
+  Remove-Item -LiteralPath $paths.Source -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $paths.Target -Force -ErrorAction SilentlyContinue
+  [System.IO.File]::WriteAllText($paths.Source, "%PDF-1.4`n% Javis durable approval deny QA`n")
+  Inject-ApprovalRecord "pdf-approval-durable-deny-qa" $paths.Source $paths.Target "2099-01-01T00:00:00.000Z" 9233
+
+  $session = Start-JavisWithCdp 9234
+  try {
+    $id = $session.Id
+    Wait-ForText $session.Socket ([ref]$id) "PDF organization approval needed" 30 | Out-Null
+    Wait-ForText $session.Socket ([ref]$id) "javis-durable-approval-deny-qa.pdf" 10 | Out-Null
+    Capture-Window $session.Process.MainWindowHandle (Join-Path $qaDir "23-pdf-durable-approval-deny-restored.png")
+    Click-PendingPermissionButton $session.Socket ([ref]$id) "Deny"
+    Wait-ForText $session.Socket ([ref]$id) "PDF organization denied" 30 | Out-Null
+    Capture-Window $session.Process.MainWindowHandle (Join-Path $qaDir "24-pdf-durable-approval-denied.png")
+    $storedRecord = Get-StoredApprovalRecord $session.Socket ([ref]$id)
+
+    if (!(Test-Path $paths.Source)) {
+      throw "Deny QA source was moved or deleted."
+    }
+    if (Test-Path $paths.Target) {
+      throw "Deny QA target exists even though approval was denied."
+    }
+    if ($storedRecord.status -ne "denied" -or $storedRecord.decision -ne "denied") {
+      throw "Deny QA durable approval record was not resolved as denied."
+    }
+
+    return [pscustomobject]@{
+      Decision = "denied"
+      Source = $paths.Source
+      Target = $paths.Target
+      SourceExistsAfterDecision = Test-Path $paths.Source
+      TargetExistsAfterDecision = Test-Path $paths.Target
+      StoredStatus = $storedRecord.status
+      PreviewHash = $storedRecord.previewHash
+      Screenshots = @(
+        "23-pdf-durable-approval-deny-restored.png",
+        "24-pdf-durable-approval-denied.png"
+      )
+    }
+  } finally {
+    Stop-Javis $session
+  }
+}
+
+function Run-ExpiredScenario {
+  $paths = New-QaPaths "javis-durable-approval-expired-qa"
+  Remove-Item -LiteralPath $paths.Source -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $paths.Target -Force -ErrorAction SilentlyContinue
+  [System.IO.File]::WriteAllText($paths.Source, "%PDF-1.4`n% Javis durable approval expired QA`n")
+  Inject-ApprovalRecord "pdf-approval-durable-expired-qa" $paths.Source $paths.Target "2026-01-01T00:00:00.000Z" 9235
+
+  $session = Start-JavisWithCdp 9236
+  try {
+    $id = $session.Id
+    Start-Sleep -Seconds 3
+    $hasApprovalCard = Test-PageTextIncludes $session.Socket ([ref]$id) "PDF organization approval needed"
+    Capture-Window $session.Process.MainWindowHandle (Join-Path $qaDir "25-pdf-durable-approval-expired.png")
+    $storedRecord = Get-StoredApprovalRecord $session.Socket ([ref]$id)
+
+    if ($hasApprovalCard) {
+      throw "Expired QA restored an approval card."
+    }
+    if (!(Test-Path $paths.Source)) {
+      throw "Expired QA source was moved or deleted."
+    }
+    if (Test-Path $paths.Target) {
+      throw "Expired QA target exists even though approval was expired."
+    }
+    if ($storedRecord.status -ne "expired") {
+      throw "Expired QA durable approval record was not marked expired."
+    }
+
+    return [pscustomobject]@{
+      Decision = "expired"
+      Source = $paths.Source
+      Target = $paths.Target
+      SourceExistsAfterDecision = Test-Path $paths.Source
+      TargetExistsAfterDecision = Test-Path $paths.Target
+      StoredStatus = $storedRecord.status
+      PreviewHash = $storedRecord.previewHash
+      Screenshots = @("25-pdf-durable-approval-expired.png")
+    }
+  } finally {
+    Stop-Javis $session
+  }
+}
+
 $session = $null
 $restartSession = $null
 $previousWebviewArgs = [Environment]::GetEnvironmentVariable("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "Process")
 
 try {
-  Remove-Item -LiteralPath $qaSource -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $qaTarget -Force -ErrorAction SilentlyContinue
   New-Item -ItemType Directory -Force -Path $qaTargetDir | Out-Null
-  [System.IO.File]::WriteAllText($qaSource, "%PDF-1.4`n% Javis durable approval QA`n")
-
-  $session = Start-JavisWithCdp 9231
-  $id = $session.Id
-  $recordJson = (New-ApprovalRecord "pdf-approval-durable-qa" $qaSource $qaTarget) | ConvertTo-Json -Depth 12 -Compress
-  $recordJsonLiteral = $recordJson | ConvertTo-Json -Compress
-  Eval-Js $session.Socket ([ref]$id) @"
-(() => {
-  localStorage.setItem('$storageKey', $recordJsonLiteral);
-  return localStorage.getItem('$storageKey');
-})()
-"@ | Out-Null
-  Stop-Javis $session
-  $session = $null
-
-  $restartSession = Start-JavisWithCdp 9232
-  $restartId = $restartSession.Id
-  Wait-ForText $restartSession.Socket ([ref]$restartId) "PDF organization approval needed" 30 | Out-Null
-  Wait-ForText $restartSession.Socket ([ref]$restartId) "javis-durable-approval-qa.pdf" 10 | Out-Null
-  Capture-Window $restartSession.Process.MainWindowHandle (Join-Path $qaDir "21-pdf-durable-approval-restored.png")
-  Click-PendingPermissionButton $restartSession.Socket ([ref]$restartId) "Approve"
-  Wait-ForText $restartSession.Socket ([ref]$restartId) "PDF organization completed" 30 | Out-Null
-  Capture-Window $restartSession.Process.MainWindowHandle (Join-Path $qaDir "22-pdf-durable-approval-approved.png")
-  $storedAfterApprove = (Eval-Js $restartSession.Socket ([ref]$restartId) "localStorage.getItem('$storageKey')").result.result.value
-
-  if (Test-Path $qaSource) {
-    throw "QA source still exists after restored approval execution."
-  }
-  if (!(Test-Path $qaTarget)) {
-    throw "QA target was not created by restored approval execution."
-  }
+  $approveResult = Run-ApproveScenario
+  $denyResult = Run-DenyScenario
+  $expiredResult = Run-ExpiredScenario
 
   [pscustomobject]@{
     ApprovalStorageKey = $storageKey
-    Source = $qaSource
-    Target = $qaTarget
-    SourceExistsAfterApprove = Test-Path $qaSource
-    TargetExistsAfterApprove = Test-Path $qaTarget
-    StoredAfterApprove = $storedAfterApprove
-    Screenshots = @(
-      "21-pdf-durable-approval-restored.png",
-      "22-pdf-durable-approval-approved.png"
-    )
+    Results = @($approveResult, $denyResult, $expiredResult)
   } | ConvertTo-Json -Depth 6
 }
 finally {
   Stop-Javis $session
   Stop-Javis $restartSession
-  Remove-Item -LiteralPath $qaSource -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $qaTarget -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $qaTargetDir -Force -ErrorAction SilentlyContinue
+  if (Test-Path -LiteralPath $qaTargetDir) {
+    Remove-Item -LiteralPath $qaTargetDir -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  Remove-Item -LiteralPath (Join-Path $downloads "javis-durable-approval-approve-qa.pdf") -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath (Join-Path $downloads "javis-durable-approval-deny-qa.pdf") -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath (Join-Path $downloads "javis-durable-approval-expired-qa.pdf") -Force -ErrorAction SilentlyContinue
   if ($null -eq $previousWebviewArgs) {
     Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
   } else {
