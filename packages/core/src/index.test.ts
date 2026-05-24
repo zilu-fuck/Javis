@@ -282,7 +282,9 @@ describe("createFileScanTaskRuntime", () => {
 
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
-    expect(applyProposedEdit).toHaveBeenCalledWith(proposedEdit);
+    expect(applyProposedEdit).toHaveBeenCalledWith(proposedEdit, {
+      approvalId: expect.stringMatching(/^task-\d+-apply-permission$/),
+    });
     expect(finalSnapshot.codeProposedEdit).toEqual(proposedEdit);
     expect(finalSnapshot.codeApplyResult?.applied).toBe(true);
     expect(finalSnapshot.tokenUsage).toEqual({

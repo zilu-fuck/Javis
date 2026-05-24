@@ -1396,7 +1396,9 @@ export function createFileScanTaskRuntime({
             });
 
             try {
-              const applyResult = await activeCodeTool.applyProposedEdit(proposedEdit);
+              const applyResult = await activeCodeTool.applyProposedEdit(proposedEdit, {
+                approvalId: resolvedApplyRequest.id,
+              });
               const applySafetyError = validateCodeApplyResult(proposedEdit, applyResult);
               if (applySafetyError) {
                 emit({

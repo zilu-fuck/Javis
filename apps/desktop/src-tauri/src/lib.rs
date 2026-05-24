@@ -145,9 +145,12 @@ struct ProjectScript {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CodePatchApplyRequest {
+    approval_id: String,
+    proposal_id: String,
     workspace_path: String,
     changed_files: Vec<String>,
     patch: String,
+    patch_hash: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1125,12 +1128,29 @@ fn apply_code_patch_in_workspace(
 ) -> Result<CodeApplyResult, String> {
     let canonical_workspace = fs::canonicalize(workspace)
         .map_err(|error| format!("Workspace is not accessible: {error}"))?;
+    if request.approval_id.trim().is_empty() {
+        return Err("Code patch approval id is required.".to_string());
+    }
+    if request.proposal_id.trim().is_empty() {
+        return Err("Code patch proposal id is required.".to_string());
+    }
     let patch = request.patch.trim();
     if patch.is_empty() {
         return Err("Code patch cannot be empty.".to_string());
     }
     if request.changed_files.is_empty() {
         return Err("Code patch must list at least one approved changed file.".to_string());
+    }
+    let expected_patch_hash = create_code_proposal_hash(&CodeProposedEdit {
+        proposal_id: request.proposal_id.clone(),
+        workspace_path: normalize_path(&canonical_workspace),
+        summary: String::new(),
+        changed_files: request.changed_files.clone(),
+        patch: request.patch.clone(),
+        patch_hash: String::new(),
+    });
+    if request.patch_hash != expected_patch_hash {
+        return Err("Code patch hash does not match the approved proposal.".to_string());
     }
 
     let approved_files = request
@@ -2407,11 +2427,7 @@ mod tests {
 
         let result = apply_code_patch_in_workspace(
             &root,
-            CodePatchApplyRequest {
-                workspace_path: normalize_path(&root),
-                changed_files: vec!["src/message.txt".to_string()],
-                patch,
-            },
+            code_patch_apply_request(&root, vec!["src/message.txt".to_string()], patch),
         )
         .expect("apply approved patch");
 
@@ -2433,16 +2449,54 @@ mod tests {
 
         let result = apply_code_patch_in_workspace(
             &root,
-            CodePatchApplyRequest {
-                workspace_path: normalize_path(&root),
-                changed_files: vec!["src/allowed.txt".to_string()],
-                patch: patch.to_string(),
-            },
+            code_patch_apply_request(
+                &root,
+                vec!["src/allowed.txt".to_string()],
+                patch.to_string(),
+            ),
         );
 
         assert_eq!(
             result.expect_err("unapproved path should fail"),
             "Patch includes an unapproved file path: src/other.txt"
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn apply_code_patch_requires_approval_id() {
+        let root = create_test_directory("code-patch-approval-id");
+        let mut request = code_patch_apply_request(
+            &root,
+            vec!["src/message.txt".to_string()],
+            "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
+        );
+        request.approval_id = " ".to_string();
+
+        let result = apply_code_patch_in_workspace(&root, request);
+
+        assert_eq!(
+            result.expect_err("missing approval id should fail"),
+            "Code patch approval id is required."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn apply_code_patch_rejects_patch_hash_mismatch() {
+        let root = create_test_directory("code-patch-hash-mismatch");
+        let mut request = code_patch_apply_request(
+            &root,
+            vec!["src/message.txt".to_string()],
+            "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
+        );
+        request.patch_hash = "fnv1a-wrong".to_string();
+
+        let result = apply_code_patch_in_workspace(&root, request);
+
+        assert_eq!(
+            result.expect_err("patch hash mismatch should fail"),
+            "Code patch hash does not match the approved proposal."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -2496,11 +2550,11 @@ mod tests {
 
         let result = apply_code_patch_in_workspace(
             &root,
-            CodePatchApplyRequest {
-                workspace_path: normalize_path(&root),
-                changed_files: vec!["../outside.txt".to_string()],
-                patch: "diff --git a/../outside.txt b/../outside.txt\n".to_string(),
-            },
+            code_patch_apply_request(
+                &root,
+                vec!["../outside.txt".to_string()],
+                "diff --git a/../outside.txt b/../outside.txt\n".to_string(),
+            ),
         );
 
         assert_eq!(
@@ -2955,6 +3009,31 @@ mod tests {
         let root = std::env::temp_dir().join(format!("javis-{name}-{unique}"));
         fs::create_dir_all(&root).expect("create test directory");
         root
+    }
+
+    fn code_patch_apply_request(
+        workspace: &Path,
+        changed_files: Vec<String>,
+        patch: String,
+    ) -> CodePatchApplyRequest {
+        let canonical_workspace =
+            fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+        let proposal = CodeProposedEdit {
+            proposal_id: "opencode-test".to_string(),
+            workspace_path: normalize_path(&canonical_workspace),
+            summary: "Test patch.".to_string(),
+            changed_files: changed_files.clone(),
+            patch: patch.clone(),
+            patch_hash: String::new(),
+        };
+        CodePatchApplyRequest {
+            approval_id: "approval-test".to_string(),
+            proposal_id: proposal.proposal_id.clone(),
+            workspace_path: proposal.workspace_path.clone(),
+            changed_files,
+            patch,
+            patch_hash: create_code_proposal_hash(&proposal),
+        }
     }
 
     fn init_git_repo(root: &Path) {

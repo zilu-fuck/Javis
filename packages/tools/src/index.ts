@@ -165,10 +165,14 @@ export interface CodeApplyResult {
   message: string;
 }
 
+export interface CodeApplyApproval {
+  approvalId: string;
+}
+
 export interface CodeTool {
   inspectRepository(): Promise<CodeReviewPreview>;
   proposeEdit?(request: { userGoal: string; preview: CodeReviewPreview }): Promise<CodeProposedEdit>;
-  applyProposedEdit?(edit: CodeProposedEdit): Promise<CodeApplyResult>;
+  applyProposedEdit?(edit: CodeProposedEdit, approval: CodeApplyApproval): Promise<CodeApplyResult>;
 }
 
 export interface WebTool {

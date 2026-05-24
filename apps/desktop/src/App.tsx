@@ -127,12 +127,15 @@ function App() {
                 baseUrl: modelSettings.baseUrl,
               },
             }),
-          applyProposedEdit: (edit: CodeProposedEdit) =>
+          applyProposedEdit: (edit: CodeProposedEdit, approval) =>
             invoke<CodeApplyResult>("apply_code_patch", {
               request: {
+                approvalId: approval.approvalId,
+                proposalId: edit.proposalId,
                 workspacePath: edit.workspacePath,
                 changedFiles: edit.changedFiles,
                 patch: edit.patch,
+                patchHash: edit.patchHash,
               },
             }),
         },
