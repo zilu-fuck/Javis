@@ -213,12 +213,19 @@ struct CodeProposedEdit {
     patch_hash: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawCodeProposal {
     summary: String,
     changed_files: Vec<String>,
     patch: String,
+}
+
+#[derive(Default)]
+struct RawCodeProposalParts {
+    summary: Option<String>,
+    changed_files: Option<Vec<String>>,
+    patch: Option<String>,
 }
 
 #[derive(Default)]
@@ -1116,19 +1123,37 @@ fn run_openai_compatible_proposal_request(
         .body_mut()
         .read_to_string()
         .map_err(|error| format!("OpenAI-compatible proposal fallback could not read response: {error}"))?;
-    let value = serde_json::from_str::<serde_json::Value>(&response_text)
-        .map_err(|error| format!("OpenAI-compatible proposal fallback returned invalid JSON: {error}"))?;
-    let content = value
+    let value = serde_json::from_str::<serde_json::Value>(&response_text).map_err(|error| {
+        format!(
+            "OpenAI-compatible proposal fallback returned invalid JSON: {error}; {}",
+            create_provider_response_diagnostic(request, &endpoint, &response_text)
+        )
+    })?;
+    let content_value = value
         .get("choices")
         .and_then(|choices| choices.as_array())
         .and_then(|choices| choices.first())
         .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(|content| content.as_str())
-        .map(str::trim)
+        .and_then(|message| message.get("content"));
+    let Some(content_value) = content_value else {
+        return Err(format!(
+            "OpenAI-compatible proposal fallback returned no message content. {}",
+            create_provider_response_diagnostic(request, &endpoint, &response_text)
+        ));
+    };
+    let content = content_value
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| serde_json::to_string(content_value).ok())
+        .map(|content| content.trim().to_string())
         .filter(|content| !content.is_empty())
-        .ok_or_else(|| "OpenAI-compatible proposal fallback returned no message content.".to_string())?;
-    Ok(content.to_string())
+        .ok_or_else(|| {
+            format!(
+                "OpenAI-compatible proposal fallback returned empty message content. {}",
+                create_provider_response_diagnostic(request, &endpoint, &response_text)
+            )
+        })?;
+    Ok(content)
 }
 
 fn default_openai_compatible_base_url(request: &CodeProposeEditRequest) -> String {
@@ -1146,6 +1171,32 @@ fn create_chat_completions_endpoint(base_url: &str) -> String {
         return trimmed.to_string();
     }
     format!("{trimmed}/chat/completions")
+}
+
+fn create_provider_response_diagnostic(
+    request: &CodeProposeEditRequest,
+    endpoint: &str,
+    body: &str,
+) -> String {
+    let provider_id = normalize_optional_config_value(request.provider_id.as_deref())
+        .unwrap_or_else(|| infer_provider_id_from_model(request));
+    let model = normalize_openai_compatible_model_name(request).unwrap_or_else(|| "unknown".to_string());
+    let body_hash = create_fnv1a_hash(body.as_bytes());
+    let body_preview = summarize_provider_output_for_error(body);
+    format!(
+        "provider={provider_id}; model={model}; endpointHost={}; bodyHash={body_hash}; bodyPreview={body_preview}",
+        extract_url_host(endpoint)
+    )
+}
+
+fn extract_url_host(url: &str) -> String {
+    url.split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(url)
+        .split('/')
+        .next()
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 fn resolve_opencode_program() -> PathBuf {
@@ -1188,9 +1239,16 @@ fn opencode_candidates_near_executable(exe_path: &Path) -> Vec<PathBuf> {
 
 fn create_opencode_proposal_prompt(request: &CodeProposeEditRequest) -> String {
     format!(
-        r#"You are generating a patch proposal for Javis. Do not edit files. Return only a single JSON object with keys summary, changedFiles, and patch. Do not include markdown fences or explanation.
+        r#"You are generating a patch proposal for Javis. Do not edit files. Return only one JSON object and no markdown fences or explanation.
 
-The patch must be a unified diff for only the approved changed files. The patch should apply to the current diff preview below. If you cannot produce a safe patch, return an empty patch string.
+Use exactly this schema:
+{{"summary":"one short sentence","changedFiles":["relative/path"],"patch":"unified diff text"}}
+
+Rules:
+- changedFiles must be a non-empty subset of the approved changed files.
+- patch must be a non-empty unified diff touching only changedFiles.
+- patch must apply to the current diff preview below.
+- If you cannot produce a safe unified diff, do not invent files or unsafe edits.
 
 User goal:
 {}
@@ -1271,6 +1329,22 @@ fn extract_raw_code_proposal(text: &str) -> Result<RawCodeProposal, String> {
                     return Ok(raw);
                 }
             }
+            if let Some(content) = value
+                .get("choices")
+                .and_then(|choices| choices.as_array())
+                .and_then(|choices| choices.first())
+                .and_then(|choice| choice.get("message"))
+                .and_then(|message| message.get("content"))
+            {
+                if let Some(raw) = raw_code_proposal_from_value(content) {
+                    return Ok(raw);
+                }
+                if let Some(content) = content.as_str() {
+                    if let Some(raw) = parse_raw_code_proposal_candidate(content.trim()) {
+                        return Ok(raw);
+                    }
+                }
+            }
             if let Some(text) = value.get("text").and_then(|text| text.as_str()) {
                 if let Ok(raw) = serde_json::from_str::<RawCodeProposal>(text.trim()) {
                     return Ok(raw);
@@ -1279,11 +1353,116 @@ fn extract_raw_code_proposal(text: &str) -> Result<RawCodeProposal, String> {
         }
     }
 
-    Err("opencode did not return a parseable CodeProposedEdit JSON object.".to_string())
+    Err(format!(
+        "opencode did not return a parseable CodeProposedEdit JSON object. Output excerpt: {}",
+        summarize_provider_output_for_error(text)
+    ))
 }
 
 fn parse_raw_code_proposal_candidate(text: &str) -> Option<RawCodeProposal> {
-    serde_json::from_str::<RawCodeProposal>(normalize_json_candidate(text).trim()).ok()
+    let value = serde_json::from_str::<serde_json::Value>(normalize_json_candidate(text).trim()).ok()?;
+    raw_code_proposal_from_value(&value)
+}
+
+fn raw_code_proposal_from_value(value: &serde_json::Value) -> Option<RawCodeProposal> {
+    let object = value.as_object()?;
+    if let Some(content) = object
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+    {
+        if let Some(raw) = raw_code_proposal_from_value(content) {
+            return Some(raw);
+        }
+        if let Some(content) = content.as_str() {
+            if let Some(raw) = parse_raw_code_proposal_candidate(content) {
+                return Some(raw);
+            }
+        }
+    }
+    for key in ["proposal", "codeProposal", "code_proposal"] {
+        if let Some(raw) = object.get(key).and_then(raw_code_proposal_from_value) {
+            return Some(raw);
+        }
+    }
+
+    let mut parts = RawCodeProposalParts::default();
+    parts.summary = get_string_field(object, &["summary", "title", "description"]);
+    parts.changed_files = get_string_array_field(
+        object,
+        &["changedFiles", "changed_files", "files", "affectedPaths", "affected_paths"],
+    );
+    parts.patch = get_string_field(object, &["patch", "diff", "unifiedDiff", "unified_diff"]);
+
+    Some(RawCodeProposal {
+        summary: parts.summary?,
+        changed_files: parts.changed_files?,
+        patch: parts.patch?,
+    })
+}
+
+fn get_string_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<String> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(|value| value.as_str()))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn get_string_array_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<Vec<String>> {
+    keys.iter().find_map(|key| {
+        object.get(*key).and_then(|value| {
+            value.as_array().map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::trim))
+                    .filter(|item| !item.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+        })
+    })
+}
+
+fn summarize_provider_output_for_error(text: &str) -> String {
+    let excerpt = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(500)
+        .collect::<String>();
+    redact_secret_like_text(&excerpt)
+}
+
+fn redact_secret_like_text(text: &str) -> String {
+    text.split_whitespace()
+        .map(|token| {
+            let normalized = token.trim_matches(|character: char| {
+                matches!(character, '"' | '\'' | ',' | ':' | ';' | '{' | '}' | '[' | ']')
+            });
+            if normalized.starts_with("sk-")
+                && normalized.len() > 12
+                || normalized.eq_ignore_ascii_case("bearer")
+                || normalized.eq_ignore_ascii_case("authorization")
+                || normalized.eq_ignore_ascii_case("apikey")
+                || normalized.eq_ignore_ascii_case("api_key")
+            {
+                "[redacted-secret]"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn normalize_json_candidate(text: &str) -> String {
@@ -3286,6 +3465,96 @@ mod tests {
         assert_eq!(proposal.summary, "Tighten message copy.");
         assert_eq!(proposal.changed_files, vec!["src/message.txt"]);
         fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn parses_provider_proposal_aliases_and_nested_payloads() {
+        let root = create_test_directory("code-proposal-aliases");
+        let file = root.join("src").join("message.txt");
+        fs::create_dir_all(file.parent().expect("file parent")).expect("create src");
+        fs::write(&file, "before\n").expect("write file");
+        let text = r#"{
+          "proposal": {
+            "description": "Tighten message copy.",
+            "changed_files": ["src/message.txt"],
+            "unifiedDiff": "diff --git a/src/message.txt b/src/message.txt\n--- a/src/message.txt\n+++ b/src/message.txt\n@@ -1 +1 @@\n-before\n+after\n"
+          }
+        }"#;
+
+        let proposal = parse_code_proposal_from_text(&root, text).expect("proposal");
+
+        assert_eq!(proposal.summary, "Tighten message copy.");
+        assert_eq!(proposal.changed_files, vec!["src/message.txt"]);
+        assert!(proposal.patch.contains("+after"));
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn parses_openai_content_object_code_proposal() {
+        let root = create_test_directory("code-proposal-content-object");
+        let file = root.join("src").join("message.txt");
+        fs::create_dir_all(file.parent().expect("file parent")).expect("create src");
+        fs::write(&file, "before\n").expect("write file");
+        let text = r#"{
+          "choices": [
+            {
+              "message": {
+                "content": {
+                  "summary": "Tighten message copy.",
+                  "files": ["src/message.txt"],
+                  "diff": "diff --git a/src/message.txt b/src/message.txt\n--- a/src/message.txt\n+++ b/src/message.txt\n@@ -1 +1 @@\n-before\n+after\n"
+                }
+              }
+            }
+          ]
+        }"#;
+
+        let proposal = parse_code_proposal_from_text(&root, text).expect("proposal");
+
+        assert_eq!(proposal.summary, "Tighten message copy.");
+        assert_eq!(proposal.changed_files, vec!["src/message.txt"]);
+        assert!(proposal.patch.contains("+after"));
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn code_proposal_parse_errors_include_sanitized_excerpt() {
+        let error = extract_raw_code_proposal(
+            "provider returned invalid response sk-super-secret-token-that-should-not-leak",
+        )
+        .expect_err("invalid proposal should fail");
+
+        assert!(error.contains("Output excerpt:"));
+        assert!(error.contains("[redacted-secret]"));
+        assert!(!error.contains("sk-super-secret"));
+    }
+
+    #[test]
+    fn provider_response_diagnostics_are_redacted() {
+        let request = CodeProposeEditRequest {
+            workspace_path: "E:/Javis".to_string(),
+            user_goal: "Review changes".to_string(),
+            changed_files: vec!["src/message.txt".to_string()],
+            diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
+            provider_id: Some("deepseek".to_string()),
+            model: Some("deepseek/deepseek-v4-flash".to_string()),
+            api_key: Some("sk-local-secret-that-must-not-leak".to_string()),
+            api_key_reference: None,
+            base_url: Some("https://api.deepseek.com".to_string()),
+        };
+
+        let diagnostic = create_provider_response_diagnostic(
+            &request,
+            "https://api.deepseek.com/chat/completions",
+            r#"{"error":"Authorization Bearer sk-local-secret-that-must-not-leak apiKey failed"}"#,
+        );
+
+        assert!(diagnostic.contains("provider=deepseek"));
+        assert!(diagnostic.contains("model=deepseek-v4-flash"));
+        assert!(diagnostic.contains("endpointHost=api.deepseek.com"));
+        assert!(diagnostic.contains("bodyHash=fnv1a-"));
+        assert!(diagnostic.contains("[redacted-secret]"));
+        assert!(!diagnostic.contains("sk-local-secret"));
     }
 
     #[test]

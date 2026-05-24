@@ -55,11 +55,11 @@ Status: complete for the 2026-05-23 QA pass.
   implemented.
 - Integrate opencode as an optional backend. Initial proposal-only adapter is
   implemented, uses desktop-managed model settings, has DeepSeek/custom
-  OpenAI-compatible fallback, proposal parser hardening, and Windows DPAPI
-  secret-reference credential storage. Packaged-app fixture QA covers proposal
-  denial and approved patch application. Live DeepSeek-compatible smoke reaches
-  proposal generation but still needs prompt/parser hardening before it returns
-  a parseable patch proposal.
+  OpenAI-compatible fallback, proposal parser hardening, redacted provider
+  diagnostics, and Windows DPAPI secret-reference credential storage.
+  Packaged-app fixture QA covers proposal denial and approved patch
+  application. Live DeepSeek-compatible smoke reaches proposal generation and
+  should be rerun after the latest prompt/parser hardening.
 - Treat opencode as an extensible kernel:
   - use MCP for memory, search, indexing, and other external capabilities
   - evaluate OpenCode plugins such as FullAutoAgent-style workflow plugins and
