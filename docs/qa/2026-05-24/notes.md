@@ -38,10 +38,10 @@ Command status:
 - `pnpm --filter @javis/desktop tauri build`: pass
 - `workspace-restart-qa.ps1`: pass
 - `code-agent-opencode-qa.ps1`: pass for fixture proposal deny/apply in the
-  current rerun. Earlier live DeepSeek-compatible provider evidence reached
-  proposal generation but did not return a parseable patch proposal before any
-  write approval was requested. Live smoke is now blocked until QA can inject
-  temporary credentials without writing them to localStorage.
+  current rerun. Live DeepSeek-compatible provider smoke now injects temporary
+  credentials through the native secret reference path instead of localStorage;
+  the provider reached proposal generation but still did not return a parseable
+  patch proposal before any write approval was requested.
 - `pdf-durable-approval-qa.ps1`: pass for restored PDF approval approve,
   restored deny, and expired-record fail-closed behavior after packaged app
   restart.
@@ -68,12 +68,14 @@ Evidence:
 - `18-code-agent-approved-before-approve.png`: approval applies only the
   proposed `src/message.txt` patch and records a successful post-apply
   `git diff --check`.
-- `20-code-agent-live-proposal-failed.png`: earlier live DeepSeek-compatible
-  settings reached the opencode proposal phase and failed before write
-  approval, with no file application attempted.
+- `20-code-agent-live-proposal-failed.png`: live DeepSeek-compatible settings
+  reached the opencode proposal phase through native secret-reference credential
+  injection and failed before write approval, with no file application
+  attempted.
 - `code-agent-opencode-qa-output.txt`: records the current fixture deny/apply
-  pass. Live provider credentials were not present in this rerun; future live
-  runs require a non-localStorage credential injection path.
+  pass plus the live DeepSeek-compatible provider result
+  `provider-hardening-needed`. The output records provider/model/status but not
+  the temporary API key.
 - `21-pdf-durable-approval-restored.png`: packaged app relaunch restores a
   pending PDF organization approval from `javis.approvalRecords.v1`.
 - `22-pdf-durable-approval-approved.png`: approving the restored card completes
@@ -106,9 +108,9 @@ Evidence:
 Manual QA verdict: pass for workspace selection, recent-workspace restart
 persistence, fixture-backed Code Agent proposal/apply safety, durable PDF
 approval restore approve/deny/expiry, and durable Code Patch approval restore
-approve/apply/deny/expiry. Live DeepSeek-compatible provider QA remains open
-until credentials can be injected without localStorage and the hardened
-fallback path is rerun.
+approve/apply/deny/expiry. Live DeepSeek-compatible provider QA now exercises
+native secret-reference credential injection, but the provider proposal still
+needs prompt/parser hardening before live approved apply can be considered.
 
 Notes:
 
@@ -122,8 +124,10 @@ Notes:
   WebView DOM.
 - `code-agent-opencode-qa.ps1` creates a temporary local git repository under
   the QA folder, launches the packaged app with WebView2 remote debugging,
-  drives both preview and confirmed-write permission buttons, and deletes the
-  temporary repository after the pass.
+  drives both preview and confirmed-write permission buttons, injects live
+  credentials through the native model API key secret command when live
+  environment variables are present, and deletes the temporary repository after
+  the pass.
 - `pdf-durable-approval-qa.ps1` creates a temporary PDF under Downloads,
   injects a scoped pending durable approval record, restarts the packaged app,
   exercises approve, deny, and expired-record paths, verifies the file effects

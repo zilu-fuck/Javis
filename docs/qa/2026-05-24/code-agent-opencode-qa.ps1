@@ -12,7 +12,7 @@ $liveProvider = [Environment]::GetEnvironmentVariable("JAVIS_OPENCODE_LIVE_PROVI
 $liveModel = [Environment]::GetEnvironmentVariable("JAVIS_OPENCODE_LIVE_MODEL", "Process")
 $liveApiKey = [Environment]::GetEnvironmentVariable("JAVIS_OPENCODE_LIVE_API_KEY", "Process")
 $liveBaseUrl = [Environment]::GetEnvironmentVariable("JAVIS_OPENCODE_LIVE_BASE_URL", "Process")
-$liveCredentialStorageDisabled = [bool]$liveApiKey
+$liveCredentialStorageEnabled = $false
 if (!$liveProvider -and $liveModel -like "deepseek*") {
   $liveProvider = "deepseek"
 }
@@ -165,6 +165,9 @@ function Submit-Goal($socket, [ref]$id, $goal) {
 (() => {
   const goal = $jsonGoal;
   const input = document.querySelector('textarea');
+  if (!input) {
+    throw new Error('Goal textarea was not found.');
+  }
   const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
   setter.call(input, goal);
   input.dispatchEvent(new Event('input', { bubbles: true }));
@@ -241,7 +244,14 @@ function Start-JavisWithCdp($port, $useFixture) {
   }
   $process = Start-Process -FilePath $exe -WorkingDirectory $repoRoot -PassThru
   Start-Sleep -Seconds 8
-  $target = (Invoke-RestMethod -Uri "http://127.0.0.1:$port/json")[0]
+  $targets = Invoke-RestMethod -Uri "http://127.0.0.1:$port/json"
+  $target = @($targets | Where-Object { $_.title -eq "Javis" -or $_.url -like "tauri://*" } | Select-Object -First 1)[0]
+  if (!$target) {
+    $target = @($targets)[0]
+  }
+  if (!$target) {
+    throw "No WebView2 CDP target found on port $port."
+  }
   $socket = [System.Net.WebSockets.ClientWebSocket]::new()
   $socket.ConnectAsync([Uri]$target.webSocketDebuggerUrl, [Threading.CancellationToken]::None).GetAwaiter().GetResult()
   return @{ Process = $process; Socket = $socket; Id = 0 }
@@ -259,10 +269,10 @@ function Stop-Javis($session) {
 
 function Configure-AppStorage($session, [ref]$id, $provider, $model, $baseUrl) {
   $workspaceJson = $workspacePath | ConvertTo-Json -Compress
-  $workspacesJson = "[$workspaceJson]"
   $modelSettingsJson = @{
     provider = $provider
     model = $model
+    apiKeyReference = "default"
     baseUrl = $baseUrl
   } | ConvertTo-Json -Compress
   $storageWorkspaceKeyJson = $storageWorkspaceKey | ConvertTo-Json -Compress
@@ -271,13 +281,25 @@ function Configure-AppStorage($session, [ref]$id, $provider, $model, $baseUrl) {
   Eval-Js $session.Socket $id @"
 (() => {
   localStorage.clear();
-  localStorage.setItem($storageWorkspaceKeyJson, JSON.stringify($workspacesJson));
+  localStorage.setItem($storageWorkspaceKeyJson, JSON.stringify([$workspaceJson]));
   localStorage.setItem($storageModelKeyJson, JSON.stringify($modelSettingsJson));
   location.reload();
   return $workspaceJson;
 })()
 "@ | Out-Null
   Start-Sleep -Seconds 2
+}
+
+function Save-ModelApiKeySecret($session, [ref]$id, $apiKey) {
+  $apiKeyJson = $apiKey | ConvertTo-Json -Compress
+  Eval-Js $session.Socket $id @"
+window.__TAURI__.core.invoke("save_model_api_key_secret", {
+  request: {
+    keyReference: "default",
+    apiKey: $apiKeyJson
+  }
+})
+"@ | Out-Null
 }
 
 function Run-CodeAgentScenario(
@@ -334,13 +356,13 @@ function Run-CodeAgentScenario(
 }
 
 function Run-LiveCodeAgentScenario($provider, $model, $apiKey, $baseUrl) {
-  throw "Live provider QA cannot inject API keys through localStorage. Use a session/credential-store injection path before running live provider QA."
   Reset-QaWorkspace
   $session = $null
   try {
     $session = Start-JavisWithCdp 9227 $false
     $id = $session.Id
     Configure-AppStorage $session ([ref]$id) $provider $model $baseUrl
+    Save-ModelApiKeySecret $session ([ref]$id) $apiKey
     Wait-ForText $session.Socket ([ref]$id) $workspaceName 20 | Out-Null
 
     Submit-Goal $session.Socket ([ref]$id) "Review code changes"
@@ -349,7 +371,8 @@ function Run-LiveCodeAgentScenario($provider, $model, $apiKey, $baseUrl) {
 
     $liveOutcome = Wait-ForAnyText $session.Socket ([ref]$id) @(
       "Code Agent patch approval needed",
-      "Code Agent patch proposal failed"
+      "Code Agent patch proposal failed",
+      "Code Agent patch proposal 失败"
     ) 120
     if ($liveOutcome -eq "Code Agent patch approval needed") {
       Wait-ForText $session.Socket ([ref]$id) "Code Agent patch proposal" 10 | Out-Null
@@ -363,8 +386,11 @@ function Run-LiveCodeAgentScenario($provider, $model, $apiKey, $baseUrl) {
         Screenshots = @("20-code-agent-live-proposal-before-approve.png")
       }
     } else {
-      if ($liveOutcome -ne "Code Agent patch proposal failed") {
-        Wait-ForText $session.Socket ([ref]$id) "Code Agent patch proposal failed" 5 | Out-Null
+      if (!$liveOutcome) {
+        Wait-ForAnyText $session.Socket ([ref]$id) @(
+          "Code Agent patch proposal failed",
+          "Code Agent patch proposal 失败"
+        ) 5 | Out-Null
       }
       Expand-ActivityLog $session.Socket ([ref]$id)
       Start-Sleep -Milliseconds 500
@@ -392,17 +418,12 @@ $previousFixture = [Environment]::GetEnvironmentVariable("JAVIS_CODE_PROPOSAL_FI
 
 try {
   $denyResult = Run-CodeAgentScenario "denied" "Deny" "16-code-agent-proposal-before-deny.png" "Code Agent patch denied" "hello reviewed`n" $true "openai" "openai/code-agent-fixture" "https://fixture.invalid/v1" 9226
-  $approveResult = Run-CodeAgentScenario "approved" "Approve" "18-code-agent-proposal-before-approve.png" "Code Agent patch applied" "hello approved`n" $true "openai" "openai/code-agent-fixture" "https://fixture.invalid/v1" 9226
+  $approveResult = Run-CodeAgentScenario "approved" "Approve" "18-code-agent-proposal-before-approve.png" "Code Agent patch applied" "hello approved`n" $true "openai" "openai/code-agent-fixture" "https://fixture.invalid/v1" 9228
   $gitCheck = Run-Git $workspacePath @("diff", "--check")
   $liveResult = $null
   if ($liveProvider -and $liveModel -and $liveApiKey -and $liveBaseUrl) {
-    $liveResult = [pscustomobject]@{
-      Scenario = "live-proposal"
-      Provider = $liveProvider
-      Model = $liveModel
-      Status = "blocked"
-      Summary = "Live provider QA is blocked until API keys can be injected without localStorage."
-    }
+    $liveCredentialStorageEnabled = $true
+    $liveResult = Run-LiveCodeAgentScenario $liveProvider $liveModel $liveApiKey $liveBaseUrl
   }
 
   [pscustomobject]@{
@@ -410,7 +431,7 @@ try {
     FixturePath = $fixturePath
     GitDiffCheck = $gitCheck
     LiveProviderConfigured = [bool]($liveProvider -and $liveModel -and $liveApiKey -and $liveBaseUrl)
-    LiveCredentialStorageDisabled = $liveCredentialStorageDisabled
+    LiveCredentialStorageEnabled = $liveCredentialStorageEnabled
     Results = @($denyResult, $approveResult)
     LiveResult = $liveResult
   } | ConvertTo-Json -Depth 6

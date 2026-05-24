@@ -34,8 +34,10 @@ Do not call Javis a complete usable product while any of these are true:
   providers. Packaged-app fixture QA passes for proposal denial and approved
   patch application, and the native proposal runner now has timeout,
   OpenAI-compatible fallback, fenced/pretty JSON parsing, and approved-file
-  binding hardening. Live DeepSeek-compatible smoke still needs to be rerun
-  with temporary credentials before this blocker can close.
+  binding hardening. Live DeepSeek-compatible smoke now runs with temporary
+  credentials injected through the native secret-reference path, but the
+  provider still fails before producing a parseable patch proposal, so live
+  approved apply remains covered only by fixture QA.
 - Model API keys are no longer persisted in browser local storage. The desktop
   stores only provider/model/base URL plus a key reference there, writes the key
   through native commands, and on Windows protects the secret with DPAPI before
@@ -61,10 +63,12 @@ Do not call Javis a complete usable product while any of these are true:
 
 The project has a verified MVP foundation. The next stage is product completion:
 
-1. Rerun the live DeepSeek-compatible Code Agent proposal smoke with temporary
-   credentials, then decide whether approved live apply is safe to exercise or
-   should remain covered only by fixture QA.
-2. Expand QA from MVP scenarios to complete-product workflows and add release
+1. Harden the real-provider Code Agent proposal prompt/parser path until the
+   live DeepSeek-compatible smoke produces a parseable proposal without write
+   approval.
+2. Keep live approved apply disabled until real-provider proposal output is
+   stable; continue covering apply through fixture QA.
+3. Expand QA from MVP scenarios to complete-product workflows and add release
    signing/versioning/rollback documentation.
 
 `docs/MVP_STATUS.md` remains useful as a baseline acceptance record, but it is

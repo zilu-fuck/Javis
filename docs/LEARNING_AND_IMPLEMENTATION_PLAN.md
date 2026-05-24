@@ -22,7 +22,7 @@
 | Code Patch proposal | opencode 只负责 proposal，Javis 已验证 patch hash、changed files、workspace 内路径，并通过 native `git apply` 写入；native apply 已在审批时记录 approved files 的当前内容 hash，并在应用前拒绝 stale file。 | proposal 仍是 `changedFiles + patch` 形态，还没有 `baseGitHead`、结构化 hunk 和 apply 前 dry-run 校验；Code Patch 跨重启 restore/apply 仍未开放。 |
 | Rust/native guard | PDF 和 Code Patch 都在 Rust 层做关键路径校验，PDF approval 具有一次性消费语义。 | approval binding、path、hash 校验已开始共享，但 task/tool binding、通用 preview hash 与更多 write command 迁移仍未完成。 |
 | 模型配置与密钥 | 桌面端能配置 provider/model/apiKey/baseUrl；local storage 只保存 provider/model/baseUrl/key reference，旧存储 key 会在加载时清理，Windows native secret store 使用 DPAPI 保护 key，proposal command 按 reference 单次读取。 | 仍需 live provider QA 证明跨重启可用，并决定非 Windows 的 Stronghold/OS credential 路线。 |
-| QA 证据 | 已有 packaged-app fixture QA 覆盖 Code Agent proposal deny 和 approve/apply，研究和工作区重启也有证据。 | live DeepSeek provider smoke 需要在 fallback hardening 后用临时凭据重跑；durable approval 跨重启 QA 尚未建立。 |
+| QA 证据 | 已有 packaged-app fixture QA 覆盖 Code Agent proposal deny 和 approve/apply，live DeepSeek provider smoke 已通过 native secret reference 注入临时凭据并到达 proposal 阶段，研究和工作区重启也有证据。 | live DeepSeek provider 仍未返回可解析 patch proposal；下一步需要 real-provider prompt/parser hardening，live approved apply 继续只由 fixture QA 覆盖。 |
 
 因此，后续不应该先扩展更多 Agent 能力，而应该按下面的实施顺序补齐审批、proposal 和 native guard 三条安全主线。
 

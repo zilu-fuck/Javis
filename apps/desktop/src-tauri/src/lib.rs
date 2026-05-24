@@ -563,7 +563,11 @@ fn propose_code_edit(
     mut request: CodeProposeEditRequest,
 ) -> Result<CodeProposedEdit, String> {
     let workspace = resolve_workspace_path(Some(request.workspace_path.clone()))?;
-    hydrate_model_api_key_secret(&app, &mut request)?;
+    if !env_flag_enabled("JAVIS_QA_MODE")
+        || env::var_os("JAVIS_CODE_PROPOSAL_FIXTURE_PATH").is_none()
+    {
+        hydrate_model_api_key_secret(&app, &mut request)?;
+    }
     propose_code_edit_with_opencode(&workspace, request)
 }
 
