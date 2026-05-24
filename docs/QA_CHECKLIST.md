@@ -157,6 +157,20 @@ exist:
   normalizes them to the provider/model form used by opencode.
   Do not write live API keys into QA notes or committed scripts.
 
+### PDF Durable Approval Restart
+
+- Run `pnpm --filter @javis/desktop tauri build` before packaged restart QA.
+- Run `docs/qa/2026-05-24/pdf-durable-approval-qa.ps1`.
+- Verify the packaged app restores a pending PDF organization approval card
+  from `javis.approvalRecords.v1` after restart.
+- Approve the restored card and verify the source PDF is moved to the approved
+  target path.
+- Verify `javis.approvalRecords.v1` records the approval as `approved` with the
+  same `previewHash`.
+- Capture screenshots for the restored card and approved completion state.
+- Add separate deny/expiry restart coverage before treating Milestone A as
+  fully closed.
+
 ### Product Readiness Scenarios
 
 Before calling a build complete-product-ready, add and pass scenario scripts for

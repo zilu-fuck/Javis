@@ -231,14 +231,14 @@ Task
 - 定义 approval record/event types，先不要引入通用 workflow engine。（已完成初版 `javis.approvalRecords.v1`）
 - 在 desktop persistence 层保存 pending/resolved approvals。（PDF pending/resolved 初版已接入）
 - 记录 `approvalId`、`taskId`、`toolName`、`workspacePath`、`permissionLevel`、`previewHash`、`expiresAt`、`status`、`decision` 和可序列化 dry-run。
-- 用 PDF organization 作为第一条迁移路径：pending approval 重启后恢复确认卡片，approve/deny 都写回 approval record。（实现已接入，仍需 packaged restart QA）
+- 用 PDF organization 作为第一条迁移路径：pending approval 重启后恢复确认卡片，approve/deny 都写回 approval record。（实现已接入，packaged approve restart QA 已通过）
 - 增加 expiry 和 stale preview rejection。
 - 保持现有 resolved permission audit 能进入任务历史，但 pending approval 不再只存在于内存。
 
 成功标准：
 
-- Pending approval 能跨应用重启保留。
-- 重启后 approve/deny 都能工作。
+- Pending approval 能跨应用重启保留。（PDF approve path 已通过 packaged QA）
+- 重启后 approve/deny 都能工作。（PDF approve path 已通过；deny restart QA 待补）
 - 过期或过时 approval 无法执行。
 - 现有 PDF flow 继续通过。
 - 增加 packaged-app QA：在 PDF permission card 出现后关闭应用，重启后恢复卡片并完成 approve/deny。
