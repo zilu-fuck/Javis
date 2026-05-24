@@ -128,7 +128,7 @@ function App() {
                 diff: preview.diff,
                 providerId: modelSettings.provider,
                 model: modelSettings.model,
-                apiKey: modelSettings.apiKey,
+                apiKeyReference: modelSettings.apiKeyReference,
                 baseUrl: modelSettings.baseUrl,
               },
             }),
@@ -295,8 +295,26 @@ function App() {
     });
   }
 
-  function updateModelSettings(settings: ModelSettings) {
-    setModelSettings(saveModelSettings(window.localStorage, settings));
+  async function updateModelSettings(settings: ModelSettings) {
+    const savedSettings = saveModelSettings(window.localStorage, settings);
+    const shouldDeleteSecret = !settings.apiKey.trim() && modelSettings.apiKey.trim();
+    setModelSettings(savedSettings);
+    try {
+      if (settings.apiKey.trim()) {
+        await invoke("save_model_api_key_secret", {
+          request: {
+            keyReference: savedSettings.apiKeyReference,
+            apiKey: settings.apiKey,
+          },
+        });
+      } else if (shouldDeleteSecret) {
+        await invoke("delete_model_api_key_secret", {
+          keyReference: savedSettings.apiKeyReference,
+        });
+      }
+    } catch (error) {
+      console.error("Failed to update model API key secret", error);
+    }
   }
 
   function persistDurableApprovalRecord(nextTask: PersistedTaskSnapshot) {

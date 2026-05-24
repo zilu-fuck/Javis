@@ -142,6 +142,7 @@ export interface WorkbenchModelSettings {
   provider: string;
   model: string;
   apiKey: string;
+  apiKeyReference: string;
   baseUrl: string;
 }
 
@@ -570,6 +571,7 @@ export function JavisWorkbench({
     provider: "openai",
     model: "",
     apiKey: "",
+    apiKeyReference: "default",
     baseUrl: "",
   };
   const filteredHistoryEntries = filterWorkbenchHistoryEntries(

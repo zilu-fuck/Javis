@@ -6,6 +6,7 @@ export interface ModelSettings {
   provider: string;
   model: string;
   apiKey: string;
+  apiKeyReference: string;
   baseUrl: string;
 }
 
@@ -15,6 +16,7 @@ export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   provider: "openai",
   model: "",
   apiKey: "",
+  apiKeyReference: "default",
   baseUrl: "",
 };
 
@@ -52,6 +54,7 @@ export function sanitizeModelSettings(value: unknown): ModelSettings {
     provider: sanitizeText(candidate.provider) || DEFAULT_MODEL_SETTINGS.provider,
     model: sanitizeText(candidate.model),
     apiKey: sanitizeText(candidate.apiKey),
+    apiKeyReference: sanitizeModelApiKeyReference(candidate.apiKeyReference),
     baseUrl: sanitizeText(candidate.baseUrl),
   };
 }
@@ -67,10 +70,16 @@ function toPersistedModelSettings(settings: ModelSettings): PersistedModelSettin
   return {
     provider: settings.provider,
     model: settings.model,
+    apiKeyReference: settings.apiKeyReference,
     baseUrl: settings.baseUrl,
   };
 }
 
 function sanitizeText(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function sanitizeModelApiKeyReference(value: unknown): string {
+  const reference = sanitizeText(value);
+  return reference || DEFAULT_MODEL_SETTINGS.apiKeyReference;
 }

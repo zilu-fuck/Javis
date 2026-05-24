@@ -436,6 +436,7 @@ describe("JavisWorkbench permission cards", () => {
           provider: "openai",
           model: "openai/gpt-5.1-codex",
           apiKey: "",
+          apiKeyReference: "default",
           baseUrl: "https://api.openai.com/v1",
         }}
         onDraftGoalChange={vi.fn()}

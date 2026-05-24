@@ -19,6 +19,7 @@ describe("model settings persistence", () => {
       provider: " openai ",
       model: " openai/gpt-5.1-codex ",
       apiKey: " sk-local ",
+      apiKeyReference: " default ",
       baseUrl: " https://api.example.test/v1 ",
     });
 
@@ -26,14 +27,16 @@ describe("model settings persistence", () => {
       provider: "openai",
       model: "openai/gpt-5.1-codex",
       apiKey: "sk-local",
+      apiKeyReference: "default",
       baseUrl: "https://api.example.test/v1",
     });
     expect(loadModelSettings(storage)).toEqual({
       ...saved,
       apiKey: "",
     });
-    expect(storage.getItem(MODEL_SETTINGS_STORAGE_KEY)).not.toContain("apiKey");
-    expect(storage.getItem(MODEL_SETTINGS_STORAGE_KEY)).not.toContain("sk-local");
+    const persisted = storage.getItem(MODEL_SETTINGS_STORAGE_KEY) ?? "";
+    expect(JSON.parse(persisted)).not.toHaveProperty("apiKey");
+    expect(persisted).not.toContain("sk-local");
   });
 
   it("drops API keys from legacy stored settings", () => {
@@ -49,10 +52,12 @@ describe("model settings persistence", () => {
       provider: "deepseek",
       model: "deepseek/deepseek-v4-flash",
       apiKey: "",
+      apiKeyReference: "default",
       baseUrl: "https://api.deepseek.com",
     });
-    expect(storage.getItem(MODEL_SETTINGS_STORAGE_KEY)).not.toContain("apiKey");
-    expect(storage.getItem(MODEL_SETTINGS_STORAGE_KEY)).not.toContain("sk-legacy");
+    const persisted = storage.getItem(MODEL_SETTINGS_STORAGE_KEY) ?? "";
+    expect(JSON.parse(persisted)).not.toHaveProperty("apiKey");
+    expect(persisted).not.toContain("sk-legacy");
   });
 
   it("rejects malformed stored settings", () => {
@@ -68,12 +73,14 @@ describe("model settings persistence", () => {
         provider: "",
         model: " anthropic/claude-sonnet-4-5 ",
         apiKey: 42,
+        apiKeyReference: "",
         baseUrl: null,
       }),
     ).toEqual({
       provider: "openai",
       model: "anthropic/claude-sonnet-4-5",
       apiKey: "",
+      apiKeyReference: "default",
       baseUrl: "",
     });
   });

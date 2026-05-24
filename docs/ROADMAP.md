@@ -125,8 +125,9 @@ Status: complete for the 2026-05-23 QA pass.
 
 - Improve empty states, loading states, and recovery paths.
 - Keep browser local storage free of model API keys. New saves now persist only
-  provider/model/base URL and legacy stored keys are cleared on load; Stronghold
-  or OS credential storage is still needed for restart-safe secrets.
+  provider/model/base URL and a key reference, legacy stored keys are cleared on
+  load, and Windows native storage protects the referenced secret with DPAPI
+  before single-request use by the Code Agent proposal command.
 - Add structured event stream objects instead of only snapshot updates.
 - Add telemetry-free diagnostics export for local debugging.
 - Add signed builds, version strategy, artifact checksums, release notes, and

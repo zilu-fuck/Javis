@@ -9,8 +9,11 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use tauri::{AppHandle, Manager};
 
 const OPENCODE_PROPOSAL_TIMEOUT: Duration = Duration::from_secs(90);
+const MODEL_API_KEY_SECRET_REFERENCE: &str = "default";
+const MODEL_API_KEY_SECRET_PREFIX: &str = "dpapi-v1:";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -188,7 +191,15 @@ struct CodeProposeEditRequest {
     provider_id: Option<String>,
     model: Option<String>,
     api_key: Option<String>,
+    api_key_reference: Option<String>,
     base_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelApiKeySecretRequest {
+    key_reference: String,
+    api_key: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -534,8 +545,25 @@ fn apply_code_patch(
 }
 
 #[tauri::command]
-fn propose_code_edit(request: CodeProposeEditRequest) -> Result<CodeProposedEdit, String> {
+fn save_model_api_key_secret(
+    app: AppHandle,
+    request: ModelApiKeySecretRequest,
+) -> Result<(), String> {
+    save_model_api_key_secret_for_app(&app, &request.key_reference, &request.api_key)
+}
+
+#[tauri::command]
+fn delete_model_api_key_secret(app: AppHandle, key_reference: String) -> Result<(), String> {
+    delete_model_api_key_secret_for_app(&app, &key_reference)
+}
+
+#[tauri::command]
+fn propose_code_edit(
+    app: AppHandle,
+    mut request: CodeProposeEditRequest,
+) -> Result<CodeProposedEdit, String> {
     let workspace = resolve_workspace_path(Some(request.workspace_path.clone()))?;
+    hydrate_model_api_key_secret(&app, &mut request)?;
     propose_code_edit_with_opencode(&workspace, request)
 }
 
@@ -621,6 +649,175 @@ fn recommend_script(scripts: &[ProjectScript], runner: &str, names: &[&str]) -> 
             .any(|script| script.name == *name)
             .then(|| format!("{} {}", runner, name))
     })
+}
+
+fn save_model_api_key_secret_for_app(
+    app: &AppHandle,
+    key_reference: &str,
+    api_key: &str,
+) -> Result<(), String> {
+    let key_reference = normalize_model_api_key_reference(key_reference)?;
+    let api_key = api_key.trim();
+    if api_key.is_empty() {
+        return delete_model_api_key_secret_for_app(app, &key_reference);
+    }
+    let path = model_api_key_secret_path(app, &key_reference)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create model secret directory: {error}"))?;
+    }
+    fs::write(&path, protect_model_api_key_secret(api_key)?)
+        .map_err(|error| format!("Could not save model API key secret: {error}"))
+}
+
+fn delete_model_api_key_secret_for_app(
+    app: &AppHandle,
+    key_reference: &str,
+) -> Result<(), String> {
+    let key_reference = normalize_model_api_key_reference(key_reference)?;
+    let path = model_api_key_secret_path(app, &key_reference)?;
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Could not delete model API key secret: {error}")),
+    }
+}
+
+fn hydrate_model_api_key_secret(
+    app: &AppHandle,
+    request: &mut CodeProposeEditRequest,
+) -> Result<(), String> {
+    if normalize_optional_config_value(request.api_key.as_deref()).is_some() {
+        return Ok(());
+    }
+    let Some(key_reference) =
+        normalize_optional_config_value(request.api_key_reference.as_deref())
+    else {
+        return Ok(());
+    };
+    request.api_key = Some(load_model_api_key_secret_for_app(app, &key_reference)?);
+    Ok(())
+}
+
+fn load_model_api_key_secret_for_app(
+    app: &AppHandle,
+    key_reference: &str,
+) -> Result<String, String> {
+    let key_reference = normalize_model_api_key_reference(key_reference)?;
+    let path = model_api_key_secret_path(app, &key_reference)?;
+    let secret = fs::read_to_string(&path)
+        .map_err(|error| format!("Could not read model API key secret: {error}"))?;
+    unprotect_model_api_key_secret(secret.trim())
+}
+
+fn model_api_key_secret_path(app: &AppHandle, key_reference: &str) -> Result<PathBuf, String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not resolve app data directory: {error}"))?;
+    Ok(data_dir
+        .join("secrets")
+        .join("model-api-keys")
+        .join(format!("{key_reference}.secret")))
+}
+
+fn normalize_model_api_key_reference(value: &str) -> Result<String, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("Model API key reference is required.".to_string());
+    }
+    if value == MODEL_API_KEY_SECRET_REFERENCE {
+        return Ok(value.to_string());
+    }
+    Err("Unknown model API key reference.".to_string())
+}
+
+#[cfg(windows)]
+fn protect_model_api_key_secret(secret: &str) -> Result<String, String> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
+
+    let mut input = CRYPT_INTEGER_BLOB {
+        cbData: secret.as_bytes().len() as u32,
+        pbData: secret.as_bytes().as_ptr() as *mut u8,
+    };
+    let mut output = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    };
+    let ok = unsafe {
+        CryptProtectData(
+            &mut input,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            0,
+            &mut output,
+        )
+    };
+    if ok == 0 {
+        return Err("Could not protect model API key secret.".to_string());
+    }
+    let protected = unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) };
+    let encoded = STANDARD.encode(protected);
+    unsafe {
+        LocalFree(output.pbData as *mut _);
+    }
+    Ok(format!("{MODEL_API_KEY_SECRET_PREFIX}{encoded}"))
+}
+
+#[cfg(windows)]
+fn unprotect_model_api_key_secret(secret: &str) -> Result<String, String> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
+
+    let encoded = secret
+        .strip_prefix(MODEL_API_KEY_SECRET_PREFIX)
+        .ok_or_else(|| "Model API key secret is not protected.".to_string())?;
+    let protected = STANDARD
+        .decode(encoded)
+        .map_err(|error| format!("Model API key secret is invalid: {error}"))?;
+    let mut input = CRYPT_INTEGER_BLOB {
+        cbData: protected.len() as u32,
+        pbData: protected.as_ptr() as *mut u8,
+    };
+    let mut output = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    };
+    let ok = unsafe {
+        CryptUnprotectData(
+            &mut input,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            0,
+            &mut output,
+        )
+    };
+    if ok == 0 {
+        return Err("Could not unprotect model API key secret.".to_string());
+    }
+    let unprotected =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) };
+    let text = String::from_utf8(unprotected.to_vec())
+        .map_err(|error| format!("Model API key secret is not valid UTF-8: {error}"));
+    unsafe {
+        LocalFree(output.pbData as *mut _);
+    }
+    text
+}
+
+#[cfg(not(windows))]
+fn protect_model_api_key_secret(secret: &str) -> Result<String, String> {
+    Ok(secret.to_string())
+}
+
+#[cfg(not(windows))]
+fn unprotect_model_api_key_secret(secret: &str) -> Result<String, String> {
+    Ok(secret.to_string())
 }
 
 fn propose_code_edit_with_opencode(
@@ -3098,6 +3295,7 @@ mod tests {
             provider_id: Some("openai".to_string()),
             model: Some("openai/gpt-5.1-codex".to_string()),
             api_key: Some("sk-test".to_string()),
+            api_key_reference: None,
             base_url: Some("https://api.example.test/v1".to_string()),
         };
 
@@ -3128,6 +3326,7 @@ mod tests {
             provider_id: Some("custom".to_string()),
             model: Some("custom/local-model".to_string()),
             api_key: Some("local-key".to_string()),
+            api_key_reference: None,
             base_url: Some("http://127.0.0.1:11434/v1".to_string()),
         };
         let config: serde_json::Value =
@@ -3154,6 +3353,7 @@ mod tests {
             provider_id: Some("deepseek".to_string()),
             model: Some("deepseek-v4-flash".to_string()),
             api_key: Some("sk-test".to_string()),
+            api_key_reference: None,
             base_url: Some("https://api.deepseek.com".to_string()),
         };
 
@@ -3181,6 +3381,7 @@ mod tests {
             provider_id: Some("deepseek".to_string()),
             model: Some("deepseek/deepseek-v4-flash".to_string()),
             api_key: Some("sk-test".to_string()),
+            api_key_reference: None,
             base_url: None,
         };
 
@@ -3233,6 +3434,7 @@ mod tests {
             provider_id: Some("deepseek".to_string()),
             model: Some("deepseek/deepseek-v4-flash".to_string()),
             api_key: None,
+            api_key_reference: None,
             base_url: None,
         };
         let text = r#"{"summary":"Tighten message copy.","changedFiles":["src/other.txt"],"patch":"diff --git a/src/other.txt b/src/other.txt\n--- a/src/other.txt\n+++ b/src/other.txt\n@@ -1 +1 @@\n-before\n+after\n"}"#;
@@ -3300,6 +3502,7 @@ mod tests {
                 provider_id: None,
                 model: None,
                 api_key: None,
+                api_key_reference: None,
                 base_url: None,
             },
         );
@@ -3363,6 +3566,37 @@ mod tests {
         let encoded = percent_encode_query("opencode intellisearch/Rust");
 
         assert_eq!(encoded, "opencode+intellisearch%2FRust");
+    }
+
+    #[test]
+    fn model_api_key_secret_round_trips_without_plaintext_storage() {
+        let protected = protect_model_api_key_secret("sk-local-secret").expect("protect secret");
+
+        assert_eq!(
+            unprotect_model_api_key_secret(&protected).expect("unprotect secret"),
+            "sk-local-secret"
+        );
+        #[cfg(windows)]
+        {
+            assert!(protected.starts_with(MODEL_API_KEY_SECRET_PREFIX));
+            assert!(!protected.contains("sk-local-secret"));
+        }
+    }
+
+    #[test]
+    fn model_api_key_reference_is_fixed_and_required() {
+        assert_eq!(
+            normalize_model_api_key_reference(" default ").expect("default reference"),
+            MODEL_API_KEY_SECRET_REFERENCE
+        );
+        assert_eq!(
+            normalize_model_api_key_reference("other").expect_err("unknown reference"),
+            "Unknown model API key reference."
+        );
+        assert_eq!(
+            normalize_model_api_key_reference(" ").expect_err("missing reference"),
+            "Model API key reference is required."
+        );
     }
 
     #[test]
@@ -3542,6 +3776,8 @@ pub fn run() {
             fetch_web_source,
             search_web_sources,
             inspect_project,
+            save_model_api_key_secret,
+            delete_model_api_key_secret,
             propose_code_edit,
             approve_code_patch,
             apply_code_patch,

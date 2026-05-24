@@ -36,9 +36,10 @@ Do not call Javis a complete usable product while any of these are true:
   OpenAI-compatible fallback, fenced/pretty JSON parsing, and approved-file
   binding hardening. Live DeepSeek-compatible smoke still needs to be rerun
   with temporary credentials before this blocker can close.
-- New model API key saves no longer persist the key in app local storage, and
-  legacy stored keys are cleared when model settings are loaded. OS credential
-  storage is still needed before treating secrets as hardened across restarts.
+- Model API keys are no longer persisted in browser local storage. The desktop
+  stores only provider/model/base URL plus a key reference there, writes the key
+  through native commands, and on Windows protects the secret with DPAPI before
+  the proposal command reads it for a single provider request.
 - Pending confirmed-write approval recovery is not fully generalized into a
   shared abstraction, but packaged restart QA now proves PDF and Code Patch
   approval cards survive app restart, can approve/apply or deny from persisted
@@ -60,12 +61,10 @@ Do not call Javis a complete usable product while any of these are true:
 
 The project has a verified MVP foundation. The next stage is product completion:
 
-1. Move model API keys from session-only input into hardened secret storage for
-   restart-safe use.
-2. Rerun the live DeepSeek-compatible Code Agent proposal smoke with temporary
+1. Rerun the live DeepSeek-compatible Code Agent proposal smoke with temporary
    credentials, then decide whether approved live apply is safe to exercise or
    should remain covered only by fixture QA.
-3. Expand QA from MVP scenarios to complete-product workflows and add release
+2. Expand QA from MVP scenarios to complete-product workflows and add release
    signing/versioning/rollback documentation.
 
 `docs/MVP_STATUS.md` remains useful as a baseline acceptance record, but it is
