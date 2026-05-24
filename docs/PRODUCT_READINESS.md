@@ -33,7 +33,9 @@ Do not call Javis a complete usable product while any of these are true:
 - Code Agent live opencode proposal/apply QA is not complete for real
   providers. Packaged-app fixture QA passes for proposal denial and approved
   patch application, but the live DeepSeek-compatible run did not produce a
-  parseable patch proposal before write approval.
+  parseable patch proposal before write approval. The native proposal runner
+  now times out unresponsive opencode/provider calls instead of stalling the
+  task indefinitely.
 - Model API keys are currently persisted in app local storage; OS credential
   storage is still needed before treating secrets as hardened.
 - Task history persistence is limited to local completed/failed/cancelled

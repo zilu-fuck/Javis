@@ -118,6 +118,20 @@ function Wait-ForText($socket, [ref]$id, $text, $seconds) {
   throw "Timed out waiting for text: $text`nCurrent page text:`n$pageText"
 }
 
+function Wait-ForAnyText($socket, [ref]$id, [string[]]$texts, $seconds) {
+  $deadline = (Get-Date).AddSeconds($seconds)
+  while ((Get-Date) -lt $deadline) {
+    $pageText = Get-PageText $socket $id
+    foreach ($text in $texts) {
+      if ($pageText.Contains($text)) {
+        return $text
+      }
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  return $null
+}
+
 function Click-PendingPermissionButton($socket, [ref]$id, $label) {
   $buttonIndex = if ($label -eq "Approve") { 0 } else { 1 }
   $expression = @"
@@ -312,8 +326,11 @@ function Run-LiveCodeAgentScenario($provider, $model, $apiKey, $baseUrl) {
     Wait-ForText $session.Socket ([ref]$id) "Approve code review continuation" 30 | Out-Null
     Click-PendingPermissionButton $session.Socket ([ref]$id) "Approve"
 
-    try {
-      Wait-ForText $session.Socket ([ref]$id) "Code Agent patch approval needed" 120 | Out-Null
+    $liveOutcome = Wait-ForAnyText $session.Socket ([ref]$id) @(
+      "Code Agent patch approval needed",
+      "Code Agent patch proposal"
+    ) 120
+    if ($liveOutcome -eq "Code Agent patch approval needed") {
       Wait-ForText $session.Socket ([ref]$id) "Code Agent patch proposal" 10 | Out-Null
       Capture-Window $session.Process.MainWindowHandle (Join-Path $qaDir "20-code-agent-live-proposal-before-approve.png")
       Click-PendingPermissionButton $session.Socket ([ref]$id) "Approve"
@@ -326,8 +343,10 @@ function Run-LiveCodeAgentScenario($provider, $model, $apiKey, $baseUrl) {
         Status = "pass"
         Screenshots = @("20-code-agent-live-proposal-before-approve.png", "20-code-agent-live-approved.png")
       }
-    } catch {
-      Wait-ForText $session.Socket ([ref]$id) "Code Agent patch proposal" 5 | Out-Null
+    } else {
+      if ($liveOutcome -ne "Code Agent patch proposal") {
+        Wait-ForText $session.Socket ([ref]$id) "Code Agent patch proposal" 5 | Out-Null
+      }
       Capture-Window $session.Process.MainWindowHandle (Join-Path $qaDir "20-code-agent-live-proposal-failed.png")
       $pageText = Get-PageText $session.Socket ([ref]$id)
       return [pscustomobject]@{

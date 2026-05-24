@@ -4,11 +4,13 @@ use std::{
     env, fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
     sync::Mutex,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+const OPENCODE_PROPOSAL_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -602,7 +604,8 @@ fn run_opencode_proposal_command(
         .env("OPENCODE_CONFIG_CONTENT", invocation.config_content)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .spawn()
+        .and_then(|child| wait_with_timeout(child, OPENCODE_PROPOSAL_TIMEOUT))
         .map_err(|error| format!("opencode is unavailable at {}: {error}", opencode.display()))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -613,6 +616,28 @@ fn run_opencode_proposal_command(
         });
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn wait_with_timeout(mut child: Child, timeout: Duration) -> std::io::Result<Output> {
+    let started = SystemTime::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output();
+        }
+        if started
+            .elapsed()
+            .map(|elapsed| elapsed >= timeout)
+            .unwrap_or(false)
+        {
+            child.kill()?;
+            let _ = child.wait();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("opencode proposal command timed out after {} seconds", timeout.as_secs()),
+            ));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 struct OpencodeProposalInvocation {
@@ -2290,6 +2315,25 @@ mod tests {
             config["provider"]["custom"]["options"]["baseURL"],
             "http://127.0.0.1:11434/v1"
         );
+    }
+
+    #[test]
+    fn times_out_long_running_child_processes() {
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/C", "ping", "127.0.0.1", "-n", "6", ">nul"]);
+            command
+        } else {
+            let mut command = Command::new("sleep");
+            command.arg("5");
+            command
+        };
+        let child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("spawn sleeper");
+
+        let error = wait_with_timeout(child, Duration::from_millis(50)).expect_err("timeout");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("timed out"));
     }
 
     #[test]

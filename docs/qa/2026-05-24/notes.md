@@ -58,7 +58,9 @@ Evidence:
   `git diff --check`.
 - `20-code-agent-live-proposal-failed.png`: live DeepSeek-compatible settings
   reached the opencode proposal phase and failed before write approval, with no
-  file application attempted.
+  file application attempted. The native opencode proposal runner now has a
+  90-second timeout so an unresponsive provider cannot stall the task
+  indefinitely.
 - `code-agent-opencode-qa-output.txt`: records the fixture deny/apply pass and
   the live provider hardening finding without storing the live API key.
 
@@ -89,3 +91,6 @@ Notes:
   diff verification failures. Core now reports them as `Code Agent patch
   proposal failed`, which keeps provider/runtime failures distinguishable from
   `git diff --check` failures.
+- After adding the native timeout, the live DeepSeek-compatible QA rerun
+  completed in 78 seconds and still stopped before write approval, confirming
+  the failure path remains preview-only.
