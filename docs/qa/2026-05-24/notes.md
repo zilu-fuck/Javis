@@ -45,6 +45,9 @@ Command status:
 - `pdf-durable-approval-qa.ps1`: pass for restored PDF approval approve,
   restored deny, and expired-record fail-closed behavior after packaged app
   restart.
+- `code-patch-durable-approval-qa.ps1`: pass for restored Code Patch approval
+  approve/apply, restored deny, and expired-record fail-closed behavior after
+  packaged app restart.
 
 Evidence:
 
@@ -85,12 +88,27 @@ Evidence:
   exists and the approved target PDF exists for approve, the source remains and
   no target exists for deny and expiry, and durable approval records resolve as
   `approved`, `denied`, and `expired` with expected preview hashes.
+- `26-code-patch-durable-approval-restored.png`: packaged app relaunch restores
+  a pending Code Agent patch approval from `javis.approvalRecords.v1`.
+- `27-code-patch-durable-approval-approved.png`: restored Code Patch approval
+  applies the persisted proposal and passes post-apply `git diff --check`.
+- `28-code-patch-durable-approval-deny-restored.png`: packaged app relaunch
+  restores a separate pending Code Patch approval for the deny path.
+- `29-code-patch-durable-approval-denied.png`: denied restored Code Patch
+  approval leaves the file unchanged.
+- `30-code-patch-durable-approval-expired.png`: expired Code Patch approval
+  fails closed without restoring a permission card.
+- `code-patch-durable-approval-qa-output.txt`: confirms the approved path
+  changes `src/message.txt` to `hello approved`, deny and expiry leave it at
+  `hello reviewed`, and durable approval records resolve as `approved`,
+  `denied`, and `expired` with expected preview hashes.
 
 Manual QA verdict: pass for workspace selection, recent-workspace restart
-persistence, fixture-backed Code Agent proposal/apply safety, and durable PDF
-approval restore approve/deny/expiry. Live DeepSeek-compatible provider QA
-remains open until the hardened fallback path is rerun with temporary
-credentials.
+persistence, fixture-backed Code Agent proposal/apply safety, durable PDF
+approval restore approve/deny/expiry, and durable Code Patch approval restore
+approve/apply/deny/expiry. Live DeepSeek-compatible provider QA remains open
+until credentials can be injected without localStorage and the hardened
+fallback path is rerun.
 
 Notes:
 
@@ -111,6 +129,12 @@ Notes:
   exercises approve, deny, and expired-record paths, verifies the file effects
   and durable record status for each path, captures screenshots, and removes
   the temporary files.
+- `code-patch-durable-approval-qa.ps1` creates temporary git workspaces under
+  the QA folder, injects scoped pending Code Patch durable approval records
+  with persisted proposal payloads, restarts the packaged app, exercises
+  approve/apply, deny, and expired-record paths, verifies file effects and
+  durable record status, captures screenshots, and removes the temporary
+  workspaces.
 - During this QA pass, `git status --short` parsing truncated paths with a
   leading status-space (for example ` M src/message.txt`). The parser now reads
   the path after the two status columns, and a regression test covers that

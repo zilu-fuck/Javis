@@ -172,6 +172,20 @@ exist:
   no file is moved, and the durable record is `expired`.
 - Capture screenshots for restored, approved, denied, and expired states.
 
+### Code Patch Durable Approval Restart
+
+- Run `pnpm --filter @javis/desktop tauri build` before packaged restart QA.
+- Run `docs/qa/2026-05-24/code-patch-durable-approval-qa.ps1`.
+- Verify the packaged app restores a pending Code Agent patch approval card
+  from `javis.approvalRecords.v1` after restart.
+- Approve the restored card and verify only the persisted proposal patch is
+  applied, `git diff --check` passes, and the approval record is `approved`.
+- Deny a restored card and verify the source file remains unchanged and the
+  approval record is `denied`.
+- Inject an expired pending approval and verify no Code Patch approval card is
+  restored, no file changes occur, and the record is marked `expired`.
+- Capture screenshots for restored, approved, denied, and expired states.
+
 ### Product Readiness Scenarios
 
 Before calling a build complete-product-ready, add and pass scenario scripts for
