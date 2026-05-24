@@ -16,11 +16,15 @@ A task is the user-visible unit of work. It has:
 - Optional result sections such as documents, commands, sources, research
   report, project inspection, permission request, or file organization result.
 
-The desktop app persists completed, failed, and cancelled task snapshots for
-sidebar history restore. Pending permission requests are not persisted because
-confirmed-write approvals are scoped to the current in-memory dry-run. Resolved
-permission decisions may be persisted as audit evidence, but they must not
-become reusable approval grants.
+The desktop app currently persists completed, failed, and cancelled task
+snapshots for sidebar history restore. Resolved permission decisions may be
+persisted as audit evidence, but they must not become reusable approval grants.
+
+Product-ready persistence needs a separate durable approval record for pending
+confirmed-write requests. That record must be scoped to a task, tool, workspace,
+preview hash, expiry, and decision state so a pending approval card can survive
+app restart without becoming a broad reusable grant. Until that migration is
+implemented, pending permission requests are still current-session state only.
 
 Current statuses:
 
@@ -160,6 +164,11 @@ general future approval. The native PDF organization command also treats
 approval as one-time-use state: execution is rejected when the approval id is
 missing, unapproved, stale, or paired with operations that differ from the
 current dry-run.
+
+The durable approval target keeps the same scoped semantics but moves the
+record out of transient Core memory. A restored approval must still pass binding
+hash, expiry, task/tool, workspace, and native operation checks before any write
+command executes.
 
 Core uses a shared permission-state helper to create pending permission
 requests and move them to exactly one terminal state. Each pending request

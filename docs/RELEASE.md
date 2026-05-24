@@ -119,8 +119,10 @@ requires manual cleanup.
 
 ## Safety Notes
 
-- Only the PDF organization flow writes files.
-- Confirmed writes require approval for the current dry-run.
+- Write-capable flows are intentionally narrow: PDF organization moves approved
+  PDFs inside Downloads, and Code Agent applies approved patches inside the
+  selected workspace.
+- Confirmed writes require visible approval for the current dry-run/proposal.
 - The Windows build bundles opencode native binaries for proposal generation,
   but patch application still runs through Javis confirmed-write approval.
 

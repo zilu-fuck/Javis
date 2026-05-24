@@ -85,8 +85,14 @@ Status: complete for the 2026-05-23 QA pass.
 
 - Store task history locally. Initial completed/failed/cancelled snapshot
   persistence is implemented in the desktop app.
-- Store permission decisions only as scoped records, never as broad reusable
+- Add durable approval records for pending and resolved confirmed-write
+  decisions. Start with PDF organization so approval cards can survive app
+  restart before Code Patch is migrated.
+- Store permission decisions only as scoped records tied to a task, tool,
+  workspace, preview hash, and expiry. Never persist them as broad reusable
   approval.
+- Restore pending approval cards from durable approval records, and persist
+  approve/deny/expired outcomes as audit evidence.
 - Add a clear history deletion path. Initial sidebar deletion is implemented.
 - Add workspace selection and remembered recent workspaces.
 - Avoid storing secrets, tokens, raw cookies, or private keys.
@@ -98,11 +104,18 @@ Status: complete for the 2026-05-23 QA pass.
 - Require write tools to execute only the approved current dry-run.
 - Add expiration/cancellation behavior for stale permission requests.
 - Add audit records for what changed, what was skipped, and what failed.
+- Add shared native guard helpers for approval id, task/tool binding, preview
+  hash, workspace/path scope, file extension, and current file hash.
+- Migrate PDF organization and Code Patch apply onto the shared guards without
+  changing their user-visible behavior.
 - Keep dangerous actions rejected by default.
 
 ## Milestone 5: Product Hardening
 
 - Improve empty states, loading states, and recovery paths.
+- Move model API keys out of browser local storage into Stronghold or OS
+  credential storage; keep local storage to provider/model/base URL and a secret
+  reference only.
 - Add structured event stream objects instead of only snapshot updates.
 - Add telemetry-free diagnostics export for local debugging.
 - Add signed builds, version strategy, artifact checksums, release notes, and

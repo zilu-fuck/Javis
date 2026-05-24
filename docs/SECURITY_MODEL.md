@@ -59,9 +59,15 @@ push, or run arbitrary scripts are outside the current v1 boundary.
 
 ## File Write Rules
 
-The current write implementation is intentionally narrow:
+The current write implementations are intentionally narrow:
 
-- Only the PDF organization flow writes.
+- PDF organization can move PDF files inside `Downloads` after approval.
+- Code Agent can apply an approved unified diff inside the selected workspace.
+- Both write paths require a visible confirmed-write approval before execution.
+- Both write paths must reject paths outside their allowed scope.
+
+PDF organization rules:
+
 - Only `move` is supported.
 - Only PDF files are moved.
 - The source and target must stay inside `Downloads`.
@@ -72,6 +78,15 @@ The current write implementation is intentionally narrow:
 - Directory traversal is rejected.
 - Existing target parent directories are canonicalized to avoid path escape.
 
+Code Agent patch rules:
+
+- opencode or provider calls may only produce preview proposals.
+- Patch application runs through Javis's native `apply_code_patch` command.
+- The patch may touch only the approved changed-file list.
+- Parent directory traversal and workspace escape are rejected.
+- A product-ready implementation still needs durable approval records, patch
+  dry-run validation, base file hashes, and shared native guard helpers.
+
 ## Model Credentials
 
 The desktop app currently stores opencode model settings locally so an installed
@@ -79,6 +94,10 @@ copy can run without manual CLI configuration. This includes provider id, model
 id, API key, and optional base URL. The current implementation persists those
 values in app local storage; this is local persistence, not hardened secret
 storage. A future release should move API keys into the OS credential store.
+
+The intended hardened shape is to keep provider id, model id, base URL, and a
+secret reference in local storage, while storing the actual API key in
+Stronghold or the OS credential store.
 
 The API key must only be passed to opencode through per-run configuration. It
 must not appear in task history, proposal metadata, screenshots, or diagnostic
