@@ -123,9 +123,9 @@ Status: complete for the 2026-05-23 QA pass.
 ## Milestone 5: Product Hardening
 
 - Improve empty states, loading states, and recovery paths.
-- Move model API keys out of browser local storage into Stronghold or OS
-  credential storage; keep local storage to provider/model/base URL and a secret
-  reference only.
+- Keep browser local storage free of model API keys. New saves now persist only
+  provider/model/base URL and legacy stored keys are cleared on load; Stronghold
+  or OS credential storage is still needed for restart-safe secrets.
 - Add structured event stream objects instead of only snapshot updates.
 - Add telemetry-free diagnostics export for local debugging.
 - Add signed builds, version strategy, artifact checksums, release notes, and

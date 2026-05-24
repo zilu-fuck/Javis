@@ -9,6 +9,8 @@ export interface ModelSettings {
   baseUrl: string;
 }
 
+type PersistedModelSettings = Omit<ModelSettings, "apiKey">;
+
 export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   provider: "openai",
   model: "",
@@ -23,7 +25,9 @@ export function loadModelSettings(storage: ModelSettingsStorage): ModelSettings 
   }
 
   try {
-    return sanitizeModelSettings(JSON.parse(rawValue));
+    const sanitized = clearModelSettingsSecret(sanitizeModelSettings(JSON.parse(rawValue)));
+    storage.setItem(MODEL_SETTINGS_STORAGE_KEY, JSON.stringify(toPersistedModelSettings(sanitized)));
+    return sanitized;
   } catch {
     return DEFAULT_MODEL_SETTINGS;
   }
@@ -34,7 +38,7 @@ export function saveModelSettings(
   settings: ModelSettings,
 ): ModelSettings {
   const sanitized = sanitizeModelSettings(settings);
-  storage.setItem(MODEL_SETTINGS_STORAGE_KEY, JSON.stringify(sanitized));
+  storage.setItem(MODEL_SETTINGS_STORAGE_KEY, JSON.stringify(toPersistedModelSettings(sanitized)));
   return sanitized;
 }
 
@@ -49,6 +53,21 @@ export function sanitizeModelSettings(value: unknown): ModelSettings {
     model: sanitizeText(candidate.model),
     apiKey: sanitizeText(candidate.apiKey),
     baseUrl: sanitizeText(candidate.baseUrl),
+  };
+}
+
+function clearModelSettingsSecret(settings: ModelSettings): ModelSettings {
+  return {
+    ...settings,
+    apiKey: "",
+  };
+}
+
+function toPersistedModelSettings(settings: ModelSettings): PersistedModelSettings {
+  return {
+    provider: settings.provider,
+    model: settings.model,
+    baseUrl: settings.baseUrl,
   };
 }
 

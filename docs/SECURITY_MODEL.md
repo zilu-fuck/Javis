@@ -89,11 +89,12 @@ Code Agent patch rules:
 
 ## Model Credentials
 
-The desktop app currently stores opencode model settings locally so an installed
-copy can run without manual CLI configuration. This includes provider id, model
-id, API key, and optional base URL. The current implementation persists those
-values in app local storage; this is local persistence, not hardened secret
-storage. A future release should move API keys into the OS credential store.
+The desktop app currently stores non-secret opencode model settings locally so
+an installed copy can run without manual CLI configuration. This includes
+provider id, model id, and optional base URL. New saves do not persist API keys
+in app local storage, and legacy stored keys are cleared when model settings are
+loaded. Until Stronghold or OS credential storage is added, API keys are
+session-only and must be re-entered after restart.
 
 The intended hardened shape is to keep provider id, model id, base URL, and a
 secret reference in local storage, while storing the actual API key in

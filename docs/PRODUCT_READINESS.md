@@ -36,8 +36,9 @@ Do not call Javis a complete usable product while any of these are true:
   OpenAI-compatible fallback, fenced/pretty JSON parsing, and approved-file
   binding hardening. Live DeepSeek-compatible smoke still needs to be rerun
   with temporary credentials before this blocker can close.
-- Model API keys are currently persisted in app local storage; OS credential
-  storage is still needed before treating secrets as hardened.
+- New model API key saves no longer persist the key in app local storage, and
+  legacy stored keys are cleared when model settings are loaded. OS credential
+  storage is still needed before treating secrets as hardened across restarts.
 - Pending confirmed-write approval recovery is not fully proven across tools.
   Durable approval record storage and PDF restore plumbing exist, and packaged
   restart QA now proves the PDF approval card survives app restart, can approve
@@ -65,8 +66,8 @@ The project has a verified MVP foundation. The next stage is product completion:
 1. Add packaged restart QA for Code Patch restore deny/apply/expired paths.
 2. Collapse the PDF and Code Patch native guards into a shared approval binding
    abstraction.
-3. Move model API keys out of browser local storage into hardened secret
-   storage.
+3. Move model API keys from session-only input into hardened secret storage for
+   restart-safe use.
 4. Rerun the live DeepSeek-compatible Code Agent proposal smoke with temporary
    credentials, then decide whether approved live apply is safe to exercise or
    should remain covered only by fixture QA.

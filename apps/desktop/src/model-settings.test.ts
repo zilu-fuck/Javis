@@ -12,7 +12,7 @@ describe("model settings persistence", () => {
     expect(loadModelSettings(createMemoryStorage())).toEqual(DEFAULT_MODEL_SETTINGS);
   });
 
-  it("trims and persists desktop model settings", () => {
+  it("trims model settings without persisting API keys", () => {
     const storage = createMemoryStorage();
 
     const saved = saveModelSettings(storage, {
@@ -28,7 +28,31 @@ describe("model settings persistence", () => {
       apiKey: "sk-local",
       baseUrl: "https://api.example.test/v1",
     });
-    expect(loadModelSettings(storage)).toEqual(saved);
+    expect(loadModelSettings(storage)).toEqual({
+      ...saved,
+      apiKey: "",
+    });
+    expect(storage.getItem(MODEL_SETTINGS_STORAGE_KEY)).not.toContain("apiKey");
+    expect(storage.getItem(MODEL_SETTINGS_STORAGE_KEY)).not.toContain("sk-local");
+  });
+
+  it("drops API keys from legacy stored settings", () => {
+    const storage = createMemoryStorage();
+    storage.setItem(MODEL_SETTINGS_STORAGE_KEY, JSON.stringify({
+      provider: "deepseek",
+      model: "deepseek/deepseek-v4-flash",
+      apiKey: "sk-legacy",
+      baseUrl: "https://api.deepseek.com",
+    }));
+
+    expect(loadModelSettings(storage)).toEqual({
+      provider: "deepseek",
+      model: "deepseek/deepseek-v4-flash",
+      apiKey: "",
+      baseUrl: "https://api.deepseek.com",
+    });
+    expect(storage.getItem(MODEL_SETTINGS_STORAGE_KEY)).not.toContain("apiKey");
+    expect(storage.getItem(MODEL_SETTINGS_STORAGE_KEY)).not.toContain("sk-legacy");
   });
 
   it("rejects malformed stored settings", () => {
