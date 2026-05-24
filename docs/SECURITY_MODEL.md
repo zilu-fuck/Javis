@@ -68,6 +68,24 @@ The current write implementation is intentionally narrow:
 - Directory traversal is rejected.
 - Existing target parent directories are canonicalized to avoid path escape.
 
+## Code Agent Write Rules
+
+The current Code Agent write path is a Core/UI contract only; the desktop app
+does not yet configure a real edit proposal or patch application backend.
+
+Before any future Code Agent backend applies edits:
+
+- The proposal must include a proposal id, workspace path, changed-file list,
+  patch text, and patch hash.
+- The confirmed-write approval must show the current proposal id, affected
+  paths, summary, and patch hash.
+- Core must verify the proposal hash before asking for approval and again before
+  calling the apply backend.
+- The apply result must report the same workspace and only approved files.
+- Post-apply verification must run before a successful final state.
+- Task history must not persist full patch text; it may keep proposal metadata
+  and apply summaries for audit context.
+
 ## What Is Rejected by Default
 
 The first version must not:

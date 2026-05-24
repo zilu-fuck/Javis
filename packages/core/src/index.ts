@@ -1,10 +1,13 @@
 import type {
   CodeReviewPreview,
+  CodeProposedEdit,
+  CodeApplyResult,
   CodeTool,
   FileOrganizationExecution,
   FileOrganizationPlan,
   FileTool,
   MarkdownDocumentSummary,
+  ModelUsage,
   PermissionRequest as ToolPermissionRequest,
   ProjectInspection,
   ProjectTool,
@@ -13,7 +16,13 @@ import type {
   ShellTool,
   WebSource,
   WebTool,
+  TokenUsageSummary,
 } from "@javis/tools";
+import {
+  createCodeApplyDryRun,
+  validateCodeApplyResult,
+  validateCodeProposal,
+} from "./code-proposal-safety";
 import {
   codeSnapshot,
   commanderSnapshot,
@@ -32,6 +41,10 @@ import {
   createResearchSourcePlan,
   markStep,
 } from "./plans";
+import {
+  createPendingPermissionRequest,
+  resolvePermissionRequest,
+} from "./permission-state";
 import { createSourceBackedReport } from "./research";
 import {
   createRecommendedCommandRequest,
@@ -43,6 +56,7 @@ import {
 } from "./routing";
 import { createRuntimeState } from "./runtime-state";
 import { appendLog } from "./snapshot-utils";
+import { addModelUsage, createEmptyTokenUsageSummary } from "./token-usage";
 
 export type ID = string;
 export type ISODateTime = string;
@@ -92,6 +106,7 @@ export interface Task {
   agentRuns: AgentRun[];
   pendingPermissionRequestId?: ID;
   verification?: VerificationResult;
+  tokenUsage?: TokenUsageSummary;
   finalMessage?: string;
 }
 
@@ -121,6 +136,7 @@ export interface AgentRun {
   modelProfileId?: ID;
   inputSummary: string;
   outputSummary?: string;
+  tokenUsage?: TokenUsageSummary;
   toolCallIds: ID[];
   error?: TaskError;
   startedAt?: ISODateTime;
@@ -248,6 +264,7 @@ export interface AgentSnapshot {
   role: string;
   status: AgentRunStatus;
   task: string;
+  tokenUsage?: TokenUsageSummary;
 }
 
 export interface TaskLogEntry {
@@ -271,12 +288,18 @@ export interface TaskSnapshot {
   fileOrganizationExecution?: FileOrganizationExecution;
   fileOrganizationPlan?: FileOrganizationPlan;
   codeReviewPreview?: CodeReviewPreview;
+  codeProposedEdit?: CodeProposedEdit;
+  codeApplyResult?: CodeApplyResult;
   permissionRequest?: ToolPermissionRequest;
   project?: ProjectInspection;
   researchReport?: ResearchReport;
   sources?: WebSource[];
+  tokenUsage?: TokenUsageSummary;
   verificationSummary?: string;
 }
+
+export type { ModelUsage, TokenUsageSummary };
+export { addModelUsage, createEmptyTokenUsageSummary };
 
 export interface TaskRuntime {
   getSnapshot(): TaskSnapshot;
@@ -319,6 +342,7 @@ export function createInitialTaskSnapshot(): TaskSnapshot {
         detail: "Core runtime is ready for startTask.",
       },
     ],
+    tokenUsage: createEmptyTokenUsageSummary(),
   };
 }
 
@@ -403,6 +427,7 @@ export function createFileScanTaskRuntime({
         fileSnapshot("queued", "Waiting for file.planPdfOrganization"),
         verifierSnapshot("queued", "Waiting for dry-run evidence"),
       ],
+      tokenUsage: createEmptyTokenUsageSummary(),
       logs: [
         {
           id: `${taskId}-created`,
@@ -465,15 +490,13 @@ export function createFileScanTaskRuntime({
         });
         return;
       }
-      const permissionRequest: ToolPermissionRequest = {
+      const permissionRequest: ToolPermissionRequest = createPendingPermissionRequest({
         id: `${taskId}-permission`,
         level: "confirmed_write",
         title: "Approve PDF move plan",
         reason: "Moving files changes the local filesystem, so Javis needs explicit approval.",
         dryRun: organizationPlan.dryRun,
-        status: "pending",
-        createdAt: new Date().toISOString(),
-      };
+      });
 
       emit({
         ...snapshot,
@@ -498,11 +521,10 @@ export function createFileScanTaskRuntime({
       });
 
       pendingPermissionHandler = async (decision) => {
-        const resolvedRequest: ToolPermissionRequest = {
-          ...permissionRequest,
-          status: decision,
-          resolvedAt: new Date().toISOString(),
-        };
+        const resolvedRequest: ToolPermissionRequest = resolvePermissionRequest(
+          permissionRequest,
+          decision,
+        );
         pendingPermissionHandler = undefined;
 
         if (decision === "denied") {
@@ -693,6 +715,7 @@ export function createFileScanTaskRuntime({
         shellSnapshot("queued", "Waiting for project inspection"),
         verifierSnapshot("queued", "Waiting for command results"),
       ],
+      tokenUsage: createEmptyTokenUsageSummary(),
       logs: [
         {
           id: `${taskId}-created`,
@@ -872,13 +895,14 @@ export function createFileScanTaskRuntime({
       userGoal,
       status: "planning",
       commanderMessage:
-        "Commander identified a code review goal and will collect a diff preview before read-only verification.",
+        "Commander identified a code review goal and will collect a diff preview before read-only verification and any optional edit proposal.",
       plan,
       agents: [
         commanderSnapshot("planning", "Create code review plan"),
         codeSnapshot("queued", "Waiting for repository diff preview"),
         verifierSnapshot("queued", "Waiting for diff evidence"),
       ],
+      tokenUsage: createEmptyTokenUsageSummary(),
       logs: [
         {
           id: `${taskId}-created`,
@@ -921,7 +945,7 @@ export function createFileScanTaskRuntime({
             "Code Agent did not find local code changes, so no review or verification step was needed.",
           plan: snapshot.plan.map((step) => ({
             ...step,
-            status: step.id === "step-inspect-code" ? "completed" : "skipped",
+              status: step.id === "step-inspect-code" ? "completed" : "skipped",
           })),
           agents: [
             commanderSnapshot("completed", "Task finished"),
@@ -940,7 +964,7 @@ export function createFileScanTaskRuntime({
         return;
       }
 
-      const permissionRequest: ToolPermissionRequest = {
+      const permissionRequest: ToolPermissionRequest = createPendingPermissionRequest({
         id: `${taskId}-permission`,
         level: "preview",
         title: "Approve code review continuation",
@@ -955,9 +979,7 @@ export function createFileScanTaskRuntime({
           riskSummary: "Read-only review of changed files before verification.",
           reversible: true,
         },
-        status: "pending",
-        createdAt: new Date().toISOString(),
-      };
+      });
 
       emit({
         ...snapshot,
@@ -982,11 +1004,10 @@ export function createFileScanTaskRuntime({
       });
 
       pendingPermissionHandler = async (decision) => {
-        const resolvedRequest: ToolPermissionRequest = {
-          ...permissionRequest,
-          status: decision,
-          resolvedAt: new Date().toISOString(),
-        };
+        const resolvedRequest: ToolPermissionRequest = resolvePermissionRequest(
+          permissionRequest,
+          decision,
+        );
         pendingPermissionHandler = undefined;
 
         if (decision === "denied") {
@@ -998,7 +1019,12 @@ export function createFileScanTaskRuntime({
               "Permission was denied. Javis kept the diff preview read-only and did not run verification.",
             plan: snapshot.plan.map((step) => ({
               ...step,
-              status: step.id === "step-verify-code" ? "skipped" : "completed",
+            status:
+              step.id === "step-verify-code" ||
+              step.id === "step-propose-code-edit" ||
+              step.id === "step-apply-code-edit"
+                ? "skipped"
+                : "completed",
             })),
             agents: [
               commanderSnapshot("completed", "Permission decision recorded"),
@@ -1047,48 +1073,411 @@ export function createFileScanTaskRuntime({
             workspacePath: null,
           });
           const verificationStatus = verification.exitCode === 0 ? "completed" : "failed";
+          const logs = appendLog(snapshot, {
+            id: `${taskId}-done`,
+            kind: "verification",
+            title:
+              verificationStatus === "completed" ? "verification.completed" : "verification.failed",
+            detail: `Verifier checked the repository diff with exit code ${verification.exitCode ?? "unknown"}.`,
+          });
+
+          if (verificationStatus === "failed") {
+            emit({
+              ...snapshot,
+              title: "Code review verification failed",
+              status: "failed",
+              commanderMessage:
+                "Code Agent reviewed the current diff, but the read-only verification check failed.",
+              plan: markCodeReviewFailedAfterVerification(snapshot.plan),
+              agents: [
+                commanderSnapshot("failed", "Verification failed"),
+                codeSnapshot("completed", "Diff preview reviewed"),
+                verifierSnapshot("failed", `${verification.exitCode ?? "unknown"} diff check exit code`),
+              ],
+              codeReviewPreview,
+              commands: [verification],
+              permissionRequest: resolvedRequest,
+              logs,
+              verificationSummary: `failed: ${changedFileCount} changed file(s) reviewed and git diff --check returned exit code ${verification.exitCode ?? "unknown"}.`,
+            });
+            return;
+          }
+
+          if (!activeCodeTool.proposeEdit) {
+            emit({
+              ...snapshot,
+              title: "Code review completed",
+              status: "completed",
+              commanderMessage:
+                "Code Agent reviewed the current diff and the read-only verification check passed. No edit proposal backend is configured yet.",
+              plan: snapshot.plan.map((step) => ({
+                ...step,
+                status:
+                  step.id === "step-propose-code-edit" || step.id === "step-apply-code-edit"
+                    ? "skipped"
+                    : "completed",
+              })),
+              agents: [
+                commanderSnapshot("completed", "Task finished"),
+                codeSnapshot("completed", "Diff preview reviewed"),
+                verifierSnapshot("completed", `${verification.exitCode ?? "unknown"} diff check exit code`),
+              ],
+              codeReviewPreview,
+              commands: [verification],
+              permissionRequest: resolvedRequest,
+              logs,
+              verificationSummary: `verified: ${changedFileCount} changed file(s) reviewed and git diff --check passed; no Code Agent edit backend is configured.`,
+            });
+            return;
+          }
 
           emit({
             ...snapshot,
-            title:
-              verificationStatus === "completed"
-                ? "Code review completed"
-                : "Code review verification failed",
-            status: verificationStatus,
+            title: "Preparing Code Agent patch proposal",
+            status: "running",
             commanderMessage:
-              verificationStatus === "completed"
-                ? "Code Agent reviewed the current diff and the read-only verification check passed."
-                : "Code Agent reviewed the current diff, but the read-only verification check failed.",
-            plan:
-              verificationStatus === "completed"
-                ? snapshot.plan.map((step) => ({ ...step, status: "completed" }))
-                : markStep(snapshot.plan, "step-verify-code", "failed"),
+              "Diff verification passed. Code Agent is preparing an optional patch proposal without applying it.",
+            plan: markStep(snapshot.plan, "step-verify-code", "completed", "step-propose-code-edit", "running"),
             agents: [
-              commanderSnapshot(
-                verificationStatus === "completed" ? "completed" : "failed",
-                verificationStatus === "completed" ? "Task finished" : "Verification failed",
-              ),
-              codeSnapshot("completed", "Diff preview reviewed"),
-              verifierSnapshot(
-                verificationStatus === "completed" ? "completed" : "failed",
-                `${verification.exitCode ?? "unknown"} diff check exit code`,
-              ),
+              commanderSnapshot("completed", "Permission decision recorded"),
+              codeSnapshot("running", "Preparing patch proposal"),
+              verifierSnapshot("completed", "Diff check passed"),
             ],
             codeReviewPreview,
             commands: [verification],
             permissionRequest: resolvedRequest,
-            logs: appendLog(snapshot, {
-              id: `${taskId}-done`,
-              kind: "verification",
-              title:
-                verificationStatus === "completed" ? "task.completed" : "verification.failed",
-              detail: `Verifier checked the repository diff with exit code ${verification.exitCode ?? "unknown"}.`,
-            }),
-            verificationSummary:
-              verificationStatus === "completed"
-                ? `verified: ${changedFileCount} changed file(s) reviewed and git diff --check passed.`
-                : `failed: ${changedFileCount} changed file(s) reviewed and git diff --check returned exit code ${verification.exitCode ?? "unknown"}.`,
+            logs,
           });
+
+          const proposedEdit = await activeCodeTool.proposeEdit({
+            userGoal,
+            preview: codeReviewPreview,
+          });
+          const tokenUsage = proposedEdit.tokenUsage
+            ? addModelUsage(snapshot.tokenUsage, "code", proposedEdit.tokenUsage)
+            : snapshot.tokenUsage;
+          const proposalSafetyError = validateCodeProposal(proposedEdit);
+          if (proposalSafetyError) {
+            emit({
+              ...snapshot,
+              title: "Code Agent patch proposal failed safety check",
+              status: "failed",
+              commanderMessage:
+                "Code Agent produced a patch proposal whose hash does not match its content, so Javis refused to request write approval.",
+              plan: markStep(snapshot.plan, "step-propose-code-edit", "failed", "step-apply-code-edit", "skipped"),
+              agents: [
+                commanderSnapshot("failed", "Proposal safety check failed"),
+                codeSnapshot("failed", "Patch hash mismatch"),
+                verifierSnapshot("cancelled", "No write approval requested"),
+              ],
+              codeReviewPreview,
+              codeProposedEdit: proposedEdit,
+              commands: [verification],
+              permissionRequest: resolvedRequest,
+              tokenUsage,
+              logs: appendLog(snapshot, {
+                id: `${taskId}-proposal-hash-mismatch`,
+                kind: "tool",
+                title: "task.failed",
+                detail: proposalSafetyError,
+              }),
+            });
+            return;
+          }
+
+          if (!proposedEdit.patch.trim()) {
+            emit({
+              ...snapshot,
+              title: "Code review completed",
+              status: "completed",
+              commanderMessage:
+                "Code Agent did not produce a patch proposal, so no confirmed-write approval is needed.",
+              plan: snapshot.plan.map((step) => ({
+                ...step,
+                status: step.id === "step-apply-code-edit" ? "skipped" : "completed",
+              })),
+              agents: [
+                commanderSnapshot("completed", "Task finished"),
+                codeSnapshot("completed", "No patch proposed"),
+                verifierSnapshot("completed", "Diff check passed"),
+              ],
+              codeReviewPreview,
+              codeProposedEdit: proposedEdit,
+              commands: [verification],
+              permissionRequest: resolvedRequest,
+              tokenUsage,
+              logs: appendLog(snapshot, {
+                id: `${taskId}-proposal-empty`,
+                kind: "tool",
+                title: "tool_call.updated",
+                detail: "code.proposeEdit returned no patch to apply.",
+              }),
+              verificationSummary: `verified: ${changedFileCount} changed file(s) reviewed and git diff --check passed; no patch was proposed.`,
+            });
+            return;
+          }
+
+          const applyPermissionRequest: ToolPermissionRequest = createPendingPermissionRequest({
+            id: `${taskId}-apply-permission`,
+            level: "confirmed_write",
+            title: "Approve Code Agent patch application",
+            reason: "Applying the proposed patch changes local project files, so Javis needs explicit approval.",
+            dryRun: createCodeApplyDryRun(proposedEdit),
+          });
+
+          emit({
+            ...snapshot,
+            title: "Code Agent patch approval needed",
+            status: "waiting_permission",
+            commanderMessage:
+              "Patch proposal is ready. Review the proposed changes before approving or denying the write step.",
+            plan: markStep(snapshot.plan, "step-propose-code-edit", "completed", "step-apply-code-edit", "running"),
+            agents: [
+              commanderSnapshot("waiting_permission", "Waiting for patch approval"),
+              codeSnapshot("waiting_permission", `${proposedEdit.changedFiles.length} proposed file change(s)`),
+              verifierSnapshot("queued", "Waiting for permission decision"),
+            ],
+            codeReviewPreview,
+            codeProposedEdit: proposedEdit,
+            commands: [verification],
+            permissionRequest: applyPermissionRequest,
+            tokenUsage,
+            logs: appendLog(snapshot, {
+              id: `${taskId}-apply-permission-requested`,
+              kind: "permission",
+              title: "permission.requested",
+              detail: `${proposedEdit.changedFiles.length} proposed file change(s) require confirmed_write approval.`,
+            }),
+          });
+
+          pendingPermissionHandler = async (applyDecision) => {
+            const resolvedApplyRequest: ToolPermissionRequest = resolvePermissionRequest(
+              applyPermissionRequest,
+              applyDecision,
+            );
+            pendingPermissionHandler = undefined;
+
+            if (applyDecision === "denied") {
+              emit({
+                ...snapshot,
+                title: "Code Agent patch denied",
+                status: "completed",
+                commanderMessage:
+                  "Permission was denied. Javis kept the patch proposal as a preview and did not modify files.",
+                plan: snapshot.plan.map((step) => ({
+                  ...step,
+                  status: step.id === "step-apply-code-edit" ? "skipped" : "completed",
+                })),
+                agents: [
+                  commanderSnapshot("completed", "Permission decision recorded"),
+                  codeSnapshot("completed", "Patch proposal kept read-only"),
+                  verifierSnapshot("completed", "Verified denial record"),
+                ],
+                codeReviewPreview,
+                codeProposedEdit: proposedEdit,
+                commands: [verification],
+                permissionRequest: resolvedApplyRequest,
+                logs: appendLog(snapshot, {
+                  id: `${taskId}-apply-denied`,
+                  kind: "permission",
+                  title: "permission.resolved",
+                  detail: `User denied ${applyPermissionRequest.id}; no patch was applied.`,
+                }),
+                verificationSummary: "verified: Code Agent patch was denied and no write operation was executed.",
+              });
+              return;
+            }
+
+            const approvedProposalSafetyError = validateCodeProposal(proposedEdit);
+            if (approvedProposalSafetyError) {
+              emit({
+                ...snapshot,
+                title: "Code Agent patch approval is stale",
+                status: "failed",
+                commanderMessage:
+                  "The approved patch proposal no longer matches its recorded hash, so Javis refused to apply it.",
+                plan: markStep(snapshot.plan, "step-apply-code-edit", "failed"),
+                agents: [
+                  commanderSnapshot("completed", "Permission decision recorded"),
+                  codeSnapshot("failed", "Approved patch hash mismatch"),
+                  verifierSnapshot("cancelled", "No write result to verify"),
+                ],
+                codeReviewPreview,
+                codeProposedEdit: proposedEdit,
+                commands: [verification],
+                permissionRequest: resolvedApplyRequest,
+                logs: appendLog(snapshot, {
+                  id: `${taskId}-approved-patch-mismatch`,
+                  kind: "permission",
+                  title: "task.failed",
+                  detail: approvedProposalSafetyError,
+                }),
+              });
+              return;
+            }
+
+            if (!activeCodeTool.applyProposedEdit) {
+              emit({
+                ...snapshot,
+                title: "Code Agent apply backend unavailable",
+                status: "failed",
+                commanderMessage:
+                  "Permission was approved, but the confirmed-write Code Agent apply backend is not configured.",
+                plan: markStep(snapshot.plan, "step-apply-code-edit", "failed"),
+                agents: [
+                  commanderSnapshot("completed", "Permission decision recorded"),
+                  codeSnapshot("failed", "Apply backend unavailable"),
+                  verifierSnapshot("cancelled", "No write result to verify"),
+                ],
+                codeReviewPreview,
+                codeProposedEdit: proposedEdit,
+                commands: [verification],
+                permissionRequest: resolvedApplyRequest,
+                logs: appendLog(snapshot, {
+                  id: `${taskId}-apply-missing`,
+                  kind: "tool",
+                  title: "task.failed",
+                  detail: "code.applyProposedEdit is not configured.",
+                }),
+              });
+              return;
+            }
+
+            emit({
+              ...snapshot,
+              title: "Applying approved Code Agent patch",
+              status: "running",
+              commanderMessage:
+                "Permission was approved. Code Agent is applying only the current patch proposal.",
+              plan: markStep(snapshot.plan, "step-apply-code-edit", "running"),
+              agents: [
+                commanderSnapshot("completed", "Permission decision recorded"),
+                codeSnapshot("running", "Applying approved patch"),
+                verifierSnapshot("queued", "Waiting for post-apply check"),
+              ],
+              codeReviewPreview,
+              codeProposedEdit: proposedEdit,
+              commands: [verification],
+              permissionRequest: resolvedApplyRequest,
+              logs: appendLog(snapshot, {
+                id: `${taskId}-apply-started`,
+                kind: "permission",
+                title: "permission.resolved",
+                detail: `User approved ${applyPermissionRequest.id}; applying proposed patch.`,
+              }),
+            });
+
+            try {
+              const applyResult = await activeCodeTool.applyProposedEdit(proposedEdit);
+              const applySafetyError = validateCodeApplyResult(proposedEdit, applyResult);
+              if (applySafetyError) {
+                emit({
+                  ...snapshot,
+                  title: "Code Agent patch result failed safety check",
+                  status: "failed",
+                  commanderMessage:
+                    "Code Agent reported an apply result that did not match the approved proposal.",
+                  plan: markStep(snapshot.plan, "step-apply-code-edit", "failed"),
+                  agents: [
+                    commanderSnapshot("failed", "Apply safety check failed"),
+                    codeSnapshot("failed", applySafetyError),
+                    verifierSnapshot("cancelled", "Post-apply check skipped"),
+                  ],
+                  codeReviewPreview,
+                  codeProposedEdit: proposedEdit,
+                  codeApplyResult: applyResult,
+                  commands: [verification],
+                  permissionRequest: resolvedApplyRequest,
+                  logs: appendLog(snapshot, {
+                    id: `${taskId}-apply-safety-failed`,
+                    kind: "tool",
+                    title: "task.failed",
+                    detail: applySafetyError,
+                  }),
+                  verificationSummary: `failed: ${applySafetyError}`,
+                });
+                return;
+              }
+              const postApplyVerification = await activeShellTool.runReadOnlyCommand({
+                program: "git",
+                args: ["diff", "--check"],
+                workspacePath: null,
+              });
+              const applyStatus =
+                applyResult.applied && postApplyVerification.exitCode === 0 ? "completed" : "failed";
+
+              emit({
+                ...snapshot,
+                title:
+                  applyStatus === "completed"
+                    ? "Code Agent patch applied"
+                    : "Code Agent patch verification failed",
+                status: applyStatus,
+                commanderMessage:
+                  applyStatus === "completed"
+                    ? "Approved patch was applied and the post-apply diff check passed."
+                    : "The patch apply step finished, but post-apply verification did not pass.",
+                plan:
+                  applyStatus === "completed"
+                    ? snapshot.plan.map((step) => ({ ...step, status: "completed" }))
+                    : markCodeReviewApplyFailed(snapshot.plan),
+                agents: [
+                  commanderSnapshot(
+                    applyStatus === "completed" ? "completed" : "failed",
+                    applyStatus === "completed" ? "Task finished" : "Verification failed",
+                  ),
+                  codeSnapshot(
+                    applyStatus === "completed" ? "completed" : "failed",
+                    applyResult.message,
+                  ),
+                  verifierSnapshot(
+                    applyStatus === "completed" ? "completed" : "failed",
+                    `${postApplyVerification.exitCode ?? "unknown"} post-apply diff check exit code`,
+                  ),
+                ],
+                codeReviewPreview,
+                codeProposedEdit: proposedEdit,
+                codeApplyResult: applyResult,
+                commands: [verification, postApplyVerification],
+                permissionRequest: resolvedApplyRequest,
+                logs: appendLog(snapshot, {
+                  id: `${taskId}-apply-done`,
+                  kind: "verification",
+                  title: applyStatus === "completed" ? "task.completed" : "verification.failed",
+                  detail: `code.applyProposedEdit applied=${applyResult.applied}; post-apply git diff --check exit code ${postApplyVerification.exitCode ?? "unknown"}.`,
+                }),
+                verificationSummary:
+                  applyStatus === "completed"
+                    ? `verified: approved Code Agent patch applied to ${applyResult.changedFiles.length} file(s), and post-apply git diff --check passed.`
+                    : `failed: Code Agent apply result was ${applyResult.applied ? "applied" : "not applied"} and post-apply git diff --check returned exit code ${postApplyVerification.exitCode ?? "unknown"}.`,
+              });
+            } catch (error) {
+              emit({
+                ...snapshot,
+                title: "Code Agent patch application failed",
+                status: "failed",
+                commanderMessage:
+                  "Code Agent could not apply the approved patch or run post-apply verification.",
+                plan: markCodeReviewApplyFailed(snapshot.plan),
+                agents: [
+                  commanderSnapshot("completed", "Permission decision recorded"),
+                  codeSnapshot("failed", "Patch application failed"),
+                  verifierSnapshot("failed", "Post-apply verification unavailable"),
+                ],
+                codeReviewPreview,
+                codeProposedEdit: proposedEdit,
+                commands: [verification],
+                permissionRequest: resolvedApplyRequest,
+                logs: appendLog(snapshot, {
+                  id: `${taskId}-apply-failed`,
+                  kind: "tool",
+                  title: "task.failed",
+                  detail: error instanceof Error ? error.message : String(error),
+                }),
+              });
+            }
+          };
+
         } catch (error) {
           emit({
             ...snapshot,
@@ -1096,7 +1485,7 @@ export function createFileScanTaskRuntime({
             status: "failed",
             commanderMessage:
               "Code Agent reviewed the diff preview, but the read-only verification command failed to run.",
-            plan: markStep(snapshot.plan, "step-verify-code", "failed"),
+            plan: markCodeReviewFailedAfterVerification(snapshot.plan),
             agents: [
               commanderSnapshot("completed", "Permission decision recorded"),
               codeSnapshot("completed", "Diff preview reviewed"),
@@ -1120,7 +1509,7 @@ export function createFileScanTaskRuntime({
         status: "failed",
         commanderMessage:
           "Code Agent could not collect a diff preview. Check repository access or try a narrower code review goal.",
-        plan: markStep(snapshot.plan, "step-inspect-code", "failed"),
+        plan: markCodeReviewPreviewFailed(snapshot.plan),
         agents: [
           commanderSnapshot("completed", "Plan submitted"),
           codeSnapshot("failed", "Diff preview unavailable"),
@@ -1152,6 +1541,7 @@ export function createFileScanTaskRuntime({
         researchSnapshot("queued", "Waiting for public source search"),
         verifierSnapshot("queued", "Waiting for source evidence"),
       ],
+      tokenUsage: createEmptyTokenUsageSummary(),
       logs: [
         {
           id: `${taskId}-created`,
@@ -1383,6 +1773,7 @@ export function createFileScanTaskRuntime({
         researchSnapshot("queued", `Waiting to fetch ${urls.length} source(s)`),
         verifierSnapshot("queued", "Waiting for source evidence"),
       ],
+      tokenUsage: createEmptyTokenUsageSummary(),
       logs: [
         {
           id: `${taskId}-created`,
@@ -1518,4 +1909,42 @@ function summarizeSearchProviders(sources: WebSource[]): string {
     new Set(sources.map((source) => source.provider).filter(Boolean)),
   );
   return providers.length > 0 ? providers.join(", ") : "unknown provider";
+}
+
+function markCodeReviewFailedAfterVerification(steps: TaskStep[]): TaskStep[] {
+  return steps.map((step) => {
+    if (step.id === "step-verify-code") {
+      return { ...step, status: "failed" };
+    }
+    if (step.id === "step-propose-code-edit" || step.id === "step-apply-code-edit") {
+      return { ...step, status: "skipped" };
+    }
+    return step;
+  });
+}
+
+function markCodeReviewPreviewFailed(steps: TaskStep[]): TaskStep[] {
+  return steps.map((step) => {
+    if (step.id === "step-inspect-code") {
+      return { ...step, status: "failed" };
+    }
+    if (
+      step.id === "step-review-code" ||
+      step.id === "step-verify-code" ||
+      step.id === "step-propose-code-edit" ||
+      step.id === "step-apply-code-edit"
+    ) {
+      return { ...step, status: "skipped" };
+    }
+    return step;
+  });
+}
+
+function markCodeReviewApplyFailed(steps: TaskStep[]): TaskStep[] {
+  return steps.map((step) => {
+    if (step.id === "step-apply-code-edit") {
+      return { ...step, status: "failed" };
+    }
+    return step;
+  });
 }

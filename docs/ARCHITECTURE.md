@@ -119,12 +119,15 @@ agent policy.
 - Commander: selects a route and presents the plan.
 - File Agent: handles Markdown scans and PDF organization previews/execution.
 - Shell Agent: runs allowlisted read-only project checks.
-- Research Agent: fetches user-provided public URLs.
+- Research Agent: searches and fetches public URL sources.
 - Verifier: checks evidence and creates the final verification summary.
 
-Browser and Code Agent roles are required for product readiness. Code Agent is
-not implemented yet; browser/account-changing automation remains out of scope
-unless a future design adds explicit safety rules.
+Browser and Code Agent roles are required for product readiness. Code Agent now
+has an initial Core/UI scaffold for changed-file listing, diff preview,
+read-only verification, proposed-edit metadata, and confirmed-write approval
+for patch application. A real OpenCode/opencode-backed proposal and apply
+backend is still pending. Browser/account-changing automation remains out of
+scope unless a future design adds explicit safety rules.
 
 ## OpenCode Extension Strategy
 
@@ -171,11 +174,11 @@ Adoption rules:
 
 - Routing is rule-based instead of model-based.
 - Search-backed research is wired through `github-cli` and Agent Chrome
-  fallback, but product QA evidence and source-comparison polish are still
-  incomplete.
+  fallback. Fixture QA and live smoke evidence exist; IntelliSearch evidence
+  remains blocked on Code Agent / OpenCode integration.
 - Completed, failed, and cancelled task history has an initial local snapshot
-  store in the desktop app; broader restart QA and storage migration hardening
-  are still needed.
+  store in the desktop app with recent workspace restore. Broader storage
+  migration hardening is still needed.
 - Permission decisions are per-task and not persisted.
 - The runtime is not fully modular yet.
 

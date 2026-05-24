@@ -75,6 +75,20 @@ export function createCodeReviewPlan(): TaskStep[] {
       status: "pending",
       successCriteria: "Final result explains whether the repository diff was reviewed and checked.",
     },
+    {
+      id: "step-propose-code-edit",
+      title: "Code Agent proposes an optional patch",
+      assignedAgentKind: "code",
+      status: "pending",
+      successCriteria: "Return a patch proposal without applying edits.",
+    },
+    {
+      id: "step-apply-code-edit",
+      title: "Code Agent applies only the approved patch",
+      assignedAgentKind: "code",
+      status: "pending",
+      successCriteria: "Apply only the current approved patch proposal.",
+    },
   ];
 }
 

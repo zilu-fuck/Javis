@@ -7,6 +7,7 @@ import {
 } from "./agents";
 import { createFileScanPlan, markStep } from "./plans";
 import { appendLog } from "./snapshot-utils";
+import { createEmptyTokenUsageSummary } from "./token-usage";
 import type { ID, TaskSnapshot } from "./index";
 
 export interface FlowController {
@@ -36,6 +37,7 @@ export async function runFileScanTask(
       fileSnapshot("queued", "Waiting for file.scanMarkdownDocuments"),
       verifierSnapshot("queued", "Waiting for file scan results"),
     ],
+    tokenUsage: createEmptyTokenUsageSummary(),
     logs: [
       {
         id: `${taskId}-created`,

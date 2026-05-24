@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { createFileScanTaskRuntime, createInitialTaskSnapshot } from "@javis/core";
 import type {
   CodeReviewPreview,
@@ -23,20 +24,39 @@ import {
   saveTaskHistory,
   upsertTaskHistory,
 } from "./task-history";
+import {
+  deletePersistedWorkspacePath,
+  getCompletedTaskWorkspacePath,
+  loadWorkspaceSession,
+  persistWorkspaceForTaskStatus,
+} from "./workspace-session";
+import { parseGitStatusFiles } from "./git-status";
 import "./App.css";
 
 type PersistedTaskSnapshot = ReturnType<typeof createInitialTaskSnapshot>;
+export const DEFAULT_DRAFT_GOAL = "检查当前项目，说明如何启动，并运行一次检查";
 
 function App() {
+  const [workspaceSession, setWorkspaceSession] = useState(() =>
+    loadWorkspaceSession(window.localStorage),
+  );
+  const { recentWorkspacePaths, workspacePath } = workspaceSession;
   const runtime = useMemo(
     () => {
       const runReadOnlyCommand = (request: ShellCommandRequest) =>
-        invoke<ShellCommandOutput>("run_read_only_command", { request });
+        invoke<ShellCommandOutput>("run_read_only_command", {
+          request: {
+            ...request,
+            workspacePath: request.workspacePath ?? (workspacePath.trim() || null),
+          },
+        });
 
       return createFileScanTaskRuntime({
         fileTool: {
           scanMarkdownDocuments: () =>
-            invoke<MarkdownDocument[]>("scan_markdown_documents", { workspacePath: null }),
+            invoke<MarkdownDocument[]>("scan_markdown_documents", {
+              workspacePath: workspacePath.trim() || null,
+            }),
           planPdfOrganization: () =>
             invoke<FileOrganizationPlan>("plan_pdf_organization"),
           executePdfOrganization: async (
@@ -76,7 +96,9 @@ function App() {
         },
         projectTool: {
           inspectProject: () =>
-            invoke<ProjectInspection>("inspect_project", { workspacePath: null }),
+            invoke<ProjectInspection>("inspect_project", {
+              workspacePath: workspacePath.trim() || null,
+            }),
         },
         webTool: {
           fetchWebSource: (request: WebSourceRequest) =>
@@ -86,15 +108,13 @@ function App() {
         },
       });
     },
-    [],
+    [workspacePath],
   );
   const [task, setTask] = useState(createInitialTaskSnapshot);
   const [history, setHistory] = useState<PersistedTaskSnapshot[]>(() =>
     loadTaskHistory(window.localStorage),
   );
-  const [draftGoal, setDraftGoal] = useState(
-    "检查当前项目，说明如何启动，并运行一次检查",
-  );
+  const [draftGoal, setDraftGoal] = useState(DEFAULT_DRAFT_GOAL);
 
   useEffect(() => {
     const unsubscribe = runtime.subscribe((nextTask) => {
@@ -104,12 +124,18 @@ function App() {
           saveTaskHistory(window.localStorage, upsertTaskHistory(current, nextTask)),
         );
       }
+      if (nextTask.status === "completed") {
+        persistWorkspaceForTask(
+          nextTask.status,
+          getCompletedTaskWorkspacePath(nextTask) || workspacePath,
+        );
+      }
     });
     return () => {
       unsubscribe();
       runtime.dispose();
     };
-  }, [runtime]);
+  }, [runtime, workspacePath]);
 
   function submitGoal() {
     const goal = draftGoal.trim();
@@ -117,6 +143,65 @@ function App() {
       return;
     }
     runtime.start(goal);
+  }
+
+  function retryCurrentTask() {
+    const goal = task.userGoal.trim();
+    if (!goal) {
+      return;
+    }
+    setDraftGoal(goal);
+    runtime.start(goal);
+  }
+
+  function persistWorkspaceForTask(
+    status: PersistedTaskSnapshot["status"],
+    completedWorkspacePath: string,
+  ) {
+    setWorkspaceSession((current) => ({
+      ...current,
+      recentWorkspacePaths: persistWorkspaceForTaskStatus(
+        window.localStorage,
+        current.recentWorkspacePaths,
+        completedWorkspacePath,
+        status,
+      ),
+    }));
+  }
+
+  function useWorkspacePath(path: string) {
+    setWorkspaceSession((current) => ({
+      ...current,
+      workspacePath: path.trim(),
+    }));
+  }
+
+  async function browseWorkspacePath() {
+    const selectedPath = await open({
+      directory: true,
+      multiple: false,
+      title: "Select Javis workspace",
+    });
+    if (typeof selectedPath === "string") {
+      useWorkspacePath(selectedPath);
+    }
+  }
+
+  function deleteRecentWorkspacePath(path: string) {
+    setWorkspaceSession((current) => {
+      const recentWorkspacePaths = deletePersistedWorkspacePath(
+        window.localStorage,
+        current.recentWorkspacePaths,
+        path,
+      );
+      return {
+        workspacePath:
+          current.workspacePath.toLocaleLowerCase() === path.trim().toLocaleLowerCase()
+            ? recentWorkspacePaths[0] ?? ""
+            : current.workspacePath,
+        recentWorkspacePaths,
+      };
+    });
   }
 
   function selectHistoryEntry(id: string) {
@@ -139,6 +224,7 @@ function App() {
   return (
     <JavisWorkbench
       draftGoal={draftGoal}
+      currentWorkspacePath={workspacePath}
       historyEntries={history.map((entry) => ({
         id: entry.id,
         title: entry.title,
@@ -147,23 +233,20 @@ function App() {
         updatedAt: getTaskUpdatedAt(entry),
       }))}
       locale={zhCNWorkbenchLocale}
+      onBrowseWorkspacePath={browseWorkspacePath}
       onDeleteHistoryEntry={deleteHistoryEntry}
+      onDeleteRecentWorkspacePath={deleteRecentWorkspacePath}
       onDraftGoalChange={setDraftGoal}
       onPermissionDecision={runtime.resolvePermission}
+      onRetryTask={retryCurrentTask}
       onSelectHistoryEntry={selectHistoryEntry}
       onSubmitGoal={submitGoal}
+      onUseWorkspacePath={useWorkspacePath}
+      onWorkspacePathChange={useWorkspacePath}
+      recentWorkspacePaths={recentWorkspacePaths}
       task={task}
     />
   );
-}
-
-function parseGitStatusFiles(output: string): string[] {
-  return output
-    .split(/\r?\n/)
-    .map((line) => line.trimEnd())
-    .filter(Boolean)
-    .map((line) => line.slice(3).trim())
-    .filter(Boolean);
 }
 
 export default App;

@@ -108,6 +108,36 @@ export interface WorkbenchCodeReviewPreview {
   diff: string;
 }
 
+export interface WorkbenchCodeProposedEdit {
+  proposalId: string;
+  workspacePath: string;
+  summary: string;
+  changedFiles: string[];
+  patch: string;
+  patchHash: string;
+}
+
+export interface WorkbenchCodeApplyResult {
+  applied: boolean;
+  workspacePath: string;
+  changedFiles: string[];
+  message: string;
+}
+
+export interface WorkbenchTokenUsageSummary {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  modelCalls: number;
+  byAgentKind: Array<{
+    agentKind: string;
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    modelCalls: number;
+  }>;
+}
+
 export interface WorkbenchHistoryEntry {
   id: string;
   title: string;
@@ -131,20 +161,30 @@ export interface WorkbenchTask {
   permissionRequest?: WorkbenchPermissionRequest;
   project?: WorkbenchProject;
   codeReviewPreview?: WorkbenchCodeReviewPreview;
+  codeProposedEdit?: WorkbenchCodeProposedEdit;
+  codeApplyResult?: WorkbenchCodeApplyResult;
   researchReport?: WorkbenchResearchReport;
   sources?: WorkbenchSource[];
+  tokenUsage?: WorkbenchTokenUsageSummary;
   verificationSummary?: string;
 }
 
 export interface JavisWorkbenchProps {
   task: WorkbenchTask;
   draftGoal: string;
+  currentWorkspacePath?: string;
   historyEntries?: WorkbenchHistoryEntry[];
   locale?: WorkbenchLocale;
+  recentWorkspacePaths?: string[];
   onDraftGoalChange: (nextGoal: string) => void;
   onDeleteHistoryEntry?: (id: string) => void;
+  onDeleteRecentWorkspacePath?: (path: string) => void;
+  onBrowseWorkspacePath?: () => void;
   onSelectHistoryEntry?: (id: string) => void;
+  onUseWorkspacePath?: (path: string) => void;
+  onWorkspacePathChange?: (path: string) => void;
   onPermissionDecision?: (decision: "approved" | "denied") => void;
+  onRetryTask?: () => void;
   onSubmitGoal: () => void;
 }
 
@@ -173,11 +213,16 @@ export interface WorkbenchLocale {
     expandActivityLog: string;
     expandInspector: string;
     fileOrganizationResult: string;
+    failedRecoveryTitle: string;
+    failedRecoveryMessage: string;
     gallery: string;
     history: string;
     historyEmpty: string;
+    historyNoMatches: string;
     localKnowledgeBase: string;
     mainThread: string;
+    manualSourceFallbackTitle: string;
+    manualSourceFallbackMessage: string;
     markdownDocuments: string;
     models: string;
     modified: string;
@@ -191,6 +236,7 @@ export interface WorkbenchLocale {
     profileName: string;
     researchReport: string;
     researchSources: string;
+    retryTask: string;
     send: string;
     searchPlaceholder: string;
     settings: string;
@@ -201,12 +247,24 @@ export interface WorkbenchLocale {
     taskInputPlaceholder: string;
     testCheck: string;
     thisComputer: string;
+    tokenUsage: string;
+    tokenInput: string;
+    tokenOutput: string;
+    tokenCalls: string;
+    noModelCalls: string;
     unknown: string;
     unknownManager: string;
     unverified: string;
     user: string;
     verifier: string;
     workspaceNavigation: string;
+    browseWorkspace: string;
+    currentWorkspace: string;
+    recentWorkspaces: string;
+    removeWorkspace: string;
+    useWorkspace: string;
+    workspaceBrowseError: string;
+    workspacePathPlaceholder: string;
   };
   phrases?: Record<string, string>;
 }
@@ -236,11 +294,16 @@ export const zhCNWorkbenchLocale: WorkbenchLocale = {
     expandActivityLog: "展开日志",
     expandInspector: "展开检查器",
     fileOrganizationResult: "文件整理结果",
+    failedRecoveryTitle: "恢复",
+    failedRecoveryMessage: "检查失败阶段和活动日志，然后重试当前任务或改写目标后再运行。",
     gallery: "图库",
     history: "历史",
     historyEmpty: "暂无历史",
+    historyNoMatches: "没有匹配的历史",
     localKnowledgeBase: "本地知识库",
     mainThread: "主线程",
+    manualSourceFallbackTitle: "手动来源备用路径",
+    manualSourceFallbackMessage: "当搜索找不到或无法获取足够证据时，把一个或多个来源 URL 粘贴到输入框，再重新运行研究任务。",
     markdownDocuments: "Markdown 文档",
     models: "模型",
     modified: "修改时间",
@@ -254,6 +317,7 @@ export const zhCNWorkbenchLocale: WorkbenchLocale = {
     profileName: "子路",
     researchReport: "研究报告",
     researchSources: "研究来源",
+    retryTask: "重试",
     send: "发送",
     searchPlaceholder: "搜索",
     settings: "设置",
@@ -264,12 +328,24 @@ export const zhCNWorkbenchLocale: WorkbenchLocale = {
     taskInputPlaceholder: "让 Javis 做点什么...",
     testCheck: "测试/检查",
     thisComputer: "此电脑",
+    tokenUsage: "Token usage",
+    tokenInput: "Input",
+    tokenOutput: "Output",
+    tokenCalls: "Calls",
+    noModelCalls: "No model calls",
     unknown: "未知",
     unknownManager: "未知包管理器",
     unverified: "未验证",
     user: "用户",
     verifier: "验证器",
     workspaceNavigation: "工作区导航",
+    currentWorkspace: "当前工作区",
+    recentWorkspaces: "最近工作区",
+    useWorkspace: "使用",
+    browseWorkspace: "选择文件夹",
+    removeWorkspace: "移除",
+    workspaceBrowseError: "无法打开文件夹选择器。请手动输入工作区路径。",
+    workspacePathPlaceholder: "E:\\Javis",
   },
   phrases: {
     "Ready": "就绪",
@@ -384,11 +460,16 @@ const defaultWorkbenchLocale: WorkbenchLocale = {
     expandActivityLog: "Expand activity log",
     expandInspector: "Expand inspector",
     fileOrganizationResult: "File Organization Result",
+    failedRecoveryTitle: "Recovery",
+    failedRecoveryMessage: "Review the failed phase and activity log, then retry this task or revise the goal before running it again.",
     gallery: "Gallery",
     history: "History",
     historyEmpty: "No history yet",
+    historyNoMatches: "No matching history",
     localKnowledgeBase: "Local knowledge base",
     mainThread: "Main Thread",
+    manualSourceFallbackTitle: "Manual source fallback",
+    manualSourceFallbackMessage: "When search cannot find or fetch enough evidence, paste one or more source URLs into the composer and run the research task again.",
     markdownDocuments: "Markdown Documents",
     models: "Models",
     modified: "modified",
@@ -402,6 +483,7 @@ const defaultWorkbenchLocale: WorkbenchLocale = {
     profileName: "User",
     researchReport: "Research report",
     researchSources: "Research Sources",
+    retryTask: "Retry",
     send: "Send",
     searchPlaceholder: "Search",
     settings: "Settings",
@@ -412,29 +494,62 @@ const defaultWorkbenchLocale: WorkbenchLocale = {
     taskInputPlaceholder: "Ask Javis to do something...",
     testCheck: "Test/check",
     thisComputer: "This computer",
+    tokenUsage: "Token usage",
+    tokenInput: "Input",
+    tokenOutput: "Output",
+    tokenCalls: "Calls",
+    noModelCalls: "No model calls",
     unknown: "Unknown",
     unknownManager: "unknown manager",
     unverified: "unverified",
     user: "User",
     verifier: "Verifier",
     workspaceNavigation: "Workspace navigation",
+    browseWorkspace: "Browse",
+    currentWorkspace: "Current workspace",
+    recentWorkspaces: "Recent workspaces",
+    removeWorkspace: "Remove",
+    useWorkspace: "Use",
+    workspaceBrowseError: "Could not open the folder picker. Enter the workspace path manually.",
+    workspacePathPlaceholder: "E:\\Javis",
   },
 };
 
 export function JavisWorkbench({
   task,
   draftGoal,
+  currentWorkspacePath = "",
   historyEntries = [],
   locale = defaultWorkbenchLocale,
+  recentWorkspacePaths = [],
   onDraftGoalChange,
   onDeleteHistoryEntry,
+  onDeleteRecentWorkspacePath,
+  onBrowseWorkspacePath,
   onSelectHistoryEntry,
+  onUseWorkspacePath,
+  onWorkspacePathChange,
   onPermissionDecision,
+  onRetryTask,
   onSubmitGoal,
 }: JavisWorkbenchProps) {
-  const labels = locale.labels;
+  const effectiveLocale = {
+    ...locale,
+    labels: {
+      ...defaultWorkbenchLocale.labels,
+      ...locale.labels,
+    },
+  };
+  const labels = effectiveLocale.labels;
   const [isActivityOpen, setIsActivityOpen] = useState(false);
   const [isInspectorOpen, setIsInspectorOpen] = useState(false);
+  const [sidebarSearchQuery, setSidebarSearchQuery] = useState("");
+  const [workspaceBrowseError, setWorkspaceBrowseError] = useState(false);
+  const filteredHistoryEntries = filterWorkbenchHistoryEntries(
+    historyEntries,
+    sidebarSearchQuery,
+  );
+  const hasHistorySearch = sidebarSearchQuery.trim().length > 0;
   const activityCount = task.logs.length + (task.permissionRequest ? 1 : 0);
   const isNewChat =
     task.status === "created" &&
@@ -445,6 +560,8 @@ export function JavisWorkbench({
     !task.permissionRequest &&
     !task.project &&
     !task.codeReviewPreview &&
+    !task.codeProposedEdit &&
+    !task.codeApplyResult &&
     !task.researchReport &&
     !task.sources &&
     !task.verificationSummary;
@@ -452,6 +569,79 @@ export function JavisWorkbench({
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     onSubmitGoal();
+  }
+
+  async function handleBrowseWorkspace() {
+    setWorkspaceBrowseError(false);
+    try {
+      await onBrowseWorkspacePath?.();
+    } catch {
+      setWorkspaceBrowseError(true);
+    }
+  }
+
+  function renderWorkspaceContext() {
+    return (
+      <div className="javis-workspace-context" aria-label={labels.currentWorkspace}>
+        <details className="javis-workspace-menu">
+          <summary title={currentWorkspacePath || labels.workspacePathPlaceholder}>
+            <span className="javis-workspace-glyph">▱</span>
+            <span>{formatWorkspaceName(currentWorkspacePath) || labels.currentWorkspace}</span>
+            <span className="javis-workspace-chevron">⌄</span>
+          </summary>
+          <div className="javis-workspace-popover">
+            <label>
+              <span>{labels.currentWorkspace}</span>
+              <input
+                aria-label={labels.currentWorkspace}
+                onChange={(event) => onWorkspacePathChange?.(event.currentTarget.value)}
+                placeholder={labels.workspacePathPlaceholder}
+                value={currentWorkspacePath}
+              />
+            </label>
+            <div className="javis-workspace-actions">
+              <button
+                disabled={!currentWorkspacePath.trim()}
+                onClick={() => onUseWorkspacePath?.(currentWorkspacePath)}
+                type="button"
+              >
+                {labels.useWorkspace}
+              </button>
+              <button onClick={handleBrowseWorkspace} type="button">
+                {labels.browseWorkspace}
+              </button>
+            </div>
+            {workspaceBrowseError ? (
+              <p role="alert">{labels.workspaceBrowseError}</p>
+            ) : null}
+            {recentWorkspacePaths.length > 0 ? (
+              <div className="javis-workspace-recent">
+                <p>{labels.recentWorkspaces}</p>
+                {recentWorkspacePaths.map((path) => (
+                  <div className="javis-workspace-recent-entry" key={path}>
+                    <button
+                      onClick={() => onUseWorkspacePath?.(path)}
+                      title={path}
+                      type="button"
+                    >
+                      {path}
+                    </button>
+                    <button
+                      aria-label={`${labels.removeWorkspace}: ${path}`}
+                      onClick={() => onDeleteRecentWorkspacePath?.(path)}
+                      title={labels.removeWorkspace}
+                      type="button"
+                    >
+                      x
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </details>
+      </div>
+    );
   }
 
   return (
@@ -468,7 +658,12 @@ export function JavisWorkbench({
         </div>
         <label className="javis-sidebar-search">
           <span aria-hidden="true">⌕</span>
-          <input aria-label={labels.searchPlaceholder} placeholder={labels.searchPlaceholder} readOnly />
+          <input
+            aria-label={labels.searchPlaceholder}
+            onChange={(event) => setSidebarSearchQuery(event.currentTarget.value)}
+            placeholder={labels.searchPlaceholder}
+            value={sidebarSearchQuery}
+          />
         </label>
         <nav className="javis-nav" aria-label={labels.workspaceNavigation}>
           <div className="javis-nav-group primary">
@@ -509,8 +704,8 @@ export function JavisWorkbench({
           </div>
           <div className="javis-nav-group">
             <p className="javis-nav-section">{labels.history}</p>
-            {historyEntries.length > 0 ? (
-              historyEntries.map((entry) => (
+            {filteredHistoryEntries.length > 0 ? (
+              filteredHistoryEntries.map((entry) => (
                 <div className="javis-history-entry" key={entry.id}>
                   <button
                     className="javis-history-select"
@@ -539,7 +734,7 @@ export function JavisWorkbench({
             ) : (
               <div className="javis-nav-item muted">
                 <span className="javis-nav-icon">○</span>
-                <span>{labels.historyEmpty}</span>
+                <span>{hasHistorySearch ? labels.historyNoMatches : labels.historyEmpty}</span>
               </div>
             )}
           </div>
@@ -564,7 +759,7 @@ export function JavisWorkbench({
               />
               <div className="javis-new-chat-actions">
                 <button className="javis-attach-button" type="button">+</button>
-                <span>{labels.currentTask}</span>
+                {renderWorkspaceContext()}
                 <button className="javis-send-button" type="submit">{labels.send}</button>
               </div>
             </form>
@@ -576,7 +771,18 @@ export function JavisWorkbench({
                 <p className="javis-eyebrow">{labels.mainThread}</p>
                 <h1 className="javis-title">{translateWorkbenchText(task.title, locale)}</h1>
               </div>
-              <span className="javis-task-status">{translateWorkbenchText(task.status, locale)}</span>
+              <div className="javis-thread-header-actions">
+                {task.status === "failed" ? (
+                  <button
+                    className="javis-retry-button"
+                    onClick={onRetryTask}
+                    type="button"
+                  >
+                    {labels.retryTask}
+                  </button>
+                ) : null}
+                <span className="javis-task-status">{translateWorkbenchText(task.status, locale)}</span>
+              </div>
             </header>
 
             <section className="javis-thread" aria-label={labels.activeTask}>
@@ -590,6 +796,43 @@ export function JavisWorkbench({
                   {translateWorkbenchText(task.commanderMessage, locale)}
                 </p>
               </article>
+
+              {task.status === "failed" ? (
+                <section className="javis-recovery" aria-label={labels.failedRecoveryTitle}>
+                  <p className="javis-message-title">{labels.failedRecoveryTitle}</p>
+                  <p>{labels.failedRecoveryMessage}</p>
+                </section>
+              ) : null}
+
+              {isResearchFallbackTask(task) ? (
+                <section className="javis-recovery" aria-label={labels.manualSourceFallbackTitle}>
+                  <p className="javis-message-title">{labels.manualSourceFallbackTitle}</p>
+                  <p>{labels.manualSourceFallbackMessage}</p>
+                </section>
+              ) : null}
+
+              {task.tokenUsage ? (
+                <section className="javis-token-usage" aria-label={labels.tokenUsage}>
+                  <div className="javis-token-usage-header">
+                    <p className="javis-message-title">{labels.tokenUsage}</p>
+                    <strong>{formatTokenCount(task.tokenUsage.totalTokens)}</strong>
+                  </div>
+                  <div className="javis-token-grid">
+                    <span>
+                      {labels.tokenInput}: {formatTokenCount(task.tokenUsage.inputTokens)}
+                    </span>
+                    <span>
+                      {labels.tokenOutput}: {formatTokenCount(task.tokenUsage.outputTokens)}
+                    </span>
+                    <span>
+                      {labels.tokenCalls}: {formatTokenCount(task.tokenUsage.modelCalls)}
+                    </span>
+                  </div>
+                  {task.tokenUsage.modelCalls === 0 ? (
+                    <p>{labels.noModelCalls}</p>
+                  ) : null}
+                </section>
+              ) : null}
 
           {task.plan.length > 0 ? (
             <section className="javis-plan" aria-label={labels.plan}>
@@ -671,6 +914,55 @@ export function JavisWorkbench({
                 <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
                   {task.codeReviewPreview.diff || labels.emptyOutput}
                 </pre>
+              </article>
+            </section>
+          ) : null}
+
+          {task.codeProposedEdit ? (
+            <section className="javis-documents" aria-label={translateWorkbenchText("Code Agent patch proposal", locale)}>
+              <p className="javis-message-title">
+                {translateWorkbenchText("Code Agent patch proposal", locale)}
+              </p>
+              <article className="javis-document">
+                <div className="javis-document-row">
+                  <strong>{task.codeProposedEdit.workspacePath}</strong>
+                  <span>
+                    {labels.changedFiles}: {task.codeProposedEdit.changedFiles.length}
+                  </span>
+                </div>
+                <p>{translateWorkbenchText(task.codeProposedEdit.summary, locale)}</p>
+              </article>
+              {task.codeProposedEdit.changedFiles.map((file) => (
+                <article className="javis-document" key={file}>
+                  <div className="javis-document-row">
+                    <strong>{file}</strong>
+                    <span>{translateWorkbenchText("proposed", locale)}</span>
+                  </div>
+                </article>
+              ))}
+              <article className="javis-document">
+                <pre style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                  {task.codeProposedEdit.patch || labels.emptyOutput}
+                </pre>
+              </article>
+            </section>
+          ) : null}
+
+          {task.codeApplyResult ? (
+            <section className="javis-documents" aria-label={translateWorkbenchText("Code Agent apply result", locale)}>
+              <p className="javis-message-title">
+                {translateWorkbenchText("Code Agent apply result", locale)}
+              </p>
+              <article className="javis-document">
+                <div className="javis-document-row">
+                  <strong>
+                    {translateWorkbenchText(task.codeApplyResult.applied ? "applied" : "not applied", locale)}
+                  </strong>
+                  <span>
+                    {labels.changedFiles}: {task.codeApplyResult.changedFiles.length}
+                  </span>
+                </div>
+                <p>{translateWorkbenchText(task.codeApplyResult.message, locale)}</p>
               </article>
             </section>
           ) : null}
@@ -856,7 +1148,10 @@ export function JavisWorkbench({
             placeholder={labels.taskInputPlaceholder}
             value={draftGoal}
           />
-          <button type="submit">{labels.send}</button>
+          <div className="javis-composer-actions">
+            {renderWorkspaceContext()}
+            <button type="submit">{labels.send}</button>
+          </div>
         </form>
           </>
         )}
@@ -980,6 +1275,53 @@ function formatSize(sizeBytes: number) {
     return `${(sizeBytes / 1024).toFixed(1)} KB`;
   }
   return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatWorkspaceName(path: string) {
+  const normalizedPath = path.trim().replace(/[\\/]+$/, "");
+  if (!normalizedPath) {
+    return "";
+  }
+
+  const parts = normalizedPath.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? normalizedPath;
+}
+
+function formatTokenCount(value: number) {
+  return new Intl.NumberFormat().format(value);
+}
+
+function isResearchFallbackTask(task: WorkbenchTask): boolean {
+  if (task.status !== "failed") {
+    return false;
+  }
+
+  const researchText = [
+    task.title,
+    task.commanderMessage,
+    task.verificationSummary ?? "",
+  ].join(" ");
+  return /\bResearch\b/i.test(researchText);
+}
+
+export function filterWorkbenchHistoryEntries(
+  entries: WorkbenchHistoryEntry[],
+  query: string,
+): WorkbenchHistoryEntry[] {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  if (!normalizedQuery) {
+    return entries;
+  }
+
+  return entries.filter((entry) => {
+    const searchableText = [
+      entry.title,
+      entry.status,
+      entry.userGoal,
+      entry.updatedAt,
+    ].join(" ");
+    return searchableText.toLocaleLowerCase().includes(normalizedQuery);
+  });
 }
 
 function formatModifiedTime(modifiedAt: string) {

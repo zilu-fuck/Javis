@@ -2,6 +2,7 @@ import type { TaskSnapshot } from "@javis/core";
 
 export const TASK_HISTORY_STORAGE_KEY = "javis.taskHistory.v1";
 export const TASK_HISTORY_LIMIT = 20;
+export const TASK_HISTORY_STORAGE_VERSION = 1;
 
 type TaskHistoryStorage = Pick<Storage, "getItem" | "setItem">;
 
@@ -21,12 +22,12 @@ export function loadTaskHistory(storage: TaskHistoryStorage): TaskSnapshot[] {
     if (!raw) {
       return [];
     }
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
+    const entries = parseTaskHistoryEntries(JSON.parse(raw));
+    if (!entries) {
       return [];
     }
 
-    return parsed
+    return entries
       .map(sanitizeTaskSnapshot)
       .filter((task): task is TaskSnapshot => Boolean(task))
       .filter(isArchivableTask)
@@ -76,6 +77,22 @@ export function getTaskUpdatedAt(task: TaskSnapshot): string {
     : new Date().toISOString();
 }
 
+function parseTaskHistoryEntries(value: unknown): unknown[] | null {
+  if (Array.isArray(value)) {
+    return value;
+  }
+
+  if (
+    isRecord(value) &&
+    value.version === TASK_HISTORY_STORAGE_VERSION &&
+    Array.isArray(value.tasks)
+  ) {
+    return value.tasks;
+  }
+
+  return null;
+}
+
 export function sanitizeTaskSnapshot(value: unknown): TaskSnapshot | null {
   if (!isRecord(value)) {
     return null;
@@ -123,11 +140,27 @@ export function sanitizeTaskSnapshot(value: unknown): TaskSnapshot | null {
   if (isCodeReviewPreview(value.codeReviewPreview)) {
     snapshot.codeReviewPreview = value.codeReviewPreview;
   }
+  if (isCodeProposedEdit(value.codeProposedEdit)) {
+    snapshot.codeProposedEdit = {
+      ...value.codeProposedEdit,
+      patch: "",
+    };
+  }
+  if (isCodeApplyResult(value.codeApplyResult)) {
+    snapshot.codeApplyResult = value.codeApplyResult;
+  }
+  const permissionRequest = sanitizeResolvedPermissionRequest(value.permissionRequest);
+  if (permissionRequest) {
+    snapshot.permissionRequest = permissionRequest;
+  }
   if (isResearchReport(value.researchReport)) {
     snapshot.researchReport = value.researchReport;
   }
   if (isWebSourceArray(value.sources)) {
     snapshot.sources = value.sources;
+  }
+  if (isTokenUsageSummary(value.tokenUsage)) {
+    snapshot.tokenUsage = value.tokenUsage;
   }
   if (isString(value.verificationSummary)) {
     snapshot.verificationSummary = value.verificationSummary;
@@ -162,6 +195,29 @@ function isTaskStatus(value: unknown): value is TaskSnapshot["status"] {
   );
 }
 
+function isTaskStepStatus(value: unknown): value is TaskSnapshot["plan"][number]["status"] {
+  return (
+    value === "pending" ||
+    value === "running" ||
+    value === "completed" ||
+    value === "failed" ||
+    value === "skipped"
+  );
+}
+
+function isAgentRunStatus(value: unknown): value is TaskSnapshot["agents"][number]["status"] {
+  return (
+    value === "queued" ||
+    value === "planning" ||
+    value === "running" ||
+    value === "waiting_permission" ||
+    value === "verifying" ||
+    value === "completed" ||
+    value === "failed" ||
+    value === "cancelled"
+  );
+}
+
 function isAgentKind(value: unknown): boolean {
   return (
     value === "commander" ||
@@ -174,6 +230,46 @@ function isAgentKind(value: unknown): boolean {
   );
 }
 
+function isTaskLogKind(value: unknown): value is TaskSnapshot["logs"][number]["kind"] {
+  return (
+    value === "plan" ||
+    value === "tool" ||
+    value === "permission" ||
+    value === "verification" ||
+    value === "event"
+  );
+}
+
+function isPlannedPathAction(
+  value: unknown,
+): value is NonNullable<TaskSnapshot["permissionRequest"]>["dryRun"]["affectedPaths"][number]["action"] {
+  return (
+    value === "create" ||
+    value === "modify" ||
+    value === "move" ||
+    value === "copy" ||
+    value === "delete" ||
+    value === "overwrite"
+  );
+}
+
+function isPermissionLevel(
+  value: unknown,
+): value is NonNullable<TaskSnapshot["permissionRequest"]>["level"] {
+  return value === "preview" || value === "confirmed_write" || value === "dangerous";
+}
+
+function isResolvedPermissionStatus(
+  value: unknown,
+): value is Exclude<NonNullable<TaskSnapshot["permissionRequest"]>["status"], "pending"> {
+  return (
+    value === "approved" ||
+    value === "denied" ||
+    value === "expired" ||
+    value === "cancelled"
+  );
+}
+
 function isTaskStepArray(value: unknown): value is TaskSnapshot["plan"] {
   return (
     Array.isArray(value) &&
@@ -183,7 +279,7 @@ function isTaskStepArray(value: unknown): value is TaskSnapshot["plan"] {
         isString(step.id) &&
         isString(step.title) &&
         isAgentKind(step.assignedAgentKind) &&
-        isString(step.status) &&
+        isTaskStepStatus(step.status) &&
         (!("successCriteria" in step) || isString(step.successCriteria)),
     )
   );
@@ -198,7 +294,7 @@ function isAgentSnapshotArray(value: unknown): value is TaskSnapshot["agents"] {
         isString(agent.id) &&
         isString(agent.name) &&
         isString(agent.role) &&
-        isString(agent.status) &&
+        isAgentRunStatus(agent.status) &&
         isString(agent.task),
     )
   );
@@ -211,7 +307,7 @@ function isTaskLogArray(value: unknown): value is TaskSnapshot["logs"] {
       (log) =>
         isRecord(log) &&
         isString(log.id) &&
-        isString(log.kind) &&
+        isTaskLogKind(log.kind) &&
         isString(log.title) &&
         isString(log.detail),
     )
@@ -249,7 +345,9 @@ function isCommandArray(value: unknown): value is TaskSnapshot["commands"] {
   );
 }
 
-function isPlannedPathArray(value: unknown): boolean {
+function isPlannedPathArray(
+  value: unknown,
+): value is NonNullable<TaskSnapshot["permissionRequest"]>["dryRun"]["affectedPaths"] {
   return (
     Array.isArray(value) &&
     value.every(
@@ -257,7 +355,7 @@ function isPlannedPathArray(value: unknown): boolean {
         isRecord(path) &&
         isString(path.source) &&
         isString(path.target) &&
-        isString(path.action) &&
+        isPlannedPathAction(path.action) &&
         (!("conflict" in path) || isString(path.conflict)),
     )
   );
@@ -298,6 +396,62 @@ function isFileOrganizationExecution(
   );
 }
 
+function sanitizeResolvedPermissionRequest(
+  value: unknown,
+): TaskSnapshot["permissionRequest"] | undefined {
+  if (
+    !isRecord(value) ||
+    !isString(value.id) ||
+    !isString(value.level) ||
+    !isString(value.title) ||
+    !isString(value.reason) ||
+    !isString(value.status) ||
+    !isString(value.createdAt) ||
+    !isRecord(value.dryRun) ||
+    ("bindingHash" in value && !isString(value.bindingHash)) ||
+    ("resolvedAt" in value && !isString(value.resolvedAt))
+  ) {
+    return undefined;
+  }
+
+  const dryRun = value.dryRun;
+  const affectedPaths = dryRun.affectedPaths;
+  if (
+    !isString(dryRun.operation) ||
+    !isPlannedPathArray(affectedPaths) ||
+    !isString(dryRun.riskSummary) ||
+    typeof dryRun.reversible !== "boolean"
+  ) {
+    return undefined;
+  }
+
+  if (!isPermissionLevel(value.level)) {
+    return undefined;
+  }
+
+  if (!isResolvedPermissionStatus(value.status)) {
+    return undefined;
+  }
+
+  return {
+    id: value.id,
+    level: value.level,
+    title: value.title,
+    reason: value.reason,
+    dryRun: {
+      operation: dryRun.operation,
+      affectedPaths,
+      riskSummary: dryRun.riskSummary,
+      reversible: dryRun.reversible,
+    },
+    bindingHash: "bindingHash" in value && isString(value.bindingHash) ? value.bindingHash : undefined,
+    status: value.status,
+    createdAt: value.createdAt,
+    resolvedAt:
+      "resolvedAt" in value && isString(value.resolvedAt) ? value.resolvedAt : undefined,
+  };
+}
+
 function isProjectInspection(value: unknown): value is TaskSnapshot["project"] {
   return (
     isRecord(value) &&
@@ -315,7 +469,7 @@ function isProjectInspection(value: unknown): value is TaskSnapshot["project"] {
   );
 }
 
-function isCodeReviewPreview(value: unknown): value is TaskSnapshot["codeReviewPreview"] {
+function isCodeReviewPreview(value: unknown): value is NonNullable<TaskSnapshot["codeReviewPreview"]> {
   return (
     isRecord(value) &&
     isString(value.workspacePath) &&
@@ -323,6 +477,30 @@ function isCodeReviewPreview(value: unknown): value is TaskSnapshot["codeReviewP
     value.changedFiles.every(isString) &&
     isString(value.diffStat) &&
     isString(value.diff)
+  );
+}
+
+function isCodeProposedEdit(value: unknown): value is NonNullable<TaskSnapshot["codeProposedEdit"]> {
+  return (
+    isRecord(value) &&
+    isString(value.proposalId) &&
+    isString(value.workspacePath) &&
+    isString(value.summary) &&
+    Array.isArray(value.changedFiles) &&
+    value.changedFiles.every(isString) &&
+    isString(value.patch) &&
+    isString(value.patchHash)
+  );
+}
+
+function isCodeApplyResult(value: unknown): value is NonNullable<TaskSnapshot["codeApplyResult"]> {
+  return (
+    isRecord(value) &&
+    typeof value.applied === "boolean" &&
+    isString(value.workspacePath) &&
+    Array.isArray(value.changedFiles) &&
+    value.changedFiles.every(isString) &&
+    isString(value.message)
   );
 }
 
@@ -355,6 +533,26 @@ function isWebSourceArray(value: unknown): value is TaskSnapshot["sources"] {
         isString(source.fetchedAt) &&
         (!("title" in source) || isString(source.title)) &&
         (!("provider" in source) || isString(source.provider)),
+    )
+  );
+}
+
+function isTokenUsageSummary(value: unknown): value is NonNullable<TaskSnapshot["tokenUsage"]> {
+  return (
+    isRecord(value) &&
+    isNumber(value.inputTokens) &&
+    isNumber(value.outputTokens) &&
+    isNumber(value.totalTokens) &&
+    isNumber(value.modelCalls) &&
+    Array.isArray(value.byAgentKind) &&
+    value.byAgentKind.every(
+      (entry) =>
+        isRecord(entry) &&
+        isString(entry.agentKind) &&
+        isNumber(entry.inputTokens) &&
+        isNumber(entry.outputTokens) &&
+        isNumber(entry.totalTokens) &&
+        isNumber(entry.modelCalls),
     )
   );
 }

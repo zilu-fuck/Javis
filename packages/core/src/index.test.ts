@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { createFileScanTaskRuntime, createInitialTaskSnapshot } from "./index";
+import {
+  addModelUsage,
+  createFileScanTaskRuntime,
+  createInitialTaskSnapshot,
+} from "./index";
 import type {
   FileOrganizationExecution,
   FileOrganizationPlan,
@@ -33,6 +37,13 @@ describe("createFileScanTaskRuntime", () => {
     const snapshot = createInitialTaskSnapshot();
 
     expect(snapshot.status).toBe("created");
+    expect(snapshot.tokenUsage).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      modelCalls: 0,
+      byAgentKind: [],
+    });
     expect(snapshot.agents.map((agent) => agent.id)).toEqual([
       "agent-commander",
       "agent-file",
@@ -42,6 +53,45 @@ describe("createFileScanTaskRuntime", () => {
       "agent-verifier",
     ]);
     expect(snapshot.agents.every((agent) => agent.status === "queued")).toBe(true);
+  });
+
+  it("aggregates model usage by task and agent kind", () => {
+    const first = addModelUsage(undefined, "commander", {
+      inputTokens: 100.8,
+      outputTokens: 20.2,
+    });
+    const second = addModelUsage(first, "commander", {
+      inputTokens: 5,
+      outputTokens: 7,
+      totalTokens: 20,
+    });
+    const final = addModelUsage(second, "research", {
+      inputTokens: 30,
+      outputTokens: 10,
+    });
+
+    expect(final).toEqual({
+      inputTokens: 135,
+      outputTokens: 37,
+      totalTokens: 180,
+      modelCalls: 3,
+      byAgentKind: [
+        {
+          agentKind: "commander",
+          inputTokens: 105,
+          outputTokens: 27,
+          totalTokens: 140,
+          modelCalls: 2,
+        },
+        {
+          agentKind: "research",
+          inputTokens: 30,
+          outputTokens: 10,
+          totalTokens: 40,
+          modelCalls: 1,
+        },
+      ],
+    });
   });
 
   it("routes project inspection goals through the project and shell tools", async () => {
@@ -166,6 +216,268 @@ describe("createFileScanTaskRuntime", () => {
     expect(finalSnapshot.commands).toHaveLength(1);
     expect(finalSnapshot.commands?.[0]?.command).toBe("git diff --check");
     expect(finalSnapshot.verificationSummary).toContain("git diff --check passed");
+    expect(finalSnapshot.verificationSummary).toContain("no Code Agent edit backend is configured");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("requires confirmed-write approval before applying a proposed Code Agent patch", async () => {
+    const preview = {
+      workspacePath: "E:/Javis",
+      changedFiles: ["packages/core/src/index.ts"],
+      diffStat: "1 file changed, 2 insertions(+)",
+      diff: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts",
+    };
+    const proposedEdit = {
+      proposalId: "proposal-1",
+      workspacePath: "E:/Javis",
+      summary: "Tighten the code review completion message.",
+      changedFiles: ["packages/core/src/index.ts"],
+      patch: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts",
+      patchHash: "fnv1a-19fcfa54",
+      tokenUsage: {
+        inputTokens: 1200,
+        outputTokens: 340,
+      },
+    };
+    const applyProposedEdit = vi.fn(async () => ({
+      applied: true,
+      workspacePath: proposedEdit.workspacePath,
+      changedFiles: proposedEdit.changedFiles,
+      message: "Applied patch in test.",
+    }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+      },
+      codeTool: {
+        inspectRepository: vi.fn(async () => preview),
+        proposeEdit: vi.fn(async () => proposedEdit),
+        applyProposedEdit,
+      },
+      shellTool: {
+        runReadOnlyCommand: vi.fn(async (request: ShellCommandRequest) => ({
+          command: [request.program, ...request.args].join(" "),
+          cwd: "E:/Javis",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        })),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("Review code changes");
+    await waitForStatus(snapshots, "waiting_permission");
+    runtime.resolvePermission("approved");
+    await vi.waitFor(() => {
+      expect(snapshots[snapshots.length - 1]?.permissionRequest?.title).toBe(
+        "Approve Code Agent patch application",
+      );
+    });
+    expect(applyProposedEdit).not.toHaveBeenCalled();
+    runtime.resolvePermission("approved");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(applyProposedEdit).toHaveBeenCalledWith(proposedEdit);
+    expect(finalSnapshot.codeProposedEdit).toEqual(proposedEdit);
+    expect(finalSnapshot.codeApplyResult?.applied).toBe(true);
+    expect(finalSnapshot.tokenUsage).toEqual({
+      inputTokens: 1200,
+      outputTokens: 340,
+      totalTokens: 1540,
+      modelCalls: 1,
+      byAgentKind: [
+        {
+          agentKind: "code",
+          inputTokens: 1200,
+          outputTokens: 340,
+          totalTokens: 1540,
+          modelCalls: 1,
+        },
+      ],
+    });
+    expect(finalSnapshot.commands).toHaveLength(2);
+    expect(finalSnapshot.verificationSummary).toContain("approved Code Agent patch applied");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("keeps denied Code Agent patch proposals as a no-op", async () => {
+    const proposedEdit = {
+      proposalId: "proposal-1",
+      workspacePath: "E:/Javis",
+      summary: "Tighten the code review completion message.",
+      changedFiles: ["packages/core/src/index.ts"],
+      patch: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts",
+      patchHash: "fnv1a-19fcfa54",
+    };
+    const applyProposedEdit = vi.fn(async () => ({
+      applied: true,
+      workspacePath: proposedEdit.workspacePath,
+      changedFiles: proposedEdit.changedFiles,
+      message: "Should not run.",
+    }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+      },
+      codeTool: {
+        inspectRepository: vi.fn(async () => ({
+          workspacePath: "E:/Javis",
+          changedFiles: ["packages/core/src/index.ts"],
+          diffStat: "1 file changed",
+          diff: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts",
+        })),
+        proposeEdit: vi.fn(async () => proposedEdit),
+        applyProposedEdit,
+      },
+      shellTool: {
+        runReadOnlyCommand: vi.fn(async (request: ShellCommandRequest) => ({
+          command: [request.program, ...request.args].join(" "),
+          cwd: "E:/Javis",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        })),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("Review code changes");
+    await waitForStatus(snapshots, "waiting_permission");
+    runtime.resolvePermission("approved");
+    await vi.waitFor(() => {
+      expect(snapshots[snapshots.length - 1]?.permissionRequest?.title).toBe(
+        "Approve Code Agent patch application",
+      );
+    });
+    runtime.resolvePermission("denied");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(applyProposedEdit).not.toHaveBeenCalled();
+    expect(finalSnapshot.permissionRequest?.status).toBe("denied");
+    expect(finalSnapshot.verificationSummary).toContain("no write operation was executed");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("refuses Code Agent patch proposals when the patch hash does not match", async () => {
+    const applyProposedEdit = vi.fn(async () => ({
+      applied: true,
+      workspacePath: "E:/Javis",
+      changedFiles: ["packages/core/src/index.ts"],
+      message: "Should not run.",
+    }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+      },
+      codeTool: {
+        inspectRepository: vi.fn(async () => ({
+          workspacePath: "E:/Javis",
+          changedFiles: ["packages/core/src/index.ts"],
+          diffStat: "1 file changed",
+          diff: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts",
+        })),
+        proposeEdit: vi.fn(async () => ({
+          proposalId: "proposal-1",
+          workspacePath: "E:/Javis",
+          summary: "Tighten the code review completion message.",
+          changedFiles: ["packages/core/src/index.ts"],
+          patch: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts",
+          patchHash: "fnv1a-wrong",
+        })),
+        applyProposedEdit,
+      },
+      shellTool: {
+        runReadOnlyCommand: vi.fn(async (request: ShellCommandRequest) => ({
+          command: [request.program, ...request.args].join(" "),
+          cwd: "E:/Javis",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        })),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("Review code changes");
+    await waitForStatus(snapshots, "waiting_permission");
+    runtime.resolvePermission("approved");
+
+    const finalSnapshot = await waitForStatus(snapshots, "failed");
+
+    expect(finalSnapshot.title).toBe("Code Agent patch proposal failed safety check");
+    expect(applyProposedEdit).not.toHaveBeenCalled();
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("refuses Code Agent apply results that include unapproved files", async () => {
+    const proposedEdit = {
+      proposalId: "proposal-1",
+      workspacePath: "E:/Javis",
+      summary: "Tighten the code review completion message.",
+      changedFiles: ["packages/core/src/index.ts"],
+      patch: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts",
+      patchHash: "fnv1a-19fcfa54",
+    };
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+      },
+      codeTool: {
+        inspectRepository: vi.fn(async () => ({
+          workspacePath: "E:/Javis",
+          changedFiles: ["packages/core/src/index.ts"],
+          diffStat: "1 file changed",
+          diff: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts",
+        })),
+        proposeEdit: vi.fn(async () => proposedEdit),
+        applyProposedEdit: vi.fn(async () => ({
+          applied: true,
+          workspacePath: "E:/Javis",
+          changedFiles: ["packages/core/src/index.ts", "packages/core/src/other.ts"],
+          message: "Applied extra file.",
+        })),
+      },
+      shellTool: {
+        runReadOnlyCommand: vi.fn(async (request: ShellCommandRequest) => ({
+          command: [request.program, ...request.args].join(" "),
+          cwd: "E:/Javis",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        })),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("Review code changes");
+    await waitForStatus(snapshots, "waiting_permission");
+    runtime.resolvePermission("approved");
+    await vi.waitFor(() => {
+      expect(snapshots[snapshots.length - 1]?.permissionRequest?.title).toBe(
+        "Approve Code Agent patch application",
+      );
+    });
+    runtime.resolvePermission("approved");
+
+    const finalSnapshot = await waitForStatus(snapshots, "failed");
+
+    expect(finalSnapshot.title).toBe("Code Agent patch result failed safety check");
+    expect(finalSnapshot.verificationSummary).toContain("unapproved file");
 
     unsubscribe();
     runtime.dispose();
@@ -207,6 +519,91 @@ describe("createFileScanTaskRuntime", () => {
     expect(runReadOnlyCommand).not.toHaveBeenCalled();
     expect(finalSnapshot.permissionRequest?.status).toBe("denied");
     expect(finalSnapshot.verificationSummary).toContain("no read-only verification command was executed");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("skips Code Agent proposal steps when diff verification fails", async () => {
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+      },
+      codeTool: {
+        inspectRepository: vi.fn(async () => ({
+          workspacePath: "E:/Javis",
+          changedFiles: ["packages/core/src/index.ts"],
+          diffStat: "1 file changed",
+          diff: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts",
+        })),
+        proposeEdit: vi.fn(async () => ({
+          proposalId: "proposal-1",
+          workspacePath: "E:/Javis",
+          summary: "Should not run.",
+          changedFiles: ["packages/core/src/index.ts"],
+          patch: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts",
+          patchHash: "fnv1a-19fcfa54",
+        })),
+      },
+      shellTool: {
+        runReadOnlyCommand: vi.fn(async (request: ShellCommandRequest) => ({
+          command: [request.program, ...request.args].join(" "),
+          cwd: "E:/Javis",
+          exitCode: 1,
+          stdout: "",
+          stderr: "whitespace error",
+        })),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("Review code changes");
+    await waitForStatus(snapshots, "waiting_permission");
+    runtime.resolvePermission("approved");
+
+    const finalSnapshot = await waitForStatus(snapshots, "failed");
+
+    expect(finalSnapshot.plan.find((step) => step.id === "step-verify-code")?.status).toBe("failed");
+    expect(finalSnapshot.plan.find((step) => step.id === "step-propose-code-edit")?.status).toBe("skipped");
+    expect(finalSnapshot.plan.find((step) => step.id === "step-apply-code-edit")?.status).toBe("skipped");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("skips follow-up Code Agent steps when diff preview fails", async () => {
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+      },
+      codeTool: {
+        inspectRepository: vi.fn(async () => {
+          throw new Error("git status failed");
+        }),
+      },
+      shellTool: {
+        runReadOnlyCommand: vi.fn(async (request: ShellCommandRequest) => ({
+          command: [request.program, ...request.args].join(" "),
+          cwd: "E:/Javis",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        })),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("Review code changes");
+
+    const finalSnapshot = await waitForStatus(snapshots, "failed");
+
+    expect(finalSnapshot.plan.find((step) => step.id === "step-inspect-code")?.status).toBe("failed");
+    expect(finalSnapshot.plan.find((step) => step.id === "step-review-code")?.status).toBe("skipped");
+    expect(finalSnapshot.plan.find((step) => step.id === "step-verify-code")?.status).toBe("skipped");
+    expect(finalSnapshot.plan.find((step) => step.id === "step-propose-code-edit")?.status).toBe("skipped");
+    expect(finalSnapshot.plan.find((step) => step.id === "step-apply-code-edit")?.status).toBe("skipped");
 
     unsubscribe();
     runtime.dispose();

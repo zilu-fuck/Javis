@@ -45,7 +45,7 @@ exist:
 - Code Agent approved edit result with verification output.
 - Code Agent denied no-op result.
 - Task history after app restart.
-- Workspace selection and recent workspace state.
+- Workspace path selection, recent workspace state, and restart persistence.
 - General confirmed-write approval for a non-PDF write tool.
 
 ## Scenarios
@@ -64,6 +64,22 @@ exist:
 - Verify read-only checks run through the Shell Agent.
 - Verify the recommended test/check command appears when available.
 - Verify failing commands produce a failed verification state.
+
+### Workspace Selection
+
+- Enter a valid workspace path, submit `test project environment`, and verify
+  the Project Inspection workspace path matches the selected path.
+- Use Browse to select a workspace with the native directory picker, submit
+  `test project environment`, and verify the Project Inspection workspace path
+  matches the Browse-selected path.
+- Enter an invalid workspace path, submit `test project environment`, and verify
+  the failure message explains that the selected workspace path is not
+  accessible or does not contain `package.json`.
+- Verify invalid workspace paths are not added to recent workspaces.
+- Verify a Browse-selected valid workspace is added to recent workspaces only
+  after the task completes.
+- Delete a recent workspace entry and verify it is removed from the sidebar.
+- Restart the app and verify valid recent workspaces are restored.
 
 ### URL Research Baseline
 
@@ -110,8 +126,9 @@ exist:
 - Approve once and verify `git diff --check` runs through the Shell Agent.
 - Verify the final state distinguishes a clean diff check from a failed diff
   check.
-- Do not treat this scenario as approved edit QA; proposed edits and patch
-  application are still future Code Agent work.
+- Do not treat this scenario as approved edit QA. Core/UI now include the
+  proposed-edit and confirmed-write approval contract, but a real opencode
+  proposal/apply backend is still pending.
 
 ### Product Readiness Scenarios
 

@@ -372,7 +372,18 @@ fn search_with_fixture_file(
 fn inspect_project(workspace_path: Option<String>) -> Result<ProjectInspection, String> {
     let workspace = resolve_workspace_path(workspace_path)?;
     let package_json_path = workspace.join("package.json");
-    let package_json = fs::read_to_string(&package_json_path).map_err(|error| error.to_string())?;
+    if !package_json_path.exists() {
+        return Err(format!(
+            "Selected workspace does not contain package.json: {}",
+            workspace.to_string_lossy()
+        ));
+    }
+    let package_json = fs::read_to_string(&package_json_path).map_err(|error| {
+        format!(
+            "Could not read package.json in selected workspace {}: {error}",
+            workspace.to_string_lossy()
+        )
+    })?;
     let value = serde_json::from_str::<serde_json::Value>(&package_json)
         .map_err(|error| error.to_string())?;
     let scripts = value
@@ -439,7 +450,19 @@ fn resolve_command_program(program: &str) -> String {
 
 fn resolve_workspace_path(workspace_path: Option<String>) -> Result<PathBuf, String> {
     if let Some(path) = workspace_path {
-        return fs::canonicalize(path).map_err(|error| error.to_string());
+        let trimmed_path = path.trim();
+        if trimmed_path.is_empty() {
+            return Err("Workspace path cannot be empty.".to_string());
+        }
+        let workspace = fs::canonicalize(trimmed_path)
+            .map_err(|error| format!("Selected workspace path is not accessible: {trimmed_path}: {error}"))?;
+        if !workspace.is_dir() {
+            return Err(format!(
+                "Selected workspace path is not a directory: {}",
+                workspace.to_string_lossy()
+            ));
+        }
+        return Ok(workspace);
     }
 
     let current_dir = std::env::current_dir().map_err(|error| error.to_string())?;
@@ -1523,6 +1546,51 @@ mod tests {
     }
 
     #[test]
+    fn resolve_workspace_rejects_missing_paths_with_actionable_message() {
+        let missing_path = std::env::temp_dir().join("javis-missing-workspace");
+
+        let result = resolve_workspace_path(Some(normalize_path(&missing_path)));
+
+        assert!(
+            result
+                .expect_err("missing workspace should fail")
+                .starts_with("Selected workspace path is not accessible:")
+        );
+    }
+
+    #[test]
+    fn resolve_workspace_rejects_file_paths() {
+        let root = create_test_directory("workspace-file-path");
+        let file_path = root.join("package.json");
+        fs::write(&file_path, "{}").expect("write file path");
+
+        let result = resolve_workspace_path(Some(normalize_path(&file_path)));
+
+        assert!(
+            result
+                .expect_err("file workspace path should fail")
+                .starts_with("Selected workspace path is not a directory:")
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn inspect_project_reports_missing_package_json() {
+        let root = create_test_directory("workspace-no-package-json");
+
+        let result = inspect_project(Some(normalize_path(&root)));
+
+        match result {
+            Ok(_) => panic!("package.json should be required"),
+            Err(error) => {
+                assert!(error.starts_with("Selected workspace does not contain package.json:"));
+                assert!(error.contains("javis-workspace-no-package-json"));
+            }
+        }
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
     fn maps_github_results_to_search_results() {
         let results = github_items_to_search_results(
             vec![GithubSearchItem {
@@ -1670,6 +1738,7 @@ mod tests {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(Mutex::new(PdfOrganizationApprovalState::default()))
         .invoke_handler(tauri::generate_handler![

@@ -41,8 +41,9 @@ Status: complete for the 2026-05-23 QA pass.
 - Fetch and compare at least three accessible public sources by default.
 - Preserve source URL, title, fetched timestamp, and excerpt.
 - Clearly label unsupported or unverifiable claims.
-- Add retry, manual-source fallback UI, and clear messaging when Javis switches
-  from `github-cli` or IntelliSearch to embedded Chrome.
+- Expand retry, manual-source fallback UI, and clear messaging when Javis
+  switches from `github-cli` or IntelliSearch to embedded Chrome. Initial
+  failed-research fallback messaging is present in the workbench.
 - Add tests and QA screenshots for `github-cli` success, IntelliSearch success
   after Code Agent integration, Chrome fallback, weak evidence, failed fetch,
   and no-results states. Live `github-cli` and Agent Chrome smoke evidence are
@@ -66,8 +67,9 @@ Status: complete for the 2026-05-23 QA pass.
   - ask for confirmation before applying edits
   - run checks through Shell Tool policy
 - Route code review goals through the Code Agent scaffold. Initial routing,
-  changed-file listing, preview approval, and read-only `git diff --check`
-  verification are implemented.
+  changed-file listing, preview approval, read-only `git diff --check`
+  verification, proposed-edit contract, and confirmed-write apply approval are
+  implemented. A real opencode-backed proposal/apply backend is still pending.
 - Add tests around rejected dangerous commands and approved edit application.
 - Add QA for inspect-only, diff preview, approved edit, denied edit, and failed
   verification states.

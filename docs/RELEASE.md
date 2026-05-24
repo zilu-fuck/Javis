@@ -57,6 +57,30 @@ Include:
 - `notes.md` with OS, branch, commit, commands run, and pass/fail notes.
 - Screenshots required by `QA_CHECKLIST.md`.
 - Any failure screenshots with a short reproduction note.
+- Rollback notes that identify the previous usable build and the downgrade
+  path for users.
+
+## Version And Rollback Notes
+
+Each product release candidate needs a short rollback record before it can be
+called release-ready. Store it in the dated QA folder or in the final release
+notes.
+
+Required fields:
+
+- Build version and commit.
+- Previous known-good version and artifact path or URL.
+- Whether local storage keys changed.
+- Whether native permission state, file locations, or user data formats
+  changed.
+- Rollback steps for uninstalling the candidate and reinstalling the previous
+  build.
+- Known data that cannot be downgraded automatically.
+
+If the build changes storage schemas, permission records, workspace history, or
+task history, run restart QA before and after rollback. Do not publish the build
+until the notes say whether old local data is preserved, ignored, migrated, or
+requires manual cleanup.
 
 ## Release Notes Template
 
@@ -90,6 +114,13 @@ Include:
 
 - Only the PDF organization flow writes files.
 - Confirmed writes require approval for the current dry-run.
+
+## Rollback
+
+- Previous known-good build:
+- Local data compatibility:
+- Rollback steps:
+- Non-downgradable data:
 ```
 
 ## Blocking Conditions

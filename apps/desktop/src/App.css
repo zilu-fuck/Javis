@@ -195,6 +195,140 @@ textarea:focus-visible {
   background: #f0efec;
 }
 
+.javis-workspace-context {
+  position: relative;
+  min-width: 0;
+}
+
+.javis-workspace-menu {
+  position: relative;
+}
+
+.javis-workspace-menu summary {
+  display: inline-flex;
+  max-width: 230px;
+  min-height: 30px;
+  align-items: center;
+  gap: 7px;
+  border-radius: 999px;
+  padding: 5px 10px;
+  color: #4d4942;
+  list-style: none;
+  font-size: 13px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.javis-workspace-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.javis-workspace-menu summary:hover {
+  background: #f1f0ec;
+}
+
+.javis-workspace-menu summary span:nth-child(2) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-workspace-glyph,
+.javis-workspace-chevron {
+  flex: 0 0 auto;
+  color: #77736b;
+}
+
+.javis-workspace-popover {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 20;
+  display: grid;
+  width: min(360px, calc(100vw - 48px));
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #d8d5cd;
+  border-radius: 14px;
+  background: #ffffff;
+  box-shadow: 0 20px 60px rgba(17, 17, 17, 0.16);
+}
+
+.javis-workspace-popover label {
+  display: grid;
+  gap: 6px;
+  color: #77736b;
+  font-size: 11px;
+}
+
+.javis-workspace-popover input {
+  min-width: 0;
+  border: 1px solid #d8d5cd;
+  border-radius: 9px;
+  padding: 9px 10px;
+  color: #20201d;
+  background: #ffffff;
+  font-size: 12px;
+}
+
+.javis-workspace-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.javis-workspace-actions button,
+.javis-workspace-recent button {
+  border: 1px solid #d8d5cd;
+  border-radius: 9px;
+  padding: 7px 8px;
+  color: #20201d;
+  background: #ffffff;
+  font-size: 12px;
+}
+
+.javis-workspace-actions button:disabled {
+  color: #aaa69d;
+  background: #f3f2ef;
+}
+
+.javis-workspace-popover [role="alert"] {
+  margin: 0;
+  color: #9a4b14;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.javis-workspace-recent {
+  display: grid;
+  gap: 5px;
+}
+
+.javis-workspace-recent p {
+  margin: 5px 0 2px;
+  color: #77736b;
+  font-size: 11px;
+}
+
+.javis-workspace-recent-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px;
+}
+
+.javis-workspace-recent-entry button:first-child {
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-workspace-recent-entry button:last-child {
+  width: 30px;
+  text-align: center;
+}
+
 .javis-history-select,
 .javis-history-delete {
   border: 0;
@@ -365,6 +499,10 @@ textarea:focus-visible {
   font-size: 13px;
 }
 
+.javis-new-chat-actions .javis-workspace-context {
+  justify-self: start;
+}
+
 .javis-attach-button,
 .javis-send-button {
   display: inline-flex;
@@ -418,6 +556,30 @@ textarea:focus-visible {
   line-height: 24px;
 }
 
+.javis-thread-header-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.javis-retry-button {
+  min-height: 30px;
+  border: 1px solid #d8d5cd;
+  border-radius: 7px;
+  padding: 5px 10px;
+  color: #20201d;
+  background: #ffffff;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.javis-retry-button:hover {
+  border-color: #bcb7ac;
+  background: #f4f3ee;
+}
+
 .javis-thread {
   display: grid;
   align-content: start;
@@ -429,7 +591,9 @@ textarea:focus-visible {
 
 .javis-message,
 .javis-plan,
+.javis-token-usage,
 .javis-documents,
+.javis-recovery,
 .javis-confirmation {
   border: 1px solid #e1ded6;
   border-radius: 8px;
@@ -485,7 +649,9 @@ textarea:focus-visible {
 }
 
 .javis-plan,
+.javis-token-usage,
 .javis-documents,
+.javis-recovery,
 .javis-confirmation {
   display: grid;
   gap: 10px;
@@ -493,8 +659,48 @@ textarea:focus-visible {
   padding: 14px;
 }
 
-.javis-plan {
+.javis-recovery {
+  border-color: #e4cfc4;
+  background: #fff8f4;
+}
+
+.javis-recovery p:last-child {
+  margin: 0;
+  color: #5e3425;
+  font-size: 13px;
+  line-height: 21px;
+}
+
+.javis-plan,
+.javis-token-usage {
   max-width: 760px;
+}
+
+.javis-token-usage-header,
+.javis-token-grid {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.javis-token-usage-header strong {
+  color: #171717;
+  font-size: 18px;
+  line-height: 24px;
+}
+
+.javis-token-grid {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.javis-token-grid span,
+.javis-token-usage p {
+  margin: 0;
+  color: #6f6b63;
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .javis-confirmation {
@@ -645,8 +851,7 @@ textarea:focus-visible {
 
 .javis-composer {
   display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 10px;
+  gap: 0;
   padding: 14px 18px;
   border-top: 1px solid #e6e4df;
   background: #fbfbf8;
@@ -656,7 +861,10 @@ textarea:focus-visible {
   height: 72px;
   resize: none;
   border: 1px solid #d8d5cd;
+  border-bottom: 0;
   border-radius: 8px;
+  border-bottom-right-radius: 0;
+  border-bottom-left-radius: 0;
   padding: 11px 12px;
   color: #171717;
   background: #ffffff;
@@ -668,8 +876,23 @@ textarea:focus-visible {
   color: #918d84;
 }
 
-.javis-composer button {
+.javis-composer-actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  border: 1px solid #d8d5cd;
+  border-top: 0;
+  border-radius: 0 0 8px 8px;
+  padding: 7px 10px 10px;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(17, 17, 17, 0.04);
+}
+
+.javis-composer-actions > button {
   min-width: 76px;
+  min-height: 34px;
   padding: 0 17px;
 }
 

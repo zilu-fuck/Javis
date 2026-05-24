@@ -32,6 +32,7 @@ export interface PermissionRequest {
   title: string;
   reason: string;
   dryRun: DryRunSummary;
+  bindingHash?: string;
   status: "pending" | "approved" | "denied" | "expired" | "cancelled";
   createdAt: string;
   resolvedAt?: string;
@@ -123,8 +124,51 @@ export interface CodeReviewPreview {
   diff: string;
 }
 
+export interface ModelUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens?: number;
+  model?: string;
+  provider?: string;
+}
+
+export interface TokenUsageByAgent {
+  agentKind: string;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  modelCalls: number;
+}
+
+export interface TokenUsageSummary {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  modelCalls: number;
+  byAgentKind: TokenUsageByAgent[];
+}
+
+export interface CodeProposedEdit {
+  proposalId: string;
+  workspacePath: string;
+  summary: string;
+  changedFiles: string[];
+  patch: string;
+  patchHash: string;
+  tokenUsage?: ModelUsage;
+}
+
+export interface CodeApplyResult {
+  applied: boolean;
+  workspacePath: string;
+  changedFiles: string[];
+  message: string;
+}
+
 export interface CodeTool {
   inspectRepository(): Promise<CodeReviewPreview>;
+  proposeEdit?(request: { userGoal: string; preview: CodeReviewPreview }): Promise<CodeProposedEdit>;
+  applyProposedEdit?(edit: CodeProposedEdit): Promise<CodeApplyResult>;
 }
 
 export interface WebTool {
@@ -185,6 +229,16 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     name: "code.inspectRepository",
     permissionLevel: "preview",
     summary: "Collect changed files, diff summary, and diff preview without applying edits.",
+  },
+  {
+    name: "code.proposeEdit",
+    permissionLevel: "preview",
+    summary: "Produce a patch proposal for user review without modifying files.",
+  },
+  {
+    name: "code.applyProposedEdit",
+    permissionLevel: "confirmed_write",
+    summary: "Apply only the approved Code Agent patch proposal.",
   },
   {
     name: "file.planPdfOrganization",

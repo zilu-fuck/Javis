@@ -18,7 +18,9 @@ A task is the user-visible unit of work. It has:
 
 The desktop app persists completed, failed, and cancelled task snapshots for
 sidebar history restore. Pending permission requests are not persisted because
-confirmed-write approvals are scoped to the current in-memory dry-run.
+confirmed-write approvals are scoped to the current in-memory dry-run. Resolved
+permission decisions may be persisted as audit evidence, but they must not
+become reusable approval grants.
 
 Current statuses:
 
@@ -110,12 +112,21 @@ show which path produced the evidence.
 Supports:
 
 - `inspectRepository()`
+- optional `proposeEdit(request)`
+- optional `applyProposedEdit(proposal)`
 
 It returns the workspace path, changed files, diff stat, and a bounded diff
-preview for the current local repository state. The first implementation is
-inspect-only: it does not propose new edits, apply patches, or call opencode.
-Core treats the preview as a `preview` permission step before running read-only
-verification.
+preview for the current local repository state. Core treats the preview as a
+`preview` permission step before running read-only verification.
+
+The proposed-edit and apply functions are contract points for a future
+OpenCode/opencode backend. When `proposeEdit` is not configured, Code Agent
+routes stop after read-only diff verification. When it is configured, Core
+expects proposal metadata, affected files, patch text, and a patch hash. Patch
+application requires a `confirmed_write` permission request bound to that exact
+proposal, and Core validates the hash before approval and again before apply.
+The desktop app does not yet configure a real OpenCode/opencode proposal/apply
+backend.
 
 ## Permission Contract
 
@@ -138,6 +149,21 @@ approval as one-time-use state: execution is rejected when the approval id is
 missing, unapproved, stale, or paired with operations that differ from the
 current dry-run.
 
+Core uses a shared permission-state helper to create pending permission
+requests and move them to exactly one terminal state. Each pending request
+includes a stable dry-run binding hash, and resolution or closure fails if the
+dry-run no longer matches that hash. Binding hashes are internal consistency
+checks, not substitutes for native execution/write enforcement. This keeps PDF
+organization, Code review continuation, and future Code Agent patch application
+on the same pending -> approved/denied/expired/cancelled transition semantics
+before any native write tool is called.
+
+The shared helper also exposes a default stale-request check for pending
+permissions. The current default TTL is 10 minutes; expired requests are
+terminal non-approvals and must not be treated as reusable grants. This is a
+Core state-machine guard only. Native confirmed-write commands still have to
+verify that the submitted operation matches the current approved dry-run.
+
 ## Verification Contract
 
 Each completed route must produce evidence:
@@ -146,7 +172,8 @@ Each completed route must produce evidence:
 - Project inspection: command outputs and exit codes.
 - Research: source URLs and excerpt-backed report rows.
 - Code review: workspace path, changed files, diff preview, permission
-  decision, and read-only `git diff --check` output.
+  decision, read-only `git diff --check` output, and proposed/apply metadata
+  when an edit backend is configured.
 - PDF organization: dry-run, permission decision, execution counts.
 
 Verifier output is currently a summary string and logs in the snapshot. A richer

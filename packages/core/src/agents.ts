@@ -26,8 +26,13 @@ export const demoAgents: Agent[] = [
     id: "agent-code",
     kind: "code",
     displayName: "Code Agent",
-    description: "Repository diff preview and verification",
-    allowedToolNames: ["code.inspectRepository", "shell.runReadOnlyCommand"],
+    description: "Repository diff preview, proposed edits, and verification",
+    allowedToolNames: [
+      "code.inspectRepository",
+      "code.proposeEdit",
+      "code.applyProposedEdit",
+      "shell.runReadOnlyCommand",
+    ],
   },
   {
     id: "agent-research",

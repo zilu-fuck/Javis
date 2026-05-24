@@ -33,8 +33,9 @@ Current product-readiness gaps:
 - Code Agent / opencode is not integrated yet.
 - Completed, failed, and cancelled task history is stored locally with sidebar
   restore and deletion; broader persistence QA is still needed.
-- Workspace selection, release signing/versioning, and broader write-tool
-  permission enforcement are not complete yet.
+- Workspace selection and recent workspace restore are implemented; broader
+  persistence QA, release signing/versioning, and write-tool permission
+  enforcement still need hardening.
 - Core runtime is being split into focused modules. Agent definitions, plans,
   route detection, and research report helpers have been extracted; the main
   runtime flow still lives in `packages/core/src/index.ts`.

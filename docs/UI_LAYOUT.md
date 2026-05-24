@@ -56,8 +56,8 @@ verification results. It is the audit trail for the current in-memory task.
 
 ## Future UI Work
 
-- Add component tests for confirmation cards.
-- Add workspace selection.
-- Add empty and error states for each task type.
-- Add persistent task history once storage exists.
+- Expand component tests for additional confirmation card variants.
+- Expand workspace selection QA beyond the current restart evidence.
+- Expand empty and error states for individual task result sections.
+- Harden persistent task history for future storage migrations.
 - Add screenshots from the manual QA checklist to `docs/qa/`.

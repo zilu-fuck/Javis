@@ -39,6 +39,10 @@ For confirmed-write execution, the native command must reject missing approval,
 stale approval ids, reused approvals, or operations that differ from the
 approved dry-run.
 
+For Code Agent patch application, the approval must be bound to the exact
+proposal content. The proposal hash is checked before approval and before apply,
+and the apply result must not include files outside the approved proposal.
+
 ## PDF Organization Policy
 
 The current confirmed-write flow is PDF organization in Downloads.
@@ -85,6 +89,10 @@ Permission UI must show:
 - Final approved or denied result.
 
 No confirmed write should happen without a visible pending permission request.
+
+Patch previews may be visible in the live session, but completed task history
+must not store full Code Agent patch text because diffs can contain sensitive
+project details.
 
 ## Audit Requirements
 
