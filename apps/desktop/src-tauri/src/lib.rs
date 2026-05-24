@@ -216,9 +216,8 @@ struct PdfOrganizationApprovalState {
 }
 
 struct PendingPdfOrganizationApproval {
-    approval_id: String,
+    binding: NativeApprovalBinding,
     operations: Vec<PlannedPathOperation>,
-    approved: bool,
 }
 
 #[derive(Default)]
@@ -227,12 +226,16 @@ struct CodePatchApprovalState {
 }
 
 struct PendingCodePatchApproval {
-    approval_id: String,
+    binding: NativeApprovalBinding,
     proposal_id: String,
     workspace_path: String,
     changed_files: Vec<String>,
     patch_hash: String,
     file_hashes: Vec<FileContentHash>,
+}
+
+struct NativeApprovalBinding {
+    approval_id: String,
     approved: bool,
 }
 
@@ -1689,6 +1692,40 @@ fn create_approval_id() -> String {
     format!("pdf-approval-{suffix}")
 }
 
+fn create_native_approval_binding(approval_id: String, approved: bool) -> NativeApprovalBinding {
+    NativeApprovalBinding {
+        approval_id,
+        approved,
+    }
+}
+
+fn approve_native_approval_binding(
+    binding: &mut NativeApprovalBinding,
+    approval_id: &str,
+    mismatch_error: &str,
+) -> Result<(), String> {
+    if binding.approval_id != approval_id {
+        return Err(mismatch_error.to_string());
+    }
+    binding.approved = true;
+    Ok(())
+}
+
+fn require_native_approval_binding(
+    binding: &NativeApprovalBinding,
+    approval_id: &str,
+    mismatch_error: &str,
+    unapproved_error: &str,
+) -> Result<(), String> {
+    if binding.approval_id != approval_id {
+        return Err(mismatch_error.to_string());
+    }
+    if !binding.approved {
+        return Err(unapproved_error.to_string());
+    }
+    Ok(())
+}
+
 fn replace_pending_pdf_approval(
     approval_state: &Mutex<PdfOrganizationApprovalState>,
     approval_id: &str,
@@ -1700,9 +1737,8 @@ fn replace_pending_pdf_approval(
         .lock()
         .map_err(|_| "PDF approval state could not be locked.".to_string())?;
     state.pending = Some(PendingPdfOrganizationApproval {
-        approval_id: approval_id.to_string(),
+        binding: create_native_approval_binding(approval_id.to_string(), false),
         operations: operations.to_vec(),
-        approved: false,
     });
     Ok(())
 }
@@ -1753,11 +1789,11 @@ fn approve_pending_pdf_organization(
     let Some(pending) = state.pending.as_mut() else {
         return Err("No pending PDF organization approval exists.".to_string());
     };
-    if pending.approval_id != approval_id {
-        return Err("PDF organization approval id does not match the pending dry-run.".to_string());
-    }
-    pending.approved = true;
-    Ok(())
+    approve_native_approval_binding(
+        &mut pending.binding,
+        approval_id,
+        "PDF organization approval id does not match the pending dry-run.",
+    )
 }
 
 fn take_approved_pdf_operations(
@@ -1770,12 +1806,12 @@ fn take_approved_pdf_operations(
     let Some(pending) = state.pending.as_ref() else {
         return Err("No approved PDF organization dry-run is pending.".to_string());
     };
-    if pending.approval_id != request.approval_id {
-        return Err("PDF organization approval id does not match the pending dry-run.".to_string());
-    }
-    if !pending.approved {
-        return Err("PDF organization dry-run has not been approved.".to_string());
-    }
+    require_native_approval_binding(
+        &pending.binding,
+        &request.approval_id,
+        "PDF organization approval id does not match the pending dry-run.",
+        "PDF organization dry-run has not been approved.",
+    )?;
     if pending.operations != request.operations {
         return Err(
             "Approved PDF organization operations do not match the current dry-run.".to_string(),
@@ -1824,13 +1860,12 @@ fn approve_pending_code_patch(
         .lock()
         .map_err(|_| "Code patch approval state could not be locked.".to_string())?;
     state.pending = Some(PendingCodePatchApproval {
-        approval_id: request.approval_id,
+        binding: create_native_approval_binding(request.approval_id, true),
         proposal_id: request.proposal_id,
         workspace_path: normalize_path(&canonical_workspace),
         changed_files: request.changed_files,
         patch_hash: request.patch_hash,
         file_hashes,
-        approved: true,
     });
     Ok(())
 }
@@ -1846,12 +1881,12 @@ fn take_approved_code_patch(
     let Some(pending) = state.pending.as_ref() else {
         return Err("No approved Code Patch proposal is pending.".to_string());
     };
-    if pending.approval_id != request.approval_id {
-        return Err("Code patch approval id does not match the approved proposal.".to_string());
-    }
-    if !pending.approved {
-        return Err("Code patch proposal has not been approved.".to_string());
-    }
+    require_native_approval_binding(
+        &pending.binding,
+        &request.approval_id,
+        "Code patch approval id does not match the approved proposal.",
+        "Code patch proposal has not been approved.",
+    )?;
     if pending.proposal_id != request.proposal_id {
         return Err("Code patch proposal id does not match the approved proposal.".to_string());
     }

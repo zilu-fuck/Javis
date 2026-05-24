@@ -20,7 +20,7 @@
 | --- | --- | --- |
 | confirmed-write 审批 | Core 已有 pending -> approved/denied/expired/cancelled 状态 helper，PDF flow 有一次性 native approval id，Code Patch apply 已通过 UI confirmed-write。Desktop 已新增 durable approval record 存储模型，并为 PDF restore 增加 native approval rehydration hook。 | packaged-app 跨重启 QA 尚未覆盖，durable approval 还没有迁移到 Code Patch，也还没有共享 native guard。 |
 | Code Patch proposal | opencode 只负责 proposal，Javis 已验证 patch hash、changed files、workspace 内路径，并通过 native `git apply` 写入；native apply 已在审批时记录 approved files 的当前内容 hash，并在应用前拒绝 stale file。 | proposal 仍是 `changedFiles + patch` 形态，还没有 `baseGitHead`、结构化 hunk 和 apply 前 dry-run 校验；Code Patch 跨重启 restore/apply 仍未开放。 |
-| Rust/native guard | PDF 和 Code Patch 都在 Rust 层做关键路径校验，PDF approval 具有一次性消费语义。 | approval/path/hash 校验仍分散在具体命令附近，尚未抽成所有 confirmed-write 命令共用的 guard。 |
+| Rust/native guard | PDF 和 Code Patch 都在 Rust 层做关键路径校验，PDF approval 具有一次性消费语义。 | approval binding、path、hash 校验已开始共享，但 task/tool binding、通用 preview hash 与更多 write command 迁移仍未完成。 |
 | 模型配置与密钥 | 桌面端能配置 provider/model/apiKey/baseUrl，并将配置传给 opencode/兼容 provider；新保存不再把 API key 写入 browser local storage，旧存储 key 会在加载时清理。 | API key 仍只是会话内输入，尚未迁移到 Stronghold/OS credential storage，重启后需要重新输入。 |
 | QA 证据 | 已有 packaged-app fixture QA 覆盖 Code Agent proposal deny 和 approve/apply，研究和工作区重启也有证据。 | live DeepSeek provider smoke 需要在 fallback hardening 后用临时凭据重跑；durable approval 跨重启 QA 尚未建立。 |
 
@@ -272,7 +272,7 @@ Task
 
 成功标准：
 
-- 所有 write-capable commands 都使用共享 guard。（进行中：Code Patch path/current-file guard 已共享，PDF pending approval 入口已有 path/source guard；仍待抽出统一 approval binding abstraction）
+- 所有 write-capable commands 都使用共享 guard。（进行中：Code Patch path/current-file guard 已共享，PDF pending approval 入口已有 path/source guard；PDF / Code Patch approval id 与 approved-state 已抽为共享 native approval binding，仍待补齐 task/tool binding、通用 preview-hash guard 和更多 write command 迁移）
 - 现有行为保持不变。
 - 新增 negative tests 在修复前失败，修复后通过。
 

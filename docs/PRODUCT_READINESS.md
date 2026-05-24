@@ -46,12 +46,12 @@ Do not call Javis a complete usable product while any of these are true:
 - Task history persistence is limited to local completed/failed/cancelled
   snapshots and needs broader QA across app restart and future storage
   migrations.
-- Confirmed-write enforcement has separate PDF and Code Patch approval/hash
-  implementations. PDF approval/restore now validates operation paths and PDF
-  sources before pending state is accepted, while Code Patch apply validates
-  approval id, proposal hash, approved files, and current-file hashes with
-  one-shot consumption. The remaining work is to collapse these into a shared
-  approval binding abstraction.
+- Confirmed-write enforcement now shares native approval binding for PDF and
+  Code Patch approval id / approved-state checks. PDF approval/restore validates
+  operation paths and PDF sources before pending state is accepted, while Code
+  Patch apply validates proposal hash, approved files, and current-file hashes
+  with one-shot consumption. Remaining guard work is task/tool binding,
+  generalized preview hash checks, and broader write-command migration.
 - Manual QA covers only MVP scenarios.
 - Release builds are unsigned or lack version/rollback notes.
 - A primary user workflow requires editing docs, scripts, or fixtures by hand.
@@ -60,14 +60,12 @@ Do not call Javis a complete usable product while any of these are true:
 
 The project has a verified MVP foundation. The next stage is product completion:
 
-1. Collapse the PDF and Code Patch native guards into a shared approval binding
-   abstraction.
-2. Move model API keys from session-only input into hardened secret storage for
+1. Move model API keys from session-only input into hardened secret storage for
    restart-safe use.
-3. Rerun the live DeepSeek-compatible Code Agent proposal smoke with temporary
+2. Rerun the live DeepSeek-compatible Code Agent proposal smoke with temporary
    credentials, then decide whether approved live apply is safe to exercise or
    should remain covered only by fixture QA.
-4. Expand QA from MVP scenarios to complete-product workflows and add release
+3. Expand QA from MVP scenarios to complete-product workflows and add release
    signing/versioning/rollback documentation.
 
 `docs/MVP_STATUS.md` remains useful as a baseline acceptance record, but it is

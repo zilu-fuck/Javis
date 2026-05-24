@@ -116,8 +116,9 @@ Status: complete for the 2026-05-23 QA pass.
   approval id, proposal patch hash, approved files, and current-file hashes
   with one-shot native consumption. PDF approval/restore now validates operation
   path scope and PDF source type before pending state is accepted. Code Patch
-  restart restore/apply is wired through durable records; a shared approval
-  binding abstraction remains.
+  restart restore/apply is wired through durable records, and PDF / Code Patch
+  approval id plus approved-state checks now share a native approval binding
+  abstraction. Task/tool binding and generalized preview-hash guards remain.
 - Keep dangerous actions rejected by default.
 
 ## Milestone 5: Product Hardening
