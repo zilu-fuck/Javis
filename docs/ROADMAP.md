@@ -54,8 +54,9 @@ Status: complete for the 2026-05-23 QA pass.
 - Add a `CodeTool` interface. Initial inspect-only diff preview is
   implemented.
 - Integrate opencode as an optional backend. Initial proposal-only adapter is
-  implemented, uses desktop-managed model settings, and still needs live
-  provider hardening plus credential-store hardening. Packaged-app fixture QA
+  implemented, uses desktop-managed model settings, has DeepSeek/custom
+  OpenAI-compatible fallback and proposal parser hardening, and still needs
+  live provider smoke plus credential-store hardening. Packaged-app fixture QA
   covers proposal denial and approved patch application.
 - Treat opencode as an extensible kernel:
   - use MCP for memory, search, indexing, and other external capabilities
@@ -73,9 +74,9 @@ Status: complete for the 2026-05-23 QA pass.
   changed-file listing, preview approval, read-only `git diff --check`
   verification, opencode-backed proposed-edit contract, confirmed-write apply
   approval, desktop model configuration, and a local approved-patch apply
-  command are implemented. Fixture opencode proposal/apply QA passes; live
-  DeepSeek-compatible proposal generation currently fails before write approval
-  and remains the next provider-hardening target.
+  command are implemented. Fixture opencode proposal/apply QA passes. Live
+  DeepSeek-compatible proposal smoke needs to be rerun after fallback hardening
+  before the real-provider QA blocker can close.
 - Add tests around rejected dangerous commands and approved edit application.
 - Add QA for inspect-only, diff preview, approved edit, denied edit, and failed
   verification states.

@@ -153,6 +153,8 @@ exist:
   approved patch application, and optional live provider smoke when
   `JAVIS_OPENCODE_LIVE_PROVIDER`, `JAVIS_OPENCODE_LIVE_MODEL`,
   `JAVIS_OPENCODE_LIVE_API_KEY`, and `JAVIS_OPENCODE_LIVE_BASE_URL` are set.
+  The script accepts bare provider model names such as `deepseek-v4-flash` and
+  normalizes them to the provider/model form used by opencode.
   Do not write live API keys into QA notes or committed scripts.
 
 ### Product Readiness Scenarios

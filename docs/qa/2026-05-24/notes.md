@@ -33,9 +33,11 @@ Command status:
 - `pnpm --filter @javis/desktop build`: pass
 - `pnpm --filter @javis/desktop tauri build`: pass
 - `workspace-restart-qa.ps1`: pass
-- `code-agent-opencode-qa.ps1`: pass for fixture proposal deny/apply; live
-  DeepSeek-compatible provider reached proposal generation but did not return a
-  parseable patch proposal before any write approval was requested.
+- `code-agent-opencode-qa.ps1`: pass for fixture proposal deny/apply in the
+  current rerun. Earlier live DeepSeek-compatible provider evidence reached
+  proposal generation but did not return a parseable patch proposal before any
+  write approval was requested; live smoke still needs to be rerun after
+  fallback hardening with temporary credentials.
 
 Evidence:
 
@@ -56,18 +58,16 @@ Evidence:
 - `18-code-agent-approved-before-approve.png`: approval applies only the
   proposed `src/message.txt` patch and records a successful post-apply
   `git diff --check`.
-- `20-code-agent-live-proposal-failed.png`: live DeepSeek-compatible settings
-  reached the opencode proposal phase and failed before write approval, with no
-  file application attempted. The native opencode proposal runner now has a
-  90-second timeout so an unresponsive provider cannot stall the task
-  indefinitely.
-- `code-agent-opencode-qa-output.txt`: records the fixture deny/apply pass and
-  the live provider hardening finding without storing the live API key.
+- `20-code-agent-live-proposal-failed.png`: earlier live DeepSeek-compatible
+  settings reached the opencode proposal phase and failed before write
+  approval, with no file application attempted.
+- `code-agent-opencode-qa-output.txt`: records the current fixture deny/apply
+  pass. Live provider credentials were not present in this rerun.
 
 Manual QA verdict: pass for workspace selection, recent-workspace restart
 persistence, and fixture-backed Code Agent proposal/apply safety. Live
-DeepSeek-compatible provider QA remains a provider-hardening blocker because
-opencode did not produce a parseable patch proposal.
+DeepSeek-compatible provider QA remains open until the hardened fallback path is
+rerun with temporary credentials.
 
 Notes:
 
@@ -91,6 +91,7 @@ Notes:
   diff verification failures. Core now reports them as `Code Agent patch
   proposal failed`, which keeps provider/runtime failures distinguishable from
   `git diff --check` failures.
-- After adding the native timeout, the live DeepSeek-compatible QA rerun
-  completed in 78 seconds and still stopped before write approval, confirming
-  the failure path remains preview-only.
+- The native proposal runner now has a 90-second timeout, an
+  OpenAI-compatible fallback for DeepSeek/custom providers, fenced/pretty JSON
+  parsing, and approved-file binding so provider output cannot expand beyond
+  the reviewed diff file list.

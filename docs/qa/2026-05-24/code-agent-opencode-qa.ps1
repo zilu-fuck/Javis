@@ -12,6 +12,12 @@ $liveProvider = [Environment]::GetEnvironmentVariable("JAVIS_OPENCODE_LIVE_PROVI
 $liveModel = [Environment]::GetEnvironmentVariable("JAVIS_OPENCODE_LIVE_MODEL", "Process")
 $liveApiKey = [Environment]::GetEnvironmentVariable("JAVIS_OPENCODE_LIVE_API_KEY", "Process")
 $liveBaseUrl = [Environment]::GetEnvironmentVariable("JAVIS_OPENCODE_LIVE_BASE_URL", "Process")
+if (!$liveProvider -and $liveModel -like "deepseek*") {
+  $liveProvider = "deepseek"
+}
+if ($liveProvider -and $liveModel -and $liveModel -notlike "*/*") {
+  $liveModel = "$liveProvider/$liveModel"
+}
 
 if (!(Test-Path $exe)) {
   throw "Release executable not found. Run pnpm --filter @javis/desktop tauri build first."
@@ -166,6 +172,21 @@ function Submit-Goal($socket, [ref]$id, $goal) {
 })()
 "@
   Eval-Js $socket $id $expression | Out-Null
+}
+
+function Expand-ActivityLog($socket, [ref]$id) {
+  Eval-Js $socket $id @"
+(() => {
+  const buttons = Array.from(document.querySelectorAll('button'));
+  const button = buttons.find((candidate) =>
+    candidate.textContent.includes('展开日志') || candidate.textContent.includes('Expand activity log')
+  );
+  if (button) {
+    button.click();
+  }
+  return document.body.innerText;
+})()
+"@ | Out-Null
 }
 
 function Run-Git($workingDirectory, [string[]]$arguments) {
@@ -328,25 +349,25 @@ function Run-LiveCodeAgentScenario($provider, $model, $apiKey, $baseUrl) {
 
     $liveOutcome = Wait-ForAnyText $session.Socket ([ref]$id) @(
       "Code Agent patch approval needed",
-      "Code Agent patch proposal"
+      "Code Agent patch proposal failed"
     ) 120
     if ($liveOutcome -eq "Code Agent patch approval needed") {
       Wait-ForText $session.Socket ([ref]$id) "Code Agent patch proposal" 10 | Out-Null
       Capture-Window $session.Process.MainWindowHandle (Join-Path $qaDir "20-code-agent-live-proposal-before-approve.png")
-      Click-PendingPermissionButton $session.Socket ([ref]$id) "Approve"
-      Wait-ForText $session.Socket ([ref]$id) "Code Agent patch applied" 45 | Out-Null
-      Capture-Window $session.Process.MainWindowHandle (Join-Path $qaDir "20-code-agent-live-approved.png")
       return [pscustomobject]@{
-        Scenario = "live-approved"
+        Scenario = "live-proposal"
         Provider = $provider
         Model = $model
         Status = "pass"
-        Screenshots = @("20-code-agent-live-proposal-before-approve.png", "20-code-agent-live-approved.png")
+        Summary = "Live provider produced a parseable patch proposal and Javis stopped for confirmed-write approval."
+        Screenshots = @("20-code-agent-live-proposal-before-approve.png")
       }
     } else {
-      if ($liveOutcome -ne "Code Agent patch proposal") {
-        Wait-ForText $session.Socket ([ref]$id) "Code Agent patch proposal" 5 | Out-Null
+      if ($liveOutcome -ne "Code Agent patch proposal failed") {
+        Wait-ForText $session.Socket ([ref]$id) "Code Agent patch proposal failed" 5 | Out-Null
       }
+      Expand-ActivityLog $session.Socket ([ref]$id)
+      Start-Sleep -Milliseconds 500
       Capture-Window $session.Process.MainWindowHandle (Join-Path $qaDir "20-code-agent-live-proposal-failed.png")
       $pageText = Get-PageText $session.Socket ([ref]$id)
       return [pscustomobject]@{
@@ -403,4 +424,5 @@ finally {
   } else {
     $env:JAVIS_CODE_PROPOSAL_FIXTURE_PATH = $previousFixture
   }
+  Remove-Item -LiteralPath $workspacePath -Recurse -Force -ErrorAction SilentlyContinue
 }

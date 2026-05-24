@@ -159,7 +159,7 @@ struct CodeApplyResult {
     message: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CodeProposeEditRequest {
     workspace_path: String,
@@ -580,15 +580,29 @@ fn propose_code_edit_with_opencode(
     if env_flag_enabled("JAVIS_QA_MODE") {
         if let Some(path) = env::var_os("JAVIS_CODE_PROPOSAL_FIXTURE_PATH").map(PathBuf::from) {
             let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
-            return parse_code_proposal_from_text(&canonical_workspace, &content);
+            return parse_code_proposal_from_text_for_request(&canonical_workspace, &content, &request);
         }
     } else if env::var_os("JAVIS_CODE_PROPOSAL_FIXTURE_PATH").is_some() {
         return Err("Code proposal fixtures require JAVIS_QA_MODE=1.".to_string());
     }
 
     let prompt = create_opencode_proposal_prompt(&request);
-    let output = run_opencode_proposal_command(&canonical_workspace, &prompt, &request)?;
-    parse_code_proposal_from_text(&canonical_workspace, &output)
+    let output = match run_opencode_proposal_command(&canonical_workspace, &prompt, &request) {
+        Ok(output) => output,
+        Err(error) if should_fallback_to_openai_compatible(&request) && can_fallback_from_opencode_error(&error) => {
+            run_openai_compatible_proposal_request(&request, &prompt)?
+        }
+        Err(error) => return Err(error),
+    };
+    match parse_code_proposal_from_text_for_request(&canonical_workspace, &output, &request) {
+        Ok(proposal) => Ok(proposal),
+        Err(error) if should_fallback_to_openai_compatible(&request) => {
+            let fallback_output = run_openai_compatible_proposal_request(&request, &prompt)?;
+            parse_code_proposal_from_text_for_request(&canonical_workspace, &fallback_output, &request)
+                .map_err(|fallback_error| format!("{error}; fallback failed: {fallback_error}"))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn run_opencode_proposal_command(
@@ -597,7 +611,8 @@ fn run_opencode_proposal_command(
     request: &CodeProposeEditRequest,
 ) -> Result<String, String> {
     let opencode = resolve_opencode_program();
-    let invocation = create_opencode_proposal_invocation(workspace, prompt, request)?;
+    let invocation = create_opencode_proposal_invocation(workspace, prompt, request)
+        .map_err(|error| format!("opencode proposal configuration error: {error}"))?;
     let output = Command::new(&opencode)
         .args(&invocation.args)
         .current_dir(workspace)
@@ -661,7 +676,7 @@ fn create_opencode_proposal_invocation(
         "--format".to_string(),
         "json".to_string(),
     ];
-    if let Some(model) = normalize_optional_config_value(request.model.as_deref()) {
+    if let Some(model) = normalize_opencode_model_id(request)? {
         args.push("--model".to_string());
         args.push(model);
     }
@@ -700,8 +715,7 @@ fn create_opencode_config_content(request: &CodeProposeEditRequest) -> Result<St
     }
 
     let provider_config = if provider_id == "custom" {
-        let model_name = normalize_optional_config_value(request.model.as_deref())
-            .and_then(|model| model.split_once('/').map(|(_, name)| name.to_string()))
+        let model_name = normalize_openai_compatible_model_name(request)
             .unwrap_or_else(|| "default".to_string());
         validate_opencode_config_id(&model_name)?;
         serde_json::json!({
@@ -732,6 +746,29 @@ fn infer_provider_id_from_model(request: &CodeProposeEditRequest) -> String {
         .unwrap_or_else(|| "openai".to_string())
 }
 
+fn normalize_opencode_model_id(request: &CodeProposeEditRequest) -> Result<Option<String>, String> {
+    let Some(model) = normalize_optional_config_value(request.model.as_deref()) else {
+        return Ok(None);
+    };
+    if model.contains('/') {
+        return Ok(Some(model));
+    }
+    let provider_id = normalize_optional_config_value(request.provider_id.as_deref())
+        .unwrap_or_else(|| infer_provider_id_from_model(request));
+    validate_opencode_config_id(&provider_id)?;
+    validate_opencode_config_id(&model)?;
+    Ok(Some(format!("{provider_id}/{model}")))
+}
+
+fn normalize_openai_compatible_model_name(request: &CodeProposeEditRequest) -> Option<String> {
+    normalize_optional_config_value(request.model.as_deref()).map(|model| {
+        model
+            .split_once('/')
+            .map(|(_, name)| name.to_string())
+            .unwrap_or(model)
+    })
+}
+
 fn normalize_optional_config_value(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -748,6 +785,95 @@ fn validate_opencode_config_id(value: &str) -> Result<(), String> {
     }
 
     Err(format!("Invalid opencode provider or model id: {value}"))
+}
+
+fn should_fallback_to_openai_compatible(request: &CodeProposeEditRequest) -> bool {
+    let provider_id = normalize_optional_config_value(request.provider_id.as_deref())
+        .unwrap_or_else(|| infer_provider_id_from_model(request));
+    let has_credentials = normalize_optional_config_value(request.api_key.as_deref()).is_some();
+    let has_custom_base_url = normalize_optional_config_value(request.base_url.as_deref()).is_some();
+    has_credentials && (provider_id == "deepseek" || provider_id == "custom" && has_custom_base_url)
+}
+
+fn can_fallback_from_opencode_error(error: &str) -> bool {
+    !error.starts_with("opencode proposal configuration error:")
+}
+
+fn run_openai_compatible_proposal_request(
+    request: &CodeProposeEditRequest,
+    prompt: &str,
+) -> Result<String, String> {
+    let api_key = normalize_optional_config_value(request.api_key.as_deref())
+        .ok_or_else(|| "OpenAI-compatible fallback requires an API key.".to_string())?;
+    let model = normalize_openai_compatible_model_name(request)
+        .ok_or_else(|| "OpenAI-compatible fallback requires a model.".to_string())?;
+    let base_url = normalize_optional_config_value(request.base_url.as_deref())
+        .unwrap_or_else(|| default_openai_compatible_base_url(request));
+    let endpoint = create_chat_completions_endpoint(&base_url);
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "Return only the requested JSON object. Do not include markdown fences or explanation."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "stream": false,
+        "temperature": 0,
+        "max_tokens": 4096,
+        "thinking": {
+            "type": "disabled"
+        }
+    });
+    let body_text = serde_json::to_string(&body).map_err(|error| error.to_string())?;
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(OPENCODE_PROPOSAL_TIMEOUT))
+        .build();
+    let agent = ureq::Agent::new_with_config(config);
+    let mut response = agent
+        .post(&endpoint)
+        .header("Authorization", &format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .send(&body_text)
+        .map_err(|error| format!("OpenAI-compatible proposal fallback failed: {error}"))?;
+    let response_text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|error| format!("OpenAI-compatible proposal fallback could not read response: {error}"))?;
+    let value = serde_json::from_str::<serde_json::Value>(&response_text)
+        .map_err(|error| format!("OpenAI-compatible proposal fallback returned invalid JSON: {error}"))?;
+    let content = value
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(|content| content.as_str())
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+        .ok_or_else(|| "OpenAI-compatible proposal fallback returned no message content.".to_string())?;
+    Ok(content.to_string())
+}
+
+fn default_openai_compatible_base_url(request: &CodeProposeEditRequest) -> String {
+    let provider_id = normalize_optional_config_value(request.provider_id.as_deref())
+        .unwrap_or_else(|| infer_provider_id_from_model(request));
+    match provider_id.as_str() {
+        "deepseek" => "https://api.deepseek.com".to_string(),
+        _ => "https://api.openai.com/v1".to_string(),
+    }
+}
+
+fn create_chat_completions_endpoint(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/chat/completions") {
+        return trimmed.to_string();
+    }
+    format!("{trimmed}/chat/completions")
 }
 
 fn resolve_opencode_program() -> PathBuf {
@@ -790,7 +916,9 @@ fn opencode_candidates_near_executable(exe_path: &Path) -> Vec<PathBuf> {
 
 fn create_opencode_proposal_prompt(request: &CodeProposeEditRequest) -> String {
     format!(
-        r#"You are generating a patch proposal for Javis. Do not edit files. Return only JSON with keys summary, changedFiles, and patch. The patch must be a unified diff for only the approved changed files.
+        r#"You are generating a patch proposal for Javis. Do not edit files. Return only a single JSON object with keys summary, changedFiles, and patch. Do not include markdown fences or explanation.
+
+The patch must be a unified diff for only the approved changed files. The patch should apply to the current diff preview below. If you cannot produce a safe patch, return an empty patch string.
 
 User goal:
 {}
@@ -806,14 +934,36 @@ Current diff preview:
     )
 }
 
+#[cfg(test)]
 fn parse_code_proposal_from_text(
     workspace: &Path,
     text: &str,
 ) -> Result<CodeProposedEdit, String> {
+    parse_code_proposal_from_text_with_allowed_files(workspace, text, None)
+}
+
+fn parse_code_proposal_from_text_for_request(
+    workspace: &Path,
+    text: &str,
+    request: &CodeProposeEditRequest,
+) -> Result<CodeProposedEdit, String> {
+    let approved_files = request
+        .changed_files
+        .iter()
+        .map(|file| normalize_relative_code_path(file))
+        .collect::<Result<Vec<_>, _>>()?;
+    parse_code_proposal_from_text_with_allowed_files(workspace, text, Some(&approved_files))
+}
+
+fn parse_code_proposal_from_text_with_allowed_files(
+    workspace: &Path,
+    text: &str,
+    allowed_files: Option<&[PathBuf]>,
+) -> Result<CodeProposedEdit, String> {
     let canonical_workspace = fs::canonicalize(workspace)
         .map_err(|error| format!("Workspace is not accessible: {error}"))?;
     let raw = extract_raw_code_proposal(text)?;
-    validate_raw_code_proposal(&canonical_workspace, &raw)?;
+    validate_raw_code_proposal(&canonical_workspace, &raw, allowed_files)?;
     let mut proposal = CodeProposedEdit {
         proposal_id: format!("opencode-{}", create_approval_id()),
         workspace_path: normalize_path(&canonical_workspace),
@@ -827,6 +977,14 @@ fn parse_code_proposal_from_text(
 }
 
 fn extract_raw_code_proposal(text: &str) -> Result<RawCodeProposal, String> {
+    if let Some(raw) = parse_raw_code_proposal_candidate(text) {
+        return Ok(raw);
+    }
+    if let Some(json_text) = extract_json_object_text(text) {
+        if let Some(raw) = parse_raw_code_proposal_candidate(&json_text) {
+            return Ok(raw);
+        }
+    }
     for line in text.lines().rev() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -852,7 +1010,40 @@ fn extract_raw_code_proposal(text: &str) -> Result<RawCodeProposal, String> {
     Err("opencode did not return a parseable CodeProposedEdit JSON object.".to_string())
 }
 
-fn validate_raw_code_proposal(workspace: &Path, proposal: &RawCodeProposal) -> Result<(), String> {
+fn parse_raw_code_proposal_candidate(text: &str) -> Option<RawCodeProposal> {
+    serde_json::from_str::<RawCodeProposal>(normalize_json_candidate(text).trim()).ok()
+}
+
+fn normalize_json_candidate(text: &str) -> String {
+    let trimmed = text.trim();
+    if !trimmed.starts_with("```") {
+        return trimmed.to_string();
+    }
+    let without_opening = trimmed
+        .lines()
+        .skip(1)
+        .collect::<Vec<_>>()
+        .join("\n");
+    without_opening
+        .trim()
+        .strip_suffix("```")
+        .unwrap_or(without_opening.trim())
+        .trim()
+        .to_string()
+}
+
+fn extract_json_object_text(text: &str) -> Option<String> {
+    let normalized = normalize_json_candidate(text);
+    let start = normalized.find('{')?;
+    let end = normalized.rfind('}')?;
+    (start <= end).then(|| normalized[start..=end].to_string())
+}
+
+fn validate_raw_code_proposal(
+    workspace: &Path,
+    proposal: &RawCodeProposal,
+    allowed_files: Option<&[PathBuf]>,
+) -> Result<(), String> {
     if proposal.summary.trim().is_empty() {
         return Err("Code proposal summary cannot be empty.".to_string());
     }
@@ -869,6 +1060,16 @@ fn validate_raw_code_proposal(workspace: &Path, proposal: &RawCodeProposal) -> R
         .collect::<Result<Vec<_>, _>>()?;
     for file in &approved_files {
         ensure_code_path_stays_in_workspace(workspace, file)?;
+    }
+    if let Some(allowed_files) = allowed_files {
+        for file in &approved_files {
+            if !allowed_files.contains(file) {
+                return Err(format!(
+                    "Code proposal includes a file outside the approved diff: {}",
+                    file.display()
+                ));
+            }
+        }
     }
     let patch_files = extract_unified_diff_paths(&proposal.patch)?;
     for file in &patch_files {
@@ -2262,6 +2463,27 @@ mod tests {
     }
 
     #[test]
+    fn parses_pretty_or_fenced_code_proposal_json() {
+        let root = create_test_directory("code-proposal-pretty-json");
+        let file = root.join("src").join("message.txt");
+        fs::create_dir_all(file.parent().expect("file parent")).expect("create src");
+        fs::write(&file, "before\n").expect("write file");
+        let text = r#"```json
+{
+  "summary": "Tighten message copy.",
+  "changedFiles": ["src/message.txt"],
+  "patch": "diff --git a/src/message.txt b/src/message.txt\n--- a/src/message.txt\n+++ b/src/message.txt\n@@ -1 +1 @@\n-before\n+after\n"
+}
+```"#;
+
+        let proposal = parse_code_proposal_from_text(&root, text).expect("proposal");
+
+        assert_eq!(proposal.summary, "Tighten message copy.");
+        assert_eq!(proposal.changed_files, vec!["src/message.txt"]);
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
     fn builds_opencode_invocation_with_desktop_model_settings() {
         let root = create_test_directory("opencode-model-settings");
         let request = CodeProposeEditRequest {
@@ -2315,6 +2537,109 @@ mod tests {
             config["provider"]["custom"]["options"]["baseURL"],
             "http://127.0.0.1:11434/v1"
         );
+    }
+
+    #[test]
+    fn qualifies_bare_desktop_model_with_provider_for_opencode_only() {
+        let root = create_test_directory("opencode-bare-model");
+        let request = CodeProposeEditRequest {
+            workspace_path: normalize_path(&root),
+            user_goal: "Review changes".to_string(),
+            changed_files: vec!["src/message.txt".to_string()],
+            diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
+            provider_id: Some("deepseek".to_string()),
+            model: Some("deepseek-v4-flash".to_string()),
+            api_key: Some("sk-test".to_string()),
+            base_url: Some("https://api.deepseek.com".to_string()),
+        };
+
+        let invocation =
+            create_opencode_proposal_invocation(&root, "Return JSON.", &request).expect("invocation");
+
+        assert!(invocation.args.windows(2).any(|pair| pair == [
+            "--model",
+            "deepseek/deepseek-v4-flash"
+        ]));
+        assert_eq!(
+            normalize_openai_compatible_model_name(&request).as_deref(),
+            Some("deepseek-v4-flash")
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn falls_back_to_openai_compatible_only_for_supported_provider_settings() {
+        let request = CodeProposeEditRequest {
+            workspace_path: "E:/Javis".to_string(),
+            user_goal: "Review changes".to_string(),
+            changed_files: vec!["src/message.txt".to_string()],
+            diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
+            provider_id: Some("deepseek".to_string()),
+            model: Some("deepseek/deepseek-v4-flash".to_string()),
+            api_key: Some("sk-test".to_string()),
+            base_url: None,
+        };
+
+        assert!(should_fallback_to_openai_compatible(&request));
+        assert!(!should_fallback_to_openai_compatible(&CodeProposeEditRequest {
+            api_key: None,
+            ..request.clone()
+        }));
+        assert!(!should_fallback_to_openai_compatible(&CodeProposeEditRequest {
+            provider_id: Some("custom".to_string()),
+            model: Some("custom/local-model".to_string()),
+            api_key: Some("custom-key".to_string()),
+            base_url: None,
+            ..request.clone()
+        }));
+        assert!(should_fallback_to_openai_compatible(&CodeProposeEditRequest {
+            provider_id: Some("custom".to_string()),
+            model: Some("custom/local-model".to_string()),
+            api_key: Some("custom-key".to_string()),
+            base_url: Some("http://127.0.0.1:11434/v1".to_string()),
+            ..request.clone()
+        }));
+        assert!(can_fallback_from_opencode_error("opencode proposal command failed without stderr."));
+        assert!(!can_fallback_from_opencode_error(
+            "opencode proposal configuration error: Invalid opencode provider or model id: bad/id"
+        ));
+        assert_eq!(
+            create_chat_completions_endpoint("https://api.deepseek.com"),
+            "https://api.deepseek.com/chat/completions"
+        );
+        assert_eq!(
+            create_chat_completions_endpoint("https://api.deepseek.com/v1/chat/completions"),
+            "https://api.deepseek.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn rejects_code_proposal_files_outside_approved_diff() {
+        let root = create_test_directory("code-proposal-approved-files");
+        let message = root.join("src").join("message.txt");
+        let other = root.join("src").join("other.txt");
+        fs::create_dir_all(message.parent().expect("file parent")).expect("create src");
+        fs::write(&message, "before\n").expect("write message");
+        fs::write(&other, "before\n").expect("write other");
+        let request = CodeProposeEditRequest {
+            workspace_path: normalize_path(&root),
+            user_goal: "Review changes".to_string(),
+            changed_files: vec!["src/message.txt".to_string()],
+            diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
+            provider_id: Some("deepseek".to_string()),
+            model: Some("deepseek/deepseek-v4-flash".to_string()),
+            api_key: None,
+            base_url: None,
+        };
+        let text = r#"{"summary":"Tighten message copy.","changedFiles":["src/other.txt"],"patch":"diff --git a/src/other.txt b/src/other.txt\n--- a/src/other.txt\n+++ b/src/other.txt\n@@ -1 +1 @@\n-before\n+after\n"}"#;
+
+        let result = parse_code_proposal_from_text_for_request(&root, text, &request);
+
+        assert_eq!(
+            result.expect_err("unapproved file should fail"),
+            "Code proposal includes a file outside the approved diff: src/other.txt"
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
     }
 
     #[test]
