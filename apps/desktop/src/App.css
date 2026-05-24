@@ -335,6 +335,62 @@ textarea:focus-visible {
   background: transparent;
 }
 
+.javis-model-settings {
+  margin-top: auto;
+  padding: 8px 6px 0;
+}
+
+.javis-model-settings summary {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 9px 8px;
+  border-radius: 9px;
+  color: #4d4942;
+  font-size: 13px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.javis-model-settings summary::-webkit-details-marker {
+  display: none;
+}
+
+.javis-model-settings summary:hover {
+  background: #f0efec;
+}
+
+.javis-model-settings-panel {
+  display: grid;
+  gap: 9px;
+  padding: 8px;
+}
+
+.javis-model-settings-panel p {
+  margin: 0;
+  color: #77736b;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.javis-model-settings-panel label {
+  display: grid;
+  gap: 5px;
+  color: #77736b;
+  font-size: 11px;
+}
+
+.javis-model-settings-panel input {
+  min-width: 0;
+  border: 1px solid #d8d5cd;
+  border-radius: 9px;
+  padding: 8px 9px;
+  color: #20201d;
+  background: #ffffff;
+  font-size: 12px;
+}
+
 .javis-history-select {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr);

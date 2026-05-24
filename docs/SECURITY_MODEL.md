@@ -23,6 +23,10 @@ Tauri currently exposes:
 - `plan_pdf_organization`: preview-only PDF move plan for `Downloads`.
 - `approve_pdf_organization`: records approval for the current PDF dry-run id.
 - `execute_pdf_organization`: confirmed-write PDF moves from an approved plan.
+- `propose_code_edit`: preview-only opencode patch proposal with opencode edit,
+  shell, and web tools denied.
+- `apply_code_patch`: confirmed-write unified diff application after Core
+  approval.
 
 ## Search And Browser Isolation
 
@@ -68,12 +72,25 @@ The current write implementation is intentionally narrow:
 - Directory traversal is rejected.
 - Existing target parent directories are canonicalized to avoid path escape.
 
+## Model Credentials
+
+The desktop app currently stores opencode model settings locally so an installed
+copy can run without manual CLI configuration. This includes provider id, model
+id, API key, and optional base URL. The current implementation persists those
+values in app local storage; this is local persistence, not hardened secret
+storage. A future release should move API keys into the OS credential store.
+
+The API key must only be passed to opencode through per-run configuration. It
+must not appear in task history, proposal metadata, screenshots, or diagnostic
+logs.
+
 ## Code Agent Write Rules
 
-The current Code Agent write path is a Core/UI contract only; the desktop app
-does not yet configure a real edit proposal or patch application backend.
+The current Code Agent write path uses opencode only for preview proposals. The
+desktop app denies opencode edit, shell, and web tools and applies files only
+through Javis's native approved-patch command.
 
-Before any future Code Agent backend applies edits:
+Before any Code Agent backend applies edits:
 
 - The proposal must include a proposal id, workspace path, changed-file list,
   patch text, and patch hash.

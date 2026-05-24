@@ -428,6 +428,41 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).toContain("aria-label=\"Remove: E:/Javis\"");
   });
 
+  it("renders desktop opencode model settings controls", () => {
+    const html = renderToStaticMarkup(
+      <JavisWorkbench
+        draftGoal="Review code changes"
+        modelSettings={{
+          provider: "openai",
+          model: "openai/gpt-5.1-codex",
+          apiKey: "",
+          baseUrl: "https://api.openai.com/v1",
+        }}
+        onDraftGoalChange={vi.fn()}
+        onModelSettingsChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={{
+          title: "Ready",
+          userGoal: "Waiting for a task",
+          status: "created",
+          commanderMessage:
+            "Javis desktop is ready. Enter a goal to start the Core event stream.",
+          plan: [],
+          agents: [],
+          logs: [],
+        }}
+      />,
+    );
+
+    expect(html).toContain("Desktop code tasks use this opencode model.");
+    expect(html).toContain("aria-label=\"Provider\"");
+    expect(html).toContain("value=\"openai\"");
+    expect(html).toContain("aria-label=\"Model\"");
+    expect(html).toContain("value=\"openai/gpt-5.1-codex\"");
+    expect(html).toContain("type=\"password\"");
+    expect(html).toContain("value=\"https://api.openai.com/v1\"");
+  });
+
   it("renders localized workspace controls", () => {
     const html = renderToStaticMarkup(
       <JavisWorkbench

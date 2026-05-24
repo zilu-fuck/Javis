@@ -32,6 +32,13 @@ Run full verification:
 pnpm check
 ```
 
+Verify the bundled opencode native binaries are present:
+
+```sh
+node_modules/.pnpm/opencode-windows-x64@1.15.10/node_modules/opencode-windows-x64/bin/opencode.exe --version
+node_modules/.pnpm/opencode-windows-x64-baseline@1.15.10/node_modules/opencode-windows-x64-baseline/bin/opencode.exe --version
+```
+
 Build the desktop frontend:
 
 ```sh
@@ -114,6 +121,8 @@ requires manual cleanup.
 
 - Only the PDF organization flow writes files.
 - Confirmed writes require approval for the current dry-run.
+- The Windows build bundles opencode native binaries for proposal generation,
+  but patch application still runs through Javis confirmed-write approval.
 
 ## Rollback
 

@@ -138,6 +138,13 @@ export interface WorkbenchTokenUsageSummary {
   }>;
 }
 
+export interface WorkbenchModelSettings {
+  provider: string;
+  model: string;
+  apiKey: string;
+  baseUrl: string;
+}
+
 export interface WorkbenchHistoryEntry {
   id: string;
   title: string;
@@ -175,11 +182,13 @@ export interface JavisWorkbenchProps {
   currentWorkspacePath?: string;
   historyEntries?: WorkbenchHistoryEntry[];
   locale?: WorkbenchLocale;
+  modelSettings?: WorkbenchModelSettings;
   recentWorkspacePaths?: string[];
   onDraftGoalChange: (nextGoal: string) => void;
   onDeleteHistoryEntry?: (id: string) => void;
   onDeleteRecentWorkspacePath?: (path: string) => void;
   onBrowseWorkspacePath?: () => void;
+  onModelSettingsChange?: (settings: WorkbenchModelSettings) => void;
   onSelectHistoryEntry?: (id: string) => void;
   onUseWorkspacePath?: (path: string) => void;
   onWorkspacePathChange?: (path: string) => void;
@@ -225,6 +234,11 @@ export interface WorkbenchLocale {
     manualSourceFallbackMessage: string;
     markdownDocuments: string;
     models: string;
+    modelProvider?: string;
+    modelName?: string;
+    modelApiKey?: string;
+    modelBaseUrl?: string;
+    modelSettingsDescription?: string;
     modified: string;
     newChat: string;
     newChatTitle: string;
@@ -472,6 +486,11 @@ const defaultWorkbenchLocale: WorkbenchLocale = {
     manualSourceFallbackMessage: "When search cannot find or fetch enough evidence, paste one or more source URLs into the composer and run the research task again.",
     markdownDocuments: "Markdown Documents",
     models: "Models",
+    modelProvider: "Provider",
+    modelName: "Model",
+    modelApiKey: "API key",
+    modelBaseUrl: "Base URL",
+    modelSettingsDescription: "Desktop code tasks use this opencode model.",
     modified: "modified",
     newChat: "New chat",
     newChatTitle: "What should Javis work on?",
@@ -521,11 +540,13 @@ export function JavisWorkbench({
   currentWorkspacePath = "",
   historyEntries = [],
   locale = defaultWorkbenchLocale,
+  modelSettings,
   recentWorkspacePaths = [],
   onDraftGoalChange,
   onDeleteHistoryEntry,
   onDeleteRecentWorkspacePath,
   onBrowseWorkspacePath,
+  onModelSettingsChange,
   onSelectHistoryEntry,
   onUseWorkspacePath,
   onWorkspacePathChange,
@@ -545,6 +566,12 @@ export function JavisWorkbench({
   const [isInspectorOpen, setIsInspectorOpen] = useState(false);
   const [sidebarSearchQuery, setSidebarSearchQuery] = useState("");
   const [workspaceBrowseError, setWorkspaceBrowseError] = useState(false);
+  const effectiveModelSettings = modelSettings ?? {
+    provider: "openai",
+    model: "",
+    apiKey: "",
+    baseUrl: "",
+  };
   const filteredHistoryEntries = filterWorkbenchHistoryEntries(
     historyEntries,
     sidebarSearchQuery,
@@ -644,6 +671,62 @@ export function JavisWorkbench({
     );
   }
 
+  function updateModelSetting(field: keyof WorkbenchModelSettings, value: string) {
+    onModelSettingsChange?.({
+      ...effectiveModelSettings,
+      [field]: value,
+    });
+  }
+
+  function renderModelSettings() {
+    return (
+      <details className="javis-model-settings">
+        <summary>
+          <span className="javis-nav-icon">M</span>
+          <span>{labels.models}</span>
+        </summary>
+        <div className="javis-model-settings-panel">
+          <p>{labels.modelSettingsDescription}</p>
+          <label>
+            <span>{labels.modelProvider}</span>
+            <input
+              aria-label={labels.modelProvider}
+              onChange={(event) => updateModelSetting("provider", event.currentTarget.value)}
+              value={effectiveModelSettings.provider}
+            />
+          </label>
+          <label>
+            <span>{labels.modelName}</span>
+            <input
+              aria-label={labels.modelName}
+              onChange={(event) => updateModelSetting("model", event.currentTarget.value)}
+              placeholder="openai/gpt-5.1-codex"
+              value={effectiveModelSettings.model}
+            />
+          </label>
+          <label>
+            <span>{labels.modelApiKey}</span>
+            <input
+              aria-label={labels.modelApiKey}
+              onChange={(event) => updateModelSetting("apiKey", event.currentTarget.value)}
+              type="password"
+              value={effectiveModelSettings.apiKey}
+            />
+          </label>
+          <label>
+            <span>{labels.modelBaseUrl}</span>
+            <input
+              aria-label={labels.modelBaseUrl}
+              onChange={(event) => updateModelSetting("baseUrl", event.currentTarget.value)}
+              placeholder="https://api.openai.com/v1"
+              value={effectiveModelSettings.baseUrl}
+            />
+          </label>
+        </div>
+      </details>
+    );
+  }
+
   return (
     <div
       className={[
@@ -739,6 +822,7 @@ export function JavisWorkbench({
             )}
           </div>
         </nav>
+        {renderModelSettings()}
         <div className="javis-sidebar-footer">
           <span className="javis-avatar">J</span>
           <span>{labels.profileName}</span>

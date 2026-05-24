@@ -127,8 +127,27 @@ exist:
 - Verify the final state distinguishes a clean diff check from a failed diff
   check.
 - Do not treat this scenario as approved edit QA. Core/UI now include the
-  proposed-edit and confirmed-write approval contract, but a real opencode
-  proposal/apply backend is still pending.
+  proposed-edit and confirmed-write approval contract, and desktop includes a
+  proposal-only opencode adapter plus local approved-patch apply command.
+  Separate approved-edit QA still needs an opencode proposal that produces a
+  reviewable patch.
+
+### Code Agent Approved Edit
+
+- Ensure `opencode --version` works in the release environment.
+- Configure provider, model, API key, and optional base URL in the desktop
+  workbench model settings before running live opencode QA.
+- Create a small local code change without committing it.
+- Submit: `Review code changes`.
+- Verify Javis shows a Code Agent patch proposal before requesting write
+  approval.
+- Deny once and verify no files change.
+- Re-run, approve the patch proposal, and verify only the approved patch paths
+  are modified.
+- Verify post-apply `git diff --check` runs and the final state records the
+  apply result.
+- For repeatable provider parsing evidence, set `JAVIS_QA_MODE=1` with
+  `JAVIS_CODE_PROPOSAL_FIXTURE_PATH` pointing at a proposal JSON fixture.
 
 ### Product Readiness Scenarios
 

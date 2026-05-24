@@ -119,14 +119,26 @@ It returns the workspace path, changed files, diff stat, and a bounded diff
 preview for the current local repository state. Core treats the preview as a
 `preview` permission step before running read-only verification.
 
-The proposed-edit and apply functions are contract points for a future
-OpenCode/opencode backend. When `proposeEdit` is not configured, Code Agent
-routes stop after read-only diff verification. When it is configured, Core
-expects proposal metadata, affected files, patch text, and a patch hash. Patch
-application requires a `confirmed_write` permission request bound to that exact
-proposal, and Core validates the hash before approval and again before apply.
-The desktop app does not yet configure a real OpenCode/opencode proposal/apply
-backend.
+The proposed-edit and apply functions form the Code Agent edit boundary. When
+`proposeEdit` is not configured, Code Agent routes stop after read-only diff
+verification. When it is configured, Core expects proposal metadata, affected
+files, patch text, and a patch hash. Patch application requires a
+`confirmed_write` permission request bound to that exact proposal, and Core
+validates the hash before approval and again before apply.
+
+The desktop app configures an opencode-backed `proposeEdit` adapter that asks
+opencode for a strict JSON patch proposal while denying edit, shell, and web
+tool permissions through opencode configuration. The adapter returns proposal
+metadata only; it must not write files. The desktop app also configures a local
+`applyProposedEdit` backend that applies approved unified diffs through the
+native boundary after Javis confirmed-write approval.
+
+The desktop workbench owns the opencode model settings for this adapter. The
+current settings are provider id, model id, API key, and optional base URL. On
+each proposal request, Tauri passes `--model <provider/model>` to opencode and
+injects provider options into `OPENCODE_CONFIG_CONTENT` together with the
+read-only permission denies. API keys must not be written to task snapshots,
+tool logs, or proposal metadata.
 
 ## Permission Contract
 

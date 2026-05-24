@@ -8,6 +8,14 @@ Install JavaScript dependencies from the repository root:
 pnpm install
 ```
 
+The desktop package depends on `opencode-ai` so Windows builds can bundle the
+native opencode executable. The runtime calls the platform binary from
+`opencode-windows-x64` / `opencode-windows-x64-baseline` directly instead of
+the npm shim, because package-manager postinstall scripts may be disabled.
+Users configure the opencode provider/model in the desktop workbench. Proposal
+runs pass `--model` to the bundled binary and inject provider options through
+`OPENCODE_CONFIG_CONTENT`; edit, shell, and webfetch remain denied there.
+
 Make sure the Rust toolchain is available:
 
 ```sh

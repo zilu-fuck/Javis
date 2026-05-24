@@ -18,6 +18,17 @@ describe("code-proposal-safety", () => {
       .not.toBe(createCodeProposalHash(proposal));
   });
 
+  it("matches the native proposal hash test vector", () => {
+    expect(createCodeProposalHash({
+      proposalId: "opencode-test",
+      workspacePath: "E:/Javis",
+      summary: "Tighten message copy.",
+      changedFiles: ["src/message.txt"],
+      patch: "diff --git a/src/message.txt b/src/message.txt\n",
+      patchHash: "",
+    })).toBe("fnv1a-00ce5494");
+  });
+
   it("validates proposal hashes", () => {
     const proposal = createProposal();
     const validProposal = {

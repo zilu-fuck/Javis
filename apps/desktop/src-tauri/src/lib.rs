@@ -2,7 +2,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::Mutex,
@@ -138,6 +138,55 @@ struct ProjectInspection {
 struct ProjectScript {
     name: String,
     command: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodePatchApplyRequest {
+    workspace_path: String,
+    changed_files: Vec<String>,
+    patch: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodeApplyResult {
+    applied: bool,
+    workspace_path: String,
+    changed_files: Vec<String>,
+    message: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodeProposeEditRequest {
+    workspace_path: String,
+    user_goal: String,
+    changed_files: Vec<String>,
+    diff: String,
+    provider_id: Option<String>,
+    model: Option<String>,
+    api_key: Option<String>,
+    base_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodeProposedEdit {
+    proposal_id: String,
+    workspace_path: String,
+    summary: String,
+    changed_files: Vec<String>,
+    patch: String,
+    patch_hash: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawCodeProposal {
+    summary: String,
+    changed_files: Vec<String>,
+    patch: String,
 }
 
 #[derive(Default)]
@@ -413,6 +462,18 @@ fn inspect_project(workspace_path: Option<String>) -> Result<ProjectInspection, 
     })
 }
 
+#[tauri::command]
+fn apply_code_patch(request: CodePatchApplyRequest) -> Result<CodeApplyResult, String> {
+    let workspace = resolve_workspace_path(Some(request.workspace_path.clone()))?;
+    apply_code_patch_in_workspace(&workspace, request)
+}
+
+#[tauri::command]
+fn propose_code_edit(request: CodeProposeEditRequest) -> Result<CodeProposedEdit, String> {
+    let workspace = resolve_workspace_path(Some(request.workspace_path.clone()))?;
+    propose_code_edit_with_opencode(&workspace, request)
+}
+
 fn is_allowed_read_only_command(program: &str, args: &[String]) -> bool {
     let normalized_program = program.to_ascii_lowercase();
     let normalized_args = args.iter().map(String::as_str).collect::<Vec<_>>();
@@ -495,6 +556,450 @@ fn recommend_script(scripts: &[ProjectScript], runner: &str, names: &[&str]) -> 
             .any(|script| script.name == *name)
             .then(|| format!("{} {}", runner, name))
     })
+}
+
+fn propose_code_edit_with_opencode(
+    workspace: &Path,
+    request: CodeProposeEditRequest,
+) -> Result<CodeProposedEdit, String> {
+    let canonical_workspace = fs::canonicalize(workspace)
+        .map_err(|error| format!("Workspace is not accessible: {error}"))?;
+    if request.user_goal.trim().is_empty() {
+        return Err("Code proposal goal cannot be empty.".to_string());
+    }
+    if request.diff.trim().is_empty() {
+        return Err("Code proposal requires a non-empty diff preview.".to_string());
+    }
+    for file in &request.changed_files {
+        let relative_path = normalize_relative_code_path(file)?;
+        ensure_code_path_stays_in_workspace(&canonical_workspace, &relative_path)?;
+    }
+
+    if env_flag_enabled("JAVIS_QA_MODE") {
+        if let Some(path) = env::var_os("JAVIS_CODE_PROPOSAL_FIXTURE_PATH").map(PathBuf::from) {
+            let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
+            return parse_code_proposal_from_text(&canonical_workspace, &content);
+        }
+    } else if env::var_os("JAVIS_CODE_PROPOSAL_FIXTURE_PATH").is_some() {
+        return Err("Code proposal fixtures require JAVIS_QA_MODE=1.".to_string());
+    }
+
+    let prompt = create_opencode_proposal_prompt(&request);
+    let output = run_opencode_proposal_command(&canonical_workspace, &prompt, &request)?;
+    parse_code_proposal_from_text(&canonical_workspace, &output)
+}
+
+fn run_opencode_proposal_command(
+    workspace: &Path,
+    prompt: &str,
+    request: &CodeProposeEditRequest,
+) -> Result<String, String> {
+    let opencode = resolve_opencode_program();
+    let invocation = create_opencode_proposal_invocation(workspace, prompt, request)?;
+    let output = Command::new(&opencode)
+        .args(&invocation.args)
+        .current_dir(workspace)
+        .env("OPENCODE_CONFIG_CONTENT", invocation.config_content)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|error| format!("opencode is unavailable at {}: {error}", opencode.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "opencode proposal command failed without stderr.".to_string()
+        } else {
+            stderr
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+struct OpencodeProposalInvocation {
+    args: Vec<String>,
+    config_content: String,
+}
+
+fn create_opencode_proposal_invocation(
+    workspace: &Path,
+    prompt: &str,
+    request: &CodeProposeEditRequest,
+) -> Result<OpencodeProposalInvocation, String> {
+    let mut args = vec![
+        "run".to_string(),
+        "--pure".to_string(),
+        "--dir".to_string(),
+        workspace
+            .to_str()
+            .ok_or_else(|| "Workspace path is not valid UTF-8.".to_string())?
+            .to_string(),
+        "--format".to_string(),
+        "json".to_string(),
+    ];
+    if let Some(model) = normalize_optional_config_value(request.model.as_deref()) {
+        args.push("--model".to_string());
+        args.push(model);
+    }
+    args.push(prompt.to_string());
+
+    Ok(OpencodeProposalInvocation {
+        args,
+        config_content: create_opencode_config_content(request)?,
+    })
+}
+
+fn create_opencode_config_content(request: &CodeProposeEditRequest) -> Result<String, String> {
+    let mut config = serde_json::json!({
+        "permission": {
+            "edit": "deny",
+            "bash": "deny",
+            "webfetch": "deny"
+        }
+    });
+    let provider_id = normalize_optional_config_value(request.provider_id.as_deref());
+    let api_key = normalize_optional_config_value(request.api_key.as_deref());
+    let base_url = normalize_optional_config_value(request.base_url.as_deref());
+
+    if provider_id.is_none() && api_key.is_none() && base_url.is_none() {
+        return serde_json::to_string(&config).map_err(|error| error.to_string());
+    }
+
+    let provider_id = provider_id.unwrap_or_else(|| infer_provider_id_from_model(request));
+    validate_opencode_config_id(&provider_id)?;
+    let mut options = serde_json::Map::new();
+    if let Some(api_key) = api_key {
+        options.insert("apiKey".to_string(), serde_json::Value::String(api_key));
+    }
+    if let Some(base_url) = base_url {
+        options.insert("baseURL".to_string(), serde_json::Value::String(base_url));
+    }
+
+    let provider_config = if provider_id == "custom" {
+        let model_name = normalize_optional_config_value(request.model.as_deref())
+            .and_then(|model| model.split_once('/').map(|(_, name)| name.to_string()))
+            .unwrap_or_else(|| "default".to_string());
+        validate_opencode_config_id(&model_name)?;
+        serde_json::json!({
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "Custom OpenAI Compatible",
+            "options": options,
+            "models": {
+                model_name.clone(): {
+                    "name": model_name
+                }
+            }
+        })
+    } else {
+        serde_json::json!({
+            "options": options
+        })
+    };
+
+    config["provider"] = serde_json::json!({
+        provider_id: provider_config
+    });
+    serde_json::to_string(&config).map_err(|error| error.to_string())
+}
+
+fn infer_provider_id_from_model(request: &CodeProposeEditRequest) -> String {
+    normalize_optional_config_value(request.model.as_deref())
+        .and_then(|model| model.split_once('/').map(|(provider, _)| provider.to_string()))
+        .unwrap_or_else(|| "openai".to_string())
+}
+
+fn normalize_optional_config_value(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn validate_opencode_config_id(value: &str) -> Result<(), String> {
+    if value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+    {
+        return Ok(());
+    }
+
+    Err(format!("Invalid opencode provider or model id: {value}"))
+}
+
+fn resolve_opencode_program() -> PathBuf {
+    bundled_opencode_candidates()
+        .into_iter()
+        .find(|path| path.exists())
+        .unwrap_or_else(|| PathBuf::from(resolve_command_program("opencode")))
+}
+
+fn bundled_opencode_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(exe_path) = env::current_exe() {
+        candidates.extend(opencode_candidates_near_executable(&exe_path));
+    }
+    if let Ok(current_dir) = env::current_dir() {
+        for ancestor in current_dir.ancestors() {
+            candidates.push(
+                ancestor
+                    .join("node_modules/.pnpm/opencode-windows-x64@1.15.10/node_modules/opencode-windows-x64/bin/opencode.exe"),
+            );
+            candidates.push(
+                ancestor
+                    .join("node_modules/.pnpm/opencode-windows-x64-baseline@1.15.10/node_modules/opencode-windows-x64-baseline/bin/opencode.exe"),
+            );
+        }
+    }
+    candidates
+}
+
+fn opencode_candidates_near_executable(exe_path: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(exe_dir) = exe_path.parent() {
+        for base in [exe_dir, &exe_dir.join("resources")] {
+            candidates.push(base.join("bin/opencode-windows-x64/opencode.exe"));
+            candidates.push(base.join("bin/opencode-windows-x64-baseline/opencode.exe"));
+        }
+    }
+    candidates
+}
+
+fn create_opencode_proposal_prompt(request: &CodeProposeEditRequest) -> String {
+    format!(
+        r#"You are generating a patch proposal for Javis. Do not edit files. Return only JSON with keys summary, changedFiles, and patch. The patch must be a unified diff for only the approved changed files.
+
+User goal:
+{}
+
+Approved changed files:
+{}
+
+Current diff preview:
+{}"#,
+        request.user_goal.trim(),
+        request.changed_files.join("\n"),
+        request.diff
+    )
+}
+
+fn parse_code_proposal_from_text(
+    workspace: &Path,
+    text: &str,
+) -> Result<CodeProposedEdit, String> {
+    let canonical_workspace = fs::canonicalize(workspace)
+        .map_err(|error| format!("Workspace is not accessible: {error}"))?;
+    let raw = extract_raw_code_proposal(text)?;
+    validate_raw_code_proposal(&canonical_workspace, &raw)?;
+    let mut proposal = CodeProposedEdit {
+        proposal_id: format!("opencode-{}", create_approval_id()),
+        workspace_path: normalize_path(&canonical_workspace),
+        summary: raw.summary.trim().to_string(),
+        changed_files: raw.changed_files,
+        patch: raw.patch,
+        patch_hash: String::new(),
+    };
+    proposal.patch_hash = create_code_proposal_hash(&proposal);
+    Ok(proposal)
+}
+
+fn extract_raw_code_proposal(text: &str) -> Result<RawCodeProposal, String> {
+    for line in text.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(raw) = serde_json::from_str::<RawCodeProposal>(trimmed) {
+            return Ok(raw);
+        }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            if let Some(message) = value.get("message").and_then(|message| message.as_str()) {
+                if let Ok(raw) = serde_json::from_str::<RawCodeProposal>(message.trim()) {
+                    return Ok(raw);
+                }
+            }
+            if let Some(text) = value.get("text").and_then(|text| text.as_str()) {
+                if let Ok(raw) = serde_json::from_str::<RawCodeProposal>(text.trim()) {
+                    return Ok(raw);
+                }
+            }
+        }
+    }
+
+    Err("opencode did not return a parseable CodeProposedEdit JSON object.".to_string())
+}
+
+fn validate_raw_code_proposal(workspace: &Path, proposal: &RawCodeProposal) -> Result<(), String> {
+    if proposal.summary.trim().is_empty() {
+        return Err("Code proposal summary cannot be empty.".to_string());
+    }
+    if proposal.patch.trim().is_empty() {
+        return Err("Code proposal patch cannot be empty.".to_string());
+    }
+    if proposal.changed_files.is_empty() {
+        return Err("Code proposal must list at least one changed file.".to_string());
+    }
+    let approved_files = proposal
+        .changed_files
+        .iter()
+        .map(|file| normalize_relative_code_path(file))
+        .collect::<Result<Vec<_>, _>>()?;
+    for file in &approved_files {
+        ensure_code_path_stays_in_workspace(workspace, file)?;
+    }
+    let patch_files = extract_unified_diff_paths(&proposal.patch)?;
+    for file in &patch_files {
+        if !approved_files.contains(file) {
+            return Err(format!(
+                "Code proposal patch includes an unlisted file path: {}",
+                file.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn create_code_proposal_hash(edit: &CodeProposedEdit) -> String {
+    let payload = std::iter::once(edit.proposal_id.as_str())
+        .chain(std::iter::once(edit.workspace_path.as_str()))
+        .chain(edit.changed_files.iter().map(String::as_str))
+        .chain(std::iter::once(edit.patch.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut hash = 2166136261u32;
+    for byte in payload.as_bytes() {
+        hash ^= *byte as u32;
+        hash = hash.wrapping_mul(16777619);
+    }
+    format!("fnv1a-{hash:08x}")
+}
+
+fn apply_code_patch_in_workspace(
+    workspace: &Path,
+    request: CodePatchApplyRequest,
+) -> Result<CodeApplyResult, String> {
+    let canonical_workspace = fs::canonicalize(workspace)
+        .map_err(|error| format!("Workspace is not accessible: {error}"))?;
+    let patch = request.patch.trim();
+    if patch.is_empty() {
+        return Err("Code patch cannot be empty.".to_string());
+    }
+    if request.changed_files.is_empty() {
+        return Err("Code patch must list at least one approved changed file.".to_string());
+    }
+
+    let approved_files = request
+        .changed_files
+        .iter()
+        .map(|file| normalize_relative_code_path(file))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let patch_files = extract_unified_diff_paths(patch)?;
+    for file in &patch_files {
+        if !approved_files.contains(file) {
+            return Err(format!(
+                "Patch includes an unapproved file path: {}",
+                file.display()
+            ));
+        }
+    }
+    for file in &approved_files {
+        ensure_code_path_stays_in_workspace(&canonical_workspace, file)?;
+    }
+
+    let mut child = Command::new(resolve_command_program("git"))
+        .args(["apply", "--whitespace=nowarn", "-"])
+        .current_dir(&canonical_workspace)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Could not start git apply: {error}"))?;
+
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| "Could not open git apply stdin.".to_string())?
+        .write_all(request.patch.as_bytes())
+        .map_err(|error| format!("Could not write patch to git apply: {error}"))?;
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("Could not finish git apply: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() {
+            "git apply failed without stderr.".to_string()
+        } else {
+            stderr
+        });
+    }
+
+    Ok(CodeApplyResult {
+        applied: true,
+        workspace_path: normalize_path(&canonical_workspace),
+        changed_files: approved_files
+            .iter()
+            .map(|file| file.to_string_lossy().replace('\\', "/"))
+            .collect(),
+        message: format!("Applied patch to {} approved file(s).", approved_files.len()),
+    })
+}
+
+fn extract_unified_diff_paths(patch: &str) -> Result<Vec<PathBuf>, String> {
+    let mut paths = Vec::new();
+    for line in patch.lines() {
+        if !line.starts_with("diff --git ") {
+            continue;
+        }
+        let parts = line.split_whitespace().collect::<Vec<_>>();
+        if parts.len() < 4 {
+            return Err("Patch contains a malformed diff header.".to_string());
+        }
+        let path = normalize_git_diff_path(parts[3])?;
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+
+    if paths.is_empty() {
+        return Err("Patch does not contain a unified diff header.".to_string());
+    }
+    Ok(paths)
+}
+
+fn normalize_git_diff_path(path: &str) -> Result<PathBuf, String> {
+    let without_prefix = path
+        .strip_prefix("b/")
+        .or_else(|| path.strip_prefix("a/"))
+        .unwrap_or(path);
+    normalize_relative_code_path(without_prefix)
+}
+
+fn normalize_relative_code_path(path: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim().replace('\\', "/");
+    if trimmed.is_empty() {
+        return Err("Changed file path cannot be empty.".to_string());
+    }
+    if trimmed.starts_with('/') || trimmed.contains(':') {
+        return Err(format!("Changed file path must be relative: {trimmed}"));
+    }
+    let path = PathBuf::from(trimmed);
+    if path.components().any(|component| matches!(component, std::path::Component::ParentDir)) {
+        return Err("Changed file path cannot contain parent directory traversal.".to_string());
+    }
+    Ok(path)
+}
+
+fn ensure_code_path_stays_in_workspace(workspace: &Path, relative_path: &Path) -> Result<(), String> {
+    let target = workspace.join(relative_path);
+    let parent = target
+        .parent()
+        .ok_or_else(|| "Changed file path does not have a parent directory.".to_string())?;
+    let canonical_parent = fs::canonicalize(parent)
+        .map_err(|error| format!("Changed file parent is not accessible: {error}"))?;
+    if !canonical_parent.starts_with(workspace) {
+        return Err("Changed file path must stay inside the selected workspace.".to_string());
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -1148,7 +1653,7 @@ fn should_skip_file(path: &Path) -> bool {
 fn read_text_prefix(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
     let mut buffer = Vec::new();
-    file.by_ref()
+    std::io::Read::by_ref(&mut file)
         .take(64 * 1024)
         .read_to_end(&mut buffer)
         .map_err(|error| error.to_string())?;
@@ -1591,6 +2096,250 @@ mod tests {
     }
 
     #[test]
+    fn apply_code_patch_applies_approved_unified_diff() {
+        let root = create_test_directory("code-patch-success");
+        init_git_repo(&root);
+        let file = root.join("src").join("message.txt");
+        fs::create_dir_all(file.parent().expect("file parent")).expect("create src");
+        fs::write(&file, "before\n").expect("write file");
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "-m", "initial"]);
+        fs::write(&file, "after\n").expect("write changed file");
+        let patch = run_git_capture(&root, &["diff"]);
+        run_git(&root, &["checkout", "--", "src/message.txt"]);
+
+        let result = apply_code_patch_in_workspace(
+            &root,
+            CodePatchApplyRequest {
+                workspace_path: normalize_path(&root),
+                changed_files: vec!["src/message.txt".to_string()],
+                patch,
+            },
+        )
+        .expect("apply approved patch");
+
+        assert!(result.applied);
+        assert_eq!(result.changed_files, vec!["src/message.txt"]);
+        assert_eq!(
+            fs::read_to_string(file)
+                .expect("read patched file")
+                .replace("\r\n", "\n"),
+            "after\n"
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn apply_code_patch_rejects_unapproved_diff_paths() {
+        let root = create_test_directory("code-patch-unapproved");
+        let patch = "diff --git a/src/allowed.txt b/src/other.txt\n--- a/src/allowed.txt\n+++ b/src/other.txt\n@@ -1 +1 @@\n-before\n+after\n";
+
+        let result = apply_code_patch_in_workspace(
+            &root,
+            CodePatchApplyRequest {
+                workspace_path: normalize_path(&root),
+                changed_files: vec!["src/allowed.txt".to_string()],
+                patch: patch.to_string(),
+            },
+        );
+
+        assert_eq!(
+            result.expect_err("unapproved path should fail"),
+            "Patch includes an unapproved file path: src/other.txt"
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn apply_code_patch_rejects_parent_directory_paths() {
+        let root = create_test_directory("code-patch-traversal");
+
+        let result = apply_code_patch_in_workspace(
+            &root,
+            CodePatchApplyRequest {
+                workspace_path: normalize_path(&root),
+                changed_files: vec!["../outside.txt".to_string()],
+                patch: "diff --git a/../outside.txt b/../outside.txt\n".to_string(),
+            },
+        );
+
+        assert_eq!(
+            result.expect_err("traversal should fail"),
+            "Changed file path cannot contain parent directory traversal."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn parses_opencode_code_proposal_json_and_hashes_patch() {
+        let root = create_test_directory("code-proposal-json");
+        let file = root.join("src").join("message.txt");
+        fs::create_dir_all(file.parent().expect("file parent")).expect("create src");
+        fs::write(&file, "before\n").expect("write file");
+        let text = r#"{"summary":"Tighten message copy.","changedFiles":["src/message.txt"],"patch":"diff --git a/src/message.txt b/src/message.txt\n--- a/src/message.txt\n+++ b/src/message.txt\n@@ -1 +1 @@\n-before\n+after\n"}"#;
+
+        let proposal = parse_code_proposal_from_text(&root, text).expect("proposal");
+
+        assert!(proposal.proposal_id.starts_with("opencode-"));
+        assert_eq!(proposal.summary, "Tighten message copy.");
+        assert_eq!(proposal.changed_files, vec!["src/message.txt"]);
+        assert_eq!(proposal.patch_hash, create_code_proposal_hash(&proposal));
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn code_proposal_hash_matches_core_test_vector() {
+        let proposal = CodeProposedEdit {
+            proposal_id: "opencode-test".to_string(),
+            workspace_path: "E:/Javis".to_string(),
+            summary: "Tighten message copy.".to_string(),
+            changed_files: vec!["src/message.txt".to_string()],
+            patch: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
+            patch_hash: String::new(),
+        };
+
+        assert_eq!(create_code_proposal_hash(&proposal), "fnv1a-00ce5494");
+    }
+
+    #[test]
+    fn resolves_bundled_opencode_before_path_fallback() {
+        let program = resolve_opencode_program();
+
+        assert!(
+            program.to_string_lossy().contains("opencode-windows-x64"),
+            "unexpected opencode program path: {}",
+            program.display()
+        );
+        let output = Command::new(program)
+            .arg("--version")
+            .output()
+            .expect("run bundled opencode");
+        assert!(
+            output.status.success(),
+            "bundled opencode --version failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn parses_opencode_json_event_message_payloads() {
+        let root = create_test_directory("code-proposal-event-json");
+        let file = root.join("src").join("message.txt");
+        fs::create_dir_all(file.parent().expect("file parent")).expect("create src");
+        fs::write(&file, "before\n").expect("write file");
+        let text = r#"{"type":"message","message":"{\"summary\":\"Tighten message copy.\",\"changedFiles\":[\"src/message.txt\"],\"patch\":\"diff --git a/src/message.txt b/src/message.txt\\n--- a/src/message.txt\\n+++ b/src/message.txt\\n@@ -1 +1 @@\\n-before\\n+after\\n\"}"}"#;
+
+        let proposal = parse_code_proposal_from_text(&root, text).expect("proposal");
+
+        assert_eq!(proposal.summary, "Tighten message copy.");
+        assert_eq!(proposal.changed_files, vec!["src/message.txt"]);
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn builds_opencode_invocation_with_desktop_model_settings() {
+        let root = create_test_directory("opencode-model-settings");
+        let request = CodeProposeEditRequest {
+            workspace_path: normalize_path(&root),
+            user_goal: "Review changes".to_string(),
+            changed_files: vec!["src/message.txt".to_string()],
+            diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
+            provider_id: Some("openai".to_string()),
+            model: Some("openai/gpt-5.1-codex".to_string()),
+            api_key: Some("sk-test".to_string()),
+            base_url: Some("https://api.example.test/v1".to_string()),
+        };
+
+        let invocation =
+            create_opencode_proposal_invocation(&root, "Return JSON.", &request).expect("invocation");
+        let config: serde_json::Value =
+            serde_json::from_str(&invocation.config_content).expect("config json");
+
+        assert!(invocation.args.windows(2).any(|pair| pair == ["--model", "openai/gpt-5.1-codex"]));
+        assert_eq!(config["permission"]["edit"], "deny");
+        assert_eq!(config["permission"]["bash"], "deny");
+        assert_eq!(config["permission"]["webfetch"], "deny");
+        assert_eq!(config["provider"]["openai"]["options"]["apiKey"], "sk-test");
+        assert_eq!(
+            config["provider"]["openai"]["options"]["baseURL"],
+            "https://api.example.test/v1"
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn builds_custom_openai_compatible_provider_config() {
+        let request = CodeProposeEditRequest {
+            workspace_path: "E:/Javis".to_string(),
+            user_goal: "Review changes".to_string(),
+            changed_files: vec!["src/message.txt".to_string()],
+            diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
+            provider_id: Some("custom".to_string()),
+            model: Some("custom/local-model".to_string()),
+            api_key: Some("local-key".to_string()),
+            base_url: Some("http://127.0.0.1:11434/v1".to_string()),
+        };
+        let config: serde_json::Value =
+            serde_json::from_str(&create_opencode_config_content(&request).expect("config"))
+                .expect("config json");
+
+        assert_eq!(config["provider"]["custom"]["npm"], "@ai-sdk/openai-compatible");
+        assert_eq!(config["provider"]["custom"]["models"]["local-model"]["name"], "local-model");
+        assert_eq!(config["provider"]["custom"]["options"]["apiKey"], "local-key");
+        assert_eq!(
+            config["provider"]["custom"]["options"]["baseURL"],
+            "http://127.0.0.1:11434/v1"
+        );
+    }
+
+    #[test]
+    fn rejects_opencode_code_proposals_with_unlisted_patch_paths() {
+        let root = create_test_directory("code-proposal-unlisted");
+        let file = root.join("src").join("message.txt");
+        fs::create_dir_all(file.parent().expect("file parent")).expect("create src");
+        fs::write(&file, "before\n").expect("write file");
+        let text = r#"{"summary":"Tighten message copy.","changedFiles":["src/message.txt"],"patch":"diff --git a/src/other.txt b/src/other.txt\n--- a/src/other.txt\n+++ b/src/other.txt\n@@ -1 +1 @@\n-before\n+after\n"}"#;
+
+        let result = parse_code_proposal_from_text(&root, text);
+
+        assert_eq!(
+            result.expect_err("unlisted path should fail"),
+            "Code proposal patch includes an unlisted file path: src/other.txt"
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn rejects_code_proposal_fixtures_without_qa_mode() {
+        let root = create_test_directory("code-proposal-fixture-guard");
+        let fixture = root.join("proposal.json");
+        fs::write(&fixture, "{}").expect("write fixture");
+        env::set_var("JAVIS_CODE_PROPOSAL_FIXTURE_PATH", &fixture);
+        env::remove_var("JAVIS_QA_MODE");
+
+        let result = propose_code_edit_with_opencode(
+            &root,
+            CodeProposeEditRequest {
+                workspace_path: normalize_path(&root),
+                user_goal: "Review changes".to_string(),
+                changed_files: vec!["proposal.json".to_string()],
+                diff: "diff --git a/proposal.json b/proposal.json\n".to_string(),
+                provider_id: None,
+                model: None,
+                api_key: None,
+                base_url: None,
+            },
+        );
+
+        assert_eq!(
+            result.expect_err("fixture should require QA mode"),
+            "Code proposal fixtures require JAVIS_QA_MODE=1."
+        );
+        env::remove_var("JAVIS_CODE_PROPOSAL_FIXTURE_PATH");
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
     fn maps_github_results_to_search_results() {
         let results = github_items_to_search_results(
             vec![GithubSearchItem {
@@ -1725,6 +2474,41 @@ mod tests {
         root
     }
 
+    fn init_git_repo(root: &Path) {
+        run_git(root, &["init"]);
+        run_git(root, &["config", "user.email", "javis@example.test"]);
+        run_git(root, &["config", "user.name", "Javis Test"]);
+    }
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let output = Command::new(resolve_command_program("git"))
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn run_git_capture(root: &Path, args: &[&str]) -> String {
+        let output = Command::new(resolve_command_program("git"))
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("run git capture");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
+    }
+
     fn planned_pdf_operation() -> PlannedPathOperation {
         PlannedPathOperation {
             source: "C:/Users/example/Downloads/paper.pdf".to_string(),
@@ -1747,6 +2531,8 @@ pub fn run() {
             fetch_web_source,
             search_web_sources,
             inspect_project,
+            propose_code_edit,
+            apply_code_patch,
             plan_pdf_organization,
             approve_pdf_organization,
             execute_pdf_organization

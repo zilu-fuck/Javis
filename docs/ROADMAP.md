@@ -53,7 +53,9 @@ Status: complete for the 2026-05-23 QA pass.
 
 - Add a `CodeTool` interface. Initial inspect-only diff preview is
   implemented.
-- Integrate opencode as an optional backend.
+- Integrate opencode as an optional backend. Initial proposal-only adapter is
+  implemented, uses desktop-managed model settings, and still needs live
+  product QA plus credential-store hardening.
 - Treat opencode as an extensible kernel:
   - use MCP for memory, search, indexing, and other external capabilities
   - evaluate OpenCode plugins such as FullAutoAgent-style workflow plugins and
@@ -68,8 +70,10 @@ Status: complete for the 2026-05-23 QA pass.
   - run checks through Shell Tool policy
 - Route code review goals through the Code Agent scaffold. Initial routing,
   changed-file listing, preview approval, read-only `git diff --check`
-  verification, proposed-edit contract, and confirmed-write apply approval are
-  implemented. A real opencode-backed proposal/apply backend is still pending.
+  verification, opencode-backed proposed-edit contract, confirmed-write apply
+  approval, desktop model configuration, and a local approved-patch apply
+  command are implemented. Live opencode proposal/apply QA and provider
+  hardening are still pending.
 - Add tests around rejected dangerous commands and approved edit application.
 - Add QA for inspect-only, diff preview, approved edit, denied edit, and failed
   verification states.

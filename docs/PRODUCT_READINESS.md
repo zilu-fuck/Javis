@@ -19,7 +19,7 @@ history intact.
 | Desktop workbench | Installable app with stable task thread, logs, agent state, and permission UI. | MVP implemented and packaged on Windows. |
 | File and project understanding | Read project files safely, summarize relevant documents, inspect scripts, and recommend/run checks. | MVP implemented with Markdown scan and allowlisted checks. |
 | Research | Search or collect public sources, fetch evidence, compare at least three sources, cite excerpts, and label unknowns. | Partial. User-provided URL flow works; automated search has `github-cli` and Agent Chrome provider paths. Fixture QA covers success/failure states, live `github-cli` plus Agent Chrome smoke QA passes, and source-comparison summaries now call out overlap and differences. |
-| Code Agent | Inspect code, propose changes, produce diffs, apply approved edits, and run verification. | Partial. Core can route code review goals to a Code Agent scaffold that lists changed files, shows a diff preview, asks before continuing, runs read-only `git diff --check`, and supports a hash-bound confirmed-write approval for proposed patch application when a backend is configured; opencode/backend integration is still not implemented. |
+| Code Agent | Inspect code, propose changes, produce diffs, apply approved edits, and run verification. | Partial. Core can route code review goals to a Code Agent scaffold that lists changed files, shows a diff preview, asks before continuing, runs read-only `git diff --check`, requests an opencode-backed JSON patch proposal using desktop-managed model/provider settings, and applies approved patches through the local confirmed-write backend. Product QA for the live opencode path is still needed. |
 | Persistence | Save task history, results, permission decisions as scoped records, and allow deletion. | Partial. Completed, failed, and cancelled task snapshots are stored locally with sidebar restore and delete controls; resolved permission decisions are retained as audit evidence, while pending approvals are not persisted. |
 | Workspace management | Select and remember workspaces without relying on the launch directory. | Implemented. Desktop sidebar accepts manual workspace paths and a native directory picker, restores recent workspaces from local storage after app restart, persists only completed workspace runs, supports recent deletion, and routes workspace-aware read/project/code tools through the selected path. Manual restart screenshots are recorded in `docs/qa/2026-05-24/`. |
 | Permission enforcement | Confirmed writes require visible approval and native enforcement for the current dry-run. | Implemented for PDF organization; needs to generalize to future write tools. |
@@ -30,8 +30,11 @@ history intact.
 
 Do not call Javis a complete usable product while any of these are true:
 
-- Code Agent still lacks opencode integration and a real desktop edit proposal /
-  patch application backend, though the Core/UI approval contract now exists.
+- Code Agent live opencode proposal/apply QA is not complete, even though the
+  proposal-only adapter, desktop model settings, Core/UI approval contract, and
+  local patch apply command now exist.
+- Model API keys are currently persisted in app local storage; OS credential
+  storage is still needed before treating secrets as hardened.
 - Task history persistence is limited to local completed/failed/cancelled
   snapshots and needs broader QA across app restart and future storage
   migrations.
@@ -44,8 +47,8 @@ Do not call Javis a complete usable product while any of these are true:
 
 The project has a verified MVP foundation. The next stage is product completion:
 
-1. Connect the Code Agent proposed-edit and approved-apply contract to an
-   opencode-backed implementation workflow.
+1. Capture live QA for the opencode-backed Code Agent proposal/apply workflow
+   and harden any provider/runtime failures it exposes.
 2. Harden local persistence across app restart, storage migration, and future
    scoped permission records.
 3. Generalize the permission model to all write-capable tools.

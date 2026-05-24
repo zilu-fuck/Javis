@@ -14,6 +14,7 @@ TypeScript + React + Tauri + Rust
 | Core runtime | TypeScript | Routing, plans, agent snapshots, permission state, verification summaries. |
 | Tool contracts | TypeScript | Shared file, shell, web, project, permission, and report types. |
 | Native bridge | Tauri, Rust | Filesystem access, process checks, HTTP fetch, safety enforcement. |
+| Code proposal backend | opencode native CLI | Proposal-only patch generation; writes still go through Javis confirmed-write apply. |
 | Tests | Vitest, Cargo test | Core behavior tests and native command safety tests. |
 
 ## Why This Stack
@@ -44,7 +45,8 @@ The following are required for complete product usability, but are not all
 implemented yet:
 
 - Search provider integration for research.
-- opencode-backed Code Agent.
+- opencode-backed Code Agent. The initial Windows proposal adapter and bundled
+  native opencode binary are implemented; live provider QA remains required.
 - SQLite or another local persistence layer for task history.
 - A reusable confirmed-write approval mechanism.
 - Build signing and release artifact verification.

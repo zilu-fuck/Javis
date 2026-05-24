@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { createFileScanTaskRuntime, createInitialTaskSnapshot } from "@javis/core";
 import type {
+  CodeApplyResult,
+  CodeProposedEdit,
   CodeReviewPreview,
   FileOrganizationExecution,
   FileOrganizationPlan,
@@ -30,6 +32,7 @@ import {
   loadWorkspaceSession,
   persistWorkspaceForTaskStatus,
 } from "./workspace-session";
+import { loadModelSettings, saveModelSettings, type ModelSettings } from "./model-settings";
 import { parseGitStatusFiles } from "./git-status";
 import "./App.css";
 
@@ -41,6 +44,9 @@ function App() {
     loadWorkspaceSession(window.localStorage),
   );
   const { recentWorkspacePaths, workspacePath } = workspaceSession;
+  const [modelSettings, setModelSettings] = useState(() =>
+    loadModelSettings(window.localStorage),
+  );
   const runtime = useMemo(
     () => {
       const runReadOnlyCommand = (request: ShellCommandRequest) =>
@@ -93,6 +99,27 @@ function App() {
               diff: diff.stdout,
             };
           },
+          proposeEdit: ({ userGoal, preview }) =>
+            invoke<CodeProposedEdit>("propose_code_edit", {
+              request: {
+                workspacePath: preview.workspacePath,
+                userGoal,
+                changedFiles: preview.changedFiles,
+                diff: preview.diff,
+                providerId: modelSettings.provider,
+                model: modelSettings.model,
+                apiKey: modelSettings.apiKey,
+                baseUrl: modelSettings.baseUrl,
+              },
+            }),
+          applyProposedEdit: (edit: CodeProposedEdit) =>
+            invoke<CodeApplyResult>("apply_code_patch", {
+              request: {
+                workspacePath: edit.workspacePath,
+                changedFiles: edit.changedFiles,
+                patch: edit.patch,
+              },
+            }),
         },
         projectTool: {
           inspectProject: () =>
@@ -108,7 +135,7 @@ function App() {
         },
       });
     },
-    [workspacePath],
+    [modelSettings, workspacePath],
   );
   const [task, setTask] = useState(createInitialTaskSnapshot);
   const [history, setHistory] = useState<PersistedTaskSnapshot[]>(() =>
@@ -204,6 +231,10 @@ function App() {
     });
   }
 
+  function updateModelSettings(settings: ModelSettings) {
+    setModelSettings(saveModelSettings(window.localStorage, settings));
+  }
+
   function selectHistoryEntry(id: string) {
     const entry = history.find((item) => item.id === id);
     if (entry) {
@@ -233,10 +264,12 @@ function App() {
         updatedAt: getTaskUpdatedAt(entry),
       }))}
       locale={zhCNWorkbenchLocale}
+      modelSettings={modelSettings}
       onBrowseWorkspacePath={browseWorkspacePath}
       onDeleteHistoryEntry={deleteHistoryEntry}
       onDeleteRecentWorkspacePath={deleteRecentWorkspacePath}
       onDraftGoalChange={setDraftGoal}
+      onModelSettingsChange={updateModelSettings}
       onPermissionDecision={runtime.resolvePermission}
       onRetryTask={retryCurrentTask}
       onSelectHistoryEntry={selectHistoryEntry}
