@@ -12,6 +12,7 @@ $liveProvider = [Environment]::GetEnvironmentVariable("JAVIS_OPENCODE_LIVE_PROVI
 $liveModel = [Environment]::GetEnvironmentVariable("JAVIS_OPENCODE_LIVE_MODEL", "Process")
 $liveApiKey = [Environment]::GetEnvironmentVariable("JAVIS_OPENCODE_LIVE_API_KEY", "Process")
 $liveBaseUrl = [Environment]::GetEnvironmentVariable("JAVIS_OPENCODE_LIVE_BASE_URL", "Process")
+$liveCredentialStorageDisabled = [bool]$liveApiKey
 if (!$liveProvider -and $liveModel -like "deepseek*") {
   $liveProvider = "deepseek"
 }
@@ -256,13 +257,12 @@ function Stop-Javis($session) {
   Start-Sleep -Seconds 2
 }
 
-function Configure-AppStorage($session, [ref]$id, $provider, $model, $apiKey, $baseUrl) {
+function Configure-AppStorage($session, [ref]$id, $provider, $model, $baseUrl) {
   $workspaceJson = $workspacePath | ConvertTo-Json -Compress
   $workspacesJson = "[$workspaceJson]"
   $modelSettingsJson = @{
     provider = $provider
     model = $model
-    apiKey = $apiKey
     baseUrl = $baseUrl
   } | ConvertTo-Json -Compress
   $storageWorkspaceKeyJson = $storageWorkspaceKey | ConvertTo-Json -Compress
@@ -289,7 +289,6 @@ function Run-CodeAgentScenario(
   $useFixture,
   $provider,
   $model,
-  $apiKey,
   $baseUrl,
   $port
 ) {
@@ -301,7 +300,7 @@ function Run-CodeAgentScenario(
   try {
     $session = Start-JavisWithCdp $port $useFixture
     $id = $session.Id
-    Configure-AppStorage $session ([ref]$id) $provider $model $apiKey $baseUrl
+    Configure-AppStorage $session ([ref]$id) $provider $model $baseUrl
     Wait-ForText $session.Socket ([ref]$id) $workspaceName 20 | Out-Null
 
     Submit-Goal $session.Socket ([ref]$id) "Review code changes"
@@ -335,12 +334,13 @@ function Run-CodeAgentScenario(
 }
 
 function Run-LiveCodeAgentScenario($provider, $model, $apiKey, $baseUrl) {
+  throw "Live provider QA cannot inject API keys through localStorage. Use a session/credential-store injection path before running live provider QA."
   Reset-QaWorkspace
   $session = $null
   try {
     $session = Start-JavisWithCdp 9227 $false
     $id = $session.Id
-    Configure-AppStorage $session ([ref]$id) $provider $model $apiKey $baseUrl
+    Configure-AppStorage $session ([ref]$id) $provider $model $baseUrl
     Wait-ForText $session.Socket ([ref]$id) $workspaceName 20 | Out-Null
 
     Submit-Goal $session.Socket ([ref]$id) "Review code changes"
@@ -391,12 +391,18 @@ $previousQaMode = [Environment]::GetEnvironmentVariable("JAVIS_QA_MODE", "Proces
 $previousFixture = [Environment]::GetEnvironmentVariable("JAVIS_CODE_PROPOSAL_FIXTURE_PATH", "Process")
 
 try {
-  $denyResult = Run-CodeAgentScenario "denied" "Deny" "16-code-agent-proposal-before-deny.png" "Code Agent patch denied" "hello reviewed`n" $true "openai" "openai/code-agent-fixture" "fixture-only" "https://fixture.invalid/v1" 9226
-  $approveResult = Run-CodeAgentScenario "approved" "Approve" "18-code-agent-proposal-before-approve.png" "Code Agent patch applied" "hello approved`n" $true "openai" "openai/code-agent-fixture" "fixture-only" "https://fixture.invalid/v1" 9226
+  $denyResult = Run-CodeAgentScenario "denied" "Deny" "16-code-agent-proposal-before-deny.png" "Code Agent patch denied" "hello reviewed`n" $true "openai" "openai/code-agent-fixture" "https://fixture.invalid/v1" 9226
+  $approveResult = Run-CodeAgentScenario "approved" "Approve" "18-code-agent-proposal-before-approve.png" "Code Agent patch applied" "hello approved`n" $true "openai" "openai/code-agent-fixture" "https://fixture.invalid/v1" 9226
   $gitCheck = Run-Git $workspacePath @("diff", "--check")
   $liveResult = $null
   if ($liveProvider -and $liveModel -and $liveApiKey -and $liveBaseUrl) {
-    $liveResult = Run-LiveCodeAgentScenario $liveProvider $liveModel $liveApiKey $liveBaseUrl
+    $liveResult = [pscustomobject]@{
+      Scenario = "live-proposal"
+      Provider = $liveProvider
+      Model = $liveModel
+      Status = "blocked"
+      Summary = "Live provider QA is blocked until API keys can be injected without localStorage."
+    }
   }
 
   [pscustomobject]@{
@@ -404,6 +410,7 @@ try {
     FixturePath = $fixturePath
     GitDiffCheck = $gitCheck
     LiveProviderConfigured = [bool]($liveProvider -and $liveModel -and $liveApiKey -and $liveBaseUrl)
+    LiveCredentialStorageDisabled = $liveCredentialStorageDisabled
     Results = @($denyResult, $approveResult)
     LiveResult = $liveResult
   } | ConvertTo-Json -Depth 6

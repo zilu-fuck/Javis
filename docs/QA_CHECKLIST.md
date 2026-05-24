@@ -150,11 +150,10 @@ exist:
   `JAVIS_CODE_PROPOSAL_FIXTURE_PATH` pointing at a proposal JSON fixture.
 - For packaged-app repeatable Code Agent evidence, run
   `docs/qa/2026-05-24/code-agent-opencode-qa.ps1`. It covers proposal denial,
-  approved patch application, and optional live provider smoke when
-  `JAVIS_OPENCODE_LIVE_PROVIDER`, `JAVIS_OPENCODE_LIVE_MODEL`,
-  `JAVIS_OPENCODE_LIVE_API_KEY`, and `JAVIS_OPENCODE_LIVE_BASE_URL` are set.
-  The script accepts bare provider model names such as `deepseek-v4-flash` and
-  normalizes them to the provider/model form used by opencode.
+  approved patch application, and reports live provider smoke as blocked until
+  API keys can be injected without writing them to localStorage. The script
+  accepts bare provider model names such as `deepseek-v4-flash` and normalizes
+  them to the provider/model form used by opencode.
   Do not write live API keys into QA notes or committed scripts.
 
 ### PDF Durable Approval Restart

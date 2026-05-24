@@ -40,8 +40,8 @@ Command status:
 - `code-agent-opencode-qa.ps1`: pass for fixture proposal deny/apply in the
   current rerun. Earlier live DeepSeek-compatible provider evidence reached
   proposal generation but did not return a parseable patch proposal before any
-  write approval was requested; live smoke still needs to be rerun after
-  fallback hardening with temporary credentials.
+  write approval was requested. Live smoke is now blocked until QA can inject
+  temporary credentials without writing them to localStorage.
 - `pdf-durable-approval-qa.ps1`: pass for restored PDF approval approve,
   restored deny, and expired-record fail-closed behavior after packaged app
   restart.
@@ -69,7 +69,8 @@ Evidence:
   settings reached the opencode proposal phase and failed before write
   approval, with no file application attempted.
 - `code-agent-opencode-qa-output.txt`: records the current fixture deny/apply
-  pass. Live provider credentials were not present in this rerun.
+  pass. Live provider credentials were not present in this rerun; future live
+  runs require a non-localStorage credential injection path.
 - `21-pdf-durable-approval-restored.png`: packaged app relaunch restores a
   pending PDF organization approval from `javis.approvalRecords.v1`.
 - `22-pdf-durable-approval-approved.png`: approving the restored card completes
