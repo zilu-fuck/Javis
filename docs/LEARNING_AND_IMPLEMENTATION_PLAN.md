@@ -251,14 +251,14 @@ Task
 - 将 opencode 输出校验并转换成内部格式。
 - 增加 patch dry-run validation。
 - 展示 diff confirmation。
-- 将 Code Patch approval 接入 Milestone A 的 durable approval record。
+- 将 Code Patch approval 接入 Milestone A 的 durable approval record。（pending/resolved 审计初版已接入；restart restore/apply 仍待共享 guard 后开放）
 - 只通过 confirmed-write 应用补丁，并在 native apply 前校验 proposal id、preview hash、workspace、approved files 和当前文件 hash。
 
 成功标准：
 
 - 无效 proposal fail closed。
-- Deny 不写入。
-- Approve 只应用展示过的 patch。
+- Deny 不写入。（现有 fixture QA 已覆盖，durable resolved 记录已接入）
+- Approve 只应用展示过的 patch。（现有 fixture QA 已覆盖，durable resolved 记录已接入）
 - 验证输出写入任务历史。
 - 应用前工作区文件变化导致 hash 过期时，native apply 拒绝执行。
 

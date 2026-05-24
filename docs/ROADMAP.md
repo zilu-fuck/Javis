@@ -89,7 +89,8 @@ Status: complete for the 2026-05-23 QA pass.
   decisions. Start with PDF organization so approval cards can survive app
   restart before Code Patch is migrated. Initial desktop storage and PDF restore
   plumbing are implemented; packaged restart QA verifies the PDF approve, deny,
-  and expiry paths. Code Patch migration remains.
+  and expiry paths. Code Patch pending/resolved approval audit records are
+  implemented; restart restore/apply remains gated on shared native guards.
 - Store permission decisions only as scoped records tied to a task, tool,
   workspace, preview hash, and expiry. Never persist them as broad reusable
   approval.

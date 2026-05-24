@@ -50,6 +50,9 @@ import "./App.css";
 type PersistedTaskSnapshot = ReturnType<typeof createInitialTaskSnapshot>;
 export const DEFAULT_DRAFT_GOAL = "检查当前项目，说明如何启动，并运行一次检查";
 const PDF_APPROVAL_TOOL_NAME = "file.executePdfOrganization";
+const PDF_APPROVAL_TITLE = "Approve PDF move plan";
+const CODE_PATCH_APPROVAL_TOOL_NAME = "code.applyProposedEdit";
+const CODE_PATCH_APPROVAL_TITLE = "Approve Code Agent patch application";
 
 function App() {
   const [workspaceSession, setWorkspaceSession] = useState(() =>
@@ -274,14 +277,18 @@ function App() {
       nextTask.status !== "waiting_permission" ||
       !request ||
       request.status !== "pending" ||
-      request.title !== "Approve PDF move plan"
+      (request.title !== PDF_APPROVAL_TITLE && request.title !== CODE_PATCH_APPROVAL_TITLE)
     ) {
+      return;
+    }
+    const toolName = getDurableApprovalToolName(request.title);
+    if (!toolName) {
       return;
     }
     const record = createApprovalRecordFromPermissionRequest({
       taskId: nextTask.id,
-      toolName: PDF_APPROVAL_TOOL_NAME,
-      workspacePath: nextTask.fileOrganizationPlan?.directoryPath ?? "",
+      toolName,
+      workspacePath: getDurableApprovalWorkspacePath(nextTask, request.title),
       permissionRequest: request,
     });
     if (!record) {
@@ -349,7 +356,7 @@ function App() {
     if (
       task.status === "waiting_permission" &&
       request?.status === "pending" &&
-      request.title === "Approve PDF move plan"
+      (request.title === PDF_APPROVAL_TITLE || request.title === CODE_PATCH_APPROVAL_TITLE)
     ) {
       const record = approvalRecords.find((item) => item.approvalId === request.id);
       if (record?.status === "pending") {
@@ -445,6 +452,29 @@ function createRestoredPdfApprovalTask(record: DurableApprovalRecord): Persisted
     },
     permissionRequest: record.permissionRequest,
   };
+}
+
+function getDurableApprovalToolName(title: string): string | undefined {
+  if (title === PDF_APPROVAL_TITLE) {
+    return PDF_APPROVAL_TOOL_NAME;
+  }
+  if (title === CODE_PATCH_APPROVAL_TITLE) {
+    return CODE_PATCH_APPROVAL_TOOL_NAME;
+  }
+  return undefined;
+}
+
+function getDurableApprovalWorkspacePath(
+  task: PersistedTaskSnapshot,
+  title: string,
+): string {
+  if (title === PDF_APPROVAL_TITLE) {
+    return task.fileOrganizationPlan?.directoryPath ?? "";
+  }
+  if (title === CODE_PATCH_APPROVAL_TITLE) {
+    return task.codeProposedEdit?.workspacePath ?? task.codeReviewPreview?.workspacePath ?? "";
+  }
+  return "";
 }
 
 function createRestoredPdfDeniedTask(record: DurableApprovalRecord): PersistedTaskSnapshot {

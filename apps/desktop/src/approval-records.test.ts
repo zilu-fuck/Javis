@@ -108,6 +108,41 @@ describe("durable approval records", () => {
     })).toBeNull();
   });
 
+  it("creates durable records for Code Agent patch approvals", () => {
+    const created = createApprovalRecordFromPermissionRequest({
+      taskId: "task-code",
+      toolName: "code.applyProposedEdit",
+      workspacePath: "E:/Javis",
+      permissionRequest: {
+        id: "task-code-apply-permission",
+        level: "confirmed_write",
+        title: "Approve Code Agent patch application",
+        reason: "Applying the proposed patch changes local project files.",
+        bindingHash: "dryrun-fnv1a-code",
+        status: "pending",
+        createdAt: "2026-05-24T00:00:00.000Z",
+        dryRun: {
+          operation: "Apply Code Agent patch proposal proposal-1",
+          affectedPaths: [
+            {
+              source: "packages/core/src/index.ts",
+              target: "packages/core/src/index.ts",
+              action: "modify",
+            },
+          ],
+          riskSummary: "Patch hash: fnv1a-test.",
+          reversible: true,
+        },
+      },
+      now: "2026-05-24T00:00:00.000Z",
+    });
+
+    expect(created?.toolName).toBe("code.applyProposedEdit");
+    expect(created?.workspacePath).toBe("E:/Javis");
+    expect(created?.permissionRequest.title).toBe("Approve Code Agent patch application");
+    expect(created?.permissionRequest.dryRun.affectedPaths[0]?.action).toBe("modify");
+  });
+
   it("resolves and expires pending records without changing terminal records", () => {
     const pending = createApprovalRecord();
     const approved = resolveApprovalRecord(pending, "approved", "2026-05-24T00:05:00.000Z");
