@@ -163,6 +163,12 @@ struct CodePatchApprovalRequest {
     patch_hash: String,
 }
 
+#[derive(Clone)]
+struct FileContentHash {
+    path: String,
+    hash: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CodeApplyResult {
@@ -226,6 +232,7 @@ struct PendingCodePatchApproval {
     workspace_path: String,
     changed_files: Vec<String>,
     patch_hash: String,
+    file_hashes: Vec<FileContentHash>,
     approved: bool,
 }
 
@@ -1149,12 +1156,7 @@ fn create_code_proposal_hash(edit: &CodeProposedEdit) -> String {
         .chain(std::iter::once(edit.patch.as_str()))
         .collect::<Vec<_>>()
         .join("\n");
-    let mut hash = 2166136261u32;
-    for byte in payload.as_bytes() {
-        hash ^= *byte as u32;
-        hash = hash.wrapping_mul(16777619);
-    }
-    format!("fnv1a-{hash:08x}")
+    create_fnv1a_hash(payload.as_bytes())
 }
 
 fn apply_code_patch_in_workspace(
@@ -1759,15 +1761,31 @@ fn approve_pending_code_patch(
     if request.patch_hash.trim().is_empty() {
         return Err("Code patch hash is required.".to_string());
     }
+    let canonical_workspace = fs::canonicalize(&request.workspace_path)
+        .map_err(|error| format!("Workspace is not accessible: {error}"))?;
+    let approved_files = request
+        .changed_files
+        .iter()
+        .map(|file| normalize_relative_code_path(file))
+        .collect::<Result<Vec<_>, _>>()?;
+    require_approved_relative_paths(
+        &canonical_workspace,
+        &approved_files,
+        &approved_files,
+        "Code patch approval includes an unapproved file path",
+        "Changed file path must stay inside the selected workspace.",
+    )?;
+    let file_hashes = create_file_content_hashes(&canonical_workspace, &approved_files)?;
     let mut state = approval_state
         .lock()
         .map_err(|_| "Code patch approval state could not be locked.".to_string())?;
     state.pending = Some(PendingCodePatchApproval {
         approval_id: request.approval_id,
         proposal_id: request.proposal_id,
-        workspace_path: request.workspace_path,
+        workspace_path: normalize_path(&canonical_workspace),
         changed_files: request.changed_files,
         patch_hash: request.patch_hash,
+        file_hashes,
         approved: true,
     });
     Ok(())
@@ -1802,8 +1820,58 @@ fn take_approved_code_patch(
     if pending.patch_hash != request.patch_hash {
         return Err("Code patch hash does not match the approved proposal.".to_string());
     }
+    let approved_files = request
+        .changed_files
+        .iter()
+        .map(|file| normalize_relative_code_path(file))
+        .collect::<Result<Vec<_>, _>>()?;
+    let current_hashes = create_file_content_hashes(canonical_workspace, &approved_files)?;
+    if pending.file_hashes.len() != current_hashes.len()
+        || pending
+            .file_hashes
+            .iter()
+            .zip(current_hashes.iter())
+            .any(|(approved, current)| approved.path != current.path || approved.hash != current.hash)
+    {
+        return Err("Code patch approved files changed before apply.".to_string());
+    }
     state.pending = None;
     Ok(())
+}
+
+fn create_file_content_hashes(
+    workspace: &Path,
+    files: &[PathBuf],
+) -> Result<Vec<FileContentHash>, String> {
+    files
+        .iter()
+        .map(|file| {
+            let path = file.to_string_lossy().replace('\\', "/");
+            let target = workspace.join(file);
+            let hash = match fs::read(&target) {
+                Ok(content) => create_fnv1a_hash(&content),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    "missing".to_string()
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "Could not read approved file before apply: {}: {error}",
+                        target.display()
+                    ));
+                }
+            };
+            Ok(FileContentHash { path, hash })
+        })
+        .collect()
+}
+
+fn create_fnv1a_hash(content: &[u8]) -> String {
+    let mut hash = 2166136261u32;
+    for byte in content {
+        hash ^= *byte as u32;
+        hash = hash.wrapping_mul(16777619);
+    }
+    format!("fnv1a-{hash:08x}")
 }
 
 fn infer_pdf_category(path: &Path) -> &'static str {
@@ -2659,6 +2727,9 @@ mod tests {
     #[test]
     fn code_patch_approval_must_match_apply_request() {
         let root = create_test_directory("code-patch-approval-mismatch");
+        let file = root.join("src").join("message.txt");
+        fs::create_dir_all(file.parent().expect("file parent")).expect("create src");
+        fs::write(&file, "before\n").expect("write file");
         let approval_state = Mutex::new(CodePatchApprovalState::default());
         let request = code_patch_apply_request(
             &root,
@@ -2674,6 +2745,58 @@ mod tests {
         assert_eq!(
             result.expect_err("proposal mismatch should fail"),
             "Code patch proposal id does not match the approved proposal."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn code_patch_apply_rejects_files_changed_after_approval() {
+        let root = create_test_directory("code-patch-stale-file");
+        init_git_repo(&root);
+        let file = root.join("src").join("message.txt");
+        fs::create_dir_all(file.parent().expect("file parent")).expect("create src");
+        fs::write(&file, "before\n").expect("write file");
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "-m", "initial"]);
+        fs::write(&file, "after\n").expect("write changed file");
+        let patch = run_git_capture(&root, &["diff"]);
+        run_git(&root, &["checkout", "--", "src/message.txt"]);
+        let request = code_patch_apply_request(&root, vec!["src/message.txt".to_string()], patch);
+        let approval_state = Mutex::new(CodePatchApprovalState::default());
+        approve_pending_code_patch(&approval_state, code_patch_approval_request(&request))
+            .expect("approve code patch");
+        fs::write(&file, "external edit\n").expect("write stale file");
+
+        let result = apply_code_patch_in_workspace(&root, request, Some(&approval_state));
+
+        assert_eq!(
+            result.expect_err("stale approved file should fail"),
+            "Code patch approved files changed before apply."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn code_patch_apply_allows_approved_missing_files_to_be_created() {
+        let root = create_test_directory("code-patch-create-missing-file");
+        init_git_repo(&root);
+        let file = root.join("src").join("new.txt");
+        fs::create_dir_all(file.parent().expect("file parent")).expect("create src");
+        let patch = "diff --git a/src/new.txt b/src/new.txt\nnew file mode 100644\nindex 0000000..3b18e51\n--- /dev/null\n+++ b/src/new.txt\n@@ -0,0 +1 @@\n+created\n".to_string();
+        let request = code_patch_apply_request(&root, vec!["src/new.txt".to_string()], patch);
+        let approval_state = Mutex::new(CodePatchApprovalState::default());
+        approve_pending_code_patch(&approval_state, code_patch_approval_request(&request))
+            .expect("approve code patch");
+
+        let result = apply_code_patch_in_workspace(&root, request, Some(&approval_state))
+            .expect("apply approved patch");
+
+        assert!(result.applied);
+        assert_eq!(
+            fs::read_to_string(file)
+                .expect("read created file")
+                .replace("\r\n", "\n"),
+            "created\n"
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }

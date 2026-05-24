@@ -19,7 +19,7 @@
 | 领域 | 当前状态 | 与路线差距 |
 | --- | --- | --- |
 | confirmed-write 审批 | Core 已有 pending -> approved/denied/expired/cancelled 状态 helper，PDF flow 有一次性 native approval id，Code Patch apply 已通过 UI confirmed-write。Desktop 已新增 durable approval record 存储模型，并为 PDF restore 增加 native approval rehydration hook。 | packaged-app 跨重启 QA 尚未覆盖，durable approval 还没有迁移到 Code Patch，也还没有共享 native guard。 |
-| Code Patch proposal | opencode 只负责 proposal，Javis 已验证 patch hash、changed files、workspace 内路径，并通过 native `git apply` 写入。 | proposal 仍是 `changedFiles + patch` 形态，还没有 `baseGitHead`、文件 before hash、hunk 结构、apply 前 dry-run 校验和 stale file hash 拒绝。 |
+| Code Patch proposal | opencode 只负责 proposal，Javis 已验证 patch hash、changed files、workspace 内路径，并通过 native `git apply` 写入；native apply 已在审批时记录 approved files 的当前内容 hash，并在应用前拒绝 stale file。 | proposal 仍是 `changedFiles + patch` 形态，还没有 `baseGitHead`、结构化 hunk 和 apply 前 dry-run 校验；Code Patch 跨重启 restore/apply 仍未开放。 |
 | Rust/native guard | PDF 和 Code Patch 都在 Rust 层做关键路径校验，PDF approval 具有一次性消费语义。 | approval/path/hash 校验仍分散在具体命令附近，尚未抽成所有 confirmed-write 命令共用的 guard。 |
 | 模型配置与密钥 | 桌面端能配置 provider/model/apiKey/baseUrl，并将配置传给 opencode/兼容 provider。 | API key 仍保存在 browser local storage，不符合 hardened secret storage 目标。 |
 | QA 证据 | 已有 packaged-app fixture QA 覆盖 Code Agent proposal deny 和 approve/apply，研究和工作区重启也有证据。 | live DeepSeek provider smoke 需要在 fallback hardening 后用临时凭据重跑；durable approval 跨重启 QA 尚未建立。 |
@@ -252,7 +252,7 @@ Task
 - 增加 patch dry-run validation。
 - 展示 diff confirmation。
 - 将 Code Patch approval 接入 Milestone A 的 durable approval record。（pending/resolved 审计初版已接入；restart restore/apply 仍待共享 guard 后开放）
-- 只通过 confirmed-write 应用补丁，并在 native apply 前校验 proposal id、preview hash、workspace、approved files 和当前文件 hash。（approval id 已传入 native apply，proposal patch hash 和 one-shot consumption 已校验；current file hash 待补）
+- 只通过 confirmed-write 应用补丁，并在 native apply 前校验 proposal id、preview hash、workspace、approved files 和当前文件 hash。（approval id 已传入 native apply，proposal patch hash、one-shot consumption 和 current file hash 已校验）
 
 成功标准：
 
@@ -266,13 +266,13 @@ Task
 
 范围：
 
-- 抽出 Rust approval/path/hash guards。（Code Patch native apply 已要求 approval id、校验 proposal patch hash，并一次性消费 native approval）
+- 抽出 Rust approval/path/hash guards。（Code Patch native apply 已要求 approval id、校验 proposal patch hash、校验当前文件 hash，并一次性消费 native approval）
 - 把 PDF organization 和 code patch apply 迁移到共享 guard。（Code Patch proposal/apply 已先迁入共享 relative path/approved-set guard）
 - 扩展 Rust 安全测试。
 
 成功标准：
 
-- 所有 write-capable commands 都使用共享 guard。（进行中：Code Patch path guard 已共享，PDF/native approval state 仍待迁移）
+- 所有 write-capable commands 都使用共享 guard。（进行中：Code Patch path/current-file guard 已共享，PDF/native approval state 仍待迁移）
 - 现有行为保持不变。
 - 新增 negative tests 在修复前失败，修复后通过。
 
