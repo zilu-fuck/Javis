@@ -1394,7 +1394,10 @@ fn raw_code_proposal_from_value(value: &serde_json::Value) -> Option<RawCodeProp
         object,
         &["changedFiles", "changed_files", "files", "affectedPaths", "affected_paths"],
     );
-    parts.patch = get_string_field(object, &["patch", "diff", "unifiedDiff", "unified_diff"]);
+    parts.patch = get_required_string_field_preserving_body(
+        object,
+        &["patch", "diff", "unifiedDiff", "unified_diff"],
+    );
 
     Some(RawCodeProposal {
         summary: parts.summary?,
@@ -1411,6 +1414,16 @@ fn get_string_field(
         .find_map(|key| object.get(*key).and_then(|value| value.as_str()))
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn get_required_string_field_preserving_body(
+    object: &serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<String> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(|value| value.as_str()))
+        .filter(|value| !value.trim().is_empty())
         .map(str::to_string)
 }
 
@@ -3394,6 +3407,21 @@ mod tests {
         assert_eq!(proposal.summary, "Tighten message copy.");
         assert_eq!(proposal.changed_files, vec!["src/message.txt"]);
         assert_eq!(proposal.patch_hash, create_code_proposal_hash(&proposal));
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn parses_code_proposal_preserves_patch_trailing_newline() {
+        let root = create_test_directory("code-proposal-patch-newline");
+        fs::create_dir_all(root.join("src")).expect("create src");
+        let text = r#"{"summary":"Tighten message copy.","changedFiles":["src/message.txt"],"patch":"diff --git a/src/message.txt b/src/message.txt\n--- a/src/message.txt\n+++ b/src/message.txt\n@@ -1 +1 @@\n-before\n+after\n"}"#;
+
+        let proposal = parse_code_proposal_from_text(&root, text).expect("proposal");
+
+        assert!(
+            proposal.patch.ends_with('\n'),
+            "patch body must keep trailing newline for git apply"
+        );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
 

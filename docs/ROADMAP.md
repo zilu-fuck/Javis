@@ -58,8 +58,9 @@ Status: complete for the 2026-05-23 QA pass.
   OpenAI-compatible fallback, proposal parser hardening, redacted provider
   diagnostics, and Windows DPAPI secret-reference credential storage.
   Packaged-app fixture QA covers proposal denial and approved patch
-  application. Live DeepSeek-compatible smoke reaches proposal generation and
-  should be rerun after the latest prompt/parser hardening.
+  application, including exact patch-body preservation for `git apply`. Live
+  DeepSeek-compatible smoke reaches proposal generation and should be rerun
+  after the latest prompt/parser/apply hardening.
 - Treat opencode as an extensible kernel:
   - use MCP for memory, search, indexing, and other external capabilities
   - evaluate OpenCode plugins such as FullAutoAgent-style workflow plugins and
@@ -78,8 +79,8 @@ Status: complete for the 2026-05-23 QA pass.
   approval, desktop model configuration, and a local approved-patch apply
   command are implemented. Fixture opencode proposal/apply QA passes. Live
   DeepSeek-compatible proposal smoke now runs through native secret-reference
-  credential injection and fails closed before write approval when the provider
-  does not return a parseable patch proposal.
+  credential injection and remains gated to proposal-only smoke until the
+  hardened real-provider path is rerun with temporary credentials.
 - Add tests around rejected dangerous commands and approved edit application.
 - Add QA for inspect-only, diff preview, approved edit, denied edit, and failed
   verification states.

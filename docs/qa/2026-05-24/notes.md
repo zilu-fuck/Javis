@@ -38,10 +38,10 @@ Command status:
 - `pnpm --filter @javis/desktop tauri build`: pass
 - `workspace-restart-qa.ps1`: pass
 - `code-agent-opencode-qa.ps1`: pass for fixture proposal deny/apply in the
-  current rerun. Live DeepSeek-compatible provider smoke now injects temporary
-  credentials through the native secret reference path instead of localStorage;
-  the provider reached proposal generation but still did not return a parseable
-  patch proposal before any write approval was requested.
+  current rerun. The fixture apply path now preserves provider patch bodies
+  exactly, including the trailing newline required by `git apply`. Live
+  DeepSeek-compatible provider smoke still needs a fresh rerun with temporary
+  credentials after the prompt/parser/apply hardening.
 - `pdf-durable-approval-qa.ps1`: pass for restored PDF approval approve,
   restored deny, and expired-record fail-closed behavior after packaged app
   restart.
@@ -73,9 +73,8 @@ Evidence:
   injection and failed before write approval, with no file application
   attempted.
 - `code-agent-opencode-qa-output.txt`: records the current fixture deny/apply
-  pass plus the live DeepSeek-compatible provider result
-  `provider-hardening-needed`. The output records provider/model/status but not
-  the temporary API key.
+  pass. The output records provider/model/status when live credentials are
+  supplied, but never the temporary API key.
 - `21-pdf-durable-approval-restored.png`: packaged app relaunch restores a
   pending PDF organization approval from `javis.approvalRecords.v1`.
 - `22-pdf-durable-approval-approved.png`: approving the restored card completes
@@ -108,9 +107,8 @@ Evidence:
 Manual QA verdict: pass for workspace selection, recent-workspace restart
 persistence, fixture-backed Code Agent proposal/apply safety, durable PDF
 approval restore approve/deny/expiry, and durable Code Patch approval restore
-approve/apply/deny/expiry. Live DeepSeek-compatible provider QA now exercises
-native secret-reference credential injection, but the provider proposal still
-needs prompt/parser hardening before live approved apply can be considered.
+approve/apply/deny/expiry. Live DeepSeek-compatible provider QA should be rerun
+with temporary credentials before live approved apply can be considered.
 
 Notes:
 
@@ -151,3 +149,7 @@ Notes:
   OpenAI-compatible fallback for DeepSeek/custom providers, fenced/pretty JSON
   parsing, and approved-file binding so provider output cannot expand beyond
   the reviewed diff file list.
+- During this QA pass, the Code Agent fixture apply path exposed that provider
+  patch JSON must be preserved exactly. The parser now keeps the patch body
+  trailing newline instead of trimming it before hash calculation and
+  `git apply`.

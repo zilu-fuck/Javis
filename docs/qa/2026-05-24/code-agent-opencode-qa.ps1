@@ -105,6 +105,14 @@ function Get-PageText($socket, [ref]$id) {
   return $response.result.result.value
 }
 
+function Get-ActivityLogText($socket, [ref]$id) {
+  $response = Invoke-Cdp $socket $id "Runtime.evaluate" @{
+    expression = "document.querySelector('.javis-activity-panel')?.innerText || ''"
+    returnByValue = $true
+  }
+  return $response.result.result.value
+}
+
 function Wait-ForText($socket, [ref]$id, $text, $seconds) {
   $jsonText = $text | ConvertTo-Json -Compress
   $deadline = (Get-Date).AddSeconds($seconds)
@@ -181,10 +189,7 @@ function Submit-Goal($socket, [ref]$id, $goal) {
 function Expand-ActivityLog($socket, [ref]$id) {
   Eval-Js $socket $id @"
 (() => {
-  const buttons = Array.from(document.querySelectorAll('button'));
-  const button = buttons.find((candidate) =>
-    candidate.textContent.includes('展开日志') || candidate.textContent.includes('Expand activity log')
-  );
+  const button = document.querySelector('.javis-activity-toggle');
   if (button) {
     button.click();
   }
@@ -192,7 +197,6 @@ function Expand-ActivityLog($socket, [ref]$id) {
 })()
 "@ | Out-Null
 }
-
 function Run-Git($workingDirectory, [string[]]$arguments) {
   $previousErrorActionPreference = $ErrorActionPreference
   try {
@@ -333,7 +337,19 @@ function Run-CodeAgentScenario(
     Capture-Window $session.Process.MainWindowHandle (Join-Path $qaDir $screenshotName)
 
     Click-PendingPermissionButton $session.Socket ([ref]$id) $decision
-    Wait-ForText $session.Socket ([ref]$id) $expectedTitle 30 | Out-Null
+    $completion = Wait-ForAnyText $session.Socket ([ref]$id) @(
+      $expectedTitle,
+      "Code Agent patch application failed",
+      "Code Agent patch application 失败"
+    ) 30
+    if ($completion -ne $expectedTitle) {
+      Expand-ActivityLog $session.Socket ([ref]$id)
+      Start-Sleep -Milliseconds 500
+      Capture-Window $session.Process.MainWindowHandle (Join-Path $qaDir ($screenshotName -replace "proposal", "$name-failed"))
+      $activityText = Get-ActivityLogText $session.Socket ([ref]$id)
+      $pageText = Get-PageText $session.Socket ([ref]$id)
+      throw "$name scenario failed before expected title '$expectedTitle'. Activity log: $($activityText.Substring(0, [Math]::Min(4000, $activityText.Length)))`nPage text: $($pageText.Substring(0, [Math]::Min(4000, $pageText.Length)))"
+    }
     $finalScreenshot = $screenshotName -replace "proposal", $name
     Capture-Window $session.Process.MainWindowHandle (Join-Path $qaDir $finalScreenshot)
     $fileText = [System.IO.File]::ReadAllText((Join-Path $workspacePath "src\message.txt"))
