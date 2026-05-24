@@ -287,7 +287,7 @@ fn plan_pdf_organization(
 
     operations.sort_by(|left, right| left.source.cmp(&right.source));
     let approval_id = create_approval_id();
-    replace_pending_pdf_approval(&approval_state, &approval_id, &operations)?;
+    replace_pending_pdf_approval(&approval_state, &approval_id, &directory, &operations)?;
 
     Ok(FileOrganizationPlan {
         approval_id,
@@ -316,7 +316,13 @@ fn restore_pdf_organization_approval(
     request: ExecuteFileOrganizationRequest,
     approval_state: tauri::State<'_, Mutex<PdfOrganizationApprovalState>>,
 ) -> Result<(), String> {
-    replace_pending_pdf_approval(&approval_state, &request.approval_id, &request.operations)?;
+    let downloads = downloads_directory()?;
+    replace_pending_pdf_approval(
+        &approval_state,
+        &request.approval_id,
+        &downloads,
+        &request.operations,
+    )?;
     approve_pending_pdf_organization(&approval_state, &request.approval_id)
 }
 
@@ -1686,8 +1692,10 @@ fn create_approval_id() -> String {
 fn replace_pending_pdf_approval(
     approval_state: &Mutex<PdfOrganizationApprovalState>,
     approval_id: &str,
+    downloads: &Path,
     operations: &[PlannedPathOperation],
 ) -> Result<(), String> {
+    require_approved_pdf_operations(downloads, operations)?;
     let mut state = approval_state
         .lock()
         .map_err(|_| "PDF approval state could not be locked.".to_string())?;
@@ -1696,6 +1704,42 @@ fn replace_pending_pdf_approval(
         operations: operations.to_vec(),
         approved: false,
     });
+    Ok(())
+}
+
+fn require_approved_pdf_operations(
+    downloads: &Path,
+    operations: &[PlannedPathOperation],
+) -> Result<(), String> {
+    let downloads_canonical = fs::canonicalize(downloads)
+        .map_err(|error| format!("Downloads directory cannot be verified: {error}"))?;
+    for operation in operations {
+        if operation.action != "move" {
+            return Err("Only move PDF organization operations can be approved.".to_string());
+        }
+        let source = PathBuf::from(&operation.source);
+        let target = PathBuf::from(&operation.target);
+        if has_parent_dir_component(&source) || has_parent_dir_component(&target) {
+            return Err(
+                "PDF organization paths cannot contain parent directory traversal.".to_string(),
+            );
+        }
+        let source_canonical = fs::canonicalize(&source)
+            .map_err(|error| format!("Approved PDF source cannot be read: {error}"))?;
+        if !source_canonical.starts_with(&downloads_canonical)
+            || !target_parent_stays_in_downloads(&target, &downloads_canonical)
+        {
+            return Err("Approved PDF organization paths must stay inside Downloads.".to_string());
+        }
+        if source_canonical
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| !extension.eq_ignore_ascii_case("pdf"))
+            .unwrap_or(true)
+        {
+            return Err("Only PDF sources can be approved for organization.".to_string());
+        }
+    }
     Ok(())
 }
 
@@ -2372,9 +2416,10 @@ mod tests {
 
     #[test]
     fn pdf_operations_require_approval_before_execution() {
+        let root = create_test_directory("pdf-approval-required");
+        let operations = vec![planned_pdf_operation_in(&root)];
         let approval_state = Mutex::new(PdfOrganizationApprovalState::default());
-        let operations = vec![planned_pdf_operation()];
-        replace_pending_pdf_approval(&approval_state, "approval-1", &operations)
+        replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations)
             .expect("store pending approval");
 
         let result = take_approved_pdf_operations(
@@ -2389,17 +2434,19 @@ mod tests {
             result.expect_err("approval should be required"),
             "PDF organization dry-run has not been approved."
         );
+        fs::remove_dir_all(root).expect("cleanup test directory");
     }
 
     #[test]
     fn pdf_operations_must_match_the_approved_dry_run() {
+        let root = create_test_directory("pdf-approval-mismatch");
+        let operations = vec![planned_pdf_operation_in(&root)];
         let approval_state = Mutex::new(PdfOrganizationApprovalState::default());
-        let operations = vec![planned_pdf_operation()];
-        replace_pending_pdf_approval(&approval_state, "approval-1", &operations)
+        replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations)
             .expect("store pending approval");
         approve_pending_pdf_organization(&approval_state, "approval-1").expect("approve plan");
         let mut changed_operations = operations;
-        changed_operations[0].target = "C:/Users/example/Downloads/Other/paper.pdf".to_string();
+        changed_operations[0].target = normalize_path(&root.join("Other").join("paper.pdf"));
 
         let result = take_approved_pdf_operations(
             &approval_state,
@@ -2413,13 +2460,15 @@ mod tests {
             result.expect_err("changed operations should be rejected"),
             "Approved PDF organization operations do not match the current dry-run."
         );
+        fs::remove_dir_all(root).expect("cleanup test directory");
     }
 
     #[test]
     fn approved_pdf_operations_are_one_time_use() {
+        let root = create_test_directory("pdf-approval-one-time");
+        let operations = vec![planned_pdf_operation_in(&root)];
         let approval_state = Mutex::new(PdfOrganizationApprovalState::default());
-        let operations = vec![planned_pdf_operation()];
-        replace_pending_pdf_approval(&approval_state, "approval-1", &operations)
+        replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations)
             .expect("store pending approval");
         approve_pending_pdf_organization(&approval_state, "approval-1").expect("approve plan");
 
@@ -2444,13 +2493,15 @@ mod tests {
             second_result.expect_err("approval should be consumed"),
             "No approved PDF organization dry-run is pending."
         );
+        fs::remove_dir_all(root).expect("cleanup test directory");
     }
 
     #[test]
     fn restored_pdf_approval_is_still_one_time_use() {
+        let root = create_test_directory("pdf-restored-approval-one-time");
+        let operations = vec![planned_pdf_operation_in(&root)];
         let approval_state = Mutex::new(PdfOrganizationApprovalState::default());
-        let operations = vec![planned_pdf_operation()];
-        replace_pending_pdf_approval(&approval_state, "approval-1", &operations)
+        replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations)
             .expect("restore pending approval");
         approve_pending_pdf_organization(&approval_state, "approval-1")
             .expect("approve restored plan");
@@ -2476,6 +2527,55 @@ mod tests {
             second_result.expect_err("approval should be consumed"),
             "No approved PDF organization dry-run is pending."
         );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn pdf_approval_rejects_paths_outside_downloads() {
+        let root = create_test_directory("pdf-approval-downloads");
+        let outside = create_test_directory("pdf-approval-outside");
+        let approval_state = Mutex::new(PdfOrganizationApprovalState::default());
+        let source = root.join("paper.pdf");
+        fs::write(&source, b"pdf").expect("write source pdf");
+        let operations = vec![PlannedPathOperation {
+            source: normalize_path(&source),
+            target: normalize_path(&outside.join("paper.pdf")),
+            action: "move".to_string(),
+            conflict: None,
+        }];
+
+        let result =
+            replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations);
+
+        assert_eq!(
+            result.expect_err("outside target should fail"),
+            "Approved PDF organization paths must stay inside Downloads."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+        fs::remove_dir_all(outside).expect("cleanup outside directory");
+    }
+
+    #[test]
+    fn pdf_approval_rejects_non_pdf_sources() {
+        let root = create_test_directory("pdf-approval-non-pdf");
+        let approval_state = Mutex::new(PdfOrganizationApprovalState::default());
+        let source = root.join("notes.txt");
+        fs::write(&source, b"text").expect("write source text");
+        let operations = vec![PlannedPathOperation {
+            source: normalize_path(&source),
+            target: normalize_path(&root.join("Research").join("notes.txt")),
+            action: "move".to_string(),
+            conflict: None,
+        }];
+
+        let result =
+            replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations);
+
+        assert_eq!(
+            result.expect_err("non-pdf source should fail"),
+            "Only PDF sources can be approved for organization."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
     }
 
     #[test]
@@ -3382,10 +3482,12 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).to_string()
     }
 
-    fn planned_pdf_operation() -> PlannedPathOperation {
+    fn planned_pdf_operation_in(root: &Path) -> PlannedPathOperation {
+        let source = root.join("paper.pdf");
+        fs::write(&source, b"pdf").expect("write planned pdf");
         PlannedPathOperation {
-            source: "C:/Users/example/Downloads/paper.pdf".to_string(),
-            target: "C:/Users/example/Downloads/Research/paper.pdf".to_string(),
+            source: normalize_path(&source),
+            target: normalize_path(&root.join("Research").join("paper.pdf")),
             action: "move".to_string(),
             conflict: None,
         }

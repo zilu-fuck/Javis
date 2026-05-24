@@ -90,7 +90,7 @@ Status: complete for the 2026-05-23 QA pass.
   restart before Code Patch is migrated. Initial desktop storage and PDF restore
   plumbing are implemented; packaged restart QA verifies the PDF approve, deny,
   and expiry paths. Code Patch pending/resolved approval audit records are
-  implemented; restart restore/apply remains gated on shared native guards.
+  implemented; restart restore/apply remains gated on durable restore wiring.
 - Store permission decisions only as scoped records tied to a task, tool,
   workspace, preview hash, and expiry. Never persist them as broad reusable
   approval.
@@ -113,8 +113,9 @@ Status: complete for the 2026-05-23 QA pass.
   changing their user-visible behavior. Code Patch proposal/apply now use the
   shared relative path and approved-file guard, and Code Patch apply validates
   approval id, proposal patch hash, approved files, and current-file hashes
-  with one-shot native consumption; PDF migration and Code Patch restart
-  restore/apply remain.
+  with one-shot native consumption. PDF approval/restore now validates operation
+  path scope and PDF source type before pending state is accepted; a shared
+  approval binding abstraction and Code Patch restart restore/apply remain.
 - Keep dangerous actions rejected by default.
 
 ## Milestone 5: Product Hardening
