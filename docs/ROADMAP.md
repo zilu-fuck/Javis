@@ -87,7 +87,8 @@ Status: complete for the 2026-05-23 QA pass.
   persistence is implemented in the desktop app.
 - Add durable approval records for pending and resolved confirmed-write
   decisions. Start with PDF organization so approval cards can survive app
-  restart before Code Patch is migrated.
+  restart before Code Patch is migrated. Initial desktop storage and PDF restore
+  plumbing are implemented; packaged restart QA remains.
 - Store permission decisions only as scoped records tied to a task, tool,
   workspace, preview hash, and expiry. Never persist them as broad reusable
   approval.

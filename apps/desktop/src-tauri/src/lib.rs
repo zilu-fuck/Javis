@@ -278,6 +278,15 @@ fn approve_pdf_organization(
 }
 
 #[tauri::command]
+fn restore_pdf_organization_approval(
+    request: ExecuteFileOrganizationRequest,
+    approval_state: tauri::State<'_, Mutex<PdfOrganizationApprovalState>>,
+) -> Result<(), String> {
+    replace_pending_pdf_approval(&approval_state, &request.approval_id, &request.operations)?;
+    approve_pending_pdf_organization(&approval_state, &request.approval_id)
+}
+
+#[tauri::command]
 fn execute_pdf_organization(
     request: ExecuteFileOrganizationRequest,
     approval_state: tauri::State<'_, Mutex<PdfOrganizationApprovalState>>,
@@ -2215,6 +2224,38 @@ mod tests {
     }
 
     #[test]
+    fn restored_pdf_approval_is_still_one_time_use() {
+        let approval_state = Mutex::new(PdfOrganizationApprovalState::default());
+        let operations = vec![planned_pdf_operation()];
+        replace_pending_pdf_approval(&approval_state, "approval-1", &operations)
+            .expect("restore pending approval");
+        approve_pending_pdf_organization(&approval_state, "approval-1")
+            .expect("approve restored plan");
+
+        let approved_operations = take_approved_pdf_operations(
+            &approval_state,
+            ExecuteFileOrganizationRequest {
+                approval_id: "approval-1".to_string(),
+                operations: operations.clone(),
+            },
+        )
+        .expect("approved operations");
+        let second_result = take_approved_pdf_operations(
+            &approval_state,
+            ExecuteFileOrganizationRequest {
+                approval_id: "approval-1".to_string(),
+                operations,
+            },
+        );
+
+        assert_eq!(approved_operations.len(), 1);
+        assert_eq!(
+            second_result.expect_err("approval should be consumed"),
+            "No approved PDF organization dry-run is pending."
+        );
+    }
+
+    #[test]
     fn execute_pdf_move_reports_missing_source() {
         let root = create_test_directory("move-missing-source");
         let source = root.join("missing.pdf");
@@ -2904,6 +2945,7 @@ pub fn run() {
             apply_code_patch,
             plan_pdf_organization,
             approve_pdf_organization,
+            restore_pdf_organization_approval,
             execute_pdf_organization
         ])
         .run(tauri::generate_context!())

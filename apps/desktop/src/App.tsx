@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { createFileScanTaskRuntime, createInitialTaskSnapshot } from "@javis/core";
@@ -34,10 +34,22 @@ import {
 } from "./workspace-session";
 import { loadModelSettings, saveModelSettings, type ModelSettings } from "./model-settings";
 import { parseGitStatusFiles } from "./git-status";
+import {
+  createApprovalRecordFromPermissionRequest,
+  expireApprovalRecord,
+  findPendingApprovalRecord,
+  isApprovalRecordExpired,
+  loadApprovalRecords,
+  resolveApprovalRecord,
+  saveApprovalRecords,
+  upsertApprovalRecord,
+  type DurableApprovalRecord,
+} from "./approval-records";
 import "./App.css";
 
 type PersistedTaskSnapshot = ReturnType<typeof createInitialTaskSnapshot>;
 export const DEFAULT_DRAFT_GOAL = "检查当前项目，说明如何启动，并运行一次检查";
+const PDF_APPROVAL_TOOL_NAME = "file.executePdfOrganization";
 
 function App() {
   const [workspaceSession, setWorkspaceSession] = useState(() =>
@@ -141,6 +153,10 @@ function App() {
   const [history, setHistory] = useState<PersistedTaskSnapshot[]>(() =>
     loadTaskHistory(window.localStorage),
   );
+  const [approvalRecords, setApprovalRecords] = useState(() =>
+    loadApprovalRecords(window.localStorage),
+  );
+  const didCheckRestoredApproval = useRef(false);
   const [draftGoal, setDraftGoal] = useState(DEFAULT_DRAFT_GOAL);
 
   useEffect(() => {
@@ -151,6 +167,7 @@ function App() {
           saveTaskHistory(window.localStorage, upsertTaskHistory(current, nextTask)),
         );
       }
+      persistDurableApprovalRecord(nextTask);
       if (nextTask.status === "completed") {
         persistWorkspaceForTask(
           nextTask.status,
@@ -163,6 +180,22 @@ function App() {
       runtime.dispose();
     };
   }, [runtime, workspacePath]);
+
+  useEffect(() => {
+    if (didCheckRestoredApproval.current) {
+      return;
+    }
+    didCheckRestoredApproval.current = true;
+    const pendingRecord = findPendingApprovalRecord(approvalRecords, PDF_APPROVAL_TOOL_NAME);
+    if (!pendingRecord) {
+      return;
+    }
+    if (isApprovalRecordExpired(pendingRecord)) {
+      updateApprovalRecord(expireApprovalRecord(pendingRecord, new Date().toISOString()));
+      return;
+    }
+    setTask(createRestoredPdfApprovalTask(pendingRecord));
+  }, [approvalRecords]);
 
   function submitGoal() {
     const goal = draftGoal.trim();
@@ -235,6 +268,97 @@ function App() {
     setModelSettings(saveModelSettings(window.localStorage, settings));
   }
 
+  function persistDurableApprovalRecord(nextTask: PersistedTaskSnapshot) {
+    const request = nextTask.permissionRequest;
+    if (
+      nextTask.status !== "waiting_permission" ||
+      !request ||
+      request.status !== "pending" ||
+      request.title !== "Approve PDF move plan"
+    ) {
+      return;
+    }
+    const record = createApprovalRecordFromPermissionRequest({
+      taskId: nextTask.id,
+      toolName: PDF_APPROVAL_TOOL_NAME,
+      workspacePath: nextTask.fileOrganizationPlan?.directoryPath ?? "",
+      permissionRequest: request,
+    });
+    if (!record) {
+      return;
+    }
+    setApprovalRecords((current) =>
+      saveApprovalRecords(window.localStorage, upsertApprovalRecord(current, record)),
+    );
+  }
+
+  function updateApprovalRecord(record: DurableApprovalRecord) {
+    setApprovalRecords((current) =>
+      saveApprovalRecords(window.localStorage, upsertApprovalRecord(current, record)),
+    );
+  }
+
+  async function resolveRestoredApproval(decision: "approved" | "denied") {
+    const record = findPendingApprovalRecord(approvalRecords, PDF_APPROVAL_TOOL_NAME);
+    if (!record) {
+      return;
+    }
+    const resolvedAt = new Date().toISOString();
+    if (decision === "denied") {
+      const deniedRecord = resolveApprovalRecord(record, "denied", resolvedAt);
+      const deniedTask = createRestoredPdfDeniedTask(deniedRecord);
+      updateApprovalRecord(deniedRecord);
+      setTask(deniedTask);
+      setHistory((current) =>
+        saveTaskHistory(window.localStorage, upsertTaskHistory(current, deniedTask)),
+      );
+      return;
+    }
+
+    const approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
+    updateApprovalRecord(approvedRecord);
+    try {
+      await invoke("restore_pdf_organization_approval", {
+        request: {
+          approvalId: approvedRecord.approvalId,
+          operations: approvedRecord.permissionRequest.dryRun.affectedPaths,
+        },
+      });
+      const execution = await invoke<FileOrganizationExecution>("execute_pdf_organization", {
+        request: {
+          approvalId: approvedRecord.approvalId,
+          operations: approvedRecord.permissionRequest.dryRun.affectedPaths,
+        },
+      });
+      const completedTask = createRestoredPdfApprovedTask(approvedRecord, execution);
+      setTask(completedTask);
+      setHistory((current) =>
+        saveTaskHistory(window.localStorage, upsertTaskHistory(current, completedTask)),
+      );
+    } catch (error) {
+      const failedTask = createRestoredPdfFailedTask(approvedRecord, error);
+      setTask(failedTask);
+      setHistory((current) =>
+        saveTaskHistory(window.localStorage, upsertTaskHistory(current, failedTask)),
+      );
+    }
+  }
+
+  function handlePermissionDecision(decision: "approved" | "denied") {
+    const request = task.permissionRequest;
+    if (
+      task.status === "waiting_permission" &&
+      request?.status === "pending" &&
+      request.title === "Approve PDF move plan"
+    ) {
+      const record = approvalRecords.find((item) => item.approvalId === request.id);
+      if (record?.status === "pending") {
+        updateApprovalRecord(resolveApprovalRecord(record, decision, new Date().toISOString()));
+      }
+    }
+    runtime.resolvePermission(decision);
+  }
+
   function selectHistoryEntry(id: string) {
     const entry = history.find((item) => item.id === id);
     if (entry) {
@@ -270,7 +394,9 @@ function App() {
       onDeleteRecentWorkspacePath={deleteRecentWorkspacePath}
       onDraftGoalChange={setDraftGoal}
       onModelSettingsChange={updateModelSettings}
-      onPermissionDecision={runtime.resolvePermission}
+      onPermissionDecision={
+        task.id.startsWith("restored-approval-") ? resolveRestoredApproval : handlePermissionDecision
+      }
       onRetryTask={retryCurrentTask}
       onSelectHistoryEntry={selectHistoryEntry}
       onSubmitGoal={submitGoal}
@@ -283,3 +409,91 @@ function App() {
 }
 
 export default App;
+
+function createRestoredPdfApprovalTask(record: DurableApprovalRecord): PersistedTaskSnapshot {
+  const affectedPaths = record.permissionRequest.dryRun.affectedPaths;
+  return {
+    ...createInitialTaskSnapshot(),
+    id: `restored-approval-${record.taskId}`,
+    title: "PDF organization approval needed",
+    userGoal: "Organize PDFs in Downloads",
+    status: "waiting_permission",
+    commanderMessage:
+      "A pending PDF organization approval was restored from local approval records.",
+    plan: [
+      {
+        id: "step-confirm-pdf",
+        title: "User reviews the confirmed-write permission card",
+        assignedAgentKind: "file",
+        status: "running",
+      },
+    ],
+    agents: [],
+    logs: [
+      {
+        id: `${record.taskId}-approval-restored`,
+        kind: "permission",
+        title: "permission.restored",
+        detail: `Restored pending approval ${record.approvalId} for ${record.toolName}.`,
+      },
+    ],
+    fileOrganizationPlan: {
+      approvalId: record.approvalId,
+      directoryPath: record.workspacePath,
+      fileCount: affectedPaths.length,
+      dryRun: record.permissionRequest.dryRun,
+    },
+    permissionRequest: record.permissionRequest,
+  };
+}
+
+function createRestoredPdfDeniedTask(record: DurableApprovalRecord): PersistedTaskSnapshot {
+  return {
+    ...createRestoredPdfApprovalTask(record),
+    id: `restored-approval-denied-${record.taskId}`,
+    title: "PDF organization denied",
+    status: "completed",
+    commanderMessage: "Permission was denied after restore. Javis did not move or modify files.",
+    permissionRequest: record.permissionRequest,
+    verificationSummary: "verified: restored permission denied; no write operation was executed.",
+  };
+}
+
+function createRestoredPdfApprovedTask(
+  record: DurableApprovalRecord,
+  execution: FileOrganizationExecution,
+): PersistedTaskSnapshot {
+  return {
+    ...createRestoredPdfApprovalTask(record),
+    id: `restored-approval-approved-${record.taskId}`,
+    title: execution.failedCount === 0 ? "PDF organization completed" : "PDF organization completed with failures",
+    status: execution.failedCount === 0 ? "completed" : "failed",
+    commanderMessage: "Restored permission was approved and the PDF organization dry-run executed.",
+    permissionRequest: record.permissionRequest,
+    fileOrganizationExecution: execution,
+    verificationSummary: `${execution.failedCount === 0 ? "verified" : "failed"}: ${execution.movedCount}/${execution.attemptedCount} PDF move(s) completed, ${execution.skippedCount} skipped, ${execution.failedCount} failed.`,
+  };
+}
+
+function createRestoredPdfFailedTask(
+  record: DurableApprovalRecord,
+  error: unknown,
+): PersistedTaskSnapshot {
+  return {
+    ...createRestoredPdfApprovalTask(record),
+    id: `restored-approval-failed-${record.taskId}`,
+    title: "PDF organization execution failed",
+    status: "failed",
+    commanderMessage: "Restored permission was approved, but native execution failed.",
+    permissionRequest: record.permissionRequest,
+    logs: [
+      ...createRestoredPdfApprovalTask(record).logs,
+      {
+        id: `${record.taskId}-approval-restore-failed`,
+        kind: "tool",
+        title: "task.failed",
+        detail: error instanceof Error ? error.message : String(error),
+      },
+    ],
+  };
+}

@@ -18,7 +18,7 @@
 
 | 领域 | 当前状态 | 与路线差距 |
 | --- | --- | --- |
-| confirmed-write 审批 | Core 已有 pending -> approved/denied/expired/cancelled 状态 helper，PDF flow 有一次性 native approval id，Code Patch apply 已通过 UI confirmed-write。 | pending approval 仍依赖当前内存任务，应用重启后不能恢复确认卡片，也不能从持久化 preview 继续 approve/deny。 |
+| confirmed-write 审批 | Core 已有 pending -> approved/denied/expired/cancelled 状态 helper，PDF flow 有一次性 native approval id，Code Patch apply 已通过 UI confirmed-write。Desktop 已新增 durable approval record 存储模型，并为 PDF restore 增加 native approval rehydration hook。 | packaged-app 跨重启 QA 尚未覆盖，durable approval 还没有迁移到 Code Patch，也还没有共享 native guard。 |
 | Code Patch proposal | opencode 只负责 proposal，Javis 已验证 patch hash、changed files、workspace 内路径，并通过 native `git apply` 写入。 | proposal 仍是 `changedFiles + patch` 形态，还没有 `baseGitHead`、文件 before hash、hunk 结构、apply 前 dry-run 校验和 stale file hash 拒绝。 |
 | Rust/native guard | PDF 和 Code Patch 都在 Rust 层做关键路径校验，PDF approval 具有一次性消费语义。 | approval/path/hash 校验仍分散在具体命令附近，尚未抽成所有 confirmed-write 命令共用的 guard。 |
 | 模型配置与密钥 | 桌面端能配置 provider/model/apiKey/baseUrl，并将配置传给 opencode/兼容 provider。 | API key 仍保存在 browser local storage，不符合 hardened secret storage 目标。 |
@@ -228,10 +228,10 @@ Task
 
 范围：
 
-- 定义 approval record/event types，先不要引入通用 workflow engine。
-- 在 desktop persistence 层保存 pending/resolved approvals。
+- 定义 approval record/event types，先不要引入通用 workflow engine。（已完成初版 `javis.approvalRecords.v1`）
+- 在 desktop persistence 层保存 pending/resolved approvals。（PDF pending/resolved 初版已接入）
 - 记录 `approvalId`、`taskId`、`toolName`、`workspacePath`、`permissionLevel`、`previewHash`、`expiresAt`、`status`、`decision` 和可序列化 dry-run。
-- 用 PDF organization 作为第一条迁移路径：pending approval 重启后恢复确认卡片，approve/deny 都写回 approval record。
+- 用 PDF organization 作为第一条迁移路径：pending approval 重启后恢复确认卡片，approve/deny 都写回 approval record。（实现已接入，仍需 packaged restart QA）
 - 增加 expiry 和 stale preview rejection。
 - 保持现有 resolved permission audit 能进入任务历史，但 pending approval 不再只存在于内存。
 
