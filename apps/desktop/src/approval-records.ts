@@ -1,4 +1,4 @@
-import type { PermissionRequest } from "@javis/tools";
+import type { CodeProposedEdit, PermissionRequest } from "@javis/tools";
 
 export const APPROVAL_RECORDS_STORAGE_KEY = "javis.approvalRecords.v1";
 export const APPROVAL_RECORDS_STORAGE_VERSION = 1;
@@ -22,6 +22,7 @@ export interface DurableApprovalRecord {
   resolvedAt?: string;
   decision?: "approved" | "denied";
   permissionRequest: PermissionRequest;
+  codeProposedEdit?: CodeProposedEdit;
 }
 
 export interface ApprovalRecordInput {
@@ -29,6 +30,7 @@ export interface ApprovalRecordInput {
   toolName: string;
   workspacePath: string;
   permissionRequest: PermissionRequest;
+  codeProposedEdit?: CodeProposedEdit;
   ttlMs?: number;
   now?: string;
 }
@@ -92,6 +94,7 @@ export function createApprovalRecordFromPermissionRequest({
   toolName,
   workspacePath,
   permissionRequest,
+  codeProposedEdit,
   ttlMs = 10 * 60 * 1000,
   now = permissionRequest.createdAt,
 }: ApprovalRecordInput): DurableApprovalRecord | null {
@@ -113,6 +116,7 @@ export function createApprovalRecordFromPermissionRequest({
     status: "pending",
     createdAt: permissionRequest.createdAt,
     permissionRequest,
+    codeProposedEdit,
   });
 }
 
@@ -233,6 +237,10 @@ export function sanitizeApprovalRecord(value: unknown): DurableApprovalRecord | 
     createdAt: value.createdAt,
     permissionRequest,
   };
+  const codeProposedEdit = sanitizeCodeProposedEdit(value.codeProposedEdit);
+  if (codeProposedEdit) {
+    record.codeProposedEdit = codeProposedEdit;
+  }
   if (isString(value.resolvedAt)) {
     record.resolvedAt = value.resolvedAt;
   }
@@ -240,6 +248,29 @@ export function sanitizeApprovalRecord(value: unknown): DurableApprovalRecord | 
     record.decision = value.decision;
   }
   return record;
+}
+
+function sanitizeCodeProposedEdit(value: unknown): CodeProposedEdit | null {
+  if (
+    !isRecord(value) ||
+    !isString(value.proposalId) ||
+    !isString(value.workspacePath) ||
+    !isString(value.summary) ||
+    !Array.isArray(value.changedFiles) ||
+    !value.changedFiles.every(isString) ||
+    !isString(value.patch) ||
+    !isString(value.patchHash)
+  ) {
+    return null;
+  }
+  return {
+    proposalId: value.proposalId,
+    workspacePath: value.workspacePath,
+    summary: value.summary,
+    changedFiles: value.changedFiles,
+    patch: value.patch,
+    patchHash: value.patchHash,
+  };
 }
 
 function sanitizePermissionRequest(value: unknown): PermissionRequest | null {

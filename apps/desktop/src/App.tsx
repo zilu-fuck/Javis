@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { createFileScanTaskRuntime, createInitialTaskSnapshot } from "@javis/core";
+import {
+  createFileScanTaskRuntime,
+  createInitialTaskSnapshot,
+  validateCodeApplyResult,
+  validateCodeProposal,
+} from "@javis/core";
 import type {
   CodeApplyResult,
   CodeProposedEdit,
@@ -202,12 +207,22 @@ function App() {
       return;
     }
     didCheckRestoredApproval.current = true;
-    const pendingRecord = findPendingApprovalRecord(approvalRecords, PDF_APPROVAL_TOOL_NAME);
+    const pendingRecord =
+      findPendingApprovalRecord(approvalRecords, PDF_APPROVAL_TOOL_NAME) ??
+      findPendingApprovalRecord(approvalRecords, CODE_PATCH_APPROVAL_TOOL_NAME);
     if (!pendingRecord) {
       return;
     }
     if (isApprovalRecordExpired(pendingRecord)) {
       updateApprovalRecord(expireApprovalRecord(pendingRecord, new Date().toISOString()));
+      return;
+    }
+    if (pendingRecord.toolName === CODE_PATCH_APPROVAL_TOOL_NAME) {
+      if (!pendingRecord.codeProposedEdit) {
+        updateApprovalRecord(expireApprovalRecord(pendingRecord, new Date().toISOString()));
+        return;
+      }
+      setTask(createRestoredCodePatchApprovalTask(pendingRecord));
       return;
     }
     setTask(createRestoredPdfApprovalTask(pendingRecord));
@@ -303,6 +318,9 @@ function App() {
       toolName,
       workspacePath: getDurableApprovalWorkspacePath(nextTask, request.title),
       permissionRequest: request,
+      codeProposedEdit: request.title === CODE_PATCH_APPROVAL_TITLE
+        ? nextTask.codeProposedEdit
+        : undefined,
     });
     if (!record) {
       return;
@@ -319,8 +337,14 @@ function App() {
   }
 
   async function resolveRestoredApproval(decision: "approved" | "denied") {
-    const record = findPendingApprovalRecord(approvalRecords, PDF_APPROVAL_TOOL_NAME);
+    const record =
+      findPendingApprovalRecord(approvalRecords, PDF_APPROVAL_TOOL_NAME) ??
+      findPendingApprovalRecord(approvalRecords, CODE_PATCH_APPROVAL_TOOL_NAME);
     if (!record) {
+      return;
+    }
+    if (record.toolName === CODE_PATCH_APPROVAL_TOOL_NAME) {
+      await resolveRestoredCodePatchApproval(record, decision);
       return;
     }
     const resolvedAt = new Date().toISOString();
@@ -357,6 +381,45 @@ function App() {
       );
     } catch (error) {
       const failedTask = createRestoredPdfFailedTask(approvedRecord, error);
+      setTask(failedTask);
+      setHistory((current) =>
+        saveTaskHistory(window.localStorage, upsertTaskHistory(current, failedTask)),
+      );
+    }
+  }
+
+  async function resolveRestoredCodePatchApproval(
+    record: DurableApprovalRecord,
+    decision: "approved" | "denied",
+  ) {
+    const resolvedAt = new Date().toISOString();
+    if (decision === "denied") {
+      const deniedRecord = resolveApprovalRecord(record, "denied", resolvedAt);
+      const deniedTask = createRestoredCodePatchDeniedTask(deniedRecord);
+      updateApprovalRecord(deniedRecord);
+      setTask(deniedTask);
+      setHistory((current) =>
+        saveTaskHistory(window.localStorage, upsertTaskHistory(current, deniedTask)),
+      );
+      return;
+    }
+
+    const approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
+    updateApprovalRecord(approvedRecord);
+    try {
+      const applyResult = await applyRestoredCodePatch(approvedRecord);
+      const verification = await runRestoredCodePatchVerification(approvedRecord.workspacePath);
+      const completedTask = createRestoredCodePatchApprovedTask(
+        approvedRecord,
+        applyResult,
+        verification,
+      );
+      setTask(completedTask);
+      setHistory((current) =>
+        saveTaskHistory(window.localStorage, upsertTaskHistory(current, completedTask)),
+      );
+    } catch (error) {
+      const failedTask = createRestoredCodePatchFailedTask(approvedRecord, error);
       setTask(failedTask);
       setHistory((current) =>
         saveTaskHistory(window.localStorage, upsertTaskHistory(current, failedTask)),
@@ -467,6 +530,46 @@ function createRestoredPdfApprovalTask(record: DurableApprovalRecord): Persisted
   };
 }
 
+function createRestoredCodePatchApprovalTask(record: DurableApprovalRecord): PersistedTaskSnapshot {
+  const affectedPaths = record.permissionRequest.dryRun.affectedPaths;
+  return {
+    ...createInitialTaskSnapshot(),
+    id: `restored-approval-${record.taskId}`,
+    title: "Code Agent patch approval needed",
+    userGoal: "Apply restored Code Agent patch proposal",
+    status: "waiting_permission",
+    commanderMessage:
+      "A pending Code Agent patch approval was restored from local approval records.",
+    plan: [
+      {
+        id: "step-confirm-code-patch",
+        title: "User reviews the confirmed-write permission card",
+        assignedAgentKind: "code",
+        status: "running",
+      },
+    ],
+    agents: [],
+    logs: [
+      {
+        id: `${record.taskId}-code-approval-restored`,
+        kind: "permission",
+        title: "permission.restored",
+        detail: `Restored pending approval ${record.approvalId} for ${record.toolName}.`,
+      },
+    ],
+    codeProposedEdit: record.codeProposedEdit,
+    codeReviewPreview: record.codeProposedEdit
+      ? {
+          workspacePath: record.codeProposedEdit.workspacePath,
+          changedFiles: record.codeProposedEdit.changedFiles,
+          diffStat: `${affectedPaths.length} proposed file(s)`,
+          diff: record.codeProposedEdit.patch,
+        }
+      : undefined,
+    permissionRequest: record.permissionRequest,
+  };
+}
+
 function getDurableApprovalToolName(title: string): string | undefined {
   if (title === PDF_APPROVAL_TITLE) {
     return PDF_APPROVAL_TOOL_NAME;
@@ -533,6 +636,118 @@ function createRestoredPdfFailedTask(
       ...createRestoredPdfApprovalTask(record).logs,
       {
         id: `${record.taskId}-approval-restore-failed`,
+        kind: "tool",
+        title: "task.failed",
+        detail: error instanceof Error ? error.message : String(error),
+      },
+    ],
+  };
+}
+
+async function applyRestoredCodePatch(record: DurableApprovalRecord): Promise<CodeApplyResult> {
+  const edit = record.codeProposedEdit;
+  if (!edit) {
+    throw new Error("Restored Code Patch approval does not include a patch proposal.");
+  }
+  const proposalSafetyError = validateCodeProposal(edit);
+  if (proposalSafetyError) {
+    throw new Error(proposalSafetyError);
+  }
+  await invoke("approve_code_patch", {
+    request: {
+      approvalId: record.approvalId,
+      proposalId: edit.proposalId,
+      workspacePath: edit.workspacePath,
+      changedFiles: edit.changedFiles,
+      patchHash: edit.patchHash,
+    },
+  });
+  const applyResult = await invoke<CodeApplyResult>("apply_code_patch", {
+    request: {
+      approvalId: record.approvalId,
+      proposalId: edit.proposalId,
+      workspacePath: edit.workspacePath,
+      changedFiles: edit.changedFiles,
+      patch: edit.patch,
+      patchHash: edit.patchHash,
+    },
+  });
+  const applySafetyError = validateCodeApplyResult(edit, applyResult);
+  if (applySafetyError) {
+    throw new Error(applySafetyError);
+  }
+  return applyResult;
+}
+
+async function runRestoredCodePatchVerification(
+  workspacePath: string,
+): Promise<ShellCommandOutput> {
+  return invoke<ShellCommandOutput>("run_read_only_command", {
+    request: {
+      program: "git",
+      args: ["diff", "--check"],
+      workspacePath,
+    },
+  });
+}
+
+function createRestoredCodePatchDeniedTask(
+  record: DurableApprovalRecord,
+): PersistedTaskSnapshot {
+  return {
+    ...createRestoredCodePatchApprovalTask(record),
+    id: `restored-approval-denied-${record.taskId}`,
+    title: "Code Agent patch denied",
+    status: "completed",
+    commanderMessage: "Permission was denied after restore. Javis did not apply the patch.",
+    permissionRequest: record.permissionRequest,
+    verificationSummary: "verified: restored Code Agent patch was denied and no write operation was executed.",
+  };
+}
+
+function createRestoredCodePatchApprovedTask(
+  record: DurableApprovalRecord,
+  applyResult: CodeApplyResult,
+  verification: ShellCommandOutput,
+): PersistedTaskSnapshot {
+  const applyStatus = applyResult.applied && verification.exitCode === 0 ? "completed" : "failed";
+  return {
+    ...createRestoredCodePatchApprovalTask(record),
+    id: `restored-approval-approved-${record.taskId}`,
+    title:
+      applyStatus === "completed"
+        ? "Code Agent patch applied"
+        : "Code Agent patch verification failed",
+    status: applyStatus,
+    commanderMessage:
+      applyStatus === "completed"
+        ? "Restored permission was approved, the patch was applied, and post-apply verification passed."
+        : "Restored permission was approved, but post-apply verification did not pass.",
+    permissionRequest: record.permissionRequest,
+    codeApplyResult: applyResult,
+    commands: [verification],
+    verificationSummary:
+      applyStatus === "completed"
+        ? `verified: restored Code Agent patch applied to ${applyResult.changedFiles.length} file(s), and post-apply git diff --check passed.`
+        : `failed: restored Code Agent patch apply result was ${applyResult.applied ? "applied" : "not applied"} and post-apply git diff --check returned exit code ${verification.exitCode ?? "unknown"}.`,
+  };
+}
+
+function createRestoredCodePatchFailedTask(
+  record: DurableApprovalRecord,
+  error: unknown,
+): PersistedTaskSnapshot {
+  return {
+    ...createRestoredCodePatchApprovalTask(record),
+    id: `restored-approval-failed-${record.taskId}`,
+    title: "Code Agent patch application failed",
+    status: "failed",
+    commanderMessage: "Restored permission was approved, but native patch application failed.",
+    permissionRequest: record.permissionRequest,
+    logs: [
+      ...createRestoredCodePatchApprovalTask(record).logs,
+      {
+        id: `${record.taskId}-code-approval-restore-failed`,
         kind: "tool",
         title: "task.failed",
         detail: error instanceof Error ? error.message : String(error),

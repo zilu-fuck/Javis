@@ -20,7 +20,7 @@ history intact.
 | File and project understanding | Read project files safely, summarize relevant documents, inspect scripts, and recommend/run checks. | MVP implemented with Markdown scan and allowlisted checks. |
 | Research | Search or collect public sources, fetch evidence, compare at least three sources, cite excerpts, and label unknowns. | Partial. User-provided URL flow works; automated search has `github-cli` and Agent Chrome provider paths. Fixture QA covers success/failure states, live `github-cli` plus Agent Chrome smoke QA passes, and source-comparison summaries now call out overlap and differences. |
 | Code Agent | Inspect code, propose changes, produce diffs, apply approved edits, and run verification. | Partial. Core can route code review goals to a Code Agent scaffold that lists changed files, shows a diff preview, asks before continuing, runs read-only `git diff --check`, requests an opencode-backed JSON patch proposal using desktop-managed model/provider settings, and applies approved patches through the local confirmed-write backend. Packaged-app fixture QA covers proposal denial and approved patch application. The proposal backend now has a DeepSeek/custom OpenAI-compatible fallback, stricter proposal-file binding, and parser hardening; live provider smoke still needs to be rerun with temporary credentials. |
-| Persistence | Save task history, results, permission decisions as scoped records, and allow deletion. | Partial. Completed, failed, and cancelled task snapshots are stored locally with sidebar restore and delete controls; resolved permission decisions are retained as audit evidence. Durable approval record storage covers PDF approvals and Code Patch pending/resolved audit records; packaged restart QA verifies the PDF approve, deny, and expiry recovery paths. Code Patch restart restore/apply remains gated on durable restore wiring. |
+| Persistence | Save task history, results, permission decisions as scoped records, and allow deletion. | Partial. Completed, failed, and cancelled task snapshots are stored locally with sidebar restore and delete controls; resolved permission decisions are retained as audit evidence. Durable approval record storage covers PDF approvals and Code Patch pending/resolved audit records. Packaged restart QA verifies the PDF approve, deny, and expiry recovery paths; Code Patch restart restore/apply is wired and still needs packaged restart QA evidence. |
 | Workspace management | Select and remember workspaces without relying on the launch directory. | Implemented. Desktop sidebar accepts manual workspace paths and a native directory picker, restores recent workspaces from local storage after app restart, persists only completed workspace runs, supports recent deletion, and routes workspace-aware read/project/code tools through the selected path. Manual restart screenshots are recorded in `docs/qa/2026-05-24/`. |
 | Permission enforcement | Confirmed writes require visible approval and native enforcement for the current dry-run. | Partial. PDF organization has one-time native approval-state enforcement and now validates restored/approved operations through a native path/source guard before they enter pending state. Code Agent patch apply is gated by Core confirmed-write plus native approval id, proposal hash, one-shot consumption, path checks, and current-file hashes. Code Patch proposal/apply now share the native relative path, approved-file, and current-file guard. |
 | Error recovery | Failed tools show actionable errors and allow retry or alternate paths. | Partial. MVP failure states exist, failed tasks expose an initial retry action, and failed research tasks now point users to manual URL fallback; broader alternate-path recovery is not complete. |
@@ -38,12 +38,13 @@ Do not call Javis a complete usable product while any of these are true:
   with temporary credentials before this blocker can close.
 - Model API keys are currently persisted in app local storage; OS credential
   storage is still needed before treating secrets as hardened.
-- Pending confirmed-write approval recovery is not fully generalized. Durable
-  approval record storage and PDF restore plumbing exist, and packaged restart
-  QA now proves the PDF approval card survives app restart, can approve or deny
-  from a persisted preview, and expires stale pending records fail-closed. Code
-  Patch pending/resolved audit persistence exists, but restart restore/apply
-  remains open until it is wired through the durable restore path.
+- Pending confirmed-write approval recovery is not fully proven across tools.
+  Durable approval record storage and PDF restore plumbing exist, and packaged
+  restart QA now proves the PDF approval card survives app restart, can approve
+  or deny from a persisted preview, and expires stale pending records
+  fail-closed. Code Patch restart restore/apply is wired through durable records
+  with persisted proposal payloads, but still needs packaged restart QA
+  evidence.
 - Task history persistence is limited to local completed/failed/cancelled
   snapshots and needs broader QA across app restart and future storage
   migrations.
@@ -61,11 +62,9 @@ Do not call Javis a complete usable product while any of these are true:
 
 The project has a verified MVP foundation. The next stage is product completion:
 
-1. Collapse the PDF and Code Patch native guards into a shared approval binding
+1. Add packaged restart QA for Code Patch restore deny/apply/expired paths.
+2. Collapse the PDF and Code Patch native guards into a shared approval binding
    abstraction.
-2. Use the shared guards to enable Code Patch restart restore/apply only for
-   the approved proposal, workspace, preview hash, approved files, and current
-   file hashes.
 3. Move model API keys out of browser local storage into hardened secret
    storage.
 4. Rerun the live DeepSeek-compatible Code Agent proposal smoke with temporary

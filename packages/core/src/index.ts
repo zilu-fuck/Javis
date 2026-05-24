@@ -58,6 +58,11 @@ import { createRuntimeState } from "./runtime-state";
 import { appendLog } from "./snapshot-utils";
 import { addModelUsage, createEmptyTokenUsageSummary } from "./token-usage";
 
+export {
+  validateCodeApplyResult,
+  validateCodeProposal,
+} from "./code-proposal-safety";
+
 export type ID = string;
 export type ISODateTime = string;
 

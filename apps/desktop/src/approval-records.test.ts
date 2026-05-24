@@ -134,6 +134,14 @@ describe("durable approval records", () => {
           reversible: true,
         },
       },
+      codeProposedEdit: {
+        proposalId: "proposal-1",
+        workspacePath: "E:/Javis",
+        summary: "Tighten completion message.",
+        changedFiles: ["packages/core/src/index.ts"],
+        patch: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts\n",
+        patchHash: "fnv1a-test",
+      },
       now: "2026-05-24T00:00:00.000Z",
     });
 
@@ -141,6 +149,8 @@ describe("durable approval records", () => {
     expect(created?.workspacePath).toBe("E:/Javis");
     expect(created?.permissionRequest.title).toBe("Approve Code Agent patch application");
     expect(created?.permissionRequest.dryRun.affectedPaths[0]?.action).toBe("modify");
+    expect(created?.codeProposedEdit?.proposalId).toBe("proposal-1");
+    expect(created?.codeProposedEdit?.patch).toContain("diff --git");
   });
 
   it("resolves and expires pending records without changing terminal records", () => {
