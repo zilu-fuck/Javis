@@ -142,7 +142,7 @@ struct ProjectScript {
     command: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CodePatchApplyRequest {
     approval_id: String,
@@ -150,6 +150,16 @@ struct CodePatchApplyRequest {
     workspace_path: String,
     changed_files: Vec<String>,
     patch: String,
+    patch_hash: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodePatchApprovalRequest {
+    approval_id: String,
+    proposal_id: String,
+    workspace_path: String,
+    changed_files: Vec<String>,
     patch_hash: String,
 }
 
@@ -202,6 +212,20 @@ struct PdfOrganizationApprovalState {
 struct PendingPdfOrganizationApproval {
     approval_id: String,
     operations: Vec<PlannedPathOperation>,
+    approved: bool,
+}
+
+#[derive(Default)]
+struct CodePatchApprovalState {
+    pending: Option<PendingCodePatchApproval>,
+}
+
+struct PendingCodePatchApproval {
+    approval_id: String,
+    proposal_id: String,
+    workspace_path: String,
+    changed_files: Vec<String>,
+    patch_hash: String,
     approved: bool,
 }
 
@@ -287,6 +311,14 @@ fn restore_pdf_organization_approval(
 ) -> Result<(), String> {
     replace_pending_pdf_approval(&approval_state, &request.approval_id, &request.operations)?;
     approve_pending_pdf_organization(&approval_state, &request.approval_id)
+}
+
+#[tauri::command]
+fn approve_code_patch(
+    request: CodePatchApprovalRequest,
+    approval_state: tauri::State<'_, Mutex<CodePatchApprovalState>>,
+) -> Result<(), String> {
+    approve_pending_code_patch(&approval_state, request)
 }
 
 #[tauri::command]
@@ -477,9 +509,12 @@ fn inspect_project(workspace_path: Option<String>) -> Result<ProjectInspection, 
 }
 
 #[tauri::command]
-fn apply_code_patch(request: CodePatchApplyRequest) -> Result<CodeApplyResult, String> {
+fn apply_code_patch(
+    request: CodePatchApplyRequest,
+    approval_state: tauri::State<'_, Mutex<CodePatchApprovalState>>,
+) -> Result<CodeApplyResult, String> {
     let workspace = resolve_workspace_path(Some(request.workspace_path.clone()))?;
-    apply_code_patch_in_workspace(&workspace, request)
+    apply_code_patch_in_workspace(&workspace, request, Some(&approval_state))
 }
 
 #[tauri::command]
@@ -1125,6 +1160,7 @@ fn create_code_proposal_hash(edit: &CodeProposedEdit) -> String {
 fn apply_code_patch_in_workspace(
     workspace: &Path,
     request: CodePatchApplyRequest,
+    approval_state: Option<&Mutex<CodePatchApprovalState>>,
 ) -> Result<CodeApplyResult, String> {
     let canonical_workspace = fs::canonicalize(workspace)
         .map_err(|error| format!("Workspace is not accessible: {error}"))?;
@@ -1151,6 +1187,9 @@ fn apply_code_patch_in_workspace(
     });
     if request.patch_hash != expected_patch_hash {
         return Err("Code patch hash does not match the approved proposal.".to_string());
+    }
+    if let Some(approval_state) = approval_state {
+        take_approved_code_patch(approval_state, &request, &canonical_workspace)?;
     }
 
     let approved_files = request
@@ -1699,6 +1738,72 @@ fn take_approved_pdf_operations(
     let operations = request.operations;
     state.pending = None;
     Ok(operations)
+}
+
+fn approve_pending_code_patch(
+    approval_state: &Mutex<CodePatchApprovalState>,
+    request: CodePatchApprovalRequest,
+) -> Result<(), String> {
+    if request.approval_id.trim().is_empty() {
+        return Err("Code patch approval id is required.".to_string());
+    }
+    if request.proposal_id.trim().is_empty() {
+        return Err("Code patch proposal id is required.".to_string());
+    }
+    if request.workspace_path.trim().is_empty() {
+        return Err("Code patch workspace path is required.".to_string());
+    }
+    if request.changed_files.is_empty() {
+        return Err("Code patch must list at least one approved changed file.".to_string());
+    }
+    if request.patch_hash.trim().is_empty() {
+        return Err("Code patch hash is required.".to_string());
+    }
+    let mut state = approval_state
+        .lock()
+        .map_err(|_| "Code patch approval state could not be locked.".to_string())?;
+    state.pending = Some(PendingCodePatchApproval {
+        approval_id: request.approval_id,
+        proposal_id: request.proposal_id,
+        workspace_path: request.workspace_path,
+        changed_files: request.changed_files,
+        patch_hash: request.patch_hash,
+        approved: true,
+    });
+    Ok(())
+}
+
+fn take_approved_code_patch(
+    approval_state: &Mutex<CodePatchApprovalState>,
+    request: &CodePatchApplyRequest,
+    canonical_workspace: &Path,
+) -> Result<(), String> {
+    let mut state = approval_state
+        .lock()
+        .map_err(|_| "Code patch approval state could not be locked.".to_string())?;
+    let Some(pending) = state.pending.as_ref() else {
+        return Err("No approved Code Patch proposal is pending.".to_string());
+    };
+    if pending.approval_id != request.approval_id {
+        return Err("Code patch approval id does not match the approved proposal.".to_string());
+    }
+    if !pending.approved {
+        return Err("Code patch proposal has not been approved.".to_string());
+    }
+    if pending.proposal_id != request.proposal_id {
+        return Err("Code patch proposal id does not match the approved proposal.".to_string());
+    }
+    if pending.workspace_path != normalize_path(canonical_workspace) {
+        return Err("Code patch workspace does not match the approved proposal.".to_string());
+    }
+    if pending.changed_files != request.changed_files {
+        return Err("Code patch changed files do not match the approved proposal.".to_string());
+    }
+    if pending.patch_hash != request.patch_hash {
+        return Err("Code patch hash does not match the approved proposal.".to_string());
+    }
+    state.pending = None;
+    Ok(())
 }
 
 fn infer_pdf_category(path: &Path) -> &'static str {
@@ -2428,6 +2533,7 @@ mod tests {
         let result = apply_code_patch_in_workspace(
             &root,
             code_patch_apply_request(&root, vec!["src/message.txt".to_string()], patch),
+            None,
         )
         .expect("apply approved patch");
 
@@ -2454,6 +2560,7 @@ mod tests {
                 vec!["src/allowed.txt".to_string()],
                 patch.to_string(),
             ),
+            None,
         );
 
         assert_eq!(
@@ -2473,7 +2580,7 @@ mod tests {
         );
         request.approval_id = " ".to_string();
 
-        let result = apply_code_patch_in_workspace(&root, request);
+        let result = apply_code_patch_in_workspace(&root, request, None);
 
         assert_eq!(
             result.expect_err("missing approval id should fail"),
@@ -2492,11 +2599,81 @@ mod tests {
         );
         request.patch_hash = "fnv1a-wrong".to_string();
 
-        let result = apply_code_patch_in_workspace(&root, request);
+        let result = apply_code_patch_in_workspace(&root, request, None);
 
         assert_eq!(
             result.expect_err("patch hash mismatch should fail"),
             "Code patch hash does not match the approved proposal."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn code_patch_apply_requires_native_approval() {
+        let root = create_test_directory("code-patch-native-approval-required");
+        let approval_state = Mutex::new(CodePatchApprovalState::default());
+        let request = code_patch_apply_request(
+            &root,
+            vec!["src/message.txt".to_string()],
+            "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
+        );
+
+        let result = apply_code_patch_in_workspace(&root, request, Some(&approval_state));
+
+        assert_eq!(
+            result.expect_err("approval should be required"),
+            "No approved Code Patch proposal is pending."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn approved_code_patch_apply_is_one_time_use() {
+        let root = create_test_directory("code-patch-one-shot");
+        init_git_repo(&root);
+        let file = root.join("src").join("message.txt");
+        fs::create_dir_all(file.parent().expect("file parent")).expect("create src");
+        fs::write(&file, "before\n").expect("write file");
+        run_git(&root, &["add", "."]);
+        run_git(&root, &["commit", "-m", "initial"]);
+        fs::write(&file, "after\n").expect("write changed file");
+        let patch = run_git_capture(&root, &["diff"]);
+        run_git(&root, &["checkout", "--", "src/message.txt"]);
+        let request = code_patch_apply_request(&root, vec!["src/message.txt".to_string()], patch);
+        let approval_state = Mutex::new(CodePatchApprovalState::default());
+        approve_pending_code_patch(&approval_state, code_patch_approval_request(&request))
+            .expect("approve code patch");
+
+        let result = apply_code_patch_in_workspace(&root, request.clone(), Some(&approval_state))
+            .expect("apply approved patch");
+        let second_result = apply_code_patch_in_workspace(&root, request, Some(&approval_state));
+
+        assert!(result.applied);
+        assert_eq!(
+            second_result.expect_err("approval should be consumed"),
+            "No approved Code Patch proposal is pending."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn code_patch_approval_must_match_apply_request() {
+        let root = create_test_directory("code-patch-approval-mismatch");
+        let approval_state = Mutex::new(CodePatchApprovalState::default());
+        let request = code_patch_apply_request(
+            &root,
+            vec!["src/message.txt".to_string()],
+            "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
+        );
+        let mut approval = code_patch_approval_request(&request);
+        approval.proposal_id = "other-proposal".to_string();
+        approve_pending_code_patch(&approval_state, approval).expect("approve code patch");
+
+        let result = apply_code_patch_in_workspace(&root, request, Some(&approval_state));
+
+        assert_eq!(
+            result.expect_err("proposal mismatch should fail"),
+            "Code patch proposal id does not match the approved proposal."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -2555,6 +2732,7 @@ mod tests {
                 vec!["../outside.txt".to_string()],
                 "diff --git a/../outside.txt b/../outside.txt\n".to_string(),
             ),
+            None,
         );
 
         assert_eq!(
@@ -3036,6 +3214,16 @@ mod tests {
         }
     }
 
+    fn code_patch_approval_request(request: &CodePatchApplyRequest) -> CodePatchApprovalRequest {
+        CodePatchApprovalRequest {
+            approval_id: request.approval_id.clone(),
+            proposal_id: request.proposal_id.clone(),
+            workspace_path: request.workspace_path.clone(),
+            changed_files: request.changed_files.clone(),
+            patch_hash: request.patch_hash.clone(),
+        }
+    }
+
     fn init_git_repo(root: &Path) {
         run_git(root, &["init"]);
         run_git(root, &["config", "user.email", "javis@example.test"]);
@@ -3087,6 +3275,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(Mutex::new(PdfOrganizationApprovalState::default()))
+        .manage(Mutex::new(CodePatchApprovalState::default()))
         .invoke_handler(tauri::generate_handler![
             scan_markdown_documents,
             run_read_only_command,
@@ -3094,6 +3283,7 @@ pub fn run() {
             search_web_sources,
             inspect_project,
             propose_code_edit,
+            approve_code_patch,
             apply_code_patch,
             plan_pdf_organization,
             approve_pdf_organization,

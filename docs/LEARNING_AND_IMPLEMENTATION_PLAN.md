@@ -252,7 +252,7 @@ Task
 - 增加 patch dry-run validation。
 - 展示 diff confirmation。
 - 将 Code Patch approval 接入 Milestone A 的 durable approval record。（pending/resolved 审计初版已接入；restart restore/apply 仍待共享 guard 后开放）
-- 只通过 confirmed-write 应用补丁，并在 native apply 前校验 proposal id、preview hash、workspace、approved files 和当前文件 hash。（approval id 已传入 native apply，proposal patch hash 已校验；one-shot/current file hash 待补）
+- 只通过 confirmed-write 应用补丁，并在 native apply 前校验 proposal id、preview hash、workspace、approved files 和当前文件 hash。（approval id 已传入 native apply，proposal patch hash 和 one-shot consumption 已校验；current file hash 待补）
 
 成功标准：
 
@@ -266,7 +266,7 @@ Task
 
 范围：
 
-- 抽出 Rust approval/path/hash guards。（Code Patch native apply 已要求 approval id 并校验 proposal patch hash）
+- 抽出 Rust approval/path/hash guards。（Code Patch native apply 已要求 approval id、校验 proposal patch hash，并一次性消费 native approval）
 - 把 PDF organization 和 code patch apply 迁移到共享 guard。（Code Patch proposal/apply 已先迁入共享 relative path/approved-set guard）
 - 扩展 Rust 安全测试。
 
