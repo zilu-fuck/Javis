@@ -267,12 +267,12 @@ Task
 范围：
 
 - 抽出 Rust approval/path/hash guards。
-- 把 PDF organization 和 code patch apply 迁移到共享 guard。
+- 把 PDF organization 和 code patch apply 迁移到共享 guard。（Code Patch proposal/apply 已先迁入共享 relative path/approved-set guard）
 - 扩展 Rust 安全测试。
 
 成功标准：
 
-- 所有 write-capable commands 都使用共享 guard。
+- 所有 write-capable commands 都使用共享 guard。（进行中：Code Patch path guard 已共享，PDF/native approval state 仍待迁移）
 - 现有行为保持不变。
 - 新增 negative tests 在修复前失败，修复后通过。
 

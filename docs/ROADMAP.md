@@ -110,7 +110,9 @@ Status: complete for the 2026-05-23 QA pass.
 - Add shared native guard helpers for approval id, task/tool binding, preview
   hash, workspace/path scope, file extension, and current file hash.
 - Migrate PDF organization and Code Patch apply onto the shared guards without
-  changing their user-visible behavior.
+  changing their user-visible behavior. Code Patch proposal/apply now use the
+  shared relative path and approved-file guard; approval/hash guards and PDF
+  migration remain.
 - Keep dangerous actions rejected by default.
 
 ## Milestone 5: Product Hardening

@@ -581,10 +581,18 @@ fn propose_code_edit_with_opencode(
     if request.diff.trim().is_empty() {
         return Err("Code proposal requires a non-empty diff preview.".to_string());
     }
-    for file in &request.changed_files {
-        let relative_path = normalize_relative_code_path(file)?;
-        ensure_code_path_stays_in_workspace(&canonical_workspace, &relative_path)?;
-    }
+    let requested_changed_files = request
+        .changed_files
+        .iter()
+        .map(|file| normalize_relative_code_path(file))
+        .collect::<Result<Vec<_>, _>>()?;
+    require_approved_relative_paths(
+        &canonical_workspace,
+        &requested_changed_files,
+        &requested_changed_files,
+        "Code proposal includes a file outside the approved diff",
+        "Changed file path must stay inside the selected workspace.",
+    )?;
 
     if env_flag_enabled("JAVIS_QA_MODE") {
         if let Some(path) = env::var_os("JAVIS_CODE_PROPOSAL_FIXTURE_PATH").map(PathBuf::from) {
@@ -1067,9 +1075,13 @@ fn validate_raw_code_proposal(
         .iter()
         .map(|file| normalize_relative_code_path(file))
         .collect::<Result<Vec<_>, _>>()?;
-    for file in &approved_files {
-        ensure_code_path_stays_in_workspace(workspace, file)?;
-    }
+    require_approved_relative_paths(
+        workspace,
+        &approved_files,
+        &approved_files,
+        "Code proposal includes a file outside the approved diff",
+        "Changed file path must stay inside the selected workspace.",
+    )?;
     if let Some(allowed_files) = allowed_files {
         for file in &approved_files {
             if !allowed_files.contains(file) {
@@ -1128,17 +1140,13 @@ fn apply_code_patch_in_workspace(
         .collect::<Result<Vec<_>, _>>()?;
 
     let patch_files = extract_unified_diff_paths(patch)?;
-    for file in &patch_files {
-        if !approved_files.contains(file) {
-            return Err(format!(
-                "Patch includes an unapproved file path: {}",
-                file.display()
-            ));
-        }
-    }
-    for file in &approved_files {
-        ensure_code_path_stays_in_workspace(&canonical_workspace, file)?;
-    }
+    require_approved_relative_paths(
+        &canonical_workspace,
+        &approved_files,
+        &patch_files,
+        "Patch includes an unapproved file path",
+        "Changed file path must stay inside the selected workspace.",
+    )?;
 
     let mut child = Command::new(resolve_command_program("git"))
         .args(["apply", "--whitespace=nowarn", "-"])
@@ -1224,15 +1232,37 @@ fn normalize_relative_code_path(path: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn ensure_code_path_stays_in_workspace(workspace: &Path, relative_path: &Path) -> Result<(), String> {
-    let target = workspace.join(relative_path);
+fn require_approved_relative_paths(
+    workspace: &Path,
+    approved_files: &[PathBuf],
+    requested_files: &[PathBuf],
+    unapproved_message: &str,
+    outside_workspace_message: &str,
+) -> Result<(), String> {
+    for file in requested_files {
+        if !approved_files.contains(file) {
+            return Err(format!("{unapproved_message}: {}", file.display()));
+        }
+    }
+    for file in approved_files {
+        ensure_relative_path_stays_in_root(workspace, file, outside_workspace_message)?;
+    }
+    Ok(())
+}
+
+fn ensure_relative_path_stays_in_root(
+    root: &Path,
+    relative_path: &Path,
+    outside_root_message: &str,
+) -> Result<(), String> {
+    let target = root.join(relative_path);
     let parent = target
         .parent()
         .ok_or_else(|| "Changed file path does not have a parent directory.".to_string())?;
     let canonical_parent = fs::canonicalize(parent)
         .map_err(|error| format!("Changed file parent is not accessible: {error}"))?;
-    if !canonical_parent.starts_with(workspace) {
-        return Err("Changed file path must stay inside the selected workspace.".to_string());
+    if !canonical_parent.starts_with(root) {
+        return Err(outside_root_message.to_string());
     }
     Ok(())
 }
@@ -2415,6 +2445,49 @@ mod tests {
             "Patch includes an unapproved file path: src/other.txt"
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn shared_relative_path_guard_rejects_unapproved_paths() {
+        let root = create_test_directory("shared-guard-unapproved");
+
+        let result = require_approved_relative_paths(
+            &root,
+            &[PathBuf::from("src/allowed.txt")],
+            &[PathBuf::from("src/other.txt")],
+            "Requested path is not approved",
+            "Requested path must stay inside root.",
+        );
+
+        assert_eq!(
+            result.expect_err("unapproved requested path should fail"),
+            "Requested path is not approved: src/other.txt"
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn shared_relative_path_guard_rejects_root_escape() {
+        let root = create_test_directory("shared-guard-escape");
+        let outside = create_test_directory("shared-guard-outside");
+        let escape = PathBuf::from("..")
+            .join(outside.file_name().expect("outside directory name"))
+            .join("file.txt");
+
+        let result = require_approved_relative_paths(
+            &root,
+            &[escape.clone()],
+            &[escape],
+            "Requested path is not approved",
+            "Requested path must stay inside root.",
+        );
+
+        assert_eq!(
+            result.expect_err("root escape should fail"),
+            "Requested path must stay inside root."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+        fs::remove_dir_all(outside).expect("cleanup outside directory");
     }
 
     #[test]
