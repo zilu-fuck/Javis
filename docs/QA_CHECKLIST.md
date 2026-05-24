@@ -148,6 +148,12 @@ exist:
   apply result.
 - For repeatable provider parsing evidence, set `JAVIS_QA_MODE=1` with
   `JAVIS_CODE_PROPOSAL_FIXTURE_PATH` pointing at a proposal JSON fixture.
+- For packaged-app repeatable Code Agent evidence, run
+  `docs/qa/2026-05-24/code-agent-opencode-qa.ps1`. It covers proposal denial,
+  approved patch application, and optional live provider smoke when
+  `JAVIS_OPENCODE_LIVE_PROVIDER`, `JAVIS_OPENCODE_LIVE_MODEL`,
+  `JAVIS_OPENCODE_LIVE_API_KEY`, and `JAVIS_OPENCODE_LIVE_BASE_URL` are set.
+  Do not write live API keys into QA notes or committed scripts.
 
 ### Product Readiness Scenarios
 

@@ -20,7 +20,7 @@ function parseGitStatusLine(line: string): string | undefined {
   }
 
   const status = line.slice(0, 2);
-  const pathText = line.slice(3).trim();
+  const pathText = line.slice(2).trim();
   if (!pathText) {
     return undefined;
   }

@@ -1149,10 +1149,38 @@ export function createFileScanTaskRuntime({
             logs,
           });
 
-          const proposedEdit = await activeCodeTool.proposeEdit({
-            userGoal,
-            preview: codeReviewPreview,
-          });
+          let proposedEdit: CodeProposedEdit;
+          try {
+            proposedEdit = await activeCodeTool.proposeEdit({
+              userGoal,
+              preview: codeReviewPreview,
+            });
+          } catch (error) {
+            emit({
+              ...snapshot,
+              title: "Code Agent patch proposal failed",
+              status: "failed",
+              commanderMessage:
+                "Code Agent could not produce a patch proposal. Check the opencode model settings or provider response, then retry.",
+              plan: markStep(snapshot.plan, "step-propose-code-edit", "failed", "step-apply-code-edit", "skipped"),
+              agents: [
+                commanderSnapshot("failed", "Patch proposal unavailable"),
+                codeSnapshot("failed", "Patch proposal failed"),
+                verifierSnapshot("cancelled", "No patch proposal to verify"),
+              ],
+              codeReviewPreview,
+              commands: [verification],
+              permissionRequest: resolvedRequest,
+              logs: appendLog(snapshot, {
+                id: `${taskId}-proposal-failed`,
+                kind: "tool",
+                title: "task.failed",
+                detail: error instanceof Error ? error.message : String(error),
+              }),
+              verificationSummary: "failed: Code Agent patch proposal failed before any write approval was requested.",
+            });
+            return;
+          }
           const tokenUsage = proposedEdit.tokenUsage
             ? addModelUsage(snapshot.tokenUsage, "code", proposedEdit.tokenUsage)
             : snapshot.tokenUsage;

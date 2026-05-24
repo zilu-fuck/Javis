@@ -6,9 +6,10 @@ describe("parseGitStatusFiles", () => {
     expect(
       parseGitStatusFiles([
         " M packages/core/src/index.ts",
+        " M src/message.txt",
         "?? docs/product notes.md",
       ].join("\n")),
-    ).toEqual(["packages/core/src/index.ts", "docs/product notes.md"]);
+    ).toEqual(["packages/core/src/index.ts", "src/message.txt", "docs/product notes.md"]);
   });
 
   it("uses rename and copy targets for approval paths", () => {

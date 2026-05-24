@@ -1,0 +1,1 @@
+{"summary":"Tighten the Code Agent QA message.","changedFiles":["src/message.txt"],"patch":"diff --git a/src/message.txt b/src/message.txt\n--- a/src/message.txt\n+++ b/src/message.txt\n@@ -1 +1 @@\n-hello reviewed\n+hello approved\n"}

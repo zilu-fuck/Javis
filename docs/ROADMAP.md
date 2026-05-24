@@ -55,7 +55,8 @@ Status: complete for the 2026-05-23 QA pass.
   implemented.
 - Integrate opencode as an optional backend. Initial proposal-only adapter is
   implemented, uses desktop-managed model settings, and still needs live
-  product QA plus credential-store hardening.
+  provider hardening plus credential-store hardening. Packaged-app fixture QA
+  covers proposal denial and approved patch application.
 - Treat opencode as an extensible kernel:
   - use MCP for memory, search, indexing, and other external capabilities
   - evaluate OpenCode plugins such as FullAutoAgent-style workflow plugins and
@@ -72,8 +73,9 @@ Status: complete for the 2026-05-23 QA pass.
   changed-file listing, preview approval, read-only `git diff --check`
   verification, opencode-backed proposed-edit contract, confirmed-write apply
   approval, desktop model configuration, and a local approved-patch apply
-  command are implemented. Live opencode proposal/apply QA and provider
-  hardening are still pending.
+  command are implemented. Fixture opencode proposal/apply QA passes; live
+  DeepSeek-compatible proposal generation currently fails before write approval
+  and remains the next provider-hardening target.
 - Add tests around rejected dangerous commands and approved edit application.
 - Add QA for inspect-only, diff preview, approved edit, denied edit, and failed
   verification states.

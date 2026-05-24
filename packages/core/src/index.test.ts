@@ -423,6 +423,59 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
+  it("reports Code Agent proposal backend failures separately from verification failures", async () => {
+    const proposeEdit = vi.fn(async () => {
+      throw new Error("provider returned invalid proposal");
+    });
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+      },
+      codeTool: {
+        inspectRepository: vi.fn(async () => ({
+          workspacePath: "E:/Javis",
+          changedFiles: ["packages/core/src/index.ts"],
+          diffStat: "1 file changed",
+          diff: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts",
+        })),
+        proposeEdit,
+        applyProposedEdit: vi.fn(async () => ({
+          applied: true,
+          workspacePath: "E:/Javis",
+          changedFiles: ["packages/core/src/index.ts"],
+          message: "Should not run.",
+        })),
+      },
+      shellTool: {
+        runReadOnlyCommand: vi.fn(async (request: ShellCommandRequest) => ({
+          command: [request.program, ...request.args].join(" "),
+          cwd: "E:/Javis",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        })),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("Review code changes");
+    await waitForStatus(snapshots, "waiting_permission");
+    runtime.resolvePermission("approved");
+
+    const finalSnapshot = await waitForStatus(snapshots, "failed");
+
+    expect(proposeEdit).toHaveBeenCalled();
+    expect(finalSnapshot.title).toBe("Code Agent patch proposal failed");
+    expect(finalSnapshot.commanderMessage).toContain("opencode model settings");
+    expect(finalSnapshot.logs[finalSnapshot.logs.length - 1]?.detail).toContain(
+      "provider returned invalid proposal",
+    );
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
   it("refuses Code Agent apply results that include unapproved files", async () => {
     const proposedEdit = {
       proposalId: "proposal-1",
