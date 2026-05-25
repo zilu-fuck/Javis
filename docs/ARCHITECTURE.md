@@ -120,6 +120,10 @@ agent policy.
 - File Agent: handles Markdown scans and PDF organization previews/execution.
 - Shell Agent: runs allowlisted read-only project checks.
 - Research Agent: searches and fetches public URL sources.
+- Computer Agent: browses local computer views and searches indexed local
+  files/documents under user-visible actions.
+- Scheduler Agent: records reminders and scheduled tasks, then coordinates
+  local notification execution.
 - Verifier: checks evidence and creates the final verification summary.
 
 Browser and Code Agent roles are required for product readiness. Code Agent now
@@ -131,6 +135,33 @@ settings into opencode's per-run config, and keeps file writes inside Javis's
 native approved-patch apply command.
 Browser/account-changing automation remains out of scope unless a future design
 adds explicit safety rules.
+
+## Multi-Agent Workflow Blueprints
+
+`packages/core/src/workflows.ts` records the product workflow templates that the
+future scheduler should consume. They are intentionally lightweight blueprints,
+not a hidden autonomous runtime. Commander remains the coordinator, and each
+step declares its agent, inputs, outputs, permission level, dependencies, and
+whether it can run in parallel.
+
+Current built-in blueprints:
+
+- Read current project: Commander coordinates File, Shell, Code, and Verifier
+  to scan files, inspect scripts, analyze structure, and produce an
+  evidence-backed project summary.
+- Research trending topics: Research and Browser collect public current
+  sources, then Verifier deduplicates and ranks the brief.
+- Plan a Spring Boot project: Commander clarifies requirements, Research checks
+  current guidance, Code drafts steps/snippets, and Verifier checks consistency.
+- Find a local document: Commander parses the query, Computer searches local
+  file metadata, and Verifier ranks matches.
+- Daily reminder: Commander parses the schedule, Scheduler persists the local
+  reminder, and Verifier confirms the next run.
+
+These workflows describe the target collaboration model for a Marvis/Mavis-style
+workbench while preserving Javis's safety rule: read steps can run directly, but
+local writes, file changes, or durable scheduled-state changes must remain
+visible and approval-bound.
 
 ## OpenCode Extension Strategy
 

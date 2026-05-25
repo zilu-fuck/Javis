@@ -1,3 +1,7 @@
+import {
+  createCodeApplyDryRun,
+  createDryRunBindingHash,
+} from "@javis/core";
 import type { CodeProposedEdit, PermissionRequest } from "@javis/tools";
 
 export const APPROVAL_RECORDS_STORAGE_KEY = "javis.approvalRecords.v1";
@@ -8,6 +12,7 @@ type ApprovalRecordStorage = Pick<Storage, "getItem" | "setItem">;
 
 export type DurableApprovalStatus = "pending" | "approved" | "denied" | "expired";
 type PlannedPath = PermissionRequest["dryRun"]["affectedPaths"][number];
+type DryRunSummary = PermissionRequest["dryRun"];
 
 export interface DurableApprovalRecord {
   approvalId: string;
@@ -221,7 +226,18 @@ export function sanitizeApprovalRecord(value: unknown): DurableApprovalRecord | 
   if (permissionRequest.bindingHash !== value.previewHash) {
     return null;
   }
+  if (createDryRunBindingHash(permissionRequest.dryRun) !== value.previewHash) {
+    return null;
+  }
   if (permissionRequest.status !== value.status) {
+    return null;
+  }
+
+  const codeProposedEdit = sanitizeCodeProposedEdit(value.codeProposedEdit);
+  if (
+    (codeProposedEdit && !isCodeProposedEditBoundToRequest(codeProposedEdit, value.toolName, value.workspacePath, permissionRequest)) ||
+    (!codeProposedEdit && value.toolName === "code.applyProposedEdit")
+  ) {
     return null;
   }
 
@@ -237,7 +253,6 @@ export function sanitizeApprovalRecord(value: unknown): DurableApprovalRecord | 
     createdAt: value.createdAt,
     permissionRequest,
   };
-  const codeProposedEdit = sanitizeCodeProposedEdit(value.codeProposedEdit);
   if (codeProposedEdit) {
     record.codeProposedEdit = codeProposedEdit;
   }
@@ -248,6 +263,36 @@ export function sanitizeApprovalRecord(value: unknown): DurableApprovalRecord | 
     record.decision = value.decision;
   }
   return record;
+}
+
+function isCodeProposedEditBoundToRequest(
+  codeProposedEdit: CodeProposedEdit,
+  toolName: string,
+  workspacePath: string,
+  permissionRequest: PermissionRequest,
+): boolean {
+  if (toolName !== "code.applyProposedEdit" || codeProposedEdit.workspacePath !== workspacePath) {
+    return false;
+  }
+  return areDryRunsEqual(permissionRequest.dryRun, createCodeApplyDryRun(codeProposedEdit));
+}
+
+function areDryRunsEqual(left: DryRunSummary, right: DryRunSummary): boolean {
+  return JSON.stringify(normalizeDryRun(left)) === JSON.stringify(normalizeDryRun(right));
+}
+
+function normalizeDryRun(dryRun: DryRunSummary) {
+  return {
+    operation: dryRun.operation,
+    affectedPaths: dryRun.affectedPaths.map((path) => ({
+      source: path.source,
+      target: path.target,
+      action: path.action,
+      conflict: path.conflict,
+    })),
+    riskSummary: dryRun.riskSummary,
+    reversible: dryRun.reversible,
+  };
 }
 
 function sanitizeCodeProposedEdit(value: unknown): CodeProposedEdit | null {

@@ -1,8 +1,35 @@
 import type { TaskSnapshot } from "@javis/core";
+import type { DatabaseValue, DesktopDatabase, DesktopDatabaseMigration } from "./desktop-database";
 
 export const TASK_HISTORY_STORAGE_KEY = "javis.taskHistory.v1";
 export const TASK_HISTORY_LIMIT = 20;
 export const TASK_HISTORY_STORAGE_VERSION = 1;
+export const TASK_HISTORY_TABLE_NAME = "task_history";
+export const TASK_HISTORY_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS task_history (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  user_goal TEXT NOT NULL,
+  status TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  snapshot_json TEXT NOT NULL
+)
+`.trim();
+export const TASK_HISTORY_UPDATED_AT_INDEX_SQL = `
+CREATE INDEX IF NOT EXISTS idx_task_history_updated_at ON task_history (updated_at DESC)
+`.trim();
+export const TASK_HISTORY_SCHEMA_MIGRATION: DesktopDatabaseMigration = {
+  id: "001_task_history",
+  sql: TASK_HISTORY_SCHEMA_SQL,
+};
+export const TASK_HISTORY_UPDATED_AT_INDEX_MIGRATION: DesktopDatabaseMigration = {
+  id: "002_task_history_updated_at_index",
+  sql: TASK_HISTORY_UPDATED_AT_INDEX_SQL,
+};
+export const TASK_HISTORY_SCHEMA_MIGRATIONS: DesktopDatabaseMigration[] = [
+  TASK_HISTORY_SCHEMA_MIGRATION,
+  TASK_HISTORY_UPDATED_AT_INDEX_MIGRATION,
+];
 
 type TaskHistoryStorage = Pick<Storage, "getItem" | "setItem">;
 
@@ -27,11 +54,7 @@ export function loadTaskHistory(storage: TaskHistoryStorage): TaskSnapshot[] {
       return [];
     }
 
-    return entries
-      .map(sanitizeTaskSnapshot)
-      .filter((task): task is TaskSnapshot => Boolean(task))
-      .filter(isArchivableTask)
-      .slice(0, TASK_HISTORY_LIMIT);
+    return sanitizeTaskHistory(entries);
   } catch {
     return [];
   }
@@ -41,11 +64,7 @@ export function saveTaskHistory(
   storage: TaskHistoryStorage,
   history: TaskSnapshot[],
 ): TaskSnapshot[] {
-  const nextHistory = history
-    .map(sanitizeTaskSnapshot)
-    .filter((task): task is TaskSnapshot => Boolean(task))
-    .filter(isArchivableTask)
-    .slice(0, TASK_HISTORY_LIMIT);
+  const nextHistory = sanitizeTaskHistory(history);
 
   try {
     storage.setItem(TASK_HISTORY_STORAGE_KEY, JSON.stringify(nextHistory));
@@ -77,6 +96,62 @@ export function getTaskUpdatedAt(task: TaskSnapshot): string {
     : new Date().toISOString();
 }
 
+export interface TaskHistoryRepository {
+  list(): Promise<TaskSnapshot[]>;
+  save(history: TaskSnapshot[]): Promise<TaskSnapshot[]>;
+  upsert(task: TaskSnapshot): Promise<TaskSnapshot[]>;
+  importFromLocalStorage(storage: TaskHistoryStorage): Promise<TaskSnapshot[]>;
+}
+
+export function createTaskHistoryRepository(
+  database: Pick<DesktopDatabase, "execute" | "select">,
+): TaskHistoryRepository {
+  return {
+    async list() {
+      return loadTaskHistoryRows(database);
+    },
+
+    async save(history) {
+      const nextHistory = sanitizeTaskHistory(history);
+      await database.execute(`DELETE FROM ${TASK_HISTORY_TABLE_NAME}`);
+      await saveTaskHistoryRows(database, nextHistory);
+      return nextHistory;
+    },
+
+    async upsert(task) {
+      const current = await loadTaskHistoryRows(database);
+      const nextHistory = upsertTaskHistory(current, task);
+      await database.execute(`DELETE FROM ${TASK_HISTORY_TABLE_NAME}`);
+      await saveTaskHistoryRows(database, nextHistory);
+      return nextHistory;
+    },
+
+    async importFromLocalStorage(storage) {
+      const importedHistory = loadTaskHistory(storage);
+      if (importedHistory.length === 0) {
+        return loadTaskHistoryRows(database);
+      }
+      await database.execute(`DELETE FROM ${TASK_HISTORY_TABLE_NAME}`);
+      await saveTaskHistoryRows(database, importedHistory);
+      return importedHistory;
+    },
+  };
+}
+
+export async function loadTaskHistoryWithStorageFallback(
+  repository: Pick<TaskHistoryRepository, "list"> | null | undefined,
+  storage: TaskHistoryStorage,
+): Promise<TaskSnapshot[]> {
+  if (!repository) {
+    return loadTaskHistory(storage);
+  }
+  try {
+    return await repository.list();
+  } catch {
+    return loadTaskHistory(storage);
+  }
+}
+
 function parseTaskHistoryEntries(value: unknown): unknown[] | null {
   if (Array.isArray(value)) {
     return value;
@@ -91,6 +166,63 @@ function parseTaskHistoryEntries(value: unknown): unknown[] | null {
   }
 
   return null;
+}
+
+function sanitizeTaskHistory(history: unknown[]): TaskSnapshot[] {
+  return history
+    .map(sanitizeTaskSnapshot)
+    .filter((task): task is TaskSnapshot => Boolean(task))
+    .filter(isArchivableTask)
+    .slice(0, TASK_HISTORY_LIMIT);
+}
+
+async function loadTaskHistoryRows(
+  database: Pick<DesktopDatabase, "select">,
+): Promise<TaskSnapshot[]> {
+  const rows = await database.select<{ snapshot_json: string }>(
+    `SELECT snapshot_json FROM ${TASK_HISTORY_TABLE_NAME} ORDER BY updated_at DESC, id DESC LIMIT ?`,
+    [TASK_HISTORY_LIMIT],
+  );
+
+  return sanitizeTaskHistory(
+    rows.map((row) => {
+      try {
+        return JSON.parse(row.snapshot_json);
+      } catch {
+        return null;
+      }
+    }),
+  );
+}
+
+async function saveTaskHistoryRows(
+  database: Pick<DesktopDatabase, "execute">,
+  history: TaskSnapshot[],
+): Promise<void> {
+  for (const task of history) {
+    await database.execute(
+      `INSERT INTO ${TASK_HISTORY_TABLE_NAME} (id, title, user_goal, status, updated_at, snapshot_json)
+VALUES (?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+  title = excluded.title,
+  user_goal = excluded.user_goal,
+  status = excluded.status,
+  updated_at = excluded.updated_at,
+  snapshot_json = excluded.snapshot_json`,
+      taskHistoryBindValues(task),
+    );
+  }
+}
+
+function taskHistoryBindValues(task: TaskSnapshot): DatabaseValue[] {
+  return [
+    task.id,
+    task.title,
+    task.userGoal,
+    task.status,
+    getTaskUpdatedAt(task),
+    JSON.stringify(task),
+  ];
 }
 
 export function sanitizeTaskSnapshot(value: unknown): TaskSnapshot | null {
@@ -224,6 +356,8 @@ function isAgentKind(value: unknown): boolean {
     value === "file" ||
     value === "shell" ||
     value === "browser" ||
+    value === "computer" ||
+    value === "scheduler" ||
     value === "research" ||
     value === "code" ||
     value === "verifier"

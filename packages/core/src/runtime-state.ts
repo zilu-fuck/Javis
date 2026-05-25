@@ -21,6 +21,7 @@ export function createRuntimeState(
 
   return {
     clearTimers() {
+      disposed = false;
       for (const timer of timers) {
         clearTimeout(timer);
       }

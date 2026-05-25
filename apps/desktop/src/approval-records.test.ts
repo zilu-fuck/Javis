@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  createCodeApplyDryRun,
+  createDryRunBindingHash,
+} from "@javis/core";
+import type { DryRunSummary, PermissionRequest } from "@javis/tools";
+import {
   APPROVAL_RECORDS_LIMIT,
   APPROVAL_RECORDS_STORAGE_KEY,
   APPROVAL_RECORDS_STORAGE_VERSION,
@@ -45,6 +50,25 @@ describe("durable approval records", () => {
           ...createApprovalRecord().permissionRequest.dryRun,
           affectedPaths: [{ action: "archive" }],
         },
+      },
+    })).toBeNull();
+    const tamperedDryRun: DryRunSummary = {
+      ...createApprovalRecord().permissionRequest.dryRun,
+      affectedPaths: [
+        {
+          source: "C:/Users/example/Downloads/a.pdf",
+          target: "C:/Users/example/Downloads/Other/a.pdf",
+          action: "move",
+        },
+      ],
+    };
+    expect(sanitizeApprovalRecord({
+      ...createApprovalRecord(),
+      previewHash: createDryRunBindingHash(tamperedDryRun),
+      permissionRequest: {
+        ...createApprovalRecord().permissionRequest,
+        bindingHash: createDryRunBindingHash(tamperedDryRun),
+        dryRun: createApprovalRecord().permissionRequest.dryRun,
       },
     })).toBeNull();
   });
@@ -109,6 +133,8 @@ describe("durable approval records", () => {
   });
 
   it("creates durable records for Code Agent patch approvals", () => {
+    const codeProposedEdit = createCodeProposedEdit();
+    const dryRun = createCodeApplyDryRun(codeProposedEdit);
     const created = createApprovalRecordFromPermissionRequest({
       taskId: "task-code",
       toolName: "code.applyProposedEdit",
@@ -118,30 +144,12 @@ describe("durable approval records", () => {
         level: "confirmed_write",
         title: "Approve Code Agent patch application",
         reason: "Applying the proposed patch changes local project files.",
-        bindingHash: "dryrun-fnv1a-code",
+        bindingHash: createDryRunBindingHash(dryRun),
         status: "pending",
         createdAt: "2026-05-24T00:00:00.000Z",
-        dryRun: {
-          operation: "Apply Code Agent patch proposal proposal-1",
-          affectedPaths: [
-            {
-              source: "packages/core/src/index.ts",
-              target: "packages/core/src/index.ts",
-              action: "modify",
-            },
-          ],
-          riskSummary: "Patch hash: fnv1a-test.",
-          reversible: true,
-        },
+        dryRun,
       },
-      codeProposedEdit: {
-        proposalId: "proposal-1",
-        workspacePath: "E:/Javis",
-        summary: "Tighten completion message.",
-        changedFiles: ["packages/core/src/index.ts"],
-        patch: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts\n",
-        patchHash: "fnv1a-test",
-      },
+      codeProposedEdit,
       now: "2026-05-24T00:00:00.000Z",
     });
 
@@ -151,6 +159,53 @@ describe("durable approval records", () => {
     expect(created?.permissionRequest.dryRun.affectedPaths[0]?.action).toBe("modify");
     expect(created?.codeProposedEdit?.proposalId).toBe("proposal-1");
     expect(created?.codeProposedEdit?.patch).toContain("diff --git");
+  });
+
+  it("rejects Code Agent approval records whose dry-run files do not match the proposed edit", () => {
+    const record = createCodeApprovalRecord();
+
+    expect(sanitizeApprovalRecord({
+      ...record,
+      codeProposedEdit: {
+        ...record.codeProposedEdit,
+        changedFiles: ["packages/core/src/other.ts"],
+      },
+    })).toBeNull();
+    expect(sanitizeApprovalRecord({
+      ...record,
+      workspacePath: "E:/Other",
+    })).toBeNull();
+    expect(sanitizeApprovalRecord({
+      ...record,
+      codeProposedEdit: undefined,
+    })).toBeNull();
+    expect(sanitizeApprovalRecord({
+      ...record,
+      codeProposedEdit: {
+        ...record.codeProposedEdit,
+        patch: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts\n+changed\n",
+        patchHash: "fnv1a-other",
+      },
+    })).toBeNull();
+    const misleadingDryRun: DryRunSummary = {
+      ...record.permissionRequest.dryRun,
+      affectedPaths: [
+        {
+          source: "packages/core/src/index.ts",
+          target: "packages/core/src/index.ts",
+          action: "delete",
+        },
+      ],
+    };
+    expect(sanitizeApprovalRecord({
+      ...record,
+      previewHash: createDryRunBindingHash(misleadingDryRun),
+      permissionRequest: {
+        ...record.permissionRequest,
+        bindingHash: createDryRunBindingHash(misleadingDryRun),
+        dryRun: misleadingDryRun,
+      },
+    })).toBeNull();
   });
 
   it("resolves and expires pending records without changing terminal records", () => {
@@ -195,37 +250,79 @@ describe("durable approval records", () => {
 });
 
 function createApprovalRecord(approvalId = "approval-1"): DurableApprovalRecord {
+  const dryRun: DryRunSummary = {
+    operation: "Organize PDF files by filename topic",
+    affectedPaths: [
+      {
+        source: "C:/Users/example/Downloads/a.pdf",
+        target: "C:/Users/example/Downloads/Documents/a.pdf",
+        action: "move",
+      },
+    ],
+    riskSummary: "Preview only.",
+    reversible: true,
+  };
+  const bindingHash = createDryRunBindingHash(dryRun);
+  const permissionRequest: PermissionRequest = {
+    id: approvalId,
+    level: "confirmed_write",
+    title: "Approve PDF move plan",
+    reason: "Moving files changes the local filesystem, so Javis needs explicit approval.",
+    bindingHash,
+    status: "pending",
+    createdAt: "2026-05-24T00:00:00.000Z",
+    dryRun,
+  };
   return {
     approvalId,
     taskId: "task-1",
     toolName: "file.executePdfOrganization",
     workspacePath: "C:/Users/example/Downloads",
     permissionLevel: "confirmed_write",
-    previewHash: "dryrun-fnv1a-test",
+    previewHash: bindingHash,
+    expiresAt: "2026-05-24T00:10:00.000Z",
+    status: "pending",
+    createdAt: "2026-05-24T00:00:00.000Z",
+    permissionRequest,
+  };
+}
+
+function createCodeApprovalRecord(): DurableApprovalRecord {
+  const codeProposedEdit = createCodeProposedEdit();
+  const dryRun = createCodeApplyDryRun(codeProposedEdit);
+  const bindingHash = createDryRunBindingHash(dryRun);
+  return {
+    approvalId: "task-code-apply-permission",
+    taskId: "task-code",
+    toolName: "code.applyProposedEdit",
+    workspacePath: "E:/Javis",
+    permissionLevel: "confirmed_write",
+    previewHash: bindingHash,
     expiresAt: "2026-05-24T00:10:00.000Z",
     status: "pending",
     createdAt: "2026-05-24T00:00:00.000Z",
     permissionRequest: {
-      id: approvalId,
+      id: "task-code-apply-permission",
       level: "confirmed_write",
-      title: "Approve PDF move plan",
-      reason: "Moving files changes the local filesystem, so Javis needs explicit approval.",
-      bindingHash: "dryrun-fnv1a-test",
+      title: "Approve Code Agent patch application",
+      reason: "Applying the proposed patch changes local project files.",
+      bindingHash,
       status: "pending",
       createdAt: "2026-05-24T00:00:00.000Z",
-      dryRun: {
-        operation: "Organize PDF files by filename topic",
-        affectedPaths: [
-          {
-            source: "C:/Users/example/Downloads/a.pdf",
-            target: "C:/Users/example/Downloads/Documents/a.pdf",
-            action: "move",
-          },
-        ],
-        riskSummary: "Preview only.",
-        reversible: true,
-      },
+      dryRun,
     },
+    codeProposedEdit,
+  };
+}
+
+function createCodeProposedEdit() {
+  return {
+    proposalId: "proposal-1",
+    workspacePath: "E:/Javis",
+    summary: "Tighten completion message.",
+    changedFiles: ["packages/core/src/index.ts"],
+    patch: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts\n",
+    patchHash: "fnv1a-test",
   };
 }
 

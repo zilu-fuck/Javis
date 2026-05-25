@@ -3,6 +3,10 @@ import {
   addModelUsage,
   createFileScanTaskRuntime,
   createInitialTaskSnapshot,
+  demoAgents,
+  getAgentSystemPrompt,
+  getWorkbenchWorkflow,
+  listWorkbenchWorkflows,
 } from "./index";
 import type {
   FileOrganizationExecution,
@@ -50,9 +54,42 @@ describe("createFileScanTaskRuntime", () => {
       "agent-shell",
       "agent-code",
       "agent-research",
+      "agent-computer",
+      "agent-scheduler",
       "agent-verifier",
     ]);
     expect(snapshot.agents.every((agent) => agent.status === "queued")).toBe(true);
+  });
+
+  it("provides bilingual system prompts for built-in agents", () => {
+    const commander = demoAgents.find((agent) => agent.kind === "commander");
+
+    expect(commander?.systemPrompt.en).toContain("Commander");
+    expect(commander && getAgentSystemPrompt(commander, "zh-CN")).toContain("指挥官");
+  });
+
+  it("describes the product multi-agent workflow blueprints", () => {
+    const workflows = listWorkbenchWorkflows();
+
+    expect(workflows.map((workflow) => workflow.id)).toEqual([
+      "read-current-project",
+      "research-trending-topics",
+      "plan-spring-boot-project",
+      "find-local-document",
+      "daily-reminder",
+    ]);
+    expect(getWorkbenchWorkflow("read-current-project")?.participatingAgentKinds).toEqual([
+      "commander",
+      "file",
+      "shell",
+      "code",
+      "verifier",
+    ]);
+    expect(getWorkbenchWorkflow("find-local-document")?.participatingAgentKinds).toContain("computer");
+    expect(getWorkbenchWorkflow("daily-reminder")?.steps).toContainEqual(expect.objectContaining({
+      agentKind: "scheduler",
+      permissionLevel: "confirmed_write",
+    }));
   });
 
   it("aggregates model usage by task and agent kind", () => {
@@ -134,6 +171,290 @@ describe("createFileScanTaskRuntime", () => {
     expect(finalSnapshot.project).toEqual(project);
     expect(commands.map((command) => command.command)).toContain("pnpm typecheck");
     expect(finalSnapshot.verificationSummary).toContain("verified");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("executes the read-current-project workflow from the workflow blueprint", async () => {
+    const project: ProjectInspection = {
+      workspacePath: "E:/Javis",
+      packageManager: "pnpm",
+      scripts: [{ name: "test", command: "pnpm test" }],
+      recommendedStartCommand: "pnpm dev",
+      recommendedTestCommand: "pnpm test",
+    };
+    const documents: MarkdownDocument[] = [
+      {
+        path: "E:/Javis/docs/README.md",
+        modifiedAt: "2026-05-25T00:00:00.000Z",
+        sizeBytes: 100,
+        heading: "Javis",
+        excerpt: "Project documentation",
+      },
+    ];
+    const commanderPlan = vi.fn(async () => ({
+      title: "Model planned project read",
+      reasoning: "Use File, Shell, Code, and Verifier agents for a read-only project pass.",
+      steps: [
+        {
+          id: "scan-files",
+          title: "Scan files",
+          assignedAgentKind: "file",
+          successCriteria: "Markdown documents are scanned.",
+        },
+      ],
+    }));
+    const verifierCheck = vi.fn(async () => ({
+      status: "pass" as const,
+      summary: "All read-current-project evidence is present.",
+      detail: "Documents, project inspection, command outputs, and summary were provided.",
+    }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      commanderTool: {
+        plan: commanderPlan,
+      },
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => documents),
+      },
+      projectTool: {
+        inspectProject: vi.fn(async () => project),
+      },
+      shellTool: {
+        runReadOnlyCommand: vi.fn(async (request: ShellCommandRequest) => ({
+          command: [request.program, ...request.args].join(" "),
+          cwd: "E:/Javis",
+          exitCode: 0,
+          stdout: "ok",
+          stderr: "",
+        })),
+      },
+      verifierTool: {
+        check: verifierCheck,
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("inspect this project");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(finalSnapshot.title).toBe("Current project read");
+    expect(finalSnapshot.plan.map((step) => step.id)).toEqual([
+      "scan-files",
+      "inspect-project",
+      "analyze-code",
+      "summarize-project",
+    ]);
+    expect(finalSnapshot.documents).toHaveLength(1);
+    expect(finalSnapshot.project).toEqual(project);
+    expect(finalSnapshot.commands).toHaveLength(3);
+    expect(commanderPlan).toHaveBeenCalledWith(expect.objectContaining({
+      workflowId: "read-current-project",
+      userGoal: "inspect this project",
+    }));
+    expect(verifierCheck).toHaveBeenCalledWith(expect.objectContaining({
+      stepId: "summarize-project",
+      successCriteria: "Human-readable summary with evidence and unknowns",
+    }));
+    expect(verifierCheck).toHaveBeenCalledWith(expect.objectContaining({
+      evidence: expect.arrayContaining([
+        expect.objectContaining({
+          label: "Shared workflow context",
+          data: expect.objectContaining({
+            fileScan: expect.objectContaining({ count: 1 }),
+            projectInspection: project,
+            shellCommands: expect.any(Array),
+            analysisSummary: expect.stringContaining("Code Agent identified pnpm"),
+          }),
+        }),
+      ]),
+    }));
+    expect(finalSnapshot.verificationSummary).toContain("pass: All read-current-project evidence is present.");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("routes supported workflow blueprints through concrete generic workflow tools", async () => {
+    const commanderPlan = vi.fn(async () => ({
+      title: "Model planned reminder",
+      reasoning: "Use the Scheduler workflow and keep confirmed writes explicit.",
+      steps: [
+        {
+          id: "parse-schedule",
+          title: "Parse schedule",
+          assignedAgentKind: "commander",
+          successCriteria: "Reminder intent is parsed.",
+        },
+      ],
+    }));
+    const verifierCheck = vi.fn(async () => ({
+      status: "pass" as const,
+      summary: "Reminder workflow created a durable schedule.",
+      detail: "The DAG executor recorded scheduler output.",
+    }));
+    const createTask = vi.fn(async (draft) => ({
+      ...draft,
+      id: "st-test",
+      enabled: true,
+    }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      commanderTool: {
+        plan: commanderPlan,
+      },
+      verifierTool: {
+        check: verifierCheck,
+      },
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => []),
+      },
+      schedulerTool: {
+        createTask,
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("remind me every day at 8");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(finalSnapshot.title).toBe("Model planned reminder");
+    expect(finalSnapshot.plan.map((step) => step.id)).toEqual([
+      "parse-schedule",
+      "persist-reminder",
+      "verify-reminder",
+    ]);
+    expect(finalSnapshot.plan.every((step) => step.status === "completed")).toBe(true);
+    expect(finalSnapshot.verificationSummary).toContain("pass: Reminder workflow created");
+    expect(createTask).toHaveBeenCalledWith(expect.objectContaining({
+      goal: "remind me every day at 8",
+      schedule: { type: "daily", value: "08:00" },
+    }));
+    expect(commanderPlan).toHaveBeenCalledWith(expect.objectContaining({
+      workflowId: "daily-reminder",
+      userGoal: "remind me every day at 8",
+    }));
+    expect(verifierCheck).toHaveBeenCalledWith(expect.objectContaining({
+      stepId: "daily-reminder:generic-summary",
+      evidence: expect.arrayContaining([
+        expect.objectContaining({
+          label: "Shared workflow context",
+          data: expect.objectContaining({
+            "parse-schedule": expect.objectContaining({ status: "completed" }),
+            "persist-reminder": expect.objectContaining({ status: "completed" }),
+            "verify-reminder": expect.objectContaining({ status: "completed" }),
+          }),
+        }),
+      ]),
+    }));
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("executes research trending workflow with search and fetch tools", async () => {
+    const searchWeb = vi.fn(async () => [
+      {
+        url: "https://example.com/trend",
+        title: "Trend",
+        excerpt: "Search excerpt",
+        fetchedAt: "2026-05-25T00:00:00.000Z",
+        provider: "fixture",
+      },
+    ]);
+    const fetchWebSource = vi.fn(async () => ({
+      url: "https://example.com/trend",
+      title: "Trend details",
+      excerpt: "Fetched detail excerpt",
+      fetchedAt: "2026-05-25T00:01:00.000Z",
+      provider: "fixture",
+    }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => []),
+      },
+      webTool: {
+        searchWeb,
+        fetchWebSource,
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("latest trending topics");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(searchWeb).toHaveBeenCalled();
+    expect(fetchWebSource).toHaveBeenCalledWith({ url: "https://example.com/trend" });
+    expect(finalSnapshot.sources).toHaveLength(1);
+    expect(finalSnapshot.researchReport?.rows[0]?.sourceUrl).toBe("https://example.com/trend");
+    expect(finalSnapshot.plan.every((step) => step.status === "completed")).toBe(true);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("executes local document workflow with the Computer tool", async () => {
+    const searchLocalDocuments = vi.fn(async () => [
+      {
+        name: "finance-report.pdf",
+        path: "C:/Users/me/Documents/finance-report.pdf",
+        isDir: false,
+        sizeBytes: 1200,
+        modifiedAt: "2026-05-24T00:00:00.000Z",
+        extension: "pdf",
+      },
+    ]);
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => []),
+      },
+      computerTool: {
+        searchLocalDocuments,
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("find local finance document on my computer");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(searchLocalDocuments).toHaveBeenCalled();
+    expect(finalSnapshot.documents?.[0]?.path).toBe("C:/Users/me/Documents/finance-report.pdf");
+    expect(finalSnapshot.plan.every((step) => step.status === "completed")).toBe(true);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("combines multiple recommended workflow blueprints in the generic executor", async () => {
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => []),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("remind me every day at 8 and find local document on my computer");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(finalSnapshot.title).toContain("Combined workflow");
+    expect(finalSnapshot.plan.map((step) => step.id)).toEqual([
+      "find-local-document:parse-query",
+      "find-local-document:search-computer",
+      "find-local-document:rank-results",
+      "daily-reminder:parse-schedule",
+      "daily-reminder:persist-reminder",
+      "daily-reminder:verify-reminder",
+    ]);
+    expect(finalSnapshot.verificationSummary).toContain("blueprint executed through the DAG executor");
 
     unsubscribe();
     runtime.dispose();
@@ -784,6 +1105,30 @@ describe("createFileScanTaskRuntime", () => {
     expect(finalSnapshot.documents).toHaveLength(1);
     expect(finalSnapshot.documents?.[0]?.purpose).toBe("Project or module entry document.");
     expect(finalSnapshot.verificationSummary).toContain("verified");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("does not route general Chinese organizing language to PDF organization", async () => {
+    const planPdfOrganization = vi.fn(async () => createPdfPlan());
+    const scanMarkdownDocuments = vi.fn(async () => []);
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments,
+        planPdfOrganization,
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("\u6574\u7406\u601d\u8def");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(planPdfOrganization).not.toHaveBeenCalled();
+    expect(scanMarkdownDocuments).toHaveBeenCalled();
+    expect(finalSnapshot.title).toBe("Workspace documents scanned");
 
     unsubscribe();
     runtime.dispose();

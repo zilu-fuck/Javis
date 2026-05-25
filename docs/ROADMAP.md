@@ -121,8 +121,10 @@ Status: complete for the 2026-05-23 QA pass.
   with one-shot native consumption. PDF approval/restore now validates operation
   path scope and PDF source type before pending state is accepted. Code Patch
   restart restore/apply is wired through durable records, and PDF / Code Patch
-  approval id plus approved-state checks now share a native approval binding
-  abstraction. Task/tool binding and generalized preview-hash guards remain.
+  approval id, approved-state, tool-name, and preview-hash checks now share a
+  native approval binding abstraction. Durable approval restore also recomputes
+  the dry-run binding hash and checks Code Patch proposal files against the
+  approved dry-run. Task binding and broader write-command migration remain.
 - Keep dangerous actions rejected by default.
 
 ## Milestone 5: Product Hardening

@@ -1,28 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createInitialTaskSnapshot, type TaskSnapshot } from "@javis/core";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
-import {
-  createFileScanTaskRuntime,
-  createInitialTaskSnapshot,
-  validateCodeApplyResult,
-  validateCodeProposal,
-} from "@javis/core";
+import { openPath } from "@tauri-apps/plugin-opener";
 import type {
-  CodeApplyResult,
-  CodeProposedEdit,
-  CodeReviewPreview,
-  FileOrganizationExecution,
-  FileOrganizationPlan,
-  MarkdownDocument,
-  PlannedPathOperation,
-  ProjectInspection,
-  ShellCommandOutput,
-  ShellCommandRequest,
-  WebSource,
-  WebSourceRequest,
-  WebSearchRequest,
-  WebSearchResult,
-} from "@javis/tools";
+  ActiveView,
+  WorkbenchAppEntry,
+  WorkbenchFileEntry,
+  WorkbenchScheduledTask,
+  WorkbenchSkillEntry,
+} from "@javis/ui";
 import { JavisWorkbench, zhCNWorkbenchLocale } from "@javis/ui";
 import {
   getTaskUpdatedAt,
@@ -31,18 +17,10 @@ import {
   saveTaskHistory,
   upsertTaskHistory,
 } from "./task-history";
-import {
-  deletePersistedWorkspacePath,
-  getCompletedTaskWorkspacePath,
-  loadWorkspaceSession,
-  persistWorkspaceForTaskStatus,
-} from "./workspace-session";
-import { loadModelSettings, saveModelSettings, type ModelSettings } from "./model-settings";
-import { parseGitStatusFiles } from "./git-status";
+import { getCompletedTaskWorkspacePath } from "./workspace-session";
 import {
   createApprovalRecordFromPermissionRequest,
   expireApprovalRecord,
-  findPendingApprovalRecord,
   isApprovalRecordExpired,
   loadApprovalRecords,
   resolveApprovalRecord,
@@ -50,139 +28,295 @@ import {
   upsertApprovalRecord,
   type DurableApprovalRecord,
 } from "./approval-records";
+import { createJavisRuntime } from "./app-runtime";
+import {
+  CODE_PATCH_APPROVAL_TITLE,
+  CODE_PATCH_APPROVAL_TOOL_NAME,
+  applyRestoredCodePatch,
+  createRestoredCodePatchApprovalTask,
+  createRestoredCodePatchApprovedTask,
+  createRestoredCodePatchDeniedTask,
+  createRestoredCodePatchFailedTask,
+  createRestoredPdfApprovalTask,
+  createRestoredPdfApprovedTask,
+  createRestoredPdfDeniedTask,
+  createRestoredPdfFailedTask,
+  findRestorableApprovalRecord,
+  getDurableApprovalToolName,
+  getDurableApprovalWorkspacePath,
+  isDurableApprovalRequestTitle,
+  runRestoredCodePatchVerification,
+  runRestoredPdfOrganization,
+} from "./restored-approval";
+import { useModelSettingsControls } from "./use-model-settings";
+import { useWorkspaceSessionControls } from "./use-workspace-session";
+import {
+  loadScheduledTasks,
+  saveScheduledTasks,
+  clearStaleGuards,
+  isDue,
+  computeNextRun,
+  type ScheduledTask,
+} from "./scheduled-tasks";
+import { loadMcpConfig, type McpServerConfig } from "./mcp-config";
+import {
+  scanInstalledApps,
+  scanUserDocuments,
+  scanUserImages,
+  listDirectory,
+  type AppEntry,
+  type FileEntry,
+} from "./local-knowledge";
+import {
+  appendTaskSnapshotAuditJsonLines,
+  createFileBackedTaskAuditJsonLineWriter,
+} from "./tool-call-audit";
+import {
+  appendTaskSessionSnapshotJsonLine,
+  createFileBackedTaskSessionJsonLineWriter,
+} from "./task-session-log";
+import { initialToolDescriptors } from "@javis/tools";
+import { demoAgents } from "@javis/core";
 import "./App.css";
 
-type PersistedTaskSnapshot = ReturnType<typeof createInitialTaskSnapshot>;
 export const DEFAULT_DRAFT_GOAL = "检查当前项目，说明如何启动，并运行一次检查";
-const PDF_APPROVAL_TOOL_NAME = "file.executePdfOrganization";
-const PDF_APPROVAL_TITLE = "Approve PDF move plan";
-const CODE_PATCH_APPROVAL_TOOL_NAME = "code.applyProposedEdit";
-const CODE_PATCH_APPROVAL_TITLE = "Approve Code Agent patch application";
+
+const DOC_EXTENSIONS = [
+  "docx", "doc", "txt", "pdf", "xlsx", "xls", "csv", "pptx", "ppt", "md", "rtf", "odt",
+];
+
+function fileEntryToWorkbench(entry: FileEntry): WorkbenchFileEntry {
+  return {
+    name: entry.name,
+    path: entry.path,
+    isDir: entry.isDir,
+    sizeBytes: entry.sizeBytes,
+    modifiedAt: entry.modifiedAt,
+    extension: entry.extension,
+  };
+}
+
+function appEntryToWorkbench(entry: AppEntry): WorkbenchAppEntry {
+  return {
+    name: entry.name,
+    path: entry.path,
+    iconPath: entry.iconPath,
+    publisher: entry.publisher,
+    installLocation: entry.installLocation,
+  };
+}
+
+function scheduledTaskToWorkbench(
+  task: ScheduledTask,
+  history: TaskSnapshot[],
+  activeScheduledTaskId: string | undefined,
+): WorkbenchScheduledTask {
+  let lastRunStatus: "running" | "success" | "failed" | "never" = "never";
+  if (task.lastRunStartedAt && activeScheduledTaskId === task.id) {
+    lastRunStatus = "running";
+  } else {
+    const matchingEntry = [...history]
+      .reverse()
+      .find((h) => (h as any).scheduledTaskId === task.id);
+    if (matchingEntry) {
+      lastRunStatus =
+        matchingEntry.status === "completed"
+          ? "success"
+          : matchingEntry.status === "failed" || matchingEntry.status === "cancelled"
+            ? "failed"
+            : "never";
+    }
+  }
+  return {
+    id: task.id,
+    name: task.name,
+    goal: task.goal,
+    scheduleType: task.schedule.type,
+    scheduleValue: task.schedule.value,
+    enabled: task.enabled,
+    nextRunAt: task.nextRunAt,
+    lastRunStatus,
+    createdAt: task.createdAt,
+  };
+}
 
 function App() {
-  const [workspaceSession, setWorkspaceSession] = useState(() =>
-    loadWorkspaceSession(window.localStorage),
-  );
+  const {
+    browseWorkspacePath,
+    deleteRecentWorkspacePath,
+    persistWorkspaceForTask,
+    useWorkspacePath,
+    workspaceSession,
+  } = useWorkspaceSessionControls(window.localStorage);
   const { recentWorkspacePaths, workspacePath } = workspaceSession;
-  const [modelSettings, setModelSettings] = useState(() =>
-    loadModelSettings(window.localStorage),
-  );
+  const { modelSettings, updateModelSettings } = useModelSettingsControls(window.localStorage);
+  // Ref always holds the effective workspace for the current/next run.
+  // When a scheduled task fires with its own workspace, the ref is updated
+  // synchronously so the runtime reads the correct path even before React
+  // re-renders. Without this, a scheduled task would silently run in the
+  // currently-selected UI workspace instead of its own.
+  const workspaceRef = useRef(workspacePath);
+  workspaceRef.current = workspacePath;
   const runtime = useMemo(
-    () => {
-      const runReadOnlyCommand = (request: ShellCommandRequest) =>
-        invoke<ShellCommandOutput>("run_read_only_command", {
-          request: {
-            ...request,
-            workspacePath: request.workspacePath ?? (workspacePath.trim() || null),
-          },
-        });
-
-      return createFileScanTaskRuntime({
-        fileTool: {
-          scanMarkdownDocuments: () =>
-            invoke<MarkdownDocument[]>("scan_markdown_documents", {
-              workspacePath: workspacePath.trim() || null,
-            }),
-          planPdfOrganization: () =>
-            invoke<FileOrganizationPlan>("plan_pdf_organization"),
-          executePdfOrganization: async (
-            operations: PlannedPathOperation[],
-            approvalId: string,
-          ) => {
-            await invoke("approve_pdf_organization", { approvalId });
-            return invoke<FileOrganizationExecution>("execute_pdf_organization", {
-              request: { approvalId, operations },
-            });
-          },
-        },
-        shellTool: {
-          runReadOnlyCommand,
-        },
-        codeTool: {
-          inspectRepository: async (): Promise<CodeReviewPreview> => {
-            const [status, diffStat, diff] = await Promise.all([
-              runReadOnlyCommand({ program: "git", args: ["status", "--short"], workspacePath: null }),
-              runReadOnlyCommand({ program: "git", args: ["diff", "--stat"], workspacePath: null }),
-              runReadOnlyCommand({ program: "git", args: ["diff", "--unified=1"], workspacePath: null }),
-            ]);
-
-            for (const output of [status, diffStat, diff]) {
-              if (output.exitCode !== 0) {
-                throw new Error(output.stderr || output.stdout || `${output.command} failed`);
-              }
-            }
-
-            return {
-              workspacePath: status.cwd,
-              changedFiles: parseGitStatusFiles(status.stdout),
-              diffStat: diffStat.stdout,
-              diff: diff.stdout,
-            };
-          },
-          proposeEdit: ({ userGoal, preview }) =>
-            invoke<CodeProposedEdit>("propose_code_edit", {
-              request: {
-                workspacePath: preview.workspacePath,
-                userGoal,
-                changedFiles: preview.changedFiles,
-                diff: preview.diff,
-                providerId: modelSettings.provider,
-                model: modelSettings.model,
-                apiKeyReference: modelSettings.apiKeyReference,
-                baseUrl: modelSettings.baseUrl,
-              },
-            }),
-          applyProposedEdit: (edit: CodeProposedEdit, approval) =>
-            invoke("approve_code_patch", {
-              request: {
-                approvalId: approval.approvalId,
-                proposalId: edit.proposalId,
-                workspacePath: edit.workspacePath,
-                changedFiles: edit.changedFiles,
-                patchHash: edit.patchHash,
-              },
-            }).then(() =>
-              invoke<CodeApplyResult>("apply_code_patch", {
-                request: {
-                  approvalId: approval.approvalId,
-                  proposalId: edit.proposalId,
-                  workspacePath: edit.workspacePath,
-                  changedFiles: edit.changedFiles,
-                  patch: edit.patch,
-                  patchHash: edit.patchHash,
-                },
-              }),
-            ),
-        },
-        projectTool: {
-          inspectProject: () =>
-            invoke<ProjectInspection>("inspect_project", {
-              workspacePath: workspacePath.trim() || null,
-            }),
-        },
-        webTool: {
-          fetchWebSource: (request: WebSourceRequest) =>
-            invoke<WebSource>("fetch_web_source", { request }),
-          searchWeb: (request: WebSearchRequest) =>
-            invoke<WebSearchResult[]>("search_web_sources", { request }),
-        },
-      });
-    },
-    [modelSettings, workspacePath],
+    () => createJavisRuntime({ modelSettings, getWorkspacePath: () => workspaceRef.current }),
+    [modelSettings],
   );
   const [task, setTask] = useState(createInitialTaskSnapshot);
-  const [history, setHistory] = useState<PersistedTaskSnapshot[]>(() =>
+  const [history, setHistory] = useState<TaskSnapshot[]>(() =>
     loadTaskHistory(window.localStorage),
   );
   const [approvalRecords, setApprovalRecords] = useState(() =>
     loadApprovalRecords(window.localStorage),
   );
   const didCheckRestoredApproval = useRef(false);
+  const auditRecordIdsRef = useRef(new Set<string>());
   const [draftGoal, setDraftGoal] = useState(DEFAULT_DRAFT_GOAL);
 
+  // ── Sidebar view state ────────────────────────────────────────────
+  const [activeView, setActiveView] = useState<ActiveView>("chat");
+  const [isTaskActive, setIsTaskActive] = useState(false);
+  // Ref mirrors isTaskActive for synchronous reads inside setInterval callbacks
+  // where React state would be stale. Both must be updated together.
+  const isTaskActiveRef = useRef(false);
+  const [activeScheduledTaskId, setActiveScheduledTaskId] = useState<string | undefined>();
+
+  // ── Scheduled tasks state ─────────────────────────────────────────
+  const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>(() =>
+    clearStaleGuards(loadScheduledTasks(window.localStorage)),
+  );
+
+  // ── Skill entries state ───────────────────────────────────────────
+  const [skillEntries, setSkillEntries] = useState<WorkbenchSkillEntry[]>([]);
+  const [mcpConfig, setMcpConfig] = useState<McpServerConfig[]>([]);
+
+  // ── Local knowledge base state ────────────────────────────────────
+  const [installedApps, setInstalledApps] = useState<WorkbenchAppEntry[]>([]);
+  const [userDocuments, setUserDocuments] = useState<WorkbenchFileEntry[]>([]);
+  const [userImages, setUserImages] = useState<WorkbenchFileEntry[]>([]);
+  const [computerEntries, setComputerEntries] = useState<WorkbenchFileEntry[]>([]);
+  const [computerPath, setComputerPath] = useState("C:\\Users");
+  const [appsLoading, setAppsLoading] = useState(false);
+  const [docsLoading, setDocsLoading] = useState(false);
+  const [imagesLoading, setImagesLoading] = useState(false);
+  const [computerLoading, setComputerLoading] = useState(false);
+  const [appsError, setAppsError] = useState<string>();
+  const [docsError, setDocsError] = useState<string>();
+  const [imagesError, setImagesError] = useState<string>();
+  const [computerError, setComputerError] = useState<string>();
+  const scanGenerationRef = useRef(0);
+
+  // ── Build skill entries from descriptors + agents + MCP ───────────
+  useEffect(() => {
+    const tools: WorkbenchSkillEntry[] = initialToolDescriptors.map((d) => {
+      const owners = demoAgents
+        .filter((a) => a.allowedToolNames.includes(d.name))
+        .map((a) => a.displayName);
+      return {
+        id: d.name,
+        name: d.name,
+        description: d.summary,
+        category: "tool" as const,
+        permissionLevel: d.permissionLevel,
+        agentOwners: owners,
+        enabled: true,
+      };
+    });
+    const agents: WorkbenchSkillEntry[] = demoAgents.map((a) => ({
+      id: a.id,
+      name: a.displayName,
+      description: a.description,
+      category: "agent" as const,
+      agentOwners: [],
+      enabled: true,
+    }));
+    const mcps: WorkbenchSkillEntry[] = mcpConfig.map((s) => ({
+      id: `mcp-${s.name}`,
+      name: s.name,
+      description: `${s.transport} · ${s.command ?? s.url ?? ""}`,
+      category: "mcp" as const,
+      agentOwners: [],
+      enabled: s.enabled,
+    }));
+    setSkillEntries([...tools, ...agents, ...mcps]);
+  }, [mcpConfig]);
+
+  // ── Load MCP config on mount ──────────────────────────────────────
+  useEffect(() => {
+    loadMcpConfig().then(setMcpConfig).catch(() => {});
+  }, []);
+
+  // ── Scheduled task trigger mechanism ──────────────────────────────
+  useEffect(() => {
+    // Clear stale guards on mount (crash recovery)
+    setScheduledTasks((current) => {
+      const cleared = clearStaleGuards(current);
+      saveScheduledTasks(window.localStorage, cleared);
+      return cleared;
+    });
+
+    const checkDue = () => {
+      setScheduledTasks((current) => {
+        const now = new Date();
+        const updated = current.map((t) => {
+          if (!isDue(t, now)) return t;
+          if (isTaskActiveRef.current) return t; // defer if another task is running
+          // Fire the task
+          submitGoal(t.goal, t.workspacePath, t.id);
+          // Compute next run
+          const nextRun = computeNextRun(t.schedule, now.toISOString());
+          const updatedTask: ScheduledTask = {
+            ...t,
+            lastRunStartedAt: now.toISOString(),
+            nextRunAt: nextRun ?? t.nextRunAt,
+            enabled: t.schedule.type === "once" && !nextRun ? false : t.enabled,
+          };
+          return updatedTask;
+        });
+        saveScheduledTasks(window.localStorage, updated);
+        return updated;
+      });
+    };
+
+    const interval = setInterval(checkDue, 60_000);
+    const handleFocus = () => checkDue();
+    window.addEventListener("focus", handleFocus);
+    // Initial check on mount
+    checkDue();
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("focus", handleFocus);
+    };
+  }, [runtime]);
+
+  // ── Track task active state ───────────────────────────────────────
   useEffect(() => {
     const unsubscribe = runtime.subscribe((nextTask) => {
+      // Attach scheduledTaskId from pending ref so that history entries
+      // carry the source scheduled task ID for last-run status derivation.
+      const sid = pendingScheduledTaskIdRef.current;
+      if (sid) {
+        (nextTask as any).scheduledTaskId = sid;
+        pendingScheduledTaskIdRef.current = undefined;
+      }
       setTask(nextTask);
+      void appendTaskSnapshotAuditJsonLines(
+        createFileBackedTaskAuditJsonLineWriter(
+          (line) =>
+            invoke("append_task_audit_jsonl_line", { request: { line } }).then(() => undefined),
+          window.localStorage,
+        ),
+        nextTask,
+        auditRecordIdsRef.current,
+      );
+      void appendTaskSessionSnapshotJsonLine(
+        createFileBackedTaskSessionJsonLineWriter(
+          (line) =>
+            invoke("append_task_session_jsonl_line", { request: { line } }).then(() => undefined),
+          window.localStorage,
+        ),
+        nextTask,
+      );
       if (isArchivableTask(nextTask)) {
         setHistory((current) =>
           saveTaskHistory(window.localStorage, upsertTaskHistory(current, nextTask)),
@@ -192,24 +326,52 @@ function App() {
       if (nextTask.status === "completed") {
         persistWorkspaceForTask(
           nextTask.status,
-          getCompletedTaskWorkspacePath(nextTask) || workspacePath,
+          getCompletedTaskWorkspacePath(nextTask) || workspaceRef.current,
         );
+        setIsTaskActive(false);
+        isTaskActiveRef.current = false;
+        setActiveScheduledTaskId(undefined);
+        // Record completion: set lastRunAt, clear lastRunStartedAt
+        setScheduledTasks((current) => {
+          const now = new Date().toISOString();
+          const updated = current.map((t) =>
+            t.lastRunStartedAt
+              ? { ...t, lastRunAt: now, lastRunStartedAt: undefined }
+              : t,
+          );
+          saveScheduledTasks(window.localStorage, updated);
+          return updated;
+        });
+      }
+      if (nextTask.status === "failed" || nextTask.status === "cancelled") {
+        setIsTaskActive(false);
+        isTaskActiveRef.current = false;
+        setActiveScheduledTaskId(undefined);
+        // Record failure: set lastRunAt, clear lastRunStartedAt
+        setScheduledTasks((current) => {
+          const now = new Date().toISOString();
+          const updated = current.map((t) =>
+            t.lastRunStartedAt
+              ? { ...t, lastRunAt: now, lastRunStartedAt: undefined }
+              : t,
+          );
+          saveScheduledTasks(window.localStorage, updated);
+          return updated;
+        });
       }
     });
     return () => {
       unsubscribe();
       runtime.dispose();
     };
-  }, [runtime, workspacePath]);
+  }, [persistWorkspaceForTask, runtime]);
 
   useEffect(() => {
     if (didCheckRestoredApproval.current) {
       return;
     }
     didCheckRestoredApproval.current = true;
-    const pendingRecord =
-      findPendingApprovalRecord(approvalRecords, PDF_APPROVAL_TOOL_NAME) ??
-      findPendingApprovalRecord(approvalRecords, CODE_PATCH_APPROVAL_TOOL_NAME);
+    const pendingRecord = findRestorableApprovalRecord(approvalRecords);
     if (!pendingRecord) {
       return;
     }
@@ -228,11 +390,113 @@ function App() {
     setTask(createRestoredPdfApprovalTask(pendingRecord));
   }, [approvalRecords]);
 
-  function submitGoal() {
-    const goal = draftGoal.trim();
+  // Incremented by refresh handlers to force re-scan even when activeView
+  // hasn't changed. Without this, clicking refresh while already on a view
+  // would show an empty list because the effect depends on [activeView].
+  const [scanVersion, setScanVersion] = useState(0);
+
+  // ── Scan lifecycle: abort-and-discard on view change ──────────────
+  useEffect(() => {
+    scanGenerationRef.current += 1;
+    const gen = scanGenerationRef.current;
+
+    if (activeView === "apps" && installedApps.length === 0 && !appsLoading) {
+      setAppsLoading(true);
+      setAppsError(undefined);
+      scanInstalledApps()
+        .then((result) => {
+          if (scanGenerationRef.current !== gen) return;
+          setInstalledApps(result.map(appEntryToWorkbench));
+        })
+        .catch((err) => {
+          if (scanGenerationRef.current !== gen) return;
+          setAppsError(String(err));
+        })
+        .finally(() => {
+          if (scanGenerationRef.current !== gen) return;
+          setAppsLoading(false);
+        });
+    }
+
+    if (activeView === "documents" && userDocuments.length === 0 && !docsLoading) {
+      setDocsLoading(true);
+      setDocsError(undefined);
+      scanUserDocuments(DOC_EXTENSIONS, 200)
+        .then((result) => {
+          if (scanGenerationRef.current !== gen) return;
+          setUserDocuments(result.map(fileEntryToWorkbench));
+        })
+        .catch((err) => {
+          if (scanGenerationRef.current !== gen) return;
+          setDocsError(String(err));
+        })
+        .finally(() => {
+          if (scanGenerationRef.current !== gen) return;
+          setDocsLoading(false);
+        });
+    }
+
+    if (activeView === "gallery" && userImages.length === 0 && !imagesLoading) {
+      setImagesLoading(true);
+      setImagesError(undefined);
+      scanUserImages(200)
+        .then((result) => {
+          if (scanGenerationRef.current !== gen) return;
+          setUserImages(result.map(fileEntryToWorkbench));
+        })
+        .catch((err) => {
+          if (scanGenerationRef.current !== gen) return;
+          setImagesError(String(err));
+        })
+        .finally(() => {
+          if (scanGenerationRef.current !== gen) return;
+          setImagesLoading(false);
+        });
+    }
+
+    if (activeView === "computer" && computerEntries.length === 0 && !computerLoading) {
+      setComputerLoading(true);
+      setComputerError(undefined);
+      listDirectory(computerPath)
+        .then((result) => {
+          if (scanGenerationRef.current !== gen) return;
+          setComputerEntries(result.map(fileEntryToWorkbench));
+        })
+        .catch((err) => {
+          if (scanGenerationRef.current !== gen) return;
+          setComputerError(String(err));
+        })
+        .finally(() => {
+          if (scanGenerationRef.current !== gen) return;
+          setComputerLoading(false);
+        });
+    }
+  }, [activeView, scanVersion]);
+
+  // Holds the scheduledTaskId for the currently-starting task so that
+  // the subscription callback can attach it to the TaskSnapshot before
+  // it's saved to history. Cleared after being consumed.
+  const pendingScheduledTaskIdRef = useRef<string | undefined>(undefined);
+
+  function submitGoal(goalOverride?: string, workspacePathOverride?: string, scheduledTaskId?: string) {
+    const goal = (goalOverride ?? draftGoal).trim();
     if (!goal) {
       return;
     }
+    // Update workspace ref synchronously so the runtime reads the correct
+    // path for this run. The state setter (useWorkspacePath) updates the UI
+    // asynchronously and would arrive too late for the current run.
+    if (workspacePathOverride) {
+      workspaceRef.current = workspacePathOverride;
+      useWorkspacePath(workspacePathOverride);
+    }
+    setIsTaskActive(true);
+    isTaskActiveRef.current = true;
+    if (scheduledTaskId) {
+      setActiveScheduledTaskId(scheduledTaskId);
+      pendingScheduledTaskIdRef.current = scheduledTaskId;
+    }
+    auditRecordIdsRef.current.clear();
     runtime.start(goal);
   }
 
@@ -242,88 +506,20 @@ function App() {
       return;
     }
     setDraftGoal(goal);
+    workspaceRef.current = workspacePath;
+    setIsTaskActive(true);
+    isTaskActiveRef.current = true;
+    auditRecordIdsRef.current.clear();
     runtime.start(goal);
   }
 
-  function persistWorkspaceForTask(
-    status: PersistedTaskSnapshot["status"],
-    completedWorkspacePath: string,
-  ) {
-    setWorkspaceSession((current) => ({
-      ...current,
-      recentWorkspacePaths: persistWorkspaceForTaskStatus(
-        window.localStorage,
-        current.recentWorkspacePaths,
-        completedWorkspacePath,
-        status,
-      ),
-    }));
-  }
-
-  function useWorkspacePath(path: string) {
-    setWorkspaceSession((current) => ({
-      ...current,
-      workspacePath: path.trim(),
-    }));
-  }
-
-  async function browseWorkspacePath() {
-    const selectedPath = await open({
-      directory: true,
-      multiple: false,
-      title: "Select Javis workspace",
-    });
-    if (typeof selectedPath === "string") {
-      useWorkspacePath(selectedPath);
-    }
-  }
-
-  function deleteRecentWorkspacePath(path: string) {
-    setWorkspaceSession((current) => {
-      const recentWorkspacePaths = deletePersistedWorkspacePath(
-        window.localStorage,
-        current.recentWorkspacePaths,
-        path,
-      );
-      return {
-        workspacePath:
-          current.workspacePath.toLocaleLowerCase() === path.trim().toLocaleLowerCase()
-            ? recentWorkspacePaths[0] ?? ""
-            : current.workspacePath,
-        recentWorkspacePaths,
-      };
-    });
-  }
-
-  async function updateModelSettings(settings: ModelSettings) {
-    const savedSettings = saveModelSettings(window.localStorage, settings);
-    const shouldDeleteSecret = !settings.apiKey.trim() && modelSettings.apiKey.trim();
-    setModelSettings(savedSettings);
-    try {
-      if (settings.apiKey.trim()) {
-        await invoke("save_model_api_key_secret", {
-          request: {
-            keyReference: savedSettings.apiKeyReference,
-            apiKey: settings.apiKey,
-          },
-        });
-      } else if (shouldDeleteSecret) {
-        await invoke("delete_model_api_key_secret", {
-          keyReference: savedSettings.apiKeyReference,
-        });
-      }
-    } catch (error) {
-      console.error("Failed to update model API key secret", error);
-    }
-  }
-
-  function persistDurableApprovalRecord(nextTask: PersistedTaskSnapshot) {
+  function persistDurableApprovalRecord(nextTask: TaskSnapshot) {
     const request = nextTask.permissionRequest;
     if (
       nextTask.status !== "waiting_permission" ||
       !request ||
       request.status !== "pending" ||
-      (request.title !== PDF_APPROVAL_TITLE && request.title !== CODE_PATCH_APPROVAL_TITLE)
+      !isDurableApprovalRequestTitle(request.title)
     ) {
       return;
     }
@@ -336,9 +532,10 @@ function App() {
       toolName,
       workspacePath: getDurableApprovalWorkspacePath(nextTask, request.title),
       permissionRequest: request,
-      codeProposedEdit: request.title === CODE_PATCH_APPROVAL_TITLE
-        ? nextTask.codeProposedEdit
-        : undefined,
+      codeProposedEdit:
+        request.title === CODE_PATCH_APPROVAL_TITLE
+          ? nextTask.codeProposedEdit
+          : undefined,
     });
     if (!record) {
       return;
@@ -355,9 +552,7 @@ function App() {
   }
 
   async function resolveRestoredApproval(decision: "approved" | "denied") {
-    const record =
-      findPendingApprovalRecord(approvalRecords, PDF_APPROVAL_TOOL_NAME) ??
-      findPendingApprovalRecord(approvalRecords, CODE_PATCH_APPROVAL_TOOL_NAME);
+    const record = findRestorableApprovalRecord(approvalRecords);
     if (!record) {
       return;
     }
@@ -370,39 +565,17 @@ function App() {
       const deniedRecord = resolveApprovalRecord(record, "denied", resolvedAt);
       const deniedTask = createRestoredPdfDeniedTask(deniedRecord);
       updateApprovalRecord(deniedRecord);
-      setTask(deniedTask);
-      setHistory((current) =>
-        saveTaskHistory(window.localStorage, upsertTaskHistory(current, deniedTask)),
-      );
+      archiveRestoredTask(deniedTask);
       return;
     }
 
     const approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
     updateApprovalRecord(approvedRecord);
     try {
-      await invoke("restore_pdf_organization_approval", {
-        request: {
-          approvalId: approvedRecord.approvalId,
-          operations: approvedRecord.permissionRequest.dryRun.affectedPaths,
-        },
-      });
-      const execution = await invoke<FileOrganizationExecution>("execute_pdf_organization", {
-        request: {
-          approvalId: approvedRecord.approvalId,
-          operations: approvedRecord.permissionRequest.dryRun.affectedPaths,
-        },
-      });
-      const completedTask = createRestoredPdfApprovedTask(approvedRecord, execution);
-      setTask(completedTask);
-      setHistory((current) =>
-        saveTaskHistory(window.localStorage, upsertTaskHistory(current, completedTask)),
-      );
+      const execution = await runRestoredPdfOrganization(approvedRecord);
+      archiveRestoredTask(createRestoredPdfApprovedTask(approvedRecord, execution));
     } catch (error) {
-      const failedTask = createRestoredPdfFailedTask(approvedRecord, error);
-      setTask(failedTask);
-      setHistory((current) =>
-        saveTaskHistory(window.localStorage, upsertTaskHistory(current, failedTask)),
-      );
+      archiveRestoredTask(createRestoredPdfFailedTask(approvedRecord, error));
     }
   }
 
@@ -413,12 +586,8 @@ function App() {
     const resolvedAt = new Date().toISOString();
     if (decision === "denied") {
       const deniedRecord = resolveApprovalRecord(record, "denied", resolvedAt);
-      const deniedTask = createRestoredCodePatchDeniedTask(deniedRecord);
       updateApprovalRecord(deniedRecord);
-      setTask(deniedTask);
-      setHistory((current) =>
-        saveTaskHistory(window.localStorage, upsertTaskHistory(current, deniedTask)),
-      );
+      archiveRestoredTask(createRestoredCodePatchDeniedTask(deniedRecord));
       return;
     }
 
@@ -427,22 +596,19 @@ function App() {
     try {
       const applyResult = await applyRestoredCodePatch(approvedRecord);
       const verification = await runRestoredCodePatchVerification(approvedRecord.workspacePath);
-      const completedTask = createRestoredCodePatchApprovedTask(
-        approvedRecord,
-        applyResult,
-        verification,
-      );
-      setTask(completedTask);
-      setHistory((current) =>
-        saveTaskHistory(window.localStorage, upsertTaskHistory(current, completedTask)),
+      archiveRestoredTask(
+        createRestoredCodePatchApprovedTask(approvedRecord, applyResult, verification),
       );
     } catch (error) {
-      const failedTask = createRestoredCodePatchFailedTask(approvedRecord, error);
-      setTask(failedTask);
-      setHistory((current) =>
-        saveTaskHistory(window.localStorage, upsertTaskHistory(current, failedTask)),
-      );
+      archiveRestoredTask(createRestoredCodePatchFailedTask(approvedRecord, error));
     }
+  }
+
+  function archiveRestoredTask(restoredTask: TaskSnapshot) {
+    setTask(restoredTask);
+    setHistory((current) =>
+      saveTaskHistory(window.localStorage, upsertTaskHistory(current, restoredTask)),
+    );
   }
 
   function handlePermissionDecision(decision: "approved" | "denied") {
@@ -450,14 +616,14 @@ function App() {
     if (
       task.status === "waiting_permission" &&
       request?.status === "pending" &&
-      (request.title === PDF_APPROVAL_TITLE || request.title === CODE_PATCH_APPROVAL_TITLE)
+      isDurableApprovalRequestTitle(request.title)
     ) {
       const record = approvalRecords.find((item) => item.approvalId === request.id);
       if (record?.status === "pending") {
         updateApprovalRecord(resolveApprovalRecord(record, decision, new Date().toISOString()));
       }
     }
-    runtime.resolvePermission(decision);
+    runtime.resolvePermission(decision, request?.id);
   }
 
   function selectHistoryEntry(id: string) {
@@ -465,6 +631,7 @@ function App() {
     if (entry) {
       setTask(entry);
       setDraftGoal(entry.userGoal);
+      setActiveView("chat");
     }
   }
 
@@ -477,8 +644,78 @@ function App() {
     );
   }
 
+  function toggleScheduledTask(id: string) {
+    setScheduledTasks((current) => {
+      const updated = current.map((t) =>
+        t.id === id ? { ...t, enabled: !t.enabled } : t,
+      );
+      saveScheduledTasks(window.localStorage, updated);
+      return updated;
+    });
+  }
+
+  function deleteScheduledTask(id: string) {
+    setScheduledTasks((current) => {
+      const updated = current.filter((t) => t.id !== id);
+      saveScheduledTasks(window.localStorage, updated);
+      return updated;
+    });
+  }
+
+  function handleChangeActiveView(view: ActiveView) {
+    setActiveView(view);
+  }
+
+  function handleRefreshApps() {
+    setInstalledApps([]);
+    setAppsError(undefined);
+    setAppsLoading(false);
+    setScanVersion((v) => v + 1);
+    setActiveView("apps");
+  }
+
+  function handleRefreshDocuments() {
+    setUserDocuments([]);
+    setDocsError(undefined);
+    setDocsLoading(false);
+    setScanVersion((v) => v + 1);
+    setActiveView("documents");
+  }
+
+  function handleRefreshImages() {
+    setUserImages([]);
+    setImagesError(undefined);
+    setImagesLoading(false);
+    setScanVersion((v) => v + 1);
+    setActiveView("gallery");
+  }
+
+  function handleNavigateDirectory(path: string) {
+    setComputerPath(path);
+    setComputerEntries([]);
+    setComputerError(undefined);
+    setComputerLoading(false);
+    listDirectory(path)
+      .then((result) => setComputerEntries(result.map(fileEntryToWorkbench)))
+      .catch((err) => setComputerError(String(err)))
+      .finally(() => setComputerLoading(false));
+  }
+
+  function handleOpenFile(path: string) {
+    openPath(path).catch(() => {});
+  }
+
   return (
     <JavisWorkbench
+      activeView={activeView}
+      appsError={appsError}
+      appsLoading={appsLoading}
+      computerEntries={computerEntries}
+      computerError={computerError}
+      computerLoading={computerLoading}
+      computerPath={computerPath}
+      docsError={docsError}
+      docsLoading={docsLoading}
       draftGoal={draftGoal}
       currentWorkspacePath={workspacePath}
       historyEntries={history.map((entry) => ({
@@ -487,289 +724,45 @@ function App() {
         status: entry.status,
         userGoal: entry.userGoal,
         updatedAt: getTaskUpdatedAt(entry),
+        scheduledTaskId: (entry as any).scheduledTaskId,
       }))}
+      imagesError={imagesError}
+      imagesLoading={imagesLoading}
+      installedApps={installedApps}
+      isTaskActive={isTaskActive}
       locale={zhCNWorkbenchLocale}
       modelSettings={modelSettings}
       onBrowseWorkspacePath={browseWorkspacePath}
+      onChangeActiveView={handleChangeActiveView}
       onDeleteHistoryEntry={deleteHistoryEntry}
       onDeleteRecentWorkspacePath={deleteRecentWorkspacePath}
+      onDeleteScheduledTask={deleteScheduledTask}
       onDraftGoalChange={setDraftGoal}
       onModelSettingsChange={updateModelSettings}
+      onNavigateDirectory={handleNavigateDirectory}
+      onOpenFile={handleOpenFile}
       onPermissionDecision={
         task.id.startsWith("restored-approval-") ? resolveRestoredApproval : handlePermissionDecision
       }
+      onRefreshApps={handleRefreshApps}
+      onRefreshDocuments={handleRefreshDocuments}
+      onRefreshImages={handleRefreshImages}
       onRetryTask={retryCurrentTask}
       onSelectHistoryEntry={selectHistoryEntry}
       onSubmitGoal={submitGoal}
+      onToggleScheduledTask={toggleScheduledTask}
       onUseWorkspacePath={useWorkspacePath}
       onWorkspacePathChange={useWorkspacePath}
       recentWorkspacePaths={recentWorkspacePaths}
+      scheduledTasks={scheduledTasks.map((t) =>
+        scheduledTaskToWorkbench(t, history, activeScheduledTaskId),
+      )}
+      skillEntries={skillEntries}
       task={task}
+      userDocuments={userDocuments}
+      userImages={userImages}
     />
   );
 }
 
 export default App;
-
-function createRestoredPdfApprovalTask(record: DurableApprovalRecord): PersistedTaskSnapshot {
-  const affectedPaths = record.permissionRequest.dryRun.affectedPaths;
-  return {
-    ...createInitialTaskSnapshot(),
-    id: `restored-approval-${record.taskId}`,
-    title: "PDF organization approval needed",
-    userGoal: "Organize PDFs in Downloads",
-    status: "waiting_permission",
-    commanderMessage:
-      "A pending PDF organization approval was restored from local approval records.",
-    plan: [
-      {
-        id: "step-confirm-pdf",
-        title: "User reviews the confirmed-write permission card",
-        assignedAgentKind: "file",
-        status: "running",
-      },
-    ],
-    agents: [],
-    logs: [
-      {
-        id: `${record.taskId}-approval-restored`,
-        kind: "permission",
-        title: "permission.restored",
-        detail: `Restored pending approval ${record.approvalId} for ${record.toolName}.`,
-      },
-    ],
-    fileOrganizationPlan: {
-      approvalId: record.approvalId,
-      directoryPath: record.workspacePath,
-      fileCount: affectedPaths.length,
-      dryRun: record.permissionRequest.dryRun,
-    },
-    permissionRequest: record.permissionRequest,
-  };
-}
-
-function createRestoredCodePatchApprovalTask(record: DurableApprovalRecord): PersistedTaskSnapshot {
-  const affectedPaths = record.permissionRequest.dryRun.affectedPaths;
-  return {
-    ...createInitialTaskSnapshot(),
-    id: `restored-approval-${record.taskId}`,
-    title: "Code Agent patch approval needed",
-    userGoal: "Apply restored Code Agent patch proposal",
-    status: "waiting_permission",
-    commanderMessage:
-      "A pending Code Agent patch approval was restored from local approval records.",
-    plan: [
-      {
-        id: "step-confirm-code-patch",
-        title: "User reviews the confirmed-write permission card",
-        assignedAgentKind: "code",
-        status: "running",
-      },
-    ],
-    agents: [],
-    logs: [
-      {
-        id: `${record.taskId}-code-approval-restored`,
-        kind: "permission",
-        title: "permission.restored",
-        detail: `Restored pending approval ${record.approvalId} for ${record.toolName}.`,
-      },
-    ],
-    codeProposedEdit: record.codeProposedEdit,
-    codeReviewPreview: record.codeProposedEdit
-      ? {
-          workspacePath: record.codeProposedEdit.workspacePath,
-          changedFiles: record.codeProposedEdit.changedFiles,
-          diffStat: `${affectedPaths.length} proposed file(s)`,
-          diff: record.codeProposedEdit.patch,
-        }
-      : undefined,
-    permissionRequest: record.permissionRequest,
-  };
-}
-
-function getDurableApprovalToolName(title: string): string | undefined {
-  if (title === PDF_APPROVAL_TITLE) {
-    return PDF_APPROVAL_TOOL_NAME;
-  }
-  if (title === CODE_PATCH_APPROVAL_TITLE) {
-    return CODE_PATCH_APPROVAL_TOOL_NAME;
-  }
-  return undefined;
-}
-
-function getDurableApprovalWorkspacePath(
-  task: PersistedTaskSnapshot,
-  title: string,
-): string {
-  if (title === PDF_APPROVAL_TITLE) {
-    return task.fileOrganizationPlan?.directoryPath ?? "";
-  }
-  if (title === CODE_PATCH_APPROVAL_TITLE) {
-    return task.codeProposedEdit?.workspacePath ?? task.codeReviewPreview?.workspacePath ?? "";
-  }
-  return "";
-}
-
-function createRestoredPdfDeniedTask(record: DurableApprovalRecord): PersistedTaskSnapshot {
-  return {
-    ...createRestoredPdfApprovalTask(record),
-    id: `restored-approval-denied-${record.taskId}`,
-    title: "PDF organization denied",
-    status: "completed",
-    commanderMessage: "Permission was denied after restore. Javis did not move or modify files.",
-    permissionRequest: record.permissionRequest,
-    verificationSummary: "verified: restored permission denied; no write operation was executed.",
-  };
-}
-
-function createRestoredPdfApprovedTask(
-  record: DurableApprovalRecord,
-  execution: FileOrganizationExecution,
-): PersistedTaskSnapshot {
-  return {
-    ...createRestoredPdfApprovalTask(record),
-    id: `restored-approval-approved-${record.taskId}`,
-    title: execution.failedCount === 0 ? "PDF organization completed" : "PDF organization completed with failures",
-    status: execution.failedCount === 0 ? "completed" : "failed",
-    commanderMessage: "Restored permission was approved and the PDF organization dry-run executed.",
-    permissionRequest: record.permissionRequest,
-    fileOrganizationExecution: execution,
-    verificationSummary: `${execution.failedCount === 0 ? "verified" : "failed"}: ${execution.movedCount}/${execution.attemptedCount} PDF move(s) completed, ${execution.skippedCount} skipped, ${execution.failedCount} failed.`,
-  };
-}
-
-function createRestoredPdfFailedTask(
-  record: DurableApprovalRecord,
-  error: unknown,
-): PersistedTaskSnapshot {
-  return {
-    ...createRestoredPdfApprovalTask(record),
-    id: `restored-approval-failed-${record.taskId}`,
-    title: "PDF organization execution failed",
-    status: "failed",
-    commanderMessage: "Restored permission was approved, but native execution failed.",
-    permissionRequest: record.permissionRequest,
-    logs: [
-      ...createRestoredPdfApprovalTask(record).logs,
-      {
-        id: `${record.taskId}-approval-restore-failed`,
-        kind: "tool",
-        title: "task.failed",
-        detail: error instanceof Error ? error.message : String(error),
-      },
-    ],
-  };
-}
-
-async function applyRestoredCodePatch(record: DurableApprovalRecord): Promise<CodeApplyResult> {
-  const edit = record.codeProposedEdit;
-  if (!edit) {
-    throw new Error("Restored Code Patch approval does not include a patch proposal.");
-  }
-  const proposalSafetyError = validateCodeProposal(edit);
-  if (proposalSafetyError) {
-    throw new Error(proposalSafetyError);
-  }
-  await invoke("approve_code_patch", {
-    request: {
-      approvalId: record.approvalId,
-      proposalId: edit.proposalId,
-      workspacePath: edit.workspacePath,
-      changedFiles: edit.changedFiles,
-      patchHash: edit.patchHash,
-    },
-  });
-  const applyResult = await invoke<CodeApplyResult>("apply_code_patch", {
-    request: {
-      approvalId: record.approvalId,
-      proposalId: edit.proposalId,
-      workspacePath: edit.workspacePath,
-      changedFiles: edit.changedFiles,
-      patch: edit.patch,
-      patchHash: edit.patchHash,
-    },
-  });
-  const applySafetyError = validateCodeApplyResult(edit, applyResult);
-  if (applySafetyError) {
-    throw new Error(applySafetyError);
-  }
-  return applyResult;
-}
-
-async function runRestoredCodePatchVerification(
-  workspacePath: string,
-): Promise<ShellCommandOutput> {
-  return invoke<ShellCommandOutput>("run_read_only_command", {
-    request: {
-      program: "git",
-      args: ["diff", "--check"],
-      workspacePath,
-    },
-  });
-}
-
-function createRestoredCodePatchDeniedTask(
-  record: DurableApprovalRecord,
-): PersistedTaskSnapshot {
-  return {
-    ...createRestoredCodePatchApprovalTask(record),
-    id: `restored-approval-denied-${record.taskId}`,
-    title: "Code Agent patch denied",
-    status: "completed",
-    commanderMessage: "Permission was denied after restore. Javis did not apply the patch.",
-    permissionRequest: record.permissionRequest,
-    verificationSummary: "verified: restored Code Agent patch was denied and no write operation was executed.",
-  };
-}
-
-function createRestoredCodePatchApprovedTask(
-  record: DurableApprovalRecord,
-  applyResult: CodeApplyResult,
-  verification: ShellCommandOutput,
-): PersistedTaskSnapshot {
-  const applyStatus = applyResult.applied && verification.exitCode === 0 ? "completed" : "failed";
-  return {
-    ...createRestoredCodePatchApprovalTask(record),
-    id: `restored-approval-approved-${record.taskId}`,
-    title:
-      applyStatus === "completed"
-        ? "Code Agent patch applied"
-        : "Code Agent patch verification failed",
-    status: applyStatus,
-    commanderMessage:
-      applyStatus === "completed"
-        ? "Restored permission was approved, the patch was applied, and post-apply verification passed."
-        : "Restored permission was approved, but post-apply verification did not pass.",
-    permissionRequest: record.permissionRequest,
-    codeApplyResult: applyResult,
-    commands: [verification],
-    verificationSummary:
-      applyStatus === "completed"
-        ? `verified: restored Code Agent patch applied to ${applyResult.changedFiles.length} file(s), and post-apply git diff --check passed.`
-        : `failed: restored Code Agent patch apply result was ${applyResult.applied ? "applied" : "not applied"} and post-apply git diff --check returned exit code ${verification.exitCode ?? "unknown"}.`,
-  };
-}
-
-function createRestoredCodePatchFailedTask(
-  record: DurableApprovalRecord,
-  error: unknown,
-): PersistedTaskSnapshot {
-  return {
-    ...createRestoredCodePatchApprovalTask(record),
-    id: `restored-approval-failed-${record.taskId}`,
-    title: "Code Agent patch application failed",
-    status: "failed",
-    commanderMessage: "Restored permission was approved, but native patch application failed.",
-    permissionRequest: record.permissionRequest,
-    logs: [
-      ...createRestoredCodePatchApprovalTask(record).logs,
-      {
-        id: `${record.taskId}-code-approval-restore-failed`,
-        kind: "tool",
-        title: "task.failed",
-        detail: error instanceof Error ? error.message : String(error),
-      },
-    ],
-  };
-}

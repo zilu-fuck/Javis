@@ -22,7 +22,7 @@ history intact.
 | Code Agent | Inspect code, propose changes, produce diffs, apply approved edits, and run verification. | Partial. Core can route code review goals to a Code Agent scaffold that lists changed files, shows a diff preview, asks before continuing, runs read-only `git diff --check`, requests an opencode-backed JSON patch proposal using desktop-managed model/provider settings, and applies approved patches through the local confirmed-write backend. Packaged-app fixture QA covers proposal denial and approved patch application after preserving provider patch bodies exactly for `git apply`. The proposal backend now has a DeepSeek/custom OpenAI-compatible fallback, stricter proposal-file binding, parser hardening, and redacted diagnostics; live provider smoke still needs to be rerun with temporary credentials. |
 | Persistence | Save task history, results, permission decisions as scoped records, and allow deletion. | Partial. Completed, failed, and cancelled task snapshots are stored locally with sidebar restore and delete controls; resolved permission decisions are retained as audit evidence. Durable approval record storage covers PDF approvals and Code Patch pending/resolved audit records. Packaged restart QA verifies PDF and Code Patch approve/apply, deny, and expiry recovery paths. |
 | Workspace management | Select and remember workspaces without relying on the launch directory. | Implemented. Desktop sidebar accepts manual workspace paths and a native directory picker, restores recent workspaces from local storage after app restart, persists only completed workspace runs, supports recent deletion, and routes workspace-aware read/project/code tools through the selected path. Manual restart screenshots are recorded in `docs/qa/2026-05-24/`. |
-| Permission enforcement | Confirmed writes require visible approval and native enforcement for the current dry-run. | Partial. PDF organization has one-time native approval-state enforcement and now validates restored/approved operations through a native path/source guard before they enter pending state. Code Agent patch apply is gated by Core confirmed-write plus native approval id, proposal hash, one-shot consumption, path checks, and current-file hashes. Code Patch proposal/apply now share the native relative path, approved-file, and current-file guard. |
+| Permission enforcement | Confirmed writes require visible approval and native enforcement for the current dry-run. | Partial. PDF organization has one-time native approval-state enforcement and now validates restored/approved operations through a native path/source guard before they enter pending state. Code Agent patch apply is gated by Core confirmed-write plus native approval id, proposal hash, one-shot consumption, path checks, current-file hashes, native tool binding, and native preview-hash binding. Restored durable approvals recompute the dry-run binding hash and Code Patch restore checks persisted proposal files against the approved dry-run. Code Patch proposal/apply now share the native relative path, approved-file, and current-file guard. |
 | Error recovery | Failed tools show actionable errors and allow retry or alternate paths. | Partial. MVP failure states exist, failed tasks expose an initial retry action, and failed research tasks now point users to manual URL fallback; broader alternate-path recovery is not complete. |
 | Release operations | Signed/versioned builds, repeatable QA evidence, release notes, and rollback notes. | Partial. Unsigned Windows build and QA evidence exist. |
 
@@ -51,11 +51,13 @@ Do not call Javis a complete usable product while any of these are true:
   snapshots and needs broader QA across app restart and future storage
   migrations.
 - Confirmed-write enforcement now shares native approval binding for PDF and
-  Code Patch approval id / approved-state checks. PDF approval/restore validates
-  operation paths and PDF sources before pending state is accepted, while Code
-  Patch apply validates proposal hash, approved files, and current-file hashes
-  with one-shot consumption. Remaining guard work is task/tool binding,
-  generalized preview hash checks, and broader write-command migration.
+  Code Patch approval id / approved-state, tool-name, and preview-hash checks.
+  PDF approval/restore validates operation paths and PDF sources before pending
+  state is accepted, while Code Patch apply validates proposal hash, approved
+  files, and current-file hashes with one-shot consumption. Restored durable
+  records recompute the dry-run binding hash and reject Code Patch proposal
+  payloads whose file list no longer matches the approved dry-run. Remaining
+  guard work is task binding and broader write-command migration.
 - Manual QA covers only MVP scenarios.
 - Release builds are unsigned or lack version/rollback notes.
 - A primary user workflow requires editing docs, scripts, or fixtures by hand.

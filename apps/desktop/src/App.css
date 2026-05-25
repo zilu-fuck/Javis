@@ -50,6 +50,37 @@ textarea:focus-visible {
   background: #f6f6f3;
 }
 
+.javis-shell.mode-resource {
+  grid-template-columns: 238px minmax(760px, 1fr);
+  grid-template-rows: 1fr;
+  padding: 14px 16px 14px 0;
+  background: #f5f5f3;
+}
+
+.javis-shell.mode-resource.inspector-collapsed,
+.javis-shell.mode-resource.inspector-open {
+  grid-template-columns: 238px minmax(760px, 1fr);
+}
+
+.javis-shell.mode-resource.activity-collapsed,
+.javis-shell.mode-resource.activity-open {
+  grid-template-rows: 1fr;
+}
+
+.javis-shell.mode-resource .javis-sidebar {
+  grid-row: 1;
+  height: calc(100vh - 28px);
+  margin: 0 24px 0 16px;
+}
+
+.javis-shell.mode-resource .javis-main {
+  display: block;
+  border-right: 0;
+  border-radius: 28px;
+  background: #f8f8f7;
+  overflow: hidden;
+}
+
 .javis-shell.inspector-collapsed {
   grid-template-columns: 220px minmax(420px, 1fr) 44px;
 }
@@ -149,6 +180,17 @@ textarea:focus-visible {
   gap: 3px;
 }
 
+.javis-nav-subitem {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  align-items: center;
+  min-height: 34px;
+  padding: 6px 9px 6px 32px;
+  color: #77736b;
+  font-size: 13px;
+  line-height: 18px;
+}
+
 .javis-nav-section {
   margin: 0 0 8px;
   padding: 0 8px;
@@ -169,16 +211,35 @@ textarea:focus-visible {
   color: #20201d;
   font-size: 14px;
   line-height: 18px;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
 }
 
 .javis-nav-item.muted {
   color: #77736b;
 }
 
+.javis-nav-item:hover {
+  background: #f6f5f3;
+}
+
 .javis-nav-item.active {
   color: #171717;
-  border-color: #ecebe7;
-  background: #f0efec;
+  border-color: #efeeeb;
+  background: #f1f0ed;
+  font-weight: 560;
+}
+
+.javis-nav-item.collapsible {
+  cursor: pointer;
+}
+
+.javis-nav-item.collapsible .javis-nav-caret {
+  justify-self: end;
+  color: #77736b;
+  font-size: 12px;
 }
 
 .javis-history-entry {
@@ -191,8 +252,8 @@ textarea:focus-visible {
 }
 
 .javis-history-entry:hover {
-  border-color: #ecebe7;
-  background: #f0efec;
+  border-color: #efeeeb;
+  background: #f6f5f3;
 }
 
 .javis-workspace-context {
@@ -1103,4 +1164,768 @@ textarea:focus-visible {
   .javis-shell.inspector-open {
     grid-template-columns: 210px minmax(420px, 1fr) 300px;
   }
+}
+
+/* ── Sidebar badge ──────────────────────────────────────────────── */
+
+.javis-nav-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  margin-left: auto;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #315f58;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.javis-resource-shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+  min-width: 0;
+  color: #161616;
+  background: #f8f8f7;
+}
+
+.javis-resource-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  min-height: 118px;
+  padding: 30px 72px 18px;
+}
+
+.javis-resource-pathbar,
+.javis-resource-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.javis-resource-back,
+.javis-resource-add,
+.javis-resource-icon-button,
+.javis-resource-segment button {
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  color: #222222;
+  background: #eeeeec;
+}
+
+.javis-resource-back,
+.javis-resource-add {
+  width: 28px;
+  height: 28px;
+  color: #9a9a96;
+  background: transparent;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.javis-resource-pill {
+  display: inline-flex;
+  width: 252px;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: #ffffff;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.javis-resource-pill-icon {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 5px;
+  color: #ffffff;
+  background: #ffc82e;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.javis-resource-icon-button {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  color: #202020;
+  font-size: 16px;
+}
+
+.javis-resource-search {
+  display: inline-grid;
+  grid-template-columns: auto minmax(0, 140px);
+  align-items: center;
+  gap: 7px;
+  width: 190px;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: #eeeeec;
+  color: #4c4c49;
+}
+
+.javis-resource-search input {
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-size: 12px;
+}
+
+.javis-resource-segment,
+.javis-resource-slider {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  border-radius: 999px;
+  background: #eeeeec;
+}
+
+.javis-resource-segment {
+  padding: 0 8px;
+  gap: 2px;
+}
+
+.javis-resource-segment button {
+  min-width: 32px;
+  height: 28px;
+  border-radius: 999px;
+  color: #8b8b86;
+  font-size: 14px;
+}
+
+.javis-resource-segment button.active {
+  color: #111111;
+  background: #ffffff;
+}
+
+.javis-resource-segment.wide button {
+  min-width: 42px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.javis-resource-slider {
+  gap: 10px;
+  padding: 0 12px;
+  color: #3a3a37;
+  font-size: 18px;
+}
+
+.javis-resource-slider span:nth-child(2) {
+  display: block;
+  width: 88px;
+  height: 5px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #111111 0 46%, #d9d9d5 46%);
+}
+
+.javis-resource-body {
+  min-height: 0;
+  overflow: auto;
+  padding: 0 72px 48px;
+  scrollbar-color: #d2d0cc transparent;
+}
+
+.javis-resource-kicker {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  min-height: 44px;
+  margin-bottom: 8px;
+}
+
+.javis-resource-kicker strong {
+  font-size: 16px;
+  font-weight: 720;
+}
+
+.javis-resource-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.javis-resource-tabs button {
+  border: 0;
+  padding: 0;
+  color: #8b8983;
+  background: transparent;
+  font-size: 14px;
+}
+
+.javis-resource-tabs button.active {
+  color: #171717;
+  font-weight: 650;
+}
+
+/* ── View panel (shared) ────────────────────────────────────────── */
+
+.javis-view-panel {
+  padding: 24px 32px;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.javis-view-title {
+  margin: 0 0 16px;
+  font-size: 20px;
+  font-weight: 700;
+  color: #171717;
+}
+
+.javis-view-loading,
+.javis-view-empty,
+.javis-view-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 48px 0;
+  color: #77736b;
+  font-size: 14px;
+}
+
+.javis-view-empty-icon {
+  font-size: 32px;
+  opacity: 0.4;
+}
+
+.javis-view-error button {
+  padding: 6px 16px;
+  border: 1px solid #d8d5cd;
+  border-radius: 6px;
+  background: #fff;
+  font-size: 13px;
+}
+
+.javis-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid #d8d5cd;
+  border-top-color: #315f58;
+  border-radius: 50%;
+  animation: javis-spin 0.6s linear infinite;
+}
+
+@keyframes javis-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.javis-view-search {
+  display: block;
+  margin-bottom: 12px;
+}
+
+.javis-view-search input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #d8d5cd;
+  border-radius: 8px;
+  font-size: 13px;
+  background: #fff;
+}
+
+/* ── Filter chips ───────────────────────────────────────────────── */
+
+.javis-filter-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.javis-chip {
+  padding: 4px 12px;
+  border: 1px solid #d8d5cd;
+  border-radius: 999px;
+  background: #fff;
+  font-size: 12px;
+  color: #555;
+}
+
+.javis-chip.active {
+  border-color: #315f58;
+  background: #e8f2ef;
+  color: #315f58;
+  font-weight: 600;
+}
+
+/* ── Scheduled tasks ────────────────────────────────────────────── */
+
+.javis-task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.javis-task-card {
+  padding: 14px 16px;
+  border: 1px solid #d8d5cd;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.javis-task-card.disabled {
+  opacity: 0.55;
+}
+
+.javis-task-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.javis-task-name {
+  font-weight: 650;
+  font-size: 14px;
+  color: #171717;
+}
+
+.javis-task-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #77736b;
+  cursor: pointer;
+}
+
+.javis-task-toggle input {
+  cursor: pointer;
+}
+
+.javis-task-card-meta {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+  color: #77736b;
+  margin-bottom: 8px;
+}
+
+.javis-task-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.javis-task-last-run {
+  font-size: 12px;
+  color: #77736b;
+}
+
+.javis-task-last-run.status-success {
+  color: #16a34a;
+}
+
+.javis-task-last-run.status-failed {
+  color: #dc2626;
+}
+
+.javis-task-last-run.status-running {
+  color: #315f58;
+}
+
+.javis-task-delete {
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  color: #999;
+  font-size: 16px;
+  border-radius: 4px;
+}
+
+.javis-task-delete:hover {
+  background: #f0f0ed;
+  color: #c00;
+}
+
+/* ── Skill market ───────────────────────────────────────────────── */
+
+.javis-skill-count {
+  font-size: 13px;
+  color: #77736b;
+  margin-bottom: 16px;
+}
+
+.javis-skill-section {
+  margin-bottom: 20px;
+}
+
+.javis-skill-section h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 650;
+  color: #171717;
+}
+
+.javis-skill-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px;
+}
+
+.javis-skill-card {
+  padding: 12px 14px;
+  border: 1px solid #d8d5cd;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.javis-skill-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.javis-skill-name {
+  font-size: 13px;
+  font-weight: 650;
+  color: #171717;
+}
+
+.javis-skill-perm-chip {
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  text-transform: uppercase;
+}
+
+.javis-skill-desc {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: #555;
+  line-height: 1.4;
+}
+
+.javis-skill-owners {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.javis-skill-owner-chip {
+  padding: 1px 8px;
+  border: 1px solid #d8d5cd;
+  border-radius: 999px;
+  font-size: 10px;
+  color: #555;
+}
+
+.javis-skill-owner-chip.muted {
+  color: #999;
+  border-style: dashed;
+}
+
+.javis-skill-empty {
+  font-size: 13px;
+  color: #77736b;
+}
+
+/* ── Apps grid ──────────────────────────────────────────────────── */
+
+.javis-app-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  gap: 38px 28px;
+  padding-top: 24px;
+}
+
+.javis-app-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: center;
+}
+
+.javis-app-card:hover {
+  background: transparent;
+}
+
+.javis-app-icon {
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 13px;
+  background: #1677ff;
+  color: #ffffff;
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.javis-app-name {
+  width: 96px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #171717;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+
+.javis-app-publisher {
+  font-size: 10px;
+  color: #999;
+}
+
+/* ── Documents table ────────────────────────────────────────────── */
+
+.javis-doc-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0 6px;
+  font-size: 14px;
+}
+
+.javis-doc-table th {
+  height: 0;
+  padding: 0;
+  overflow: hidden;
+  color: transparent;
+  font-size: 0;
+}
+
+.javis-doc-table td {
+  padding: 8px 10px;
+  border-bottom: 0;
+  color: #8a8985;
+  background: transparent;
+}
+
+.javis-doc-table tr:hover td {
+  background: #eeeeec;
+}
+
+.javis-doc-table tr:hover td:first-child {
+  border-radius: 7px 0 0 7px;
+}
+
+.javis-doc-table tr:hover td:last-child {
+  border-radius: 0 7px 7px 0;
+}
+
+.javis-doc-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: none;
+  color: #171717;
+  font-size: 14px;
+  padding: 0;
+}
+
+.javis-doc-link:hover {
+  color: #315f58;
+}
+
+.javis-doc-ext {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 22px;
+  border: 1px solid #dad8d3;
+  border-radius: 3px;
+  background: #ffffff;
+  color: #77736b;
+  font-size: 7px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+/* ── Gallery grid ───────────────────────────────────────────────── */
+
+.javis-gallery-skeleton {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 18px 16px;
+}
+
+.javis-gallery-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 18px 16px;
+  width: 100%;
+  padding-top: 18px;
+}
+
+.javis-gallery-thumb {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  text-align: center;
+}
+
+.javis-gallery-thumb:hover {
+  background: transparent;
+}
+
+.javis-gallery-thumb.skeleton {
+  background: #f0f0ed;
+  border-color: #eee;
+  animation: javis-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes javis-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.javis-gallery-icon {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  background: #f0f0ed;
+  color: #77736b;
+  font-size: 24px;
+  font-weight: 700;
+}
+
+.javis-gallery-name {
+  width: 100%;
+  font-size: 12px;
+  color: #555;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+/* ── File explorer ──────────────────────────────────────────────── */
+
+.javis-breadcrumb {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-bottom: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: 12px;
+}
+
+.javis-breadcrumb-item {
+  border: none;
+  background: none;
+  color: #315f58;
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.javis-breadcrumb-item:hover {
+  background: #e8f2ef;
+}
+
+.javis-breadcrumb-sep {
+  color: #ccc;
+  margin: 0 2px;
+}
+
+.javis-file-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.javis-file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 10px;
+  border: none;
+  border-bottom: 0;
+  border-radius: 7px;
+  background: none;
+  text-align: left;
+  font-size: 14px;
+  width: 100%;
+}
+
+.javis-file-row:hover {
+  background: #eeeeec;
+}
+
+.javis-file-row.dir .javis-file-name {
+  font-weight: 600;
+  color: #171717;
+}
+
+.javis-file-icon {
+  width: 20px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.javis-file-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #333;
+}
+
+.javis-file-size {
+  width: 70px;
+  text-align: right;
+  color: #999;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.javis-file-modified {
+  width: 140px;
+  text-align: right;
+  color: #999;
+  font-size: 11px;
+  flex-shrink: 0;
 }

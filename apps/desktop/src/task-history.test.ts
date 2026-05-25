@@ -1,15 +1,23 @@
 import { describe, expect, it } from "vitest";
 import {
   TASK_HISTORY_LIMIT,
+  TASK_HISTORY_SCHEMA_MIGRATIONS,
+  TASK_HISTORY_SCHEMA_MIGRATION,
+  TASK_HISTORY_SCHEMA_SQL,
   TASK_HISTORY_STORAGE_KEY,
   TASK_HISTORY_STORAGE_VERSION,
+  TASK_HISTORY_UPDATED_AT_INDEX_MIGRATION,
+  TASK_HISTORY_UPDATED_AT_INDEX_SQL,
+  createTaskHistoryRepository,
   getTaskUpdatedAt,
   loadTaskHistory,
+  loadTaskHistoryWithStorageFallback,
   saveTaskHistory,
   sanitizeTaskSnapshot,
   upsertTaskHistory,
 } from "./task-history";
 import type { TaskSnapshot } from "@javis/core";
+import type { DatabaseValue, DesktopDatabase } from "./desktop-database";
 
 describe("task history persistence", () => {
   it("keeps resolved permission decisions in completed task history", () => {
@@ -312,6 +320,122 @@ describe("task history persistence", () => {
     expect(sanitized?.project).toBeUndefined();
     expect(sanitized?.tokenUsage).toBeUndefined();
   });
+
+  it("exposes SQLite-ready task history schema migration SQL", () => {
+    expect(TASK_HISTORY_SCHEMA_MIGRATION).toEqual({
+      id: "001_task_history",
+      sql: TASK_HISTORY_SCHEMA_SQL,
+    });
+    expect(TASK_HISTORY_UPDATED_AT_INDEX_MIGRATION).toEqual({
+      id: "002_task_history_updated_at_index",
+      sql: TASK_HISTORY_UPDATED_AT_INDEX_SQL,
+    });
+    expect(TASK_HISTORY_SCHEMA_MIGRATIONS).toEqual([
+      TASK_HISTORY_SCHEMA_MIGRATION,
+      TASK_HISTORY_UPDATED_AT_INDEX_MIGRATION,
+    ]);
+    expect(TASK_HISTORY_SCHEMA_SQL).toContain("CREATE TABLE IF NOT EXISTS task_history");
+    expect(TASK_HISTORY_SCHEMA_SQL).toContain("snapshot_json TEXT NOT NULL");
+    expect(TASK_HISTORY_UPDATED_AT_INDEX_SQL).toContain(
+      "CREATE INDEX IF NOT EXISTS idx_task_history_updated_at",
+    );
+  });
+
+  it("persists sanitized task history through the async repository", async () => {
+    const database = createMemoryTaskHistoryDatabase();
+    const repository = createTaskHistoryRepository(database);
+    const task = {
+      ...createTask("task-1000"),
+      permissionRequest: {
+        id: "permission-pending",
+        level: "confirmed_write",
+        title: "Approve write",
+        reason: "Write requires approval.",
+        status: "pending",
+        createdAt: "2026-05-23T00:00:00.000Z",
+        dryRun: {
+          operation: "Move files",
+          affectedPaths: [],
+          riskSummary: "Risk",
+          reversible: true,
+        },
+      },
+      codeProposedEdit: {
+        proposalId: "proposal-1",
+        workspacePath: "E:/Javis",
+        summary: "Tighten the code review completion message.",
+        changedFiles: ["packages/core/src/index.ts"],
+        patch: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts",
+        patchHash: "fnv1a-19fcfa54",
+      },
+    } satisfies TaskSnapshot;
+
+    const saved = await repository.save([task, createTask("task-running", "running")]);
+    const loaded = await repository.list();
+
+    expect(saved.map((entry) => entry.id)).toEqual(["task-1000"]);
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0]?.permissionRequest).toBeUndefined();
+    expect(loaded[0]?.codeProposedEdit?.patch).toBe("");
+    expect(database.rows[0]?.snapshot_json).not.toContain("permission-pending");
+    expect(database.rows[0]?.snapshot_json).not.toContain("diff --git");
+  });
+
+  it("upserts repository entries with newest snapshots first", async () => {
+    const repository = createTaskHistoryRepository(createMemoryTaskHistoryDatabase());
+    const first = createTask("task-1000");
+    const second = createTask("task-2000");
+
+    await repository.save([first]);
+    const history = await repository.upsert(second);
+
+    expect(history.map((task) => task.id)).toEqual(["task-2000", "task-1000"]);
+  });
+
+  it("imports sanitized legacy localStorage history into the repository", async () => {
+    const storage = createMemoryStorage();
+    const database = createMemoryTaskHistoryDatabase();
+    const repository = createTaskHistoryRepository(database);
+    storage.setItem(
+      TASK_HISTORY_STORAGE_KEY,
+      JSON.stringify({
+        version: TASK_HISTORY_STORAGE_VERSION,
+        tasks: [createTask("task-1000"), createTask("task-running", "running")],
+      }),
+    );
+
+    const imported = await repository.importFromLocalStorage(storage);
+    const loaded = await repository.list();
+
+    expect(imported.map((task) => task.id)).toEqual(["task-1000"]);
+    expect(loaded.map((task) => task.id)).toEqual(["task-1000"]);
+  });
+
+  it("keeps existing repository history when localStorage import is empty", async () => {
+    const repository = createTaskHistoryRepository(createMemoryTaskHistoryDatabase());
+    await repository.save([createTask("task-1000")]);
+
+    const imported = await repository.importFromLocalStorage(createMemoryStorage());
+
+    expect(imported.map((task) => task.id)).toEqual(["task-1000"]);
+  });
+
+  it("falls back to localStorage when task history repository loading fails", async () => {
+    const storage = createMemoryStorage();
+    storage.setItem(TASK_HISTORY_STORAGE_KEY, JSON.stringify([createTask("task-1000")]));
+    const failingRepository = {
+      async list() {
+        throw new Error("unavailable");
+      },
+    };
+
+    await expect(
+      loadTaskHistoryWithStorageFallback(failingRepository, storage),
+    ).resolves.toEqual([createTask("task-1000")]);
+    await expect(
+      loadTaskHistoryWithStorageFallback(null, storage),
+    ).resolves.toEqual([createTask("task-1000")]);
+  });
 });
 
 function createTask(
@@ -359,5 +483,72 @@ function createMemoryStorage(): Pick<Storage, "getItem" | "setItem"> {
     setItem: (key, value) => {
       values.set(key, value);
     },
+  };
+}
+
+function createMemoryTaskHistoryDatabase(initialRows: TaskHistoryRow[] = []) {
+  const rows = [...initialRows];
+  const database: DesktopDatabase & {
+    executedSql: string[];
+    bindValues: DatabaseValue[][];
+    rows: TaskHistoryRow[];
+  } = {
+    executedSql: [],
+    bindValues: [],
+    rows,
+    async execute(sql, values = []) {
+      this.executedSql.push(sql);
+      if (values.length > 0) {
+        this.bindValues.push(values);
+      }
+      if (sql.startsWith("DELETE FROM task_history")) {
+        rows.splice(0, rows.length);
+        return;
+      }
+      if (!sql.startsWith("INSERT INTO task_history")) {
+        return;
+      }
+
+      const row = bindValuesToTaskHistoryRow(values);
+      const existingIndex = rows.findIndex((entry) => entry.id === row.id);
+      if (existingIndex >= 0) {
+        rows[existingIndex] = row;
+      } else {
+        rows.push(row);
+      }
+    },
+    async select<T extends Record<string, unknown>>(_sql: string, values = []) {
+      const limit = typeof values[0] === "number" ? values[0] : TASK_HISTORY_LIMIT;
+      return [...rows]
+        .sort(
+          (left, right) =>
+            right.updated_at.localeCompare(left.updated_at) ||
+            right.id.localeCompare(left.id),
+        )
+        .slice(0, limit)
+        .map((row) => ({ snapshot_json: row.snapshot_json }) as unknown as T);
+    },
+  };
+  return database;
+}
+
+interface TaskHistoryRow {
+  id: string;
+  title: string;
+  user_goal: string;
+  status: string;
+  updated_at: string;
+  snapshot_json: string;
+}
+
+function bindValuesToTaskHistoryRow(values: DatabaseValue[]): TaskHistoryRow {
+  const [id, title, userGoal, status, updatedAt, snapshotJson] = values;
+  return {
+    id: String(id),
+    title: String(title),
+    user_goal: String(userGoal),
+    status: String(status),
+    updated_at: String(updatedAt),
+    snapshot_json: String(snapshotJson),
   };
 }

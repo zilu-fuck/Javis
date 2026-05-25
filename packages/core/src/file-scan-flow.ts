@@ -1,10 +1,7 @@
 import type { FileTool } from "@javis/tools";
 import { summarizeMarkdownDocuments } from "@javis/tools";
-import {
-  commanderSnapshot,
-  fileSnapshot,
-  verifierSnapshot,
-} from "./agents";
+import { createAgentStateTracker } from "./agent-state-tracker";
+import { demoAgents } from "./agents";
 import { createFileScanPlan, markStep } from "./plans";
 import { appendLog } from "./snapshot-utils";
 import { createEmptyTokenUsageSummary } from "./token-usage";
@@ -23,6 +20,23 @@ export async function runFileScanTask(
   userGoal: string,
 ) {
   const plan = createFileScanPlan();
+  const agentTracker = createAgentStateTracker(
+    demoAgents.filter((agent) => ["commander", "file", "verifier"].includes(agent.kind)),
+  );
+
+  agentTracker.setState("agent-commander", {
+    status: "planning",
+    task: "Create document scan plan",
+    currentStepId: "step-scan-markdown",
+  });
+  agentTracker.setState("agent-file", {
+    status: "queued",
+    task: "Waiting for file.scanMarkdownDocuments",
+  });
+  agentTracker.setState("agent-verifier", {
+    status: "queued",
+    task: "Waiting for file scan results",
+  });
 
   controller.emit({
     id: taskId,
@@ -32,11 +46,7 @@ export async function runFileScanTask(
     commanderMessage:
       "Commander identified a local document scan and prepared a read-only File Tool call.",
     plan,
-    agents: [
-      commanderSnapshot("planning", "Create document scan plan"),
-      fileSnapshot("queued", "Waiting for file.scanMarkdownDocuments"),
-      verifierSnapshot("queued", "Waiting for file scan results"),
-    ],
+    agents: agentTracker.getSnapshots(),
     tokenUsage: createEmptyTokenUsageSummary(),
     logs: [
       {
@@ -57,6 +67,20 @@ export async function runFileScanTask(
 
   await controller.wait();
 
+  agentTracker.setState("agent-commander", {
+    status: "completed",
+    task: "Plan submitted",
+  });
+  agentTracker.setState("agent-file", {
+    status: "running",
+    task: "Running read-only Markdown scan",
+    currentStepId: "step-scan-markdown",
+  });
+  agentTracker.setState("agent-verifier", {
+    status: "queued",
+    task: "Waiting for scan results",
+  });
+
   controller.emit({
     ...controller.getSnapshot(),
     title: "Scanning workspace documents",
@@ -64,11 +88,7 @@ export async function runFileScanTask(
     commanderMessage:
       "File Agent is scanning Markdown documents through the Tauri desktop bridge.",
     plan: markStep(controller.getSnapshot().plan, "step-scan-markdown", "running"),
-    agents: [
-      commanderSnapshot("completed", "Plan submitted"),
-      fileSnapshot("running", "Running read-only Markdown scan"),
-      verifierSnapshot("queued", "Waiting for scan results"),
-    ],
+    agents: agentTracker.getSnapshots(),
     logs: appendLog(controller.getSnapshot(), {
       id: `${taskId}-tool-planned`,
       kind: "tool",
@@ -80,6 +100,19 @@ export async function runFileScanTask(
 
   try {
     const documents = summarizeMarkdownDocuments(await fileTool.scanMarkdownDocuments());
+
+    agentTracker.setState("agent-commander", {
+      status: "completed",
+      task: "Plan submitted",
+    });
+    agentTracker.setState("agent-file", {
+      status: "completed",
+      task: `Found ${documents.length} Markdown documents`,
+    });
+    agentTracker.setState("agent-verifier", {
+      status: "queued",
+      task: "Waiting for verification",
+    });
 
     controller.emit({
       ...controller.getSnapshot(),
@@ -93,11 +126,7 @@ export async function runFileScanTask(
         "step-summarize",
         "running",
       ),
-      agents: [
-        commanderSnapshot("completed", "Plan submitted"),
-        fileSnapshot("completed", `Found ${documents.length} Markdown documents`),
-        verifierSnapshot("queued", "Waiting for verification"),
-      ],
+      agents: agentTracker.getSnapshots(),
       documents,
       logs: appendLog(controller.getSnapshot(), {
         id: `${taskId}-tool-done`,
@@ -108,6 +137,20 @@ export async function runFileScanTask(
     });
 
     await controller.wait();
+
+    agentTracker.setState("agent-commander", {
+      status: "completed",
+      task: "Waiting for verification",
+    });
+    agentTracker.setState("agent-file", {
+      status: "completed",
+      task: "Document scan and summaries completed",
+    });
+    agentTracker.setState("agent-verifier", {
+      status: "verifying",
+      task: "Checking document result fields",
+      currentStepId: "step-verify-docs",
+    });
 
     controller.emit({
       ...controller.getSnapshot(),
@@ -122,11 +165,7 @@ export async function runFileScanTask(
         "step-verify-docs",
         "running",
       ),
-      agents: [
-        commanderSnapshot("completed", "Waiting for verification"),
-        fileSnapshot("completed", "Document scan and summaries completed"),
-        verifierSnapshot("verifying", "Checking document result fields"),
-      ],
+      agents: agentTracker.getSnapshots(),
       logs: appendLog(controller.getSnapshot(), {
         id: `${taskId}-verify`,
         kind: "verification",
@@ -146,6 +185,18 @@ export async function runFileScanTask(
         Boolean(document.purpose),
     ).length;
     const verificationStatus = validCount === documents.length ? "completed" : "failed";
+    agentTracker.setState("agent-commander", {
+      status: "completed",
+      task: "Task finished",
+    });
+    agentTracker.setState("agent-file", {
+      status: "completed",
+      task: "Read-only scan completed",
+    });
+    agentTracker.setState("agent-verifier", {
+      status: verificationStatus === "completed" ? "completed" : "failed",
+      task: `${validCount}/${documents.length} records verified`,
+    });
 
     controller.emit({
       ...controller.getSnapshot(),
@@ -162,14 +213,7 @@ export async function runFileScanTask(
         verificationStatus === "completed"
           ? controller.getSnapshot().plan.map((step) => ({ ...step, status: "completed" }))
           : markStep(controller.getSnapshot().plan, "step-verify-docs", "failed"),
-      agents: [
-        commanderSnapshot("completed", "Task finished"),
-        fileSnapshot("completed", "Read-only scan completed"),
-        verifierSnapshot(
-          verificationStatus === "completed" ? "completed" : "failed",
-          `${validCount}/${documents.length} records verified`,
-        ),
-      ],
+      agents: agentTracker.getSnapshots(),
       logs: appendLog(controller.getSnapshot(), {
         id: `${taskId}-done`,
         kind: "verification",
@@ -183,6 +227,19 @@ export async function runFileScanTask(
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    agentTracker.setState("agent-commander", {
+      status: "completed",
+      task: "Plan submitted",
+    });
+    agentTracker.setState("agent-file", {
+      status: "failed",
+      task: "Scan failed",
+    });
+    agentTracker.setState("agent-verifier", {
+      status: "cancelled",
+      task: "No result to verify",
+    });
+
     controller.emit({
       ...controller.getSnapshot(),
       title: "Document scan failed",
@@ -190,11 +247,7 @@ export async function runFileScanTask(
       commanderMessage:
         "File Agent scan failed. The task stopped without running any write operation.",
       plan: markStep(controller.getSnapshot().plan, "step-scan-markdown", "failed"),
-      agents: [
-        commanderSnapshot("completed", "Plan submitted"),
-        fileSnapshot("failed", "Scan failed"),
-        verifierSnapshot("cancelled", "No result to verify"),
-      ],
+      agents: agentTracker.getSnapshots(),
       logs: appendLog(controller.getSnapshot(), {
         id: `${taskId}-failed`,
         kind: "tool",

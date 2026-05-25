@@ -1,11 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
+  WORKSPACE_SESSION_DEFAULT_ID,
+  WORKSPACE_SESSION_SCHEMA_MIGRATION,
+  WORKSPACE_SESSION_SCHEMA_MIGRATIONS,
+  WORKSPACE_SESSION_SCHEMA_SQL,
   deletePersistedWorkspacePath,
+  createWorkspaceSessionRepository,
   getCompletedTaskWorkspacePath,
   loadWorkspaceSession,
+  loadWorkspaceSessionWithStorageFallback,
   persistWorkspaceForTaskStatus,
 } from "./workspace-session";
 import { RECENT_WORKSPACES_STORAGE_KEY } from "./recent-workspaces";
+import type { DatabaseValue, DesktopDatabase } from "./desktop-database";
 
 describe("workspace session persistence", () => {
   it("restores the first recent workspace as the active workspace", () => {
@@ -103,6 +110,83 @@ describe("workspace session persistence", () => {
       }),
     ).toBe("");
   });
+
+  it("exposes SQLite-ready workspace session schema migration SQL", () => {
+    expect(WORKSPACE_SESSION_SCHEMA_MIGRATION).toEqual({
+      id: "001_workspace_session",
+      sql: WORKSPACE_SESSION_SCHEMA_SQL,
+    });
+    expect(WORKSPACE_SESSION_SCHEMA_MIGRATIONS).toEqual([
+      WORKSPACE_SESSION_SCHEMA_MIGRATION,
+    ]);
+    expect(WORKSPACE_SESSION_SCHEMA_SQL).toContain(
+      "CREATE TABLE IF NOT EXISTS workspace_session",
+    );
+    expect(WORKSPACE_SESSION_SCHEMA_SQL).toContain(
+      "recent_workspace_paths_json TEXT NOT NULL",
+    );
+  });
+
+  it("persists workspace sessions through the async repository", async () => {
+    const database = createMemoryWorkspaceSessionDatabase();
+    const repository = createWorkspaceSessionRepository(database);
+
+    const saved = await repository.save({
+      workspacePath: "",
+      recentWorkspacePaths: [" E:/Javis ", "e:/javis", "F:/Other"],
+    });
+    const loaded = await repository.load();
+
+    expect(saved).toEqual({
+      workspacePath: "E:/Javis",
+      recentWorkspacePaths: ["E:/Javis", "F:/Other"],
+    });
+    expect(loaded).toEqual(saved);
+    expect(database.row?.id).toBe(WORKSPACE_SESSION_DEFAULT_ID);
+  });
+
+  it("imports existing localStorage workspace session into the repository", async () => {
+    const storage = createMemoryStorage();
+    const repository = createWorkspaceSessionRepository(
+      createMemoryWorkspaceSessionDatabase(),
+    );
+    storage.setItem(
+      RECENT_WORKSPACES_STORAGE_KEY,
+      JSON.stringify(["E:/Javis", "F:/Other"]),
+    );
+
+    const imported = await repository.importFromLocalStorage(storage);
+    const loaded = await repository.load();
+
+    expect(imported).toEqual({
+      workspacePath: "E:/Javis",
+      recentWorkspacePaths: ["E:/Javis", "F:/Other"],
+    });
+    expect(loaded).toEqual(imported);
+  });
+
+  it("falls back to localStorage when workspace repository loading fails", async () => {
+    const storage = createMemoryStorage();
+    storage.setItem(RECENT_WORKSPACES_STORAGE_KEY, JSON.stringify(["E:/Javis"]));
+    const failingRepository = {
+      async load() {
+        throw new Error("unavailable");
+      },
+    };
+
+    await expect(
+      loadWorkspaceSessionWithStorageFallback(failingRepository, storage),
+    ).resolves.toEqual({
+      workspacePath: "E:/Javis",
+      recentWorkspacePaths: ["E:/Javis"],
+    });
+    await expect(
+      loadWorkspaceSessionWithStorageFallback(null, storage),
+    ).resolves.toEqual({
+      workspacePath: "E:/Javis",
+      recentWorkspacePaths: ["E:/Javis"],
+    });
+  });
 });
 
 function createMemoryStorage(): Pick<Storage, "getItem" | "setItem"> {
@@ -113,4 +197,42 @@ function createMemoryStorage(): Pick<Storage, "getItem" | "setItem"> {
       values.set(key, value);
     },
   };
+}
+
+function createMemoryWorkspaceSessionDatabase() {
+  const database: DesktopDatabase & {
+    row: WorkspaceSessionRow | null;
+  } = {
+    row: null,
+    async execute(sql: string, values: DatabaseValue[] = []) {
+      if (!sql.startsWith("INSERT INTO workspace_session")) {
+        return;
+      }
+      this.row = {
+        id: String(values[0]),
+        workspace_path: String(values[1]),
+        recent_workspace_paths_json: String(values[2]),
+        updated_at: String(values[3]),
+      };
+    },
+    async select<T extends Record<string, unknown>>() {
+      if (!this.row) {
+        return [];
+      }
+      return [
+        {
+          workspace_path: this.row.workspace_path,
+          recent_workspace_paths_json: this.row.recent_workspace_paths_json,
+        } as unknown as T,
+      ];
+    },
+  };
+  return database;
+}
+
+interface WorkspaceSessionRow {
+  id: string;
+  workspace_path: string;
+  recent_workspace_paths_json: string;
+  updated_at: string;
 }

@@ -22,6 +22,7 @@ pnpm --filter @javis/desktop tauri build
 powershell -ExecutionPolicy Bypass -File docs/qa/2026-05-24/workspace-restart-qa.ps1
 powershell -ExecutionPolicy Bypass -File docs/qa/2026-05-24/code-agent-opencode-qa.ps1
 powershell -ExecutionPolicy Bypass -File docs/qa/2026-05-24/pdf-durable-approval-qa.ps1
+cargo test
 ```
 
 Command output:
@@ -48,6 +49,19 @@ Command status:
 - `code-patch-durable-approval-qa.ps1`: pass for restored Code Patch approval
   approve/apply, restored deny, and expired-record fail-closed behavior after
   packaged app restart.
+- `cargo test`: pass after adding native approval tool-name and preview-hash
+  binding checks for PDF organization and Code Patch apply.
+- 2026-05-25 rerun: `pnpm --filter @javis/desktop tauri build` passed, and
+  `code-agent-opencode-qa.ps1` passed fixture proposal deny/apply. Live provider
+  remained fail-closed with `LiveProviderConfigured: false` because no temporary
+  API key was supplied.
+- 2026-05-25 unit/build rerun: `pnpm --filter @javis/desktop test`,
+  `pnpm --filter @javis/desktop build`, `pnpm --filter @javis/ui typecheck`,
+  `pnpm --filter @javis/core test`, and `cargo test` passed after durable
+  approval restore began recomputing dry-run binding hashes. A follow-up
+  review pass tightened Code Patch restore to compare against the canonical
+  `createCodeApplyDryRun` shape, and the desktop/Rust validation suite was
+  rerun successfully.
 
 Evidence:
 
@@ -75,6 +89,10 @@ Evidence:
 - `code-agent-opencode-qa-output.txt`: records the current fixture deny/apply
   pass. The output records provider/model/status when live credentials are
   supplied, but never the temporary API key.
+- 2026-05-25 `code-agent-opencode-qa-output.txt`: records
+  `LiveProviderConfigured: false`, `LiveCredentialStorageEnabled: false`, and
+  `LiveResult: null`; no live write approval was requested and no live apply was
+  attempted.
 - `21-pdf-durable-approval-restored.png`: packaged app relaunch restores a
   pending PDF organization approval from `javis.approvalRecords.v1`.
 - `22-pdf-durable-approval-approved.png`: approving the restored card completes
@@ -149,6 +167,13 @@ Notes:
   OpenAI-compatible fallback for DeepSeek/custom providers, fenced/pretty JSON
   parsing, and approved-file binding so provider output cannot expand beyond
   the reviewed diff file list.
+- Native approval binding now also records and checks tool name plus preview
+  hash for the PDF organization and Code Patch write paths. Rust tests cover
+  stale PDF preview hashes and Code Patch tool/preview binding mismatches.
+- Durable approval restore now recomputes the dry-run binding hash instead of
+  trusting the persisted `permissionRequest.bindingHash`, and Code Patch
+  approval records fail closed when the persisted proposal payload no longer
+  matches the canonical apply dry-run.
 - During this QA pass, the Code Agent fixture apply path exposed that provider
   patch JSON must be preserved exactly. The parser now keeps the patch body
   trailing newline instead of trimming it before hash calculation and
