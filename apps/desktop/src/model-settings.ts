@@ -20,6 +20,19 @@ export const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   baseUrl: "",
 };
 
+export function localeDefaultModelSettings(locale = "en"): ModelSettings {
+  if (locale.toLowerCase().startsWith("zh")) {
+    return {
+      provider: "deepseek",
+      model: "deepseek-chat",
+      apiKey: "",
+      apiKeyReference: "default",
+      baseUrl: "https://api.deepseek.com",
+    };
+  }
+  return DEFAULT_MODEL_SETTINGS;
+}
+
 export function loadModelSettings(storage: ModelSettingsStorage): ModelSettings {
   const rawValue = storage.getItem(MODEL_SETTINGS_STORAGE_KEY);
   if (!rawValue) {

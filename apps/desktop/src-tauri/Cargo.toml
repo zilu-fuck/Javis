@@ -25,6 +25,10 @@ serde_json = "1"
 base64 = "0.22"
 ureq = "3"
 tauri-plugin-dialog = "2"
+dirs = "5"
+
+[target.'cfg(not(windows))'.dependencies]
+keyring = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_System_Memory"] }

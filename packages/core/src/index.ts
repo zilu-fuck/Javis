@@ -3,6 +3,8 @@ import type {
   CodeProposedEdit,
   CodeApplyResult,
   CodeTool,
+  ComputerTool,
+  CommanderTool,
   FileOrganizationExecution,
   FileOrganizationPlan,
   FileTool,
@@ -14,6 +16,8 @@ import type {
   ResearchReport,
   ShellCommandOutput,
   ShellTool,
+  SchedulerTool,
+  VerifierTool,
   WebSource,
   WebTool,
   TokenUsageSummary,
@@ -23,45 +27,91 @@ import {
   validateCodeApplyResult,
   validateCodeProposal,
 } from "./code-proposal-safety";
+import type { PendingPermissionHandler } from "./confirmed-write";
 import {
-  codeSnapshot,
-  commanderSnapshot,
   demoAgents,
-  fileSnapshot,
-  researchSnapshot,
-  shellSnapshot,
-  verifierSnapshot,
 } from "./agents";
+import { createAgentStateTracker, type AgentStateTracker } from "./agent-state-tracker";
 import { runFileScanTask } from "./file-scan-flow";
+import { runPdfOrganizationPreviewTask } from "./pdf-organization-flow";
+import { runProjectInspectionTask } from "./project-inspection-flow";
+import {
+  isReadCurrentProjectGoal,
+  runGenericWorkbenchWorkflow,
+  runReadCurrentProjectWorkflow,
+} from "./workflow-executor";
 import {
   createCodeReviewPlan,
-  createPdfOrganizationPlan,
-  createProjectInspectionPlan,
   createResearchSearchPlan,
   createResearchSourcePlan,
   markStep,
 } from "./plans";
+import type { WorkbenchWorkflowId } from "./workflows";
 import {
   createPendingPermissionRequest,
   resolvePermissionRequest,
 } from "./permission-state";
 import { createSourceBackedReport } from "./research";
 import {
-  createRecommendedCommandRequest,
   extractUrls,
   isCodeReviewGoal,
   isPdfOrganizationGoal,
   isProjectInspectionGoal,
   isResearchGoal,
+  getRecommendedWorkflowIds,
 } from "./routing";
 import { createRuntimeState } from "./runtime-state";
 import { appendLog } from "./snapshot-utils";
 import { addModelUsage, createEmptyTokenUsageSummary } from "./token-usage";
 
 export {
+  createCodeApplyDryRun,
+  parsePatchHunks,
   validateCodeApplyResult,
   validateCodeProposal,
 } from "./code-proposal-safety";
+export { createDryRunBindingHash } from "./permission-state";
+export {
+  DOCUMENTED_TASK_TRANSITIONS,
+  TASK_STATUSES,
+  isTerminalTaskStatus,
+  transitionTask,
+} from "./state/task-state";
+export { demoAgents, getAgentSystemPrompt } from "./agents";
+export {
+  WORKBENCH_WORKFLOWS,
+  getWorkbenchWorkflow,
+  listWorkbenchWorkflows,
+} from "./workflows";
+export {
+  createTaskEventBus,
+  taskEventToLogEntry,
+} from "./task-event-bus";
+export { createSharedTaskContext, CONTEXT_KEYS, contextKeyForLocale } from "./shared-context";
+export type { ContextKey, SharedTaskContext } from "./shared-context";
+export { localizeError, localizeOpenCodeError } from "./error-localizer";
+export { executeWorkflow } from "./workflow-dag-executor";
+export type {
+  WorkflowExecutionResult,
+  WorkflowExecutorOptions,
+  WorkflowStepExecutionResult,
+} from "./workflow-dag-executor";
+export { createAgentStateTracker } from "./agent-state-tracker";
+export type {
+  AgentState,
+  AgentStateTracker,
+} from "./agent-state-tracker";
+export type {
+  TaskEventBus,
+  TaskEventHandler,
+  TaskEventMiddleware,
+  TaskRuntimeEvent,
+} from "./task-event-bus";
+export type {
+  WorkbenchWorkflow,
+  WorkbenchWorkflowId,
+  WorkbenchWorkflowStep,
+} from "./workflows";
 
 export type ID = string;
 export type ISODateTime = string;
@@ -82,6 +132,8 @@ export type AgentKind =
   | "file"
   | "shell"
   | "browser"
+  | "computer"
+  | "scheduler"
   | "research"
   | "code"
   | "verifier";
@@ -130,6 +182,12 @@ export interface Agent {
   description: string;
   allowedToolNames: string[];
   preferredModelTags?: string[];
+  systemPrompt: AgentPromptSet;
+}
+
+export interface AgentPromptSet {
+  en: string;
+  zhCN: string;
 }
 
 export interface AgentRun {
@@ -284,6 +342,7 @@ export interface TaskSnapshot {
   title: string;
   userGoal: string;
   status: TaskStatus;
+  updatedAt?: ISODateTime;
   commanderMessage: string;
   plan: TaskStep[];
   agents: AgentSnapshot[];
@@ -306,19 +365,42 @@ export interface TaskSnapshot {
 export type { ModelUsage, TokenUsageSummary };
 export { addModelUsage, createEmptyTokenUsageSummary };
 
+function createScopedAgentTracker(agentKinds: AgentKind[]): AgentStateTracker {
+  return createAgentStateTracker(
+    demoAgents.filter((agent) => agentKinds.includes(agent.kind)),
+  );
+}
+
+function setTrackedAgentStates(
+  agentTracker: AgentStateTracker,
+  states: Array<{ agentId: ID; status: AgentRunStatus; task: string }>,
+): AgentSnapshot[] {
+  for (const state of states) {
+    agentTracker.setState(state.agentId, {
+      status: state.status,
+      task: state.task,
+    });
+  }
+  return agentTracker.getSnapshots();
+}
+
 export interface TaskRuntime {
   getSnapshot(): TaskSnapshot;
   subscribe(listener: (snapshot: TaskSnapshot) => void): () => void;
   start(userGoal: string): void;
-  resolvePermission(decision: "approved" | "denied"): void;
+  resolvePermission(decision: "approved" | "denied", requestId?: string): void;
   dispose(): void;
 }
 
 export interface FileScanRuntimeOptions {
   fileTool: FileTool;
+  commanderTool?: CommanderTool;
+  computerTool?: ComputerTool;
   codeTool?: CodeTool;
   projectTool?: ProjectTool;
   shellTool?: ShellTool;
+  schedulerTool?: SchedulerTool;
+  verifierTool?: VerifierTool;
   webTool?: WebTool;
   delayMs?: number;
 }
@@ -353,18 +435,41 @@ export function createInitialTaskSnapshot(): TaskSnapshot {
 
 export function createFileScanTaskRuntime({
   fileTool,
+  commanderTool,
+  computerTool,
   codeTool,
   projectTool,
   shellTool,
+  schedulerTool,
+  verifierTool,
   webTool,
   delayMs = 250,
 }: FileScanRuntimeOptions): TaskRuntime {
   const runtimeState = createRuntimeState(createInitialTaskSnapshot(), delayMs);
-  let pendingPermissionHandler: ((decision: "approved" | "denied") => void | Promise<void>) | undefined;
+  const permissionHandlers = new Map<string, PendingPermissionHandler>();
+  const queuedPermissionDecisions = new Map<string, "approved" | "denied">();
+  let queuedLegacyPermissionDecision: "approved" | "denied" | undefined;
   let snapshot = runtimeState.getSnapshot();
   function emit(nextSnapshot: TaskSnapshot) {
     runtimeState.emit(nextSnapshot);
     snapshot = runtimeState.getSnapshot();
+  }
+  function setPendingPermissionHandler(
+    requestId: string,
+    handler: PendingPermissionHandler | undefined,
+  ) {
+    if (handler) {
+      const queuedDecision = queuedPermissionDecisions.get(requestId) ?? queuedLegacyPermissionDecision;
+      if (queuedDecision) {
+        queuedPermissionDecisions.delete(requestId);
+        queuedLegacyPermissionDecision = undefined;
+        void handler(queuedDecision);
+        return;
+      }
+      permissionHandlers.set(requestId, handler);
+      return;
+    }
+    permissionHandlers.delete(requestId);
   }
   const wait = runtimeState.wait;
 
@@ -375,18 +480,74 @@ export function createFileScanTaskRuntime({
     },
     start(userGoal) {
       runtimeState.clearTimers();
-      pendingPermissionHandler = undefined;
+      permissionHandlers.clear();
+      queuedPermissionDecisions.clear();
+      queuedLegacyPermissionDecision = undefined;
       const taskId = `task-${Date.now()}`;
       if (webTool && extractUrls(userGoal).length > 0) {
         void runResearchSourceTask(taskId, userGoal, webTool);
+        return;
+      }
+      const recommendedWorkflowIds = getRecommendedWorkflowIds(userGoal);
+      const [recommendedWorkflowId] = recommendedWorkflowIds;
+      if (shellTool && projectTool && isReadCurrentProjectGoal(userGoal)) {
+        void runReadCurrentProjectWorkflow({
+          controller: {
+            emit,
+            getSnapshot: runtimeState.getSnapshot,
+            wait,
+          },
+          fileTool,
+          commanderTool,
+          projectTool,
+          shellTool,
+          codeTool,
+          verifierTool,
+          taskId,
+          userGoal,
+        });
         return;
       }
       if (webTool?.searchWeb && isResearchGoal(userGoal)) {
         void runResearchSearchTask(taskId, userGoal, webTool);
         return;
       }
+      if (recommendedWorkflowId && recommendedWorkflowId !== "read-current-project") {
+        const executableWorkflowIds = recommendedWorkflowIds.filter(
+          (workflowId): workflowId is Exclude<WorkbenchWorkflowId, "read-current-project"> =>
+            workflowId !== "read-current-project",
+        );
+        void runGenericWorkbenchWorkflow({
+          controller: {
+            emit,
+            getSnapshot: runtimeState.getSnapshot,
+            wait,
+          },
+          commanderTool,
+          codeTool,
+          computerTool,
+          schedulerTool,
+          webTool,
+          verifierTool,
+          taskId,
+          userGoal,
+          workflowId:
+            executableWorkflowIds.length === 1 ? executableWorkflowIds[0] : executableWorkflowIds,
+        });
+        return;
+      }
       if (shellTool && projectTool && isProjectInspectionGoal(userGoal)) {
-        void runProjectInspectionTask(taskId, userGoal, shellTool, projectTool);
+        void runProjectInspectionTask(
+          {
+            emit,
+            getSnapshot: runtimeState.getSnapshot,
+            wait,
+          },
+          taskId,
+          userGoal,
+          shellTool,
+          projectTool,
+        );
         return;
       }
       if (codeTool && shellTool && isCodeReviewGoal(userGoal)) {
@@ -394,7 +555,17 @@ export function createFileScanTaskRuntime({
         return;
       }
       if (fileTool.planPdfOrganization && isPdfOrganizationGoal(userGoal)) {
-        void runPdfOrganizationPreviewTask(taskId, userGoal);
+        void runPdfOrganizationPreviewTask({
+          controller: {
+            emit,
+            getSnapshot: runtimeState.getSnapshot,
+            wait,
+          },
+          fileTool,
+          taskId,
+          userGoal,
+          setPendingPermissionHandler,
+        });
         return;
       }
       void runFileScanTask(
@@ -408,491 +579,35 @@ export function createFileScanTaskRuntime({
         userGoal,
       );
     },
-    resolvePermission(decision) {
-      void pendingPermissionHandler?.(decision);
+    resolvePermission(decision, requestId) {
+      if (requestId) {
+        const handler = permissionHandlers.get(requestId);
+        permissionHandlers.delete(requestId);
+        if (handler) {
+          void handler(decision);
+        } else {
+          queuedPermissionDecisions.set(requestId, decision);
+        }
+        return;
+      }
+      if (permissionHandlers.size < 1) {
+        queuedLegacyPermissionDecision = decision;
+        return;
+      }
+      const [onlyRequestId, handler] = [...permissionHandlers.entries()][
+        permissionHandlers.size - 1
+      ];
+      permissionHandlers.delete(onlyRequestId);
+      void handler(decision);
     },
     dispose() {
       runtimeState.dispose();
     },
   };
 
-  async function runPdfOrganizationPreviewTask(taskId: ID, userGoal: string) {
-    const plan = createPdfOrganizationPlan();
-
-    emit({
-      id: taskId,
-      title: "Planning PDF organization",
-      userGoal,
-      status: "planning",
-      commanderMessage:
-        "Commander identified a high-risk file organization request and will create a dry-run before any write action.",
-      plan,
-      agents: [
-        commanderSnapshot("planning", "Create dry-run plan"),
-        fileSnapshot("queued", "Waiting for file.planPdfOrganization"),
-        verifierSnapshot("queued", "Waiting for dry-run evidence"),
-      ],
-      tokenUsage: createEmptyTokenUsageSummary(),
-      logs: [
-        {
-          id: `${taskId}-created`,
-          kind: "event",
-          title: "task.created",
-          detail: "Desktop UI passed the PDF organization goal to Core.",
-        },
-      ],
-    });
-
-    await wait();
-
-    emit({
-      ...snapshot,
-      status: "running",
-      commanderMessage: "File Agent is creating a preview plan. No files are being moved.",
-      plan: markStep(snapshot.plan, "step-plan-pdf", "running"),
-      agents: [
-        commanderSnapshot("completed", "Plan submitted"),
-        fileSnapshot("running", "Creating PDF organization dry-run"),
-        verifierSnapshot("queued", "Waiting for dry-run evidence"),
-      ],
-      logs: appendLog(snapshot, {
-        id: `${taskId}-preview-started`,
-        kind: "tool",
-        title: "tool_call.planned",
-        detail: "file.planPdfOrganization uses preview permission and does not modify local files.",
-      }),
-    });
-
-    try {
-      const organizationPlan = await fileTool.planPdfOrganization?.();
-      if (!organizationPlan) {
-        throw new Error("PDF organization preview tool is not available.");
-      }
-      if (organizationPlan.fileCount === 0) {
-        emit({
-          ...snapshot,
-          title: "No PDFs found to organize",
-          status: "completed",
-          commanderMessage:
-            "File Agent did not find PDF files in Downloads, so no permission request or write step is needed.",
-          plan: snapshot.plan.map((step) => ({
-            ...step,
-            status: step.id === "step-plan-pdf" ? "completed" : "skipped",
-          })),
-          agents: [
-            commanderSnapshot("completed", "Task finished"),
-            fileSnapshot("completed", "No PDF files found"),
-            verifierSnapshot("completed", "Verified no-op result"),
-          ],
-          fileOrganizationPlan: organizationPlan,
-          logs: appendLog(snapshot, {
-            id: `${taskId}-no-pdfs`,
-            kind: "verification",
-            title: "task.completed",
-            detail: "Dry-run found 0 PDF files, so no confirmed_write request was created.",
-          }),
-          verificationSummary: "verified: no PDF files were found in Downloads, and no files were moved.",
-        });
-        return;
-      }
-      const permissionRequest: ToolPermissionRequest = createPendingPermissionRequest({
-        id: `${taskId}-permission`,
-        level: "confirmed_write",
-        title: "Approve PDF move plan",
-        reason: "Moving files changes the local filesystem, so Javis needs explicit approval.",
-        dryRun: organizationPlan.dryRun,
-      });
-
-      emit({
-        ...snapshot,
-        title: "PDF organization approval needed",
-        status: "waiting_permission",
-        commanderMessage:
-          "Dry-run is ready. Review the affected paths before approving or denying the write step.",
-        plan: markStep(snapshot.plan, "step-plan-pdf", "completed", "step-confirm-pdf", "running"),
-        agents: [
-          commanderSnapshot("waiting_permission", "Waiting for user approval"),
-          fileSnapshot("waiting_permission", `${organizationPlan.fileCount} PDF move(s) planned`),
-          verifierSnapshot("queued", "Waiting for permission decision"),
-        ],
-        fileOrganizationPlan: organizationPlan,
-        permissionRequest,
-        logs: appendLog(snapshot, {
-          id: `${taskId}-permission-requested`,
-          kind: "permission",
-          title: "permission.requested",
-          detail: `${organizationPlan.fileCount} planned move(s) require confirmed_write approval.`,
-        }),
-      });
-
-      pendingPermissionHandler = async (decision) => {
-        const resolvedRequest: ToolPermissionRequest = resolvePermissionRequest(
-          permissionRequest,
-          decision,
-        );
-        pendingPermissionHandler = undefined;
-
-        if (decision === "denied") {
-          emit({
-            ...snapshot,
-            title: "PDF organization denied",
-            status: "completed",
-            commanderMessage: "Permission was denied. Javis did not move or modify any files.",
-            plan: snapshot.plan.map((step) => ({
-              ...step,
-              status: step.id === "step-execute-pdf" ? "skipped" : "completed",
-            })),
-            agents: [
-              commanderSnapshot("completed", "Permission decision recorded"),
-              fileSnapshot("completed", "No write operation executed"),
-              verifierSnapshot("completed", "Verified denial record"),
-            ],
-            permissionRequest: resolvedRequest,
-            logs: appendLog(snapshot, {
-              id: `${taskId}-permission-denied`,
-              kind: "permission",
-              title: "permission.resolved",
-              detail: `User denied ${permissionRequest.id}; no files were moved.`,
-            }),
-            verificationSummary: `verified: permission denied; dry-run listed ${organizationPlan.fileCount} affected PDF file(s), and no write operation was executed.`,
-          });
-          return;
-        }
-
-        if (!fileTool.executePdfOrganization) {
-          emit({
-            ...snapshot,
-            title: "PDF organization execution unavailable",
-            status: "failed",
-            commanderMessage:
-              "Permission was approved, but the confirmed-write File Tool is not available.",
-            plan: markStep(snapshot.plan, "step-execute-pdf", "failed"),
-            agents: [
-              commanderSnapshot("completed", "Permission decision recorded"),
-              fileSnapshot("failed", "Execution tool unavailable"),
-              verifierSnapshot("cancelled", "No write result to verify"),
-            ],
-            permissionRequest: resolvedRequest,
-            logs: appendLog(snapshot, {
-              id: `${taskId}-execute-missing`,
-              kind: "tool",
-              title: "task.failed",
-              detail: "file.executePdfOrganization is not configured.",
-            }),
-          });
-          return;
-        }
-
-        emit({
-          ...snapshot,
-          title: "Executing approved PDF organization",
-          status: "running",
-          commanderMessage:
-            "Permission was approved. File Agent is moving only the paths from the current dry-run plan.",
-          plan: markStep(snapshot.plan, "step-confirm-pdf", "completed", "step-execute-pdf", "running"),
-          agents: [
-            commanderSnapshot("completed", "Permission decision recorded"),
-            fileSnapshot("running", "Executing approved PDF moves"),
-            verifierSnapshot("queued", "Waiting for move results"),
-          ],
-          permissionRequest: resolvedRequest,
-          logs: appendLog(snapshot, {
-            id: `${taskId}-execute-started`,
-            kind: "permission",
-            title: "permission.resolved",
-            detail: `User approved ${permissionRequest.id}; executing exactly ${organizationPlan.fileCount} planned move(s).`,
-          }),
-        });
-
-        try {
-          const execution = await fileTool.executePdfOrganization(
-            organizationPlan.dryRun.affectedPaths,
-            organizationPlan.approvalId,
-          );
-          const verificationStatus = execution.failedCount === 0 ? "completed" : "failed";
-
-          emit({
-            ...snapshot,
-            title:
-              verificationStatus === "completed"
-                ? "PDF organization completed"
-                : "PDF organization completed with failures",
-            status: verificationStatus,
-            commanderMessage:
-              verificationStatus === "completed"
-                ? "Approved PDF moves finished and Verifier checked the execution summary."
-                : "Approved PDF moves finished, but at least one operation failed.",
-            plan:
-              verificationStatus === "completed"
-                ? snapshot.plan.map((step) => ({ ...step, status: "completed" }))
-                : markStep(snapshot.plan, "step-verify-pdf", "failed"),
-            agents: [
-              commanderSnapshot("completed", "Task finished"),
-              fileSnapshot("completed", `${execution.movedCount} moved, ${execution.skippedCount} skipped`),
-              verifierSnapshot(
-                verificationStatus === "completed" ? "completed" : "failed",
-                `${execution.failedCount} failed`,
-              ),
-            ],
-            fileOrganizationExecution: execution,
-            permissionRequest: resolvedRequest,
-            logs: [
-              ...appendLog(snapshot, {
-                id: `${taskId}-execute-done`,
-                kind: "tool",
-                title: "tool_call.updated",
-                detail: `file.executePdfOrganization moved=${execution.movedCount}, skipped=${execution.skippedCount}, failed=${execution.failedCount}.`,
-              }),
-              ...execution.results.map((result, index) => ({
-                id: `${taskId}-move-${index}`,
-                kind: "tool" as const,
-                title: `${result.status}: ${result.source}`,
-                detail: `${result.target} - ${result.message}`,
-              })),
-            ],
-            verificationSummary: `${verificationStatus === "completed" ? "verified" : "failed"}: ${execution.movedCount}/${execution.attemptedCount} PDF move(s) completed, ${execution.skippedCount} skipped, ${execution.failedCount} failed.`,
-          });
-        } catch (error) {
-          emit({
-            ...snapshot,
-            title: "PDF organization execution failed",
-            status: "failed",
-            commanderMessage:
-              "The approved write step failed. Verifier has no completed move result to validate.",
-            plan: markStep(snapshot.plan, "step-execute-pdf", "failed"),
-            agents: [
-              commanderSnapshot("completed", "Permission decision recorded"),
-              fileSnapshot("failed", "Approved move failed"),
-              verifierSnapshot("cancelled", "No complete result to verify"),
-            ],
-            permissionRequest: resolvedRequest,
-            logs: appendLog(snapshot, {
-              id: `${taskId}-execute-failed`,
-              kind: "tool",
-              title: "task.failed",
-              detail: error instanceof Error ? error.message : String(error),
-            }),
-          });
-        }
-      };
-    } catch (error) {
-      emit({
-        ...snapshot,
-        title: "PDF organization preview failed",
-        status: "failed",
-        commanderMessage:
-          "File Agent could not create the dry-run. The task stopped without moving files.",
-        plan: markStep(snapshot.plan, "step-plan-pdf", "failed"),
-        agents: [
-          commanderSnapshot("completed", "Plan submitted"),
-          fileSnapshot("failed", "Dry-run failed"),
-          verifierSnapshot("cancelled", "No dry-run to verify"),
-        ],
-        logs: appendLog(snapshot, {
-          id: `${taskId}-failed`,
-          kind: "tool",
-          title: "task.failed",
-          detail: error instanceof Error ? error.message : String(error),
-        }),
-      });
-    }
-  }
-
-  async function runProjectInspectionTask(
-    taskId: ID,
-    userGoal: string,
-    activeShellTool: ShellTool,
-    activeProjectTool: ProjectTool,
-  ) {
-    const plan = createProjectInspectionPlan();
-
-    emit({
-      id: taskId,
-      title: "Inspecting project environment",
-      userGoal,
-      status: "planning",
-      commanderMessage:
-        "Commander identified a project inspection task and prepared read-only Shell Tool calls.",
-      plan,
-      agents: [
-        commanderSnapshot("planning", "Create project inspection plan"),
-        fileSnapshot("queued", "No file scan needed"),
-        shellSnapshot("queued", "Waiting for project inspection"),
-        verifierSnapshot("queued", "Waiting for command results"),
-      ],
-      tokenUsage: createEmptyTokenUsageSummary(),
-      logs: [
-        {
-          id: `${taskId}-created`,
-          kind: "event",
-          title: "task.created",
-          detail: "Desktop UI passed the project inspection goal to Core.",
-        },
-      ],
-    });
-
-    await wait();
-
-    emit({
-      ...snapshot,
-      status: "running",
-      commanderMessage: "Project Tool is reading package scripts before Shell Agent checks versions.",
-      plan: markStep(snapshot.plan, "step-inspect-project", "running"),
-      agents: [
-        commanderSnapshot("completed", "Plan submitted"),
-        fileSnapshot("queued", "No file scan needed"),
-        shellSnapshot("running", "Inspecting package scripts"),
-        verifierSnapshot("queued", "Waiting for command results"),
-      ],
-      logs: appendLog(snapshot, {
-        id: `${taskId}-project-started`,
-        kind: "tool",
-        title: "tool_call.planned",
-        detail: "project.inspect reads package.json scripts with read permission.",
-      }),
-    });
-
-    try {
-      const project = await activeProjectTool.inspectProject();
-      const recommendedTestCommand = createRecommendedCommandRequest(project.recommendedTestCommand);
-      const commandRequests = [
-        {
-          program: "node",
-          args: ["--version"],
-          workspacePath: null,
-        },
-        {
-          program: "pnpm",
-          args: ["--version"],
-          workspacePath: null,
-        },
-        {
-          program: "git",
-          args: ["status", "--short"],
-          workspacePath: null,
-        },
-        ...(recommendedTestCommand ? [recommendedTestCommand] : []),
-      ];
-
-      emit({
-        ...snapshot,
-        commanderMessage:
-          "Project Tool found scripts and recommended commands. Shell Agent is running allowlisted checks.",
-        plan: markStep(snapshot.plan, "step-inspect-project", "completed", "step-read-env", "running"),
-        agents: [
-          commanderSnapshot("completed", "Plan submitted"),
-          fileSnapshot("queued", "No file scan needed"),
-          shellSnapshot("running", "Running node/pnpm/git read-only checks"),
-          verifierSnapshot("queued", "Waiting for command results"),
-        ],
-        project,
-        logs: appendLog(snapshot, {
-          id: `${taskId}-project-done`,
-          kind: "tool",
-          title: "tool_call.updated",
-          detail: `project.inspect found ${project.scripts.length} package script(s).`,
-        }),
-      });
-
-      const commands = await Promise.all(
-        commandRequests.map((request) => activeShellTool.runReadOnlyCommand(request)),
-      );
-
-      emit({
-        ...snapshot,
-        title: "Verifying project environment",
-        status: "verifying",
-        commanderMessage: "Verifier is checking command exit codes and output summaries.",
-        plan: markStep(snapshot.plan, "step-read-env", "completed", "step-verify-env", "running"),
-        agents: [
-          commanderSnapshot("completed", "Waiting for verification"),
-          fileSnapshot("queued", "No file scan needed"),
-          shellSnapshot("completed", "Read-only commands completed"),
-          verifierSnapshot("verifying", "Checking exit codes"),
-        ],
-        commands,
-        project: snapshot.project,
-        logs: [
-          ...appendLog(snapshot, {
-            id: `${taskId}-commands-done`,
-            kind: "tool",
-            title: "tool_call.updated",
-            detail: `Shell Tool completed ${commands.length} read-only commands.`,
-          }),
-          ...commands.map((command, index) => ({
-            id: `${taskId}-command-${index}`,
-            kind: "tool" as const,
-            title: command.command,
-            detail: `exit=${command.exitCode ?? "unknown"} stdout=${command.stdout || "(empty)"}`,
-          })),
-        ],
-      });
-
-      await wait();
-
-      const passingCount = commands.filter((command) => command.exitCode === 0).length;
-      const verificationStatus = passingCount === commands.length ? "completed" : "failed";
-      emit({
-        ...snapshot,
-        title:
-          verificationStatus === "completed"
-            ? "Project environment inspected"
-            : "Project environment check failed",
-        status: verificationStatus,
-        commanderMessage:
-          verificationStatus === "completed"
-            ? "Project inspection completed through the Tauri desktop process and a read-only command allowlist."
-            : "Project inspection finished, but Verifier found a failing command.",
-        plan:
-          verificationStatus === "completed"
-            ? snapshot.plan.map((step) => ({ ...step, status: "completed" }))
-            : markStep(snapshot.plan, "step-verify-env", "failed"),
-        agents: [
-          commanderSnapshot("completed", "Task finished"),
-          fileSnapshot("queued", "No file scan needed"),
-          shellSnapshot("completed", "Read-only command checks completed"),
-          verifierSnapshot(
-            verificationStatus === "completed" ? "completed" : "failed",
-            `${passingCount}/${commands.length} commands passed`,
-          ),
-        ],
-        project: snapshot.project,
-        logs: appendLog(snapshot, {
-          id: `${taskId}-done`,
-          kind: "verification",
-          title:
-            verificationStatus === "completed" ? "task.completed" : "verification.failed",
-          detail: `Verifier checked ${passingCount}/${commands.length} command results.`,
-        }),
-        verificationSummary: `${verificationStatus === "completed" ? "verified" : "failed"}: ${passingCount}/${commands.length} read-only commands exited successfully. Start: ${project.recommendedStartCommand ?? "not found"}. Test/check: ${project.recommendedTestCommand ?? "not found"}.`,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      emit({
-        ...snapshot,
-        title: "Project inspection failed",
-        status: "failed",
-        commanderMessage:
-          "Shell Agent inspection failed. The task stopped without running any write operation.",
-        plan: markStep(snapshot.plan, "step-read-env", "failed"),
-        agents: [
-          commanderSnapshot("completed", "Plan submitted"),
-          fileSnapshot("queued", "No file scan needed"),
-          shellSnapshot("failed", "Read-only command failed"),
-          verifierSnapshot("cancelled", "No result to verify"),
-        ],
-        logs: appendLog(snapshot, {
-          id: `${taskId}-failed`,
-          kind: "tool",
-          title: "task.failed",
-          detail: message,
-        }),
-      });
-    }
-  }
-
   async function runCodeReviewTask(taskId: ID, userGoal: string, activeCodeTool: CodeTool, activeShellTool: ShellTool) {
     const plan = createCodeReviewPlan();
+    const agentTracker = createScopedAgentTracker(["commander", "code", "verifier"]);
 
     emit({
       id: taskId,
@@ -902,11 +617,11 @@ export function createFileScanTaskRuntime({
       commanderMessage:
         "Commander identified a code review goal and will collect a diff preview before read-only verification and any optional edit proposal.",
       plan,
-      agents: [
-        commanderSnapshot("planning", "Create code review plan"),
-        codeSnapshot("queued", "Waiting for repository diff preview"),
-        verifierSnapshot("queued", "Waiting for diff evidence"),
-      ],
+      agents: setTrackedAgentStates(agentTracker, [
+        { agentId: "agent-commander", status: "planning", task: "Create code review plan" },
+        { agentId: "agent-code", status: "queued", task: "Waiting for repository diff preview" },
+        { agentId: "agent-verifier", status: "queued", task: "Waiting for diff evidence" },
+      ]),
       tokenUsage: createEmptyTokenUsageSummary(),
       logs: [
         {
@@ -925,11 +640,11 @@ export function createFileScanTaskRuntime({
       status: "running",
       commanderMessage: "Code Agent is gathering changed files and a diff preview from the current workspace.",
       plan: markStep(snapshot.plan, "step-inspect-code", "running"),
-      agents: [
-        commanderSnapshot("completed", "Plan submitted"),
-        codeSnapshot("running", "Collecting repository diff preview"),
-        verifierSnapshot("queued", "Waiting for diff evidence"),
-      ],
+      agents: setTrackedAgentStates(agentTracker, [
+        { agentId: "agent-commander", status: "completed", task: "Plan submitted" },
+        { agentId: "agent-code", status: "running", task: "Collecting repository diff preview" },
+        { agentId: "agent-verifier", status: "queued", task: "Waiting for diff evidence" },
+      ]),
       logs: appendLog(snapshot, {
         id: `${taskId}-preview-started`,
         kind: "tool",
@@ -952,11 +667,11 @@ export function createFileScanTaskRuntime({
             ...step,
               status: step.id === "step-inspect-code" ? "completed" : "skipped",
           })),
-          agents: [
-            commanderSnapshot("completed", "Task finished"),
-            codeSnapshot("completed", "No local diff"),
-            verifierSnapshot("completed", "Verified no-op result"),
-          ],
+          agents: setTrackedAgentStates(agentTracker, [
+            { agentId: "agent-commander", status: "completed", task: "Task finished" },
+            { agentId: "agent-code", status: "completed", task: "No local diff" },
+            { agentId: "agent-verifier", status: "completed", task: "Verified no-op result" },
+          ]),
           codeReviewPreview,
           logs: appendLog(snapshot, {
             id: `${taskId}-no-diff`,
@@ -993,11 +708,11 @@ export function createFileScanTaskRuntime({
         commanderMessage:
           "Diff preview is ready. Review the changed files before approving the read-only verification check.",
         plan: markStep(snapshot.plan, "step-inspect-code", "completed", "step-review-code", "running"),
-        agents: [
-          commanderSnapshot("waiting_permission", "Waiting for code review approval"),
-          codeSnapshot("completed", "Repository diff preview collected"),
-          verifierSnapshot("queued", "Waiting for approval"),
-        ],
+        agents: setTrackedAgentStates(agentTracker, [
+          { agentId: "agent-commander", status: "waiting_permission", task: "Waiting for code review approval" },
+          { agentId: "agent-code", status: "completed", task: "Repository diff preview collected" },
+          { agentId: "agent-verifier", status: "queued", task: "Waiting for approval" },
+        ]),
         codeReviewPreview,
         permissionRequest,
         logs: appendLog(snapshot, {
@@ -1008,12 +723,12 @@ export function createFileScanTaskRuntime({
         }),
       });
 
-      pendingPermissionHandler = async (decision) => {
+      setPendingPermissionHandler(permissionRequest.id, async (decision) => {
         const resolvedRequest: ToolPermissionRequest = resolvePermissionRequest(
           permissionRequest,
           decision,
         );
-        pendingPermissionHandler = undefined;
+        setPendingPermissionHandler(permissionRequest.id, undefined);
 
         if (decision === "denied") {
           emit({
@@ -1031,11 +746,11 @@ export function createFileScanTaskRuntime({
                 ? "skipped"
                 : "completed",
             })),
-            agents: [
-              commanderSnapshot("completed", "Permission decision recorded"),
-              codeSnapshot("completed", "Diff preview kept read-only"),
-              verifierSnapshot("completed", "Verified denial record"),
-            ],
+            agents: setTrackedAgentStates(agentTracker, [
+              { agentId: "agent-commander", status: "completed", task: "Permission decision recorded" },
+              { agentId: "agent-code", status: "completed", task: "Diff preview kept read-only" },
+              { agentId: "agent-verifier", status: "completed", task: "Verified denial record" },
+            ]),
             codeReviewPreview,
             permissionRequest: resolvedRequest,
             logs: appendLog(snapshot, {
@@ -1056,11 +771,11 @@ export function createFileScanTaskRuntime({
           commanderMessage:
             "Code Agent will run a read-only diff check against the current repository state.",
           plan: markStep(snapshot.plan, "step-review-code", "completed", "step-verify-code", "running"),
-          agents: [
-            commanderSnapshot("completed", "Permission decision recorded"),
-            codeSnapshot("running", "Running read-only diff verification"),
-            verifierSnapshot("queued", "Waiting for diff check result"),
-          ],
+          agents: setTrackedAgentStates(agentTracker, [
+            { agentId: "agent-commander", status: "completed", task: "Permission decision recorded" },
+            { agentId: "agent-code", status: "running", task: "Running read-only diff verification" },
+            { agentId: "agent-verifier", status: "queued", task: "Waiting for diff check result" },
+          ]),
           codeReviewPreview,
           permissionRequest: resolvedRequest,
           logs: appendLog(snapshot, {
@@ -1094,11 +809,11 @@ export function createFileScanTaskRuntime({
               commanderMessage:
                 "Code Agent reviewed the current diff, but the read-only verification check failed.",
               plan: markCodeReviewFailedAfterVerification(snapshot.plan),
-              agents: [
-                commanderSnapshot("failed", "Verification failed"),
-                codeSnapshot("completed", "Diff preview reviewed"),
-                verifierSnapshot("failed", `${verification.exitCode ?? "unknown"} diff check exit code`),
-              ],
+              agents: setTrackedAgentStates(agentTracker, [
+                { agentId: "agent-commander", status: "failed", task: "Verification failed" },
+                { agentId: "agent-code", status: "completed", task: "Diff preview reviewed" },
+                { agentId: "agent-verifier", status: "failed", task: `${verification.exitCode ?? "unknown"} diff check exit code` },
+              ]),
               codeReviewPreview,
               commands: [verification],
               permissionRequest: resolvedRequest,
@@ -1122,11 +837,11 @@ export function createFileScanTaskRuntime({
                     ? "skipped"
                     : "completed",
               })),
-              agents: [
-                commanderSnapshot("completed", "Task finished"),
-                codeSnapshot("completed", "Diff preview reviewed"),
-                verifierSnapshot("completed", `${verification.exitCode ?? "unknown"} diff check exit code`),
-              ],
+              agents: setTrackedAgentStates(agentTracker, [
+                { agentId: "agent-commander", status: "completed", task: "Task finished" },
+                { agentId: "agent-code", status: "completed", task: "Diff preview reviewed" },
+                { agentId: "agent-verifier", status: "completed", task: `${verification.exitCode ?? "unknown"} diff check exit code` },
+              ]),
               codeReviewPreview,
               commands: [verification],
               permissionRequest: resolvedRequest,
@@ -1143,11 +858,11 @@ export function createFileScanTaskRuntime({
             commanderMessage:
               "Diff verification passed. Code Agent is preparing an optional patch proposal without applying it.",
             plan: markStep(snapshot.plan, "step-verify-code", "completed", "step-propose-code-edit", "running"),
-            agents: [
-              commanderSnapshot("completed", "Permission decision recorded"),
-              codeSnapshot("running", "Preparing patch proposal"),
-              verifierSnapshot("completed", "Diff check passed"),
-            ],
+            agents: setTrackedAgentStates(agentTracker, [
+              { agentId: "agent-commander", status: "completed", task: "Permission decision recorded" },
+              { agentId: "agent-code", status: "running", task: "Preparing patch proposal" },
+              { agentId: "agent-verifier", status: "completed", task: "Diff check passed" },
+            ]),
             codeReviewPreview,
             commands: [verification],
             permissionRequest: resolvedRequest,
@@ -1168,11 +883,11 @@ export function createFileScanTaskRuntime({
               commanderMessage:
                 "Code Agent could not produce a patch proposal. Check the opencode model settings or provider response, then retry.",
               plan: markStep(snapshot.plan, "step-propose-code-edit", "failed", "step-apply-code-edit", "skipped"),
-              agents: [
-                commanderSnapshot("failed", "Patch proposal unavailable"),
-                codeSnapshot("failed", "Patch proposal failed"),
-                verifierSnapshot("cancelled", "No patch proposal to verify"),
-              ],
+              agents: setTrackedAgentStates(agentTracker, [
+                { agentId: "agent-commander", status: "failed", task: "Patch proposal unavailable" },
+                { agentId: "agent-code", status: "failed", task: "Patch proposal failed" },
+                { agentId: "agent-verifier", status: "cancelled", task: "No patch proposal to verify" },
+              ]),
               codeReviewPreview,
               commands: [verification],
               permissionRequest: resolvedRequest,
@@ -1198,11 +913,11 @@ export function createFileScanTaskRuntime({
               commanderMessage:
                 "Code Agent produced a patch proposal whose hash does not match its content, so Javis refused to request write approval.",
               plan: markStep(snapshot.plan, "step-propose-code-edit", "failed", "step-apply-code-edit", "skipped"),
-              agents: [
-                commanderSnapshot("failed", "Proposal safety check failed"),
-                codeSnapshot("failed", "Patch hash mismatch"),
-                verifierSnapshot("cancelled", "No write approval requested"),
-              ],
+              agents: setTrackedAgentStates(agentTracker, [
+                { agentId: "agent-commander", status: "failed", task: "Proposal safety check failed" },
+                { agentId: "agent-code", status: "failed", task: "Patch hash mismatch" },
+                { agentId: "agent-verifier", status: "cancelled", task: "No write approval requested" },
+              ]),
               codeReviewPreview,
               codeProposedEdit: proposedEdit,
               commands: [verification],
@@ -1229,11 +944,11 @@ export function createFileScanTaskRuntime({
                 ...step,
                 status: step.id === "step-apply-code-edit" ? "skipped" : "completed",
               })),
-              agents: [
-                commanderSnapshot("completed", "Task finished"),
-                codeSnapshot("completed", "No patch proposed"),
-                verifierSnapshot("completed", "Diff check passed"),
-              ],
+              agents: setTrackedAgentStates(agentTracker, [
+                { agentId: "agent-commander", status: "completed", task: "Task finished" },
+                { agentId: "agent-code", status: "completed", task: "No patch proposed" },
+                { agentId: "agent-verifier", status: "completed", task: "Diff check passed" },
+              ]),
               codeReviewPreview,
               codeProposedEdit: proposedEdit,
               commands: [verification],
@@ -1265,11 +980,11 @@ export function createFileScanTaskRuntime({
             commanderMessage:
               "Patch proposal is ready. Review the proposed changes before approving or denying the write step.",
             plan: markStep(snapshot.plan, "step-propose-code-edit", "completed", "step-apply-code-edit", "running"),
-            agents: [
-              commanderSnapshot("waiting_permission", "Waiting for patch approval"),
-              codeSnapshot("waiting_permission", `${proposedEdit.changedFiles.length} proposed file change(s)`),
-              verifierSnapshot("queued", "Waiting for permission decision"),
-            ],
+            agents: setTrackedAgentStates(agentTracker, [
+              { agentId: "agent-commander", status: "waiting_permission", task: "Waiting for patch approval" },
+              { agentId: "agent-code", status: "waiting_permission", task: `${proposedEdit.changedFiles.length} proposed file change(s)` },
+              { agentId: "agent-verifier", status: "queued", task: "Waiting for permission decision" },
+            ]),
             codeReviewPreview,
             codeProposedEdit: proposedEdit,
             commands: [verification],
@@ -1283,12 +998,12 @@ export function createFileScanTaskRuntime({
             }),
           });
 
-          pendingPermissionHandler = async (applyDecision) => {
+          setPendingPermissionHandler(applyPermissionRequest.id, async (applyDecision) => {
             const resolvedApplyRequest: ToolPermissionRequest = resolvePermissionRequest(
               applyPermissionRequest,
               applyDecision,
             );
-            pendingPermissionHandler = undefined;
+            setPendingPermissionHandler(applyPermissionRequest.id, undefined);
 
             if (applyDecision === "denied") {
               emit({
@@ -1301,11 +1016,11 @@ export function createFileScanTaskRuntime({
                   ...step,
                   status: step.id === "step-apply-code-edit" ? "skipped" : "completed",
                 })),
-                agents: [
-                  commanderSnapshot("completed", "Permission decision recorded"),
-                  codeSnapshot("completed", "Patch proposal kept read-only"),
-                  verifierSnapshot("completed", "Verified denial record"),
-                ],
+                agents: setTrackedAgentStates(agentTracker, [
+                  { agentId: "agent-commander", status: "completed", task: "Permission decision recorded" },
+                  { agentId: "agent-code", status: "completed", task: "Patch proposal kept read-only" },
+                  { agentId: "agent-verifier", status: "completed", task: "Verified denial record" },
+                ]),
                 codeReviewPreview,
                 codeProposedEdit: proposedEdit,
                 commands: [verification],
@@ -1330,11 +1045,11 @@ export function createFileScanTaskRuntime({
                 commanderMessage:
                   "The approved patch proposal no longer matches its recorded hash, so Javis refused to apply it.",
                 plan: markStep(snapshot.plan, "step-apply-code-edit", "failed"),
-                agents: [
-                  commanderSnapshot("completed", "Permission decision recorded"),
-                  codeSnapshot("failed", "Approved patch hash mismatch"),
-                  verifierSnapshot("cancelled", "No write result to verify"),
-                ],
+                agents: setTrackedAgentStates(agentTracker, [
+                  { agentId: "agent-commander", status: "completed", task: "Permission decision recorded" },
+                  { agentId: "agent-code", status: "failed", task: "Approved patch hash mismatch" },
+                  { agentId: "agent-verifier", status: "cancelled", task: "No write result to verify" },
+                ]),
                 codeReviewPreview,
                 codeProposedEdit: proposedEdit,
                 commands: [verification],
@@ -1357,11 +1072,11 @@ export function createFileScanTaskRuntime({
                 commanderMessage:
                   "Permission was approved, but the confirmed-write Code Agent apply backend is not configured.",
                 plan: markStep(snapshot.plan, "step-apply-code-edit", "failed"),
-                agents: [
-                  commanderSnapshot("completed", "Permission decision recorded"),
-                  codeSnapshot("failed", "Apply backend unavailable"),
-                  verifierSnapshot("cancelled", "No write result to verify"),
-                ],
+                agents: setTrackedAgentStates(agentTracker, [
+                  { agentId: "agent-commander", status: "completed", task: "Permission decision recorded" },
+                  { agentId: "agent-code", status: "failed", task: "Apply backend unavailable" },
+                  { agentId: "agent-verifier", status: "cancelled", task: "No write result to verify" },
+                ]),
                 codeReviewPreview,
                 codeProposedEdit: proposedEdit,
                 commands: [verification],
@@ -1383,11 +1098,11 @@ export function createFileScanTaskRuntime({
               commanderMessage:
                 "Permission was approved. Code Agent is applying only the current patch proposal.",
               plan: markStep(snapshot.plan, "step-apply-code-edit", "running"),
-              agents: [
-                commanderSnapshot("completed", "Permission decision recorded"),
-                codeSnapshot("running", "Applying approved patch"),
-                verifierSnapshot("queued", "Waiting for post-apply check"),
-              ],
+              agents: setTrackedAgentStates(agentTracker, [
+                { agentId: "agent-commander", status: "completed", task: "Permission decision recorded" },
+                { agentId: "agent-code", status: "running", task: "Applying approved patch" },
+                { agentId: "agent-verifier", status: "queued", task: "Waiting for post-apply check" },
+              ]),
               codeReviewPreview,
               codeProposedEdit: proposedEdit,
               commands: [verification],
@@ -1413,11 +1128,11 @@ export function createFileScanTaskRuntime({
                   commanderMessage:
                     "Code Agent reported an apply result that did not match the approved proposal.",
                   plan: markStep(snapshot.plan, "step-apply-code-edit", "failed"),
-                  agents: [
-                    commanderSnapshot("failed", "Apply safety check failed"),
-                    codeSnapshot("failed", applySafetyError),
-                    verifierSnapshot("cancelled", "Post-apply check skipped"),
-                  ],
+                  agents: setTrackedAgentStates(agentTracker, [
+                    { agentId: "agent-commander", status: "failed", task: "Apply safety check failed" },
+                    { agentId: "agent-code", status: "failed", task: applySafetyError },
+                    { agentId: "agent-verifier", status: "cancelled", task: "Post-apply check skipped" },
+                  ]),
                   codeReviewPreview,
                   codeProposedEdit: proposedEdit,
                   codeApplyResult: applyResult,
@@ -1456,20 +1171,23 @@ export function createFileScanTaskRuntime({
                   applyStatus === "completed"
                     ? snapshot.plan.map((step) => ({ ...step, status: "completed" }))
                     : markCodeReviewApplyFailed(snapshot.plan),
-                agents: [
-                  commanderSnapshot(
-                    applyStatus === "completed" ? "completed" : "failed",
-                    applyStatus === "completed" ? "Task finished" : "Verification failed",
-                  ),
-                  codeSnapshot(
-                    applyStatus === "completed" ? "completed" : "failed",
-                    applyResult.message,
-                  ),
-                  verifierSnapshot(
-                    applyStatus === "completed" ? "completed" : "failed",
-                    `${postApplyVerification.exitCode ?? "unknown"} post-apply diff check exit code`,
-                  ),
-                ],
+                agents: setTrackedAgentStates(agentTracker, [
+                  {
+                    agentId: "agent-commander",
+                    status: applyStatus === "completed" ? "completed" : "failed",
+                    task: applyStatus === "completed" ? "Task finished" : "Verification failed",
+                  },
+                  {
+                    agentId: "agent-code",
+                    status: applyStatus === "completed" ? "completed" : "failed",
+                    task: applyResult.message,
+                  },
+                  {
+                    agentId: "agent-verifier",
+                    status: applyStatus === "completed" ? "completed" : "failed",
+                    task: `${postApplyVerification.exitCode ?? "unknown"} post-apply diff check exit code`,
+                  },
+                ]),
                 codeReviewPreview,
                 codeProposedEdit: proposedEdit,
                 codeApplyResult: applyResult,
@@ -1494,11 +1212,11 @@ export function createFileScanTaskRuntime({
                 commanderMessage:
                   "Code Agent could not apply the approved patch or run post-apply verification.",
                 plan: markCodeReviewApplyFailed(snapshot.plan),
-                agents: [
-                  commanderSnapshot("completed", "Permission decision recorded"),
-                  codeSnapshot("failed", "Patch application failed"),
-                  verifierSnapshot("failed", "Post-apply verification unavailable"),
-                ],
+                agents: setTrackedAgentStates(agentTracker, [
+                  { agentId: "agent-commander", status: "completed", task: "Permission decision recorded" },
+                  { agentId: "agent-code", status: "failed", task: "Patch application failed" },
+                  { agentId: "agent-verifier", status: "failed", task: "Post-apply verification unavailable" },
+                ]),
                 codeReviewPreview,
                 codeProposedEdit: proposedEdit,
                 commands: [verification],
@@ -1511,7 +1229,7 @@ export function createFileScanTaskRuntime({
                 }),
               });
             }
-          };
+          });
 
         } catch (error) {
           emit({
@@ -1521,11 +1239,11 @@ export function createFileScanTaskRuntime({
             commanderMessage:
               "Code Agent reviewed the diff preview, but the read-only verification command failed to run.",
             plan: markCodeReviewFailedAfterVerification(snapshot.plan),
-            agents: [
-              commanderSnapshot("completed", "Permission decision recorded"),
-              codeSnapshot("completed", "Diff preview reviewed"),
-              verifierSnapshot("failed", "Verification command failed"),
-            ],
+            agents: setTrackedAgentStates(agentTracker, [
+              { agentId: "agent-commander", status: "completed", task: "Permission decision recorded" },
+              { agentId: "agent-code", status: "completed", task: "Diff preview reviewed" },
+              { agentId: "agent-verifier", status: "failed", task: "Verification command failed" },
+            ]),
             codeReviewPreview,
             permissionRequest: resolvedRequest,
             logs: appendLog(snapshot, {
@@ -1536,7 +1254,7 @@ export function createFileScanTaskRuntime({
             }),
           });
         }
-      };
+      });
     } catch (error) {
       emit({
         ...snapshot,
@@ -1545,11 +1263,11 @@ export function createFileScanTaskRuntime({
         commanderMessage:
           "Code Agent could not collect a diff preview. Check repository access or try a narrower code review goal.",
         plan: markCodeReviewPreviewFailed(snapshot.plan),
-        agents: [
-          commanderSnapshot("completed", "Plan submitted"),
-          codeSnapshot("failed", "Diff preview unavailable"),
-          verifierSnapshot("cancelled", "No diff to verify"),
-        ],
+        agents: setTrackedAgentStates(agentTracker, [
+          { agentId: "agent-commander", status: "completed", task: "Plan submitted" },
+          { agentId: "agent-code", status: "failed", task: "Diff preview unavailable" },
+          { agentId: "agent-verifier", status: "cancelled", task: "No diff to verify" },
+        ]),
         logs: appendLog(snapshot, {
           id: `${taskId}-failed`,
           kind: "tool",
@@ -1562,6 +1280,7 @@ export function createFileScanTaskRuntime({
 
   async function runResearchSearchTask(taskId: ID, userGoal: string, activeWebTool: WebTool) {
     const plan = createResearchSearchPlan();
+    const agentTracker = createScopedAgentTracker(["commander", "research", "verifier"]);
 
     emit({
       id: taskId,
@@ -1571,11 +1290,11 @@ export function createFileScanTaskRuntime({
       commanderMessage:
         "Commander identified a research goal and prepared read-only public source search.",
       plan,
-      agents: [
-        commanderSnapshot("planning", "Create research source plan"),
-        researchSnapshot("queued", "Waiting for public source search"),
-        verifierSnapshot("queued", "Waiting for source evidence"),
-      ],
+      agents: setTrackedAgentStates(agentTracker, [
+        { agentId: "agent-commander", status: "planning", task: "Create research source plan" },
+        { agentId: "agent-research", status: "queued", task: "Waiting for public source search" },
+        { agentId: "agent-verifier", status: "queued", task: "Waiting for source evidence" },
+      ]),
       tokenUsage: createEmptyTokenUsageSummary(),
       logs: [
         {
@@ -1595,11 +1314,11 @@ export function createFileScanTaskRuntime({
       commanderMessage:
         "Research Agent is asking the configured search provider for public source candidates.",
       plan: markStep(snapshot.plan, "step-search-sources", "running"),
-      agents: [
-        commanderSnapshot("completed", "Plan submitted"),
-        researchSnapshot("running", "Searching public sources"),
-        verifierSnapshot("queued", "Waiting for sources"),
-      ],
+      agents: setTrackedAgentStates(agentTracker, [
+        { agentId: "agent-commander", status: "completed", task: "Plan submitted" },
+        { agentId: "agent-research", status: "running", task: "Searching public sources" },
+        { agentId: "agent-verifier", status: "queued", task: "Waiting for sources" },
+      ]),
       logs: appendLog(snapshot, {
         id: `${taskId}-search-started`,
         kind: "tool",
@@ -1621,11 +1340,11 @@ export function createFileScanTaskRuntime({
           commanderMessage:
             "The configured search provider did not return source candidates. Add source URLs manually or try a narrower query.",
           plan: markStep(snapshot.plan, "step-search-sources", "failed"),
-          agents: [
-            commanderSnapshot("completed", "Plan submitted"),
-            researchSnapshot("failed", "No search results"),
-            verifierSnapshot("cancelled", "No source to verify"),
-          ],
+          agents: setTrackedAgentStates(agentTracker, [
+            { agentId: "agent-commander", status: "completed", task: "Plan submitted" },
+            { agentId: "agent-research", status: "failed", task: "No search results" },
+            { agentId: "agent-verifier", status: "cancelled", task: "No source to verify" },
+          ]),
           logs: appendLog(snapshot, {
             id: `${taskId}-search-empty`,
             kind: "tool",
@@ -1650,11 +1369,11 @@ export function createFileScanTaskRuntime({
         commanderMessage:
           "Research Agent found source candidates and is fetching the selected URLs for evidence.",
         plan: markStep(snapshot.plan, "step-search-sources", "completed", "step-fetch-sources", "running"),
-        agents: [
-          commanderSnapshot("completed", "Plan submitted"),
-          researchSnapshot("running", `Fetching ${urls.length} selected source(s)`),
-          verifierSnapshot("queued", "Waiting for sources"),
-        ],
+        agents: setTrackedAgentStates(agentTracker, [
+          { agentId: "agent-commander", status: "completed", task: "Plan submitted" },
+          { agentId: "agent-research", status: "running", task: `Fetching ${urls.length} selected source(s)` },
+          { agentId: "agent-verifier", status: "queued", task: "Waiting for sources" },
+        ]),
         sources: searchResults,
         logs: appendLog(snapshot, {
           id: `${taskId}-search-done`,
@@ -1697,11 +1416,11 @@ export function createFileScanTaskRuntime({
         commanderMessage:
           "Research Agent collected searched sources. Verifier is checking that every source has a URL and excerpt.",
         plan: markStep(snapshot.plan, "step-fetch-sources", "completed", "step-verify-sources", "running"),
-        agents: [
-          commanderSnapshot("completed", "Waiting for verification"),
-          researchSnapshot("completed", `Fetched ${sources.length} source(s)`),
-          verifierSnapshot("verifying", "Checking source evidence"),
-        ],
+        agents: setTrackedAgentStates(agentTracker, [
+          { agentId: "agent-commander", status: "completed", task: "Waiting for verification" },
+          { agentId: "agent-research", status: "completed", task: `Fetched ${sources.length} source(s)` },
+          { agentId: "agent-verifier", status: "verifying", task: "Checking source evidence" },
+        ]),
         sources,
         researchReport,
         logs: [
@@ -1747,17 +1466,19 @@ export function createFileScanTaskRuntime({
           verificationStatus === "completed"
             ? snapshot.plan.map((step) => ({ ...step, status: "completed" }))
             : markStep(snapshot.plan, "step-verify-sources", "failed"),
-        agents: [
-          commanderSnapshot(
-            verificationStatus === "completed" ? "completed" : "failed",
-            verificationStatus === "completed" ? "Task finished" : "Verification failed",
-          ),
-          researchSnapshot("completed", "Source collection completed"),
-          verifierSnapshot(
-            verificationStatus === "completed" ? "completed" : "failed",
-            `${reportEvidenceCount}/${researchReport.rows.length} claims verified`,
-          ),
-        ],
+        agents: setTrackedAgentStates(agentTracker, [
+          {
+            agentId: "agent-commander",
+            status: verificationStatus === "completed" ? "completed" : "failed",
+            task: verificationStatus === "completed" ? "Task finished" : "Verification failed",
+          },
+          { agentId: "agent-research", status: "completed", task: "Source collection completed" },
+          {
+            agentId: "agent-verifier",
+            status: verificationStatus === "completed" ? "completed" : "failed",
+            task: `${reportEvidenceCount}/${researchReport.rows.length} claims verified`,
+          },
+        ]),
         logs: appendLog(snapshot, {
           id: `${taskId}-done`,
           kind: "verification",
@@ -1776,11 +1497,11 @@ export function createFileScanTaskRuntime({
         commanderMessage:
           "Research Agent could not complete search-backed source collection. Add source URLs manually as a fallback.",
         plan: markStep(snapshot.plan, "step-search-sources", "failed"),
-        agents: [
-          commanderSnapshot("completed", "Plan submitted"),
-          researchSnapshot("failed", "Source search failed"),
-          verifierSnapshot("cancelled", "No source to verify"),
-        ],
+        agents: setTrackedAgentStates(agentTracker, [
+          { agentId: "agent-commander", status: "completed", task: "Plan submitted" },
+          { agentId: "agent-research", status: "failed", task: "Source search failed" },
+          { agentId: "agent-verifier", status: "cancelled", task: "No source to verify" },
+        ]),
         logs: appendLog(snapshot, {
           id: `${taskId}-failed`,
           kind: "tool",
@@ -1794,6 +1515,7 @@ export function createFileScanTaskRuntime({
   async function runResearchSourceTask(taskId: ID, userGoal: string, activeWebTool: WebTool) {
     const urls = extractUrls(userGoal);
     const plan = createResearchSourcePlan();
+    const agentTracker = createScopedAgentTracker(["commander", "research", "verifier"]);
 
     emit({
       id: taskId,
@@ -1803,11 +1525,11 @@ export function createFileScanTaskRuntime({
       commanderMessage:
         "Commander found user-provided URLs and prepared read-only source collection.",
       plan,
-      agents: [
-        commanderSnapshot("planning", "Create research source plan"),
-        researchSnapshot("queued", `Waiting to fetch ${urls.length} source(s)`),
-        verifierSnapshot("queued", "Waiting for source evidence"),
-      ],
+      agents: setTrackedAgentStates(agentTracker, [
+        { agentId: "agent-commander", status: "planning", task: "Create research source plan" },
+        { agentId: "agent-research", status: "queued", task: `Waiting to fetch ${urls.length} source(s)` },
+        { agentId: "agent-verifier", status: "queued", task: "Waiting for source evidence" },
+      ]),
       tokenUsage: createEmptyTokenUsageSummary(),
       logs: [
         {
@@ -1826,11 +1548,11 @@ export function createFileScanTaskRuntime({
       status: "running",
       commanderMessage: "Research Agent is fetching public sources provided by the user.",
       plan: markStep(snapshot.plan, "step-fetch-sources", "running"),
-      agents: [
-        commanderSnapshot("completed", "Plan submitted"),
-        researchSnapshot("running", "Fetching public URL sources"),
-        verifierSnapshot("queued", "Waiting for sources"),
-      ],
+      agents: setTrackedAgentStates(agentTracker, [
+        { agentId: "agent-commander", status: "completed", task: "Plan submitted" },
+        { agentId: "agent-research", status: "running", task: "Fetching public URL sources" },
+        { agentId: "agent-verifier", status: "queued", task: "Waiting for sources" },
+      ]),
       logs: appendLog(snapshot, {
         id: `${taskId}-sources-started`,
         kind: "tool",
@@ -1854,11 +1576,11 @@ export function createFileScanTaskRuntime({
         commanderMessage:
           "Research Agent collected sources. Verifier is checking that every source has a URL and excerpt.",
         plan: markStep(snapshot.plan, "step-fetch-sources", "completed", "step-verify-sources", "running"),
-        agents: [
-          commanderSnapshot("completed", "Waiting for verification"),
-          researchSnapshot("completed", `Fetched ${sources.length} source(s)`),
-          verifierSnapshot("verifying", "Checking source evidence"),
-        ],
+        agents: setTrackedAgentStates(agentTracker, [
+          { agentId: "agent-commander", status: "completed", task: "Waiting for verification" },
+          { agentId: "agent-research", status: "completed", task: `Fetched ${sources.length} source(s)` },
+          { agentId: "agent-verifier", status: "verifying", task: "Checking source evidence" },
+        ]),
         sources,
         researchReport,
         logs: appendLog(snapshot, {
@@ -1894,17 +1616,19 @@ export function createFileScanTaskRuntime({
           verificationStatus === "completed"
             ? snapshot.plan.map((step) => ({ ...step, status: "completed" }))
             : markStep(snapshot.plan, "step-verify-sources", "failed"),
-        agents: [
-          commanderSnapshot(
-            verificationStatus === "completed" ? "completed" : "failed",
-            verificationStatus === "completed" ? "Task finished" : "Verification failed",
-          ),
-          researchSnapshot("completed", "Source collection completed"),
-          verifierSnapshot(
-            verificationStatus === "completed" ? "completed" : "failed",
-            `${reportEvidenceCount}/${researchReport.rows.length} claims verified`,
-          ),
-        ],
+        agents: setTrackedAgentStates(agentTracker, [
+          {
+            agentId: "agent-commander",
+            status: verificationStatus === "completed" ? "completed" : "failed",
+            task: verificationStatus === "completed" ? "Task finished" : "Verification failed",
+          },
+          { agentId: "agent-research", status: "completed", task: "Source collection completed" },
+          {
+            agentId: "agent-verifier",
+            status: verificationStatus === "completed" ? "completed" : "failed",
+            task: `${reportEvidenceCount}/${researchReport.rows.length} claims verified`,
+          },
+        ]),
         logs: appendLog(snapshot, {
           id: `${taskId}-done`,
           kind: "verification",
@@ -1923,11 +1647,11 @@ export function createFileScanTaskRuntime({
         commanderMessage:
           "Research Agent could not fetch the provided source. Add alternate URLs manually or try a search-backed research goal.",
         plan: markStep(snapshot.plan, "step-fetch-sources", "failed"),
-        agents: [
-          commanderSnapshot("completed", "Plan submitted"),
-          researchSnapshot("failed", "Source fetch failed"),
-          verifierSnapshot("cancelled", "No source to verify"),
-        ],
+        agents: setTrackedAgentStates(agentTracker, [
+          { agentId: "agent-commander", status: "completed", task: "Plan submitted" },
+          { agentId: "agent-research", status: "failed", task: "Source fetch failed" },
+          { agentId: "agent-verifier", status: "cancelled", task: "No source to verify" },
+        ]),
         logs: appendLog(snapshot, {
           id: `${taskId}-failed`,
           kind: "tool",
