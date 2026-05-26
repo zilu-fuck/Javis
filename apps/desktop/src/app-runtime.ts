@@ -1,5 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
-import { createFileScanTaskRuntime } from "@javis/core";
+import {
+  CONTEXT_KEYS,
+  createChineseReviewPrompt,
+  createChineseRevisionPrompt,
+  createFileScanTaskRuntime,
+  createSharedTaskContext,
+  createTaskEventBus,
+  parseChineseReviewResult,
+} from "@javis/core";
 import type {
   CodeApplyResult,
   CodeProposedEdit,
@@ -23,9 +31,15 @@ import type {
   ScheduledTaskDraft,
 } from "@javis/tools";
 import { parseGitStatusFiles } from "./git-status";
-import { createConfiguredModelProvider, type ModelProvider } from "./model-provider";
+import {
+  createConfiguredModelProvider,
+  type CompletionOptions,
+  type CompletionResult,
+  type ModelProvider,
+} from "./model-provider";
 import type { ModelSettings } from "./model-settings";
 import { scanUserDocuments } from "./local-knowledge";
+import { preprocessChineseInput } from "./input-preprocessor";
 import {
   createScheduledTask,
   loadScheduledTasks,
@@ -42,6 +56,9 @@ export function createJavisRuntime({
   modelSettings,
 }: CreateJavisRuntimeOptions) {
   const modelProvider = createConfiguredModelProvider(modelSettings);
+  const sharedContext = createSharedTaskContext();
+  const eventBus = createTaskEventBus();
+  const taskIdRef: { current: string | null } = { current: null };
   const runReadOnlyCommand = (request: ShellCommandRequest) => {
     const workspacePath = getWorkspacePath();
     return invoke<ShellCommandOutput>("run_read_only_command", {
@@ -52,9 +69,44 @@ export function createJavisRuntime({
     });
   };
 
-  return createFileScanTaskRuntime({
+  const runtime = createFileScanTaskRuntime({
+    chatTool: {
+      complete: (prompt, options) => modelProvider.complete(prompt, options),
+    },
     commanderTool: {
-      plan: (request) => planWithModelProvider(request, modelProvider),
+      plan: async (request) => {
+        const taskId = taskIdRef.current ?? "task-unknown";
+        eventBus.emit({ kind: "agent.chunk_start", taskId, agentKind: "commander" });
+        try {
+          const result = await planWithModelProviderStreaming(
+            request,
+            modelProvider,
+            (chunk) =>
+              eventBus.emit({
+                kind: "agent.chunk",
+                taskId,
+                agentKind: "commander",
+                text: chunk.text,
+              }),
+          );
+          eventBus.emit({
+            kind: "agent.chunk_end",
+            taskId,
+            agentKind: "commander",
+            fullText: result.reasoning,
+          });
+          return result;
+        } catch (error) {
+          eventBus.emit({
+            kind: "agent.chunk_end",
+            taskId,
+            agentKind: "commander",
+            fullText: "",
+            error: String(error),
+          });
+          throw error;
+        }
+      },
     },
     fileTool: {
       scanMarkdownDocuments: () => {
@@ -63,14 +115,16 @@ export function createJavisRuntime({
           workspacePath: workspacePath.trim() || null,
         });
       },
-      planPdfOrganization: () => invoke<FileOrganizationPlan>("plan_pdf_organization"),
+      planPdfOrganization: (taskId?: string) =>
+        invoke<FileOrganizationPlan>("plan_pdf_organization", { taskId }),
       executePdfOrganization: async (
         operations: PlannedPathOperation[],
         approvalId: string,
+        taskId?: string,
       ) => {
-        await invoke("approve_pdf_organization", { approvalId });
+        await invoke("approve_pdf_organization", { approvalId, taskId });
         return invoke<FileOrganizationExecution>("execute_pdf_organization", {
-          request: { approvalId, operations },
+          request: { approvalId, operations, taskId },
         });
       },
     },
@@ -179,9 +233,68 @@ export function createJavisRuntime({
         invoke<WebSearchResult[]>("search_web_sources", { request }),
     },
     verifierTool: {
-      check: (request) => verifyWithModelProvider(request, modelProvider),
+      check: async (request) => {
+        const taskId = taskIdRef.current ?? "task-unknown";
+        eventBus.emit({ kind: "agent.chunk_start", taskId, agentKind: "verifier" });
+        try {
+          const result = await verifyWithModelProviderStreaming(
+            request,
+            modelProvider,
+            (chunk) =>
+              eventBus.emit({
+                kind: "agent.chunk",
+                taskId,
+                agentKind: "verifier",
+                text: chunk.text,
+              }),
+          );
+          eventBus.emit({
+            kind: "agent.chunk_end",
+            taskId,
+            agentKind: "verifier",
+            fullText: result.summary,
+          });
+          return result;
+        } catch (error) {
+          eventBus.emit({
+            kind: "agent.chunk_end",
+            taskId,
+            agentKind: "verifier",
+            fullText: "",
+            error: String(error),
+          });
+          throw error;
+        }
+      },
+    },
+    eventBus,
+    onTaskStarted: (taskId) => {
+      taskIdRef.current = taskId;
     },
   });
+
+  return {
+    ...runtime,
+    start(userGoal: string) {
+      void (async () => {
+        sharedContext.clear();
+        sharedContext.set(sharedContext.resolveKey(CONTEXT_KEYS.USER_GOAL, "zh-CN"), userGoal);
+        const result = await preprocessChineseInput(userGoal, modelProvider);
+        if (result) {
+          sharedContext.set(
+            sharedContext.resolveKey(CONTEXT_KEYS.PREPROCESSED_INPUT, "zh-CN"),
+            result,
+          );
+        }
+        runtime.start(userGoal);
+      })();
+    },
+    dispose() {
+      void invoke("cancel_all_model_streams");
+      sharedContext.clear();
+      runtime.dispose();
+    },
+  };
 }
 
 function matchesLocalDocumentQuery(name: string, path: string, query: string): boolean {
@@ -197,11 +310,57 @@ function matchesLocalDocumentQuery(name: string, path: string, query: string): b
   return terms.some((term) => haystack.includes(term));
 }
 
-async function planWithModelProvider(
+async function streamOrCompleteWithReview<T>(
+  prompt: string,
+  streamOptions: { maxTokens: number; temperature: number },
+  modelProvider: ModelProvider,
+  onChunk: (chunk: { text: string }) => void,
+  normalize: (value: unknown) => T,
+): Promise<T> {
+  let fullText: string;
+
+  try {
+    fullText = "";
+    for await (const chunk of modelProvider.stream(prompt, {
+      ...streamOptions,
+      locale: "zh-CN",
+    })) {
+      fullText += chunk.text;
+      onChunk(chunk);
+    }
+  } catch {
+    // Provider doesn't support SSE — fall back to non-streaming complete()
+    const result = await completeWithChineseReview(
+      prompt,
+      { ...streamOptions, locale: "zh-CN" },
+      modelProvider,
+      "terms-only",
+    );
+    onChunk({ text: result.text });
+    return normalize(parseJsonObject(result.text));
+  }
+
+  let resultText = fullText;
+  try {
+    const reviewed = await reviewChineseStyle(
+      { text: fullText },
+      modelProvider,
+      "terms-only",
+    );
+    resultText = reviewed.text;
+  } catch {
+    // Fall back to unreviewed text
+  }
+
+  return normalize(parseJsonObject(resultText));
+}
+
+async function planWithModelProviderStreaming(
   request: CommanderPlanRequest,
   modelProvider: ModelProvider,
+  onChunk: (chunk: { text: string }) => void,
 ): Promise<CommanderPlanResult> {
-  const response = await modelProvider.complete(
+  return streamOrCompleteWithReview(
     [
       "You are Javis Commander Agent. Return JSON only.",
       "Plan the selected workflow using the available agents and tools.",
@@ -211,15 +370,18 @@ async function planWithModelProvider(
       `Available agents: ${JSON.stringify(request.availableAgents)}`,
     ].join("\n"),
     { maxTokens: 1200, temperature: 0 },
+    modelProvider,
+    onChunk,
+    (value) => normalizeCommanderPlan(value),
   );
-  return normalizeCommanderPlan(parseJsonObject(response.text));
 }
 
-async function verifyWithModelProvider(
+async function verifyWithModelProviderStreaming(
   request: VerifierCheckRequest,
   modelProvider: ModelProvider,
+  onChunk: (chunk: { text: string }) => void,
 ): Promise<VerifierCheckResult> {
-  const response = await modelProvider.complete(
+  return streamOrCompleteWithReview(
     [
       "You are Javis Verifier Agent. Return JSON only.",
       "Check whether the evidence satisfies the success criteria.",
@@ -229,8 +391,52 @@ async function verifyWithModelProvider(
       `Evidence: ${JSON.stringify(request.evidence)}`,
     ].join("\n"),
     { maxTokens: 900, temperature: 0 },
+    modelProvider,
+    onChunk,
+    (value) => normalizeVerifierCheck(value),
   );
-  return normalizeVerifierCheck(parseJsonObject(response.text));
+}
+
+async function completeWithChineseReview(
+  prompt: string,
+  options: CompletionOptions | undefined,
+  modelProvider: ModelProvider,
+  reviewMode: "full" | "terms-only" | "none",
+): Promise<CompletionResult> {
+  const result = await modelProvider.complete(prompt, options);
+  if (reviewMode === "none" || !options?.locale?.toLowerCase().startsWith("zh")) {
+    return result;
+  }
+  return reviewChineseStyle(result, modelProvider, reviewMode);
+}
+
+async function reviewChineseStyle(
+  result: CompletionResult,
+  modelProvider: ModelProvider,
+  reviewMode: "full" | "terms-only",
+): Promise<CompletionResult> {
+  try {
+    const reviewed = parseChineseReviewResult(
+      (await modelProvider.complete(createChineseReviewPrompt(result.text, reviewMode), {
+        maxTokens: Math.max(700, Math.min(1600, result.text.length + 400)),
+        temperature: 0,
+        locale: "zh-CN",
+      })).text,
+    );
+    if (!reviewed.score.needs_revision) {
+      return { ...result, text: reviewed.text };
+    }
+    const revised = parseChineseReviewResult(
+      (await modelProvider.complete(createChineseRevisionPrompt(reviewed.text, reviewed.score), {
+        maxTokens: Math.max(700, Math.min(1600, reviewed.text.length + 400)),
+        temperature: 0,
+        locale: "zh-CN",
+      })).text,
+    );
+    return { ...result, text: revised.text };
+  } catch {
+    return result;
+  }
 }
 
 function parseJsonObject(text: string): unknown {

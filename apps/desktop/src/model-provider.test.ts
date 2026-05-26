@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createConfiguredModelProvider, ModelProviderError } from "./model-provider";
 import type { ModelSettings } from "./model-settings";
@@ -6,12 +7,17 @@ import type { ModelSettings } from "./model-settings";
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(),
+}));
 
 const invokeMock = vi.mocked(invoke);
+const listenMock = vi.mocked(listen);
 
 describe("model provider", () => {
   beforeEach(() => {
     invokeMock.mockReset();
+    listenMock.mockReset();
   });
 
   it("keeps complete compatible with the configured completion command", async () => {
@@ -43,11 +49,18 @@ describe("model provider", () => {
   });
 
   it("adapts stream chunks to an AsyncIterable and optional callback", async () => {
-    invokeMock.mockResolvedValueOnce([
-      { text: "Hel", model: "gpt-test", provider: "openai" },
-      { text: "" },
-      { text: "lo", model: "gpt-test", provider: "openai" },
-    ]);
+    invokeMock.mockResolvedValueOnce("stream-1");
+    listenMock.mockImplementation(async (eventName, handler) => {
+      if (eventName === "stream-model-chunk") {
+        handler({ payload: { stream_id: "stream-1", text: "Hel", model: "gpt-test", provider: "openai", index: 0 } } as never);
+        handler({ payload: { stream_id: "other", text: "skip", index: 0 } } as never);
+        handler({ payload: { stream_id: "stream-1", text: "lo", model: "gpt-test", provider: "openai", index: 1 } } as never);
+      }
+      if (eventName === "stream-model-done") {
+        handler({ payload: { stream_id: "stream-1", total_chunks: 2 } } as never);
+      }
+      return (() => {}) as () => void;
+    });
     const provider = createConfiguredModelProvider(createSettings());
     const seen: string[] = [];
 
@@ -61,11 +74,29 @@ describe("model provider", () => {
 
     expect(chunks).toEqual(["Hel", "lo"]);
     expect(seen).toEqual(["Hel", "lo"]);
-    expect(invokeMock).toHaveBeenCalledWith("stream_model_prompt", {
+    expect(invokeMock).toHaveBeenCalledWith("stream_model_prompt_start", {
       request: expect.objectContaining({
         prompt: "Say hello",
         providerId: "openai",
         stopSequences: ["\n\n"],
+      }),
+    });
+  });
+
+  it("injects terminology rules for Chinese model calls", async () => {
+    invokeMock.mockResolvedValueOnce({
+      text: "done",
+      model: "deepseek-chat",
+      provider: "deepseek",
+    });
+    const provider = createConfiguredModelProvider(createSettings());
+
+    await provider.complete("Return JSON only.", { locale: "zh-CN" });
+
+    expect(invokeMock).toHaveBeenCalledWith("complete_model_prompt", {
+      request: expect.objectContaining({
+        prompt: expect.stringContaining("Javis terminology rules for Chinese output"),
+        locale: "zh-CN",
       }),
     });
   });

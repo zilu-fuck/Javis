@@ -1,6 +1,6 @@
 # MVP Status
 
-Last updated: 2026-05-23
+Last updated: 2026-05-26
 
 This document maps the current implementation against the MVP scenarios in
 `docs/MVP.md`.
@@ -15,11 +15,11 @@ This file remains the baseline record for what the verified MVP already covers.
 | --- | --- | --- |
 | Desktop workbench shell | Implemented | Sidebar, main thread, agent inspector, activity log, composer, and confirmation cards render in the desktop UI. |
 | Local file scan and summary | Implemented | Markdown documents are scanned through Tauri, summarized in `packages/tools`, displayed in the UI, and verified for path/time/size/purpose fields. |
-| Research report with sources | Implemented for MVP | User-provided URLs are fetched and converted into a source-backed report. Search-backed research is wired post-MVP, but product QA evidence is still incomplete. |
+| Research report with sources | Implemented | User-provided URLs are fetched into source-backed reports. Search-backed research is wired with `github-cli` primary path and Agent Chrome fallback. Source-comparison summaries call out overlap and differences. Live search QA passes. |
 | Project inspection and check run | Implemented | Project scripts are inspected, start/check commands are recommended, and allowlisted checks are executed with exit codes and output. |
 | High-risk file dry-run and confirmation | Implemented | PDF organization creates a dry-run, asks for approval, executes approved matching moves with a one-time approval id, skips conflicts, and reports moved/skipped/failed results. |
-| Code Agent / opencode backend | Deferred | Current project inspection does not call opencode; Code Agent is Milestone C. |
-| Persistent task history | Partial post-MVP | Completed, failed, and cancelled task snapshots now persist locally with sidebar restore/delete. Restart QA and storage migration hardening remain product-readiness work. |
+| Code Agent / opencode backend | Implemented | Core routes code review goals to Code Agent: lists changed files, shows diff preview, requests opencode-backed JSON patch proposal using desktop-managed model/provider settings, and applies approved patches through confirmed-write + native guard. Fixture QA covers proposal denial and approved patch application. Live provider smoke QA in progress. |
+| Persistent task history | Implemented | Completed, failed, and cancelled task snapshots persist locally with sidebar restore/delete. Durable approval records cover PDF and Code Patch pending/resolved audit records. Packaged restart QA verifies PDF and Code Patch approve/apply, deny, and expiry recovery paths. Storage migration hardening remains product-readiness work. |
 | Core runtime tests | Implemented for MVP | Route selection, permission state changes, research reporting, selected failure paths, file-scan failure, PDF no-op/preview/execution failures, and native PDF safety boundaries have focused coverage. |
 
 ## Scenario Details
@@ -63,9 +63,8 @@ Implemented flow:
 
 Limitations:
 
-- Search-backed research is now wired behind the optional `searchWeb` contract,
-  with a `github-cli` primary path and Agent Chrome fallback in the desktop
-  bridge. The verified MVP baseline still accepts manual URL input.
+- Search-backed research is wired with `github-cli` primary path and Agent Chrome
+  fallback in the desktop bridge. Live QA passes for both paths.
 - The MVP scenario expects at least three accessible sources for a full
   comparison report; fewer sources are explicitly marked as incomplete.
 
@@ -89,7 +88,7 @@ Implemented flow:
 Limitations:
 
 - Test execution is limited to a small allowlist.
-- Code Agent / opencode is not integrated and is deferred to Milestone C.
+- Code Agent / opencode is now integrated for code review tasks; see summary table.
 
 ### 4. PDF Organization Dry-Run and Confirmation
 
@@ -139,9 +138,8 @@ The documented MVP release criteria are complete for the 2026-05-23 QA pass:
 Remaining work is not blocking for the verified MVP baseline, but it is blocking
 for a complete product release:
 
-- Search-backed research product QA evidence and source-comparison polish.
-- Code Agent / opencode integration.
-- Persistence hardening across app restart and storage migrations.
-- Workspace selection.
+- Live Code Agent proposal/apply smoke QA with real provider credentials.
+- SQLite migration for durable task and audit storage.
 - Generalized confirmed-write enforcement for all write-capable tools.
 - Signed/versioned release builds with rollback notes.
+- Expanded QA from MVP scenarios to complete-product workflows.

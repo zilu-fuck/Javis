@@ -1,6 +1,7 @@
 import type { FormEventHandler } from "react";
 import type { WorkbenchLocale, WorkbenchTask } from "../types";
 import { translateWorkbenchText } from "../utils";
+import { StreamingMessage } from "./StreamingMessage";
 import { TaskSections } from "./TaskSections";
 import { WorkspaceContext } from "./WorkspaceContext";
 
@@ -37,6 +38,8 @@ export function ThreadView({
   onUseWorkspacePath,
   onWorkspacePathChange,
 }: ThreadViewProps) {
+  const showStreaming = Boolean(task.isStreaming && task.streamingText);
+
   return (
     <>
       <header className="javis-thread-header">
@@ -63,24 +66,36 @@ export function ThreadView({
           <p className="javis-message-title">{labels.user}</p>
           <p className="javis-message-body">{translateWorkbenchText(task.userGoal, locale)}</p>
         </article>
-        <article className="javis-message">
-          <p className="javis-message-title">{labels.commander}</p>
-          <p className="javis-message-body">
-            {translateWorkbenchText(task.commanderMessage, locale)}
-          </p>
-        </article>
 
-        <TaskSections
-          labels={labels}
-          locale={locale}
-          onPermissionDecision={onPermissionDecision}
-          task={task}
-        />
+        {showStreaming ? (
+          <StreamingMessage
+            text={task.streamingText!}
+            isStreaming={task.isStreaming!}
+            agentLabel={labels.commander}
+          />
+        ) : (
+          <article className="javis-message">
+            <p className="javis-message-title">{labels.commander}</p>
+            <p className="javis-message-body">
+              {translateWorkbenchText(task.commanderMessage, locale)}
+            </p>
+          </article>
+        )}
+
+        {!showStreaming && (
+          <TaskSections
+            labels={labels}
+            locale={locale}
+            onPermissionDecision={onPermissionDecision}
+            task={task}
+          />
+        )}
       </section>
 
       <form className="javis-composer" onSubmit={onSubmit}>
         <textarea
           aria-label={labels.taskInput}
+          disabled={showStreaming}
           onChange={(event) => onDraftGoalChange(event.currentTarget.value)}
           placeholder={labels.taskInputPlaceholder}
           value={draftGoal}
@@ -95,7 +110,7 @@ export function ThreadView({
             onWorkspacePathChange={onWorkspacePathChange}
             recentWorkspacePaths={recentWorkspacePaths}
           />
-          <button type="submit">{labels.send}</button>
+          <button type="submit" disabled={showStreaming}>{labels.send}</button>
         </div>
       </form>
     </>

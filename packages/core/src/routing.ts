@@ -45,6 +45,12 @@ export function isPdfOrganizationGoal(userGoal: string): boolean {
   return getTopRoute(userGoal)?.route === "pdf";
 }
 
+export function isDocumentScanGoal(userGoal: string): boolean {
+  const docWords = /document|documents|docs|markdown|\.md|md\s*文件|文档|笔记/i;
+  const actionWords = /scan|find|list|search|workspace|summarize|扫描|查找|搜索|总结|工作区|列出/i;
+  return docWords.test(userGoal) && actionWords.test(userGoal);
+}
+
 export function scoreRoutes(
   userGoal: string,
   context: RouteScoringContext = {},

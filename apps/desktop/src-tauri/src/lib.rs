@@ -11,11 +11,27 @@ use std::{
 };
 use tauri::{AppHandle, Manager};
 
+mod streaming;
+
 const OPENCODE_PROPOSAL_TIMEOUT: Duration = Duration::from_secs(90);
 const MODEL_API_KEY_SECRET_REFERENCE: &str = "default";
 const MODEL_API_KEY_SECRET_PREFIX: &str = "dpapi-v1:";
 const PDF_APPROVAL_TOOL_NAME: &str = "file.executePdfOrganization";
 const CODE_PATCH_APPROVAL_TOOL_NAME: &str = "code.applyProposedEdit";
+const JAVIS_TERMINOLOGY_PROMPT_PREFIX: &str = r#"Javis terminology rules for Chinese output:
+- Agent: keep the English term; do not translate it as proxy or bot.
+- Token: keep the English term.
+- confirmed write: confirmed write = user-approved write operation.
+- dry run: dry run = preview execution without modifying files.
+- patch: patch = code/file change proposal, not a repair program.
+- hunk: hunk = one changed section in a unified diff.
+- diff: diff = unified/text difference.
+- workspace: workspace = working directory.
+- approval: approval = user permission decision.
+- proposal: proposal = proposed change.
+- verifier: verifier = validation role.
+- Commander: keep Commander as an English role name.
+Keep JSON keys, code, paths, commands, and identifiers unchanged."#;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,6 +75,8 @@ struct PlannedPathOperation {
 struct ExecuteFileOrganizationRequest {
     approval_id: String,
     operations: Vec<PlannedPathOperation>,
+    #[serde(default)]
+    task_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -215,7 +233,7 @@ struct CodeProposeEditRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ModelCompletionRequest {
+pub(crate) struct ModelCompletionRequest {
     prompt: String,
     provider_id: Option<String>,
     model: Option<String>,
@@ -346,6 +364,7 @@ fn scan_markdown_documents(
 
 #[tauri::command]
 fn plan_pdf_organization(
+    task_id: Option<String>,
     approval_state: tauri::State<'_, Mutex<PdfOrganizationApprovalState>>,
 ) -> Result<FileOrganizationPlan, String> {
     let directory = downloads_directory()?;
@@ -383,7 +402,13 @@ fn plan_pdf_organization(
 
     operations.sort_by(|left, right| left.source.cmp(&right.source));
     let approval_id = create_approval_id();
-    replace_pending_pdf_approval(&approval_state, &approval_id, &directory, &operations)?;
+    replace_pending_pdf_approval(
+        &approval_state,
+        &approval_id,
+        &directory,
+        &operations,
+        task_id.as_deref(),
+    )?;
 
     Ok(FileOrganizationPlan {
         approval_id,
@@ -402,9 +427,10 @@ fn plan_pdf_organization(
 #[tauri::command]
 fn approve_pdf_organization(
     approval_id: String,
+    #[allow(unused_variables)] task_id: Option<String>,
     approval_state: tauri::State<'_, Mutex<PdfOrganizationApprovalState>>,
 ) -> Result<(), String> {
-    approve_pending_pdf_organization(&approval_state, &approval_id)
+    approve_pending_pdf_organization(&approval_state, &approval_id, task_id.as_deref())
 }
 
 #[tauri::command]
@@ -418,8 +444,13 @@ fn restore_pdf_organization_approval(
         &request.approval_id,
         &downloads,
         &request.operations,
+        request.task_id.as_deref(),
     )?;
-    approve_pending_pdf_organization(&approval_state, &request.approval_id)
+    approve_pending_pdf_organization(
+        &approval_state,
+        &request.approval_id,
+        request.task_id.as_deref(),
+    )
 }
 
 #[tauri::command]
@@ -567,8 +598,9 @@ fn search_web_sources(request: WebSearchRequest) -> Result<Vec<WebSearchResult>,
     }
 
     if env_flag_enabled("JAVIS_SEARCH_DISABLE_GITHUB_CLI") {
-        return search_with_agent_chrome(query, max_results)
-            .map_err(|error| format!("GitHub CLI search disabled; Chrome fallback failed: {error}"));
+        return search_with_agent_chrome(query, max_results).map_err(|error| {
+            format!("GitHub CLI search disabled; Chrome fallback failed: {error}")
+        });
     }
 
     match search_with_github_cli(query, max_results) {
@@ -740,8 +772,9 @@ fn resolve_workspace_path(workspace_path: Option<String>) -> Result<PathBuf, Str
         if trimmed_path.is_empty() {
             return Err("Workspace path cannot be empty.".to_string());
         }
-        let workspace = fs::canonicalize(trimmed_path)
-            .map_err(|error| format!("Selected workspace path is not accessible: {trimmed_path}: {error}"))?;
+        let workspace = fs::canonicalize(trimmed_path).map_err(|error| {
+            format!("Selected workspace path is not accessible: {trimmed_path}: {error}")
+        })?;
         if !workspace.is_dir() {
             return Err(format!(
                 "Selected workspace path is not a directory: {}",
@@ -804,10 +837,7 @@ fn save_model_api_key_secret_for_app(
 }
 
 #[cfg(windows)]
-fn delete_model_api_key_secret_for_app(
-    app: &AppHandle,
-    key_reference: &str,
-) -> Result<(), String> {
+fn delete_model_api_key_secret_for_app(app: &AppHandle, key_reference: &str) -> Result<(), String> {
     let key_reference = normalize_model_api_key_reference(key_reference)?;
     let path = model_api_key_secret_path(app, &key_reference)?;
     match fs::remove_file(&path) {
@@ -824,8 +854,7 @@ fn hydrate_model_api_key_secret(
     if normalize_optional_config_value(request.api_key.as_deref()).is_some() {
         return Ok(());
     }
-    let Some(key_reference) =
-        normalize_optional_config_value(request.api_key_reference.as_deref())
+    let Some(key_reference) = normalize_optional_config_value(request.api_key_reference.as_deref())
     else {
         return Ok(());
     };
@@ -833,15 +862,14 @@ fn hydrate_model_api_key_secret(
     Ok(())
 }
 
-fn hydrate_model_completion_api_key_secret(
+pub(crate) fn hydrate_model_completion_api_key_secret(
     app: &AppHandle,
     request: &mut ModelCompletionRequest,
 ) -> Result<(), String> {
     if normalize_optional_config_value(request.api_key.as_deref()).is_some() {
         return Ok(());
     }
-    let Some(key_reference) =
-        normalize_optional_config_value(request.api_key_reference.as_deref())
+    let Some(key_reference) = normalize_optional_config_value(request.api_key_reference.as_deref())
     else {
         return Ok(());
     };
@@ -951,8 +979,7 @@ fn unprotect_model_api_key_secret(secret: &str) -> Result<String, String> {
     if ok == 0 {
         return Err("Could not unprotect model API key secret.".to_string());
     }
-    let unprotected =
-        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) };
+    let unprotected = unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) };
     let text = String::from_utf8(unprotected.to_vec())
         .map_err(|error| format!("Model API key secret is not valid UTF-8: {error}"));
     unsafe {
@@ -977,51 +1004,103 @@ fn unprotect_model_api_key_secret(marker: &str) -> Result<String, String> {
 
 #[cfg(not(windows))]
 fn save_model_api_key_secret_for_app(
-    app: &AppHandle,
+    _app: &AppHandle,
+    key_reference: &str,
+    api_key: &str,
+) -> Result<(), String> {
+    let store = OsModelApiKeySecretStore;
+    save_model_api_key_secret_with_store(&store, key_reference, api_key)
+}
+
+#[cfg(not(windows))]
+trait ModelApiKeySecretStore {
+    fn save(&self, key_reference: &str, api_key: &str) -> Result<(), String>;
+    fn load(&self, key_reference: &str) -> Result<String, String>;
+    fn delete(&self, key_reference: &str) -> Result<(), String>;
+}
+
+#[cfg(not(windows))]
+struct OsModelApiKeySecretStore;
+
+#[cfg(not(windows))]
+impl ModelApiKeySecretStore for OsModelApiKeySecretStore {
+    fn save(&self, key_reference: &str, api_key: &str) -> Result<(), String> {
+        let entry = keyring::Entry::new("javis-model-api-key", key_reference)
+            .map_err(|error| format!("Could not access OS credential store: {error}"))?;
+        entry.set_password(api_key).map_err(|error| {
+            format!("Could not save model API key to OS credential store: {error}")
+        })
+    }
+
+    fn load(&self, key_reference: &str) -> Result<String, String> {
+        let entry = keyring::Entry::new("javis-model-api-key", key_reference)
+            .map_err(|error| format!("Could not access OS credential store: {error}"))?;
+        entry.get_password().map_err(|error| {
+            format!("Could not read model API key from OS credential store: {error}")
+        })
+    }
+
+    fn delete(&self, key_reference: &str) -> Result<(), String> {
+        let entry = keyring::Entry::new("javis-model-api-key", key_reference)
+            .map_err(|error| format!("Could not access OS credential store: {error}"))?;
+        match entry.delete_credential() {
+            Ok(()) => Ok(()),
+            Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(format!(
+                "Could not delete model API key from OS credential store: {error}"
+            )),
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn save_model_api_key_secret_with_store(
+    store: &impl ModelApiKeySecretStore,
     key_reference: &str,
     api_key: &str,
 ) -> Result<(), String> {
     let key_reference = normalize_model_api_key_reference(key_reference)?;
     let api_key = api_key.trim();
     if api_key.is_empty() {
-        return delete_model_api_key_secret_for_app(app, &key_reference);
+        return store.delete(&key_reference);
     }
-    let entry = keyring::Entry::new("javis-model-api-key", &key_reference)
-        .map_err(|error| format!("Could not access OS credential store: {error}"))?;
-    entry
-        .set_password(api_key)
-        .map_err(|error| format!("Could not save model API key to OS credential store: {error}"))?;
-    Ok(())
+    store.save(&key_reference, api_key)
 }
 
 #[cfg(not(windows))]
 fn load_model_api_key_secret_for_app(
-    app: &AppHandle,
+    _app: &AppHandle,
+    key_reference: &str,
+) -> Result<String, String> {
+    let store = OsModelApiKeySecretStore;
+    load_model_api_key_secret_with_store(&store, key_reference)
+}
+
+#[cfg(not(windows))]
+fn load_model_api_key_secret_with_store(
+    store: &impl ModelApiKeySecretStore,
     key_reference: &str,
 ) -> Result<String, String> {
     let key_reference = normalize_model_api_key_reference(key_reference)?;
-    let entry = keyring::Entry::new("javis-model-api-key", &key_reference)
-        .map_err(|error| format!("Could not access OS credential store: {error}"))?;
-    entry
-        .get_password()
-        .map_err(|error| format!("Could not read model API key from OS credential store: {error}"))
+    store.load(&key_reference)
 }
 
 #[cfg(not(windows))]
 fn delete_model_api_key_secret_for_app(
-    app: &AppHandle,
+    _app: &AppHandle,
+    key_reference: &str,
+) -> Result<(), String> {
+    let store = OsModelApiKeySecretStore;
+    delete_model_api_key_secret_with_store(&store, key_reference)
+}
+
+#[cfg(not(windows))]
+fn delete_model_api_key_secret_with_store(
+    store: &impl ModelApiKeySecretStore,
     key_reference: &str,
 ) -> Result<(), String> {
     let key_reference = normalize_model_api_key_reference(key_reference)?;
-    let entry = keyring::Entry::new("javis-model-api-key", &key_reference)
-        .map_err(|error| format!("Could not access OS credential store: {error}"))?;
-    match entry.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(format!(
-            "Could not delete model API key from OS credential store: {error}"
-        )),
-    }
+    store.delete(&key_reference)
 }
 
 fn propose_code_edit_with_opencode(
@@ -1052,7 +1131,11 @@ fn propose_code_edit_with_opencode(
     if env_flag_enabled("JAVIS_QA_MODE") {
         if let Some(path) = env::var_os("JAVIS_CODE_PROPOSAL_FIXTURE_PATH").map(PathBuf::from) {
             let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
-            return parse_code_proposal_from_text_for_request(&canonical_workspace, &content, &request);
+            return parse_code_proposal_from_text_for_request(
+                &canonical_workspace,
+                &content,
+                &request,
+            );
         }
     } else if env::var_os("JAVIS_CODE_PROPOSAL_FIXTURE_PATH").is_some() {
         return Err("Code proposal fixtures require JAVIS_QA_MODE=1.".to_string());
@@ -1061,7 +1144,10 @@ fn propose_code_edit_with_opencode(
     let prompt = create_opencode_proposal_prompt(&request);
     let output = match run_opencode_proposal_command(&canonical_workspace, &prompt, &request) {
         Ok(output) => output,
-        Err(error) if should_fallback_to_openai_compatible(&request) && can_fallback_from_opencode_error(&error) => {
+        Err(error)
+            if should_fallback_to_openai_compatible(&request)
+                && can_fallback_from_opencode_error(&error) =>
+        {
             run_openai_compatible_proposal_request(&request, &prompt)?
         }
         Err(error) => return Err(error),
@@ -1070,8 +1156,12 @@ fn propose_code_edit_with_opencode(
         Ok(proposal) => Ok(proposal),
         Err(error) if should_fallback_to_openai_compatible(&request) => {
             let fallback_output = run_openai_compatible_proposal_request(&request, &prompt)?;
-            parse_code_proposal_from_text_for_request(&canonical_workspace, &fallback_output, &request)
-                .map_err(|fallback_error| format!("{error}; fallback failed: {fallback_error}"))
+            parse_code_proposal_from_text_for_request(
+                &canonical_workspace,
+                &fallback_output,
+                &request,
+            )
+            .map_err(|fallback_error| format!("{error}; fallback failed: {fallback_error}"))
         }
         Err(error) => Err(error),
     }
@@ -1120,7 +1210,10 @@ fn wait_with_timeout(mut child: Child, timeout: Duration) -> std::io::Result<Out
             let _ = child.wait();
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                format!("opencode proposal command timed out after {} seconds", timeout.as_secs()),
+                format!(
+                    "opencode proposal command timed out after {} seconds",
+                    timeout.as_secs()
+                ),
             ));
         }
         thread::sleep(Duration::from_millis(100));
@@ -1214,7 +1307,11 @@ fn create_opencode_config_content(request: &CodeProposeEditRequest) -> Result<St
 
 fn infer_provider_id_from_model(request: &CodeProposeEditRequest) -> String {
     normalize_optional_config_value(request.model.as_deref())
-        .and_then(|model| model.split_once('/').map(|(provider, _)| provider.to_string()))
+        .and_then(|model| {
+            model
+                .split_once('/')
+                .map(|(provider, _)| provider.to_string())
+        })
         .unwrap_or_else(|| default_provider_for_locale(request.locale.as_deref()))
 }
 
@@ -1259,7 +1356,7 @@ fn normalize_openai_compatible_model_name(request: &CodeProposeEditRequest) -> O
     })
 }
 
-fn normalize_optional_config_value(value: Option<&str>) -> Option<String> {
+pub(crate) fn normalize_optional_config_value(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -1281,7 +1378,8 @@ fn should_fallback_to_openai_compatible(request: &CodeProposeEditRequest) -> boo
     let provider_id = normalize_optional_config_value(request.provider_id.as_deref())
         .unwrap_or_else(|| infer_provider_id_from_model(request));
     let has_credentials = normalize_optional_config_value(request.api_key.as_deref()).is_some();
-    let has_custom_base_url = normalize_optional_config_value(request.base_url.as_deref()).is_some();
+    let has_custom_base_url =
+        normalize_optional_config_value(request.base_url.as_deref()).is_some();
     has_credentials && (provider_id == "deepseek" || provider_id == "custom" && has_custom_base_url)
 }
 
@@ -1312,10 +1410,9 @@ fn run_openai_compatible_proposal_request(
         .header("Content-Type", "application/json")
         .send(&body_text)
         .map_err(|error| format!("OpenAI-compatible proposal fallback failed: {error}"))?;
-    let response_text = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|error| format!("OpenAI-compatible proposal fallback could not read response: {error}"))?;
+    let response_text = response.body_mut().read_to_string().map_err(|error| {
+        format!("OpenAI-compatible proposal fallback could not read response: {error}")
+    })?;
     let value = serde_json::from_str::<serde_json::Value>(&response_text).map_err(|error| {
         format!(
             "OpenAI-compatible proposal fallback returned invalid JSON: {error}; {}",
@@ -1405,7 +1502,12 @@ fn run_openai_compatible_completion_request(
     let value = serde_json::from_str::<serde_json::Value>(&response_text).map_err(|error| {
         format!(
             "Model completion returned invalid JSON: {error}; {}",
-            create_model_completion_response_diagnostic(&provider_id, &model, &endpoint, &response_text)
+            create_model_completion_response_diagnostic(
+                &provider_id,
+                &model,
+                &endpoint,
+                &response_text
+            )
         )
     })?;
     let content_value = value
@@ -1417,7 +1519,12 @@ fn run_openai_compatible_completion_request(
     let Some(content_value) = content_value else {
         return Err(format!(
             "Model completion returned no message content. {}",
-            create_model_completion_response_diagnostic(&provider_id, &model, &endpoint, &response_text)
+            create_model_completion_response_diagnostic(
+                &provider_id,
+                &model,
+                &endpoint,
+                &response_text
+            )
         ));
     };
     let text = content_value
@@ -1429,7 +1536,12 @@ fn run_openai_compatible_completion_request(
         .ok_or_else(|| {
             format!(
                 "Model completion returned empty message content. {}",
-                create_model_completion_response_diagnostic(&provider_id, &model, &endpoint, &response_text)
+                create_model_completion_response_diagnostic(
+                    &provider_id,
+                    &model,
+                    &endpoint,
+                    &response_text
+                )
             )
         })?;
     Ok(ModelCompletionResponse {
@@ -1490,7 +1602,7 @@ fn create_openai_compatible_completion_body(
     body
 }
 
-fn create_openai_compatible_stream_body(
+pub(crate) fn create_openai_compatible_stream_body(
     model: &str,
     request: &ModelCompletionRequest,
 ) -> serde_json::Value {
@@ -1549,13 +1661,18 @@ fn parse_openai_compatible_stream_chunks(
     if chunks.is_empty() {
         return Err(format!(
             "Model stream returned no content chunks. {}",
-            create_model_completion_response_diagnostic(provider_id, model, endpoint, response_text)
+            create_model_completion_response_diagnostic(
+                provider_id,
+                model,
+                endpoint,
+                response_text
+            )
         ));
     }
     Ok(chunks)
 }
 
-fn extract_openai_compatible_stream_text(value: &serde_json::Value) -> Option<String> {
+pub(crate) fn extract_openai_compatible_stream_text(value: &serde_json::Value) -> Option<String> {
     let choice = value
         .get("choices")
         .and_then(|choices| choices.as_array())
@@ -1563,13 +1680,17 @@ fn extract_openai_compatible_stream_text(value: &serde_json::Value) -> Option<St
     choice
         .get("delta")
         .and_then(|delta| delta.get("content"))
-        .or_else(|| choice.get("message").and_then(|message| message.get("content")))
+        .or_else(|| {
+            choice
+                .get("message")
+                .and_then(|message| message.get("content"))
+        })
         .and_then(|content| content.as_str())
         .map(str::to_string)
         .filter(|content| !content.is_empty())
 }
 
-fn normalize_model_completion_model_name(request: &ModelCompletionRequest) -> Option<String> {
+pub(crate) fn normalize_model_completion_model_name(request: &ModelCompletionRequest) -> Option<String> {
     let model = normalize_optional_config_value(request.model.as_deref())
         .or_else(|| Some(default_model_for_locale(request.locale.as_deref())));
     model.map(|model| {
@@ -1580,13 +1701,17 @@ fn normalize_model_completion_model_name(request: &ModelCompletionRequest) -> Op
     })
 }
 
-fn infer_model_completion_provider_id(request: &ModelCompletionRequest) -> String {
+pub(crate) fn infer_model_completion_provider_id(request: &ModelCompletionRequest) -> String {
     normalize_optional_config_value(request.model.as_deref())
-        .and_then(|model| model.split_once('/').map(|(provider, _)| provider.to_string()))
+        .and_then(|model| {
+            model
+                .split_once('/')
+                .map(|(provider, _)| provider.to_string())
+        })
         .unwrap_or_else(|| default_provider_for_locale(request.locale.as_deref()))
 }
 
-fn default_openai_compatible_base_url_for_provider(provider_id: &str) -> String {
+pub(crate) fn default_openai_compatible_base_url_for_provider(provider_id: &str) -> String {
     match provider_id {
         "deepseek" => "https://api.deepseek.com".to_string(),
         _ => "https://api.openai.com/v1".to_string(),
@@ -1616,7 +1741,7 @@ fn default_openai_compatible_base_url(request: &CodeProposeEditRequest) -> Strin
     }
 }
 
-fn create_chat_completions_endpoint(base_url: &str) -> String {
+pub(crate) fn create_chat_completions_endpoint(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
     if trimmed.ends_with("/chat/completions") {
         return trimmed.to_string();
@@ -1631,7 +1756,8 @@ fn create_provider_response_diagnostic(
 ) -> String {
     let provider_id = normalize_optional_config_value(request.provider_id.as_deref())
         .unwrap_or_else(|| infer_provider_id_from_model(request));
-    let model = normalize_openai_compatible_model_name(request).unwrap_or_else(|| "unknown".to_string());
+    let model =
+        normalize_openai_compatible_model_name(request).unwrap_or_else(|| "unknown".to_string());
     let body_hash = create_fnv1a_hash(body.as_bytes());
     let body_preview = summarize_provider_output_for_error(body);
     format!(
@@ -1689,8 +1815,12 @@ fn opencode_candidates_near_executable(exe_path: &Path) -> Vec<PathBuf> {
 }
 
 fn create_opencode_proposal_prompt(request: &CodeProposeEditRequest) -> String {
-    if request.locale.as_deref().is_some_and(|locale| locale.starts_with("zh")) {
-        return format!(
+    if request
+        .locale
+        .as_deref()
+        .is_some_and(|locale| locale.starts_with("zh"))
+    {
+        let prompt = format!(
             r#"你是 Javis 的代码补丁提案生成器。不要直接编辑文件。只返回一个 JSON 对象，不要包含 markdown 代码块或额外解释。
 
 严格使用以下 schema：
@@ -1715,6 +1845,7 @@ fn create_opencode_proposal_prompt(request: &CodeProposeEditRequest) -> String {
             request.changed_files.join("\n"),
             request.diff
         );
+        return format!("{JAVIS_TERMINOLOGY_PROMPT_PREFIX}\n\n{prompt}");
     }
 
     format!(
@@ -1744,10 +1875,7 @@ Current diff preview:
 }
 
 #[cfg(test)]
-fn parse_code_proposal_from_text(
-    workspace: &Path,
-    text: &str,
-) -> Result<CodeProposedEdit, String> {
+fn parse_code_proposal_from_text(workspace: &Path, text: &str) -> Result<CodeProposedEdit, String> {
     parse_code_proposal_from_text_with_allowed_files(workspace, text, None)
 }
 
@@ -1843,7 +1971,8 @@ fn extract_raw_code_proposal(text: &str) -> Result<RawCodeProposal, String> {
 }
 
 fn parse_raw_code_proposal_candidate(text: &str) -> Option<RawCodeProposal> {
-    let value = serde_json::from_str::<serde_json::Value>(normalize_json_candidate(text).trim()).ok()?;
+    let value =
+        serde_json::from_str::<serde_json::Value>(normalize_json_candidate(text).trim()).ok()?;
     raw_code_proposal_from_value(&value)
 }
 
@@ -1875,7 +2004,13 @@ fn raw_code_proposal_from_value(value: &serde_json::Value) -> Option<RawCodeProp
     parts.summary = get_string_field(object, &["summary", "title", "description"]);
     parts.changed_files = get_string_array_field(
         object,
-        &["changedFiles", "changed_files", "files", "affectedPaths", "affected_paths"],
+        &[
+            "changedFiles",
+            "changed_files",
+            "files",
+            "affectedPaths",
+            "affected_paths",
+        ],
     );
     parts.patch = get_required_string_field_preserving_body(
         object,
@@ -1943,10 +2078,12 @@ fn redact_secret_like_text(text: &str) -> String {
     text.split_whitespace()
         .map(|token| {
             let normalized = token.trim_matches(|character: char| {
-                matches!(character, '"' | '\'' | ',' | ':' | ';' | '{' | '}' | '[' | ']')
+                matches!(
+                    character,
+                    '"' | '\'' | ',' | ':' | ';' | '{' | '}' | '[' | ']'
+                )
             });
-            if normalized.starts_with("sk-")
-                && normalized.len() > 12
+            if normalized.starts_with("sk-") && normalized.len() > 12
                 || normalized.eq_ignore_ascii_case("bearer")
                 || normalized.eq_ignore_ascii_case("authorization")
                 || normalized.eq_ignore_ascii_case("apikey")
@@ -1966,11 +2103,7 @@ fn normalize_json_candidate(text: &str) -> String {
     if !trimmed.starts_with("```") {
         return trimmed.to_string();
     }
-    let without_opening = trimmed
-        .lines()
-        .skip(1)
-        .collect::<Vec<_>>()
-        .join("\n");
+    let without_opening = trimmed.lines().skip(1).collect::<Vec<_>>().join("\n");
     without_opening
         .trim()
         .strip_suffix("```")
@@ -2154,7 +2287,10 @@ fn apply_code_patch_in_workspace(
             .iter()
             .map(|file| file.to_string_lossy().replace('\\', "/"))
             .collect(),
-        message: format!("Applied patch to {} approved file(s).", approved_files.len()),
+        message: format!(
+            "Applied patch to {} approved file(s).",
+            approved_files.len()
+        ),
     })
 }
 
@@ -2197,7 +2333,10 @@ fn normalize_relative_code_path(path: &str) -> Result<PathBuf, String> {
         return Err(format!("Changed file path must be relative: {trimmed}"));
     }
     let path = PathBuf::from(trimmed);
-    if path.components().any(|component| matches!(component, std::path::Component::ParentDir)) {
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
         return Err("Changed file path cannot contain parent directory traversal.".to_string());
     }
     Ok(path)
@@ -2247,19 +2386,16 @@ struct GithubSearchItem {
     updated_at: Option<String>,
 }
 
-fn search_with_github_cli(
-    query: &str,
-    max_results: usize,
-) -> Result<Vec<WebSearchResult>, String> {
+fn search_with_github_cli(query: &str, max_results: usize) -> Result<Vec<WebSearchResult>, String> {
     let limit = max_results.to_string();
     let args = [
-            "search",
-            "repos",
-            query,
-            "--limit",
-            &limit,
-            "--json",
-            "fullName,description,url,updatedAt",
+        "search",
+        "repos",
+        query,
+        "--limit",
+        &limit,
+        "--json",
+        "fullName,description,url,updatedAt",
     ];
     let output = run_command_with_timeout(
         resolve_command_program("gh"),
@@ -2305,7 +2441,10 @@ fn github_items_to_search_results(
         .collect()
 }
 
-fn search_with_agent_chrome(query: &str, max_results: usize) -> Result<Vec<WebSearchResult>, String> {
+fn search_with_agent_chrome(
+    query: &str,
+    max_results: usize,
+) -> Result<Vec<WebSearchResult>, String> {
     let chrome = resolve_agent_chrome_program()
         .ok_or_else(|| "Agent Chrome executable was not found.".to_string())?;
     let profile = create_agent_chrome_profile_dir()?;
@@ -2315,18 +2454,18 @@ fn search_with_agent_chrome(query: &str, max_results: usize) -> Result<Vec<WebSe
     );
     let user_data_dir = format!("--user-data-dir={}", profile.to_string_lossy());
     let args = [
-            "--headless=new",
-            "--disable-gpu",
-            "--disable-background-networking",
-            "--disable-component-update",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-sync",
-            "--disable-extensions",
-            "--incognito",
-            &user_data_dir,
-            "--dump-dom",
-            &search_url,
+        "--headless=new",
+        "--disable-gpu",
+        "--disable-background-networking",
+        "--disable-component-update",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-sync",
+        "--disable-extensions",
+        "--incognito",
+        &user_data_dir,
+        "--dump-dom",
+        &search_url,
     ];
     let output = run_command_with_timeout(
         chrome.to_string_lossy().to_string(),
@@ -2437,15 +2576,16 @@ fn run_command_with_timeout(
                 });
             }
             Ok(None) => {
-                let elapsed = SystemTime::now()
-                    .duration_since(start)
-                    .unwrap_or_default();
+                let elapsed = SystemTime::now().duration_since(start).unwrap_or_default();
                 if elapsed >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
                     let _ = stdout_reader.join();
                     let _ = stderr_reader.join();
-                    return Err(format!("Command timed out after {} seconds.", timeout.as_secs()));
+                    return Err(format!(
+                        "Command timed out after {} seconds.",
+                        timeout.as_secs()
+                    ));
                 }
                 thread::sleep(Duration::from_millis(50));
             }
@@ -2525,7 +2665,9 @@ fn extract_bing_snippet(value: &str) -> Option<String> {
     let paragraph = &snippet[paragraph_index..];
     let close_index = paragraph.find('>')?;
     let after_tag = &paragraph[close_index + 1..];
-    let end_index = after_tag.find("</p>").or_else(|| after_tag.find("</div>"))?;
+    let end_index = after_tag
+        .find("</p>")
+        .or_else(|| after_tag.find("</div>"))?;
     Some(html_to_text(&after_tag[..end_index]))
 }
 
@@ -2613,6 +2755,7 @@ fn approve_native_approval_binding(
     binding: &mut NativeApprovalBinding,
     approval_id: &str,
     tool_name: &str,
+    task_id: Option<&str>,
     preview_hash: &str,
     mismatch_error: &str,
 ) -> Result<(), String> {
@@ -2622,6 +2765,7 @@ fn approve_native_approval_binding(
     if binding.tool_name != tool_name {
         return Err("Approval tool binding does not match the pending dry-run.".to_string());
     }
+    require_native_approval_task_id(binding, task_id)?;
     if binding.preview_hash != preview_hash {
         return Err("Approval preview hash does not match the pending dry-run.".to_string());
     }
@@ -2633,6 +2777,7 @@ fn require_native_approval_binding(
     binding: &NativeApprovalBinding,
     approval_id: &str,
     tool_name: &str,
+    task_id: Option<&str>,
     preview_hash: &str,
     mismatch_error: &str,
     unapproved_error: &str,
@@ -2643,11 +2788,24 @@ fn require_native_approval_binding(
     if binding.tool_name != tool_name {
         return Err("Approval tool binding does not match the approved dry-run.".to_string());
     }
+    require_native_approval_task_id(binding, task_id)?;
     if binding.preview_hash != preview_hash {
         return Err("Approval preview hash does not match the approved dry-run.".to_string());
     }
     if !binding.approved {
         return Err(unapproved_error.to_string());
+    }
+    Ok(())
+}
+
+fn require_native_approval_task_id(
+    binding: &NativeApprovalBinding,
+    task_id: Option<&str>,
+) -> Result<(), String> {
+    let approved_task_id = binding.task_id.trim();
+    let requested_task_id = task_id.unwrap_or_default().trim();
+    if approved_task_id != requested_task_id {
+        return Err("Approval task id does not match the approved request.".to_string());
     }
     Ok(())
 }
@@ -2677,6 +2835,7 @@ fn replace_pending_pdf_approval(
     approval_id: &str,
     downloads: &Path,
     operations: &[PlannedPathOperation],
+    task_id: Option<&str>,
 ) -> Result<(), String> {
     require_approved_pdf_operations(downloads, operations)?;
     let preview_hash = create_pdf_operations_preview_hash(operations);
@@ -2687,7 +2846,7 @@ fn replace_pending_pdf_approval(
         binding: create_native_approval_binding(
             approval_id.to_string(),
             PDF_APPROVAL_TOOL_NAME,
-            String::new(),
+            task_id.unwrap_or_default().trim().to_string(),
             preview_hash,
             false,
         ),
@@ -2752,6 +2911,7 @@ fn require_approved_pdf_operations(
 fn approve_pending_pdf_organization(
     approval_state: &Mutex<PdfOrganizationApprovalState>,
     approval_id: &str,
+    task_id: Option<&str>,
 ) -> Result<(), String> {
     let mut state = approval_state
         .lock()
@@ -2763,6 +2923,7 @@ fn approve_pending_pdf_organization(
         &mut pending.binding,
         approval_id,
         PDF_APPROVAL_TOOL_NAME,
+        task_id,
         &create_pdf_operations_preview_hash(&pending.operations),
         "PDF organization approval id does not match the pending dry-run.",
     )
@@ -2782,6 +2943,7 @@ fn take_approved_pdf_operations(
         &pending.binding,
         &request.approval_id,
         PDF_APPROVAL_TOOL_NAME,
+        request.task_id.as_deref(),
         &create_pdf_operations_preview_hash(&pending.operations),
         "PDF organization approval id does not match the pending dry-run.",
         "PDF organization dry-run has not been approved.",
@@ -2865,6 +3027,7 @@ fn take_approved_code_patch(
         &pending.binding,
         &request.approval_id,
         CODE_PATCH_APPROVAL_TOOL_NAME,
+        request.task_id.as_deref(),
         &request.patch_hash,
         "Code patch approval id does not match the approved proposal.",
         "Code patch proposal has not been approved.",
@@ -2892,7 +3055,9 @@ fn take_approved_code_patch(
             .file_hashes
             .iter()
             .zip(current_hashes.iter())
-            .any(|(approved, current)| approved.path != current.path || approved.hash != current.hash)
+            .any(|(approved, current)| {
+                approved.path != current.path || approved.hash != current.hash
+            })
     {
         return Err("Code patch approved files changed before apply.".to_string());
     }
@@ -2914,9 +3079,7 @@ fn create_file_content_hashes(
             let target = workspace.join(file);
             let hash = match fs::read(&target) {
                 Ok(content) => create_fnv1a_hash(&content),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    "missing".to_string()
-                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => "missing".to_string(),
                 Err(error) => {
                     return Err(format!(
                         "Could not read approved file before apply: {}: {error}",
@@ -3516,7 +3679,7 @@ mod tests {
         let root = create_test_directory("pdf-approval-required");
         let operations = vec![planned_pdf_operation_in(&root)];
         let approval_state = Mutex::new(PdfOrganizationApprovalState::default());
-        replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations)
+        replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations, None)
             .expect("store pending approval");
 
         let result = take_approved_pdf_operations(
@@ -3524,6 +3687,7 @@ mod tests {
             ExecuteFileOrganizationRequest {
                 approval_id: "approval-1".to_string(),
                 operations,
+                task_id: None,
             },
         );
 
@@ -3539,9 +3703,10 @@ mod tests {
         let root = create_test_directory("pdf-approval-mismatch");
         let operations = vec![planned_pdf_operation_in(&root)];
         let approval_state = Mutex::new(PdfOrganizationApprovalState::default());
-        replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations)
+        replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations, None)
             .expect("store pending approval");
-        approve_pending_pdf_organization(&approval_state, "approval-1").expect("approve plan");
+        approve_pending_pdf_organization(&approval_state, "approval-1", None)
+            .expect("approve plan");
         let mut changed_operations = operations;
         changed_operations[0].target = normalize_path(&root.join("Other").join("paper.pdf"));
 
@@ -3550,6 +3715,7 @@ mod tests {
             ExecuteFileOrganizationRequest {
                 approval_id: "approval-1".to_string(),
                 operations: changed_operations,
+                task_id: None,
             },
         );
 
@@ -3565,7 +3731,7 @@ mod tests {
         let root = create_test_directory("pdf-approval-preview-hash");
         let operations = vec![planned_pdf_operation_in(&root)];
         let approval_state = Mutex::new(PdfOrganizationApprovalState::default());
-        replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations)
+        replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations, None)
             .expect("store pending approval");
         {
             let mut state = approval_state.lock().expect("lock approval state");
@@ -3577,7 +3743,7 @@ mod tests {
                 .preview_hash = "fnv1a-stale".to_string();
         }
 
-        let result = approve_pending_pdf_organization(&approval_state, "approval-1");
+        let result = approve_pending_pdf_organization(&approval_state, "approval-1", None);
 
         assert_eq!(
             result.expect_err("preview hash mismatch should fail"),
@@ -3587,19 +3753,77 @@ mod tests {
     }
 
     #[test]
+    fn pdf_native_approval_rejects_task_id_mismatch() {
+        let root = create_test_directory("pdf-approval-task-id");
+        let operations = vec![planned_pdf_operation_in(&root)];
+        let approval_state = Mutex::new(PdfOrganizationApprovalState::default());
+        replace_pending_pdf_approval(
+            &approval_state,
+            "approval-1",
+            &root,
+            &operations,
+            Some("task-1"),
+        )
+        .expect("store pending approval");
+
+        let result =
+            approve_pending_pdf_organization(&approval_state, "approval-1", Some("task-2"));
+
+        assert_eq!(
+            result.expect_err("task id mismatch should fail"),
+            "Approval task id does not match the approved request."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn pdf_execution_requires_matching_task_id() {
+        let root = create_test_directory("pdf-execute-task-id");
+        let operations = vec![planned_pdf_operation_in(&root)];
+        let approval_state = Mutex::new(PdfOrganizationApprovalState::default());
+        replace_pending_pdf_approval(
+            &approval_state,
+            "approval-1",
+            &root,
+            &operations,
+            Some("task-1"),
+        )
+        .expect("store pending approval");
+        approve_pending_pdf_organization(&approval_state, "approval-1", Some("task-1"))
+            .expect("approve plan");
+
+        let result = take_approved_pdf_operations(
+            &approval_state,
+            ExecuteFileOrganizationRequest {
+                approval_id: "approval-1".to_string(),
+                operations,
+                task_id: Some("task-2".to_string()),
+            },
+        );
+
+        assert_eq!(
+            result.expect_err("task id mismatch should fail"),
+            "Approval task id does not match the approved request."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
     fn approved_pdf_operations_are_one_time_use() {
         let root = create_test_directory("pdf-approval-one-time");
         let operations = vec![planned_pdf_operation_in(&root)];
         let approval_state = Mutex::new(PdfOrganizationApprovalState::default());
-        replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations)
+        replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations, None)
             .expect("store pending approval");
-        approve_pending_pdf_organization(&approval_state, "approval-1").expect("approve plan");
+        approve_pending_pdf_organization(&approval_state, "approval-1", None)
+            .expect("approve plan");
 
         let approved_operations = take_approved_pdf_operations(
             &approval_state,
             ExecuteFileOrganizationRequest {
                 approval_id: "approval-1".to_string(),
                 operations: operations.clone(),
+                task_id: None,
             },
         )
         .expect("approved operations");
@@ -3608,6 +3832,7 @@ mod tests {
             ExecuteFileOrganizationRequest {
                 approval_id: "approval-1".to_string(),
                 operations,
+                task_id: None,
             },
         );
 
@@ -3624,9 +3849,9 @@ mod tests {
         let root = create_test_directory("pdf-restored-approval-one-time");
         let operations = vec![planned_pdf_operation_in(&root)];
         let approval_state = Mutex::new(PdfOrganizationApprovalState::default());
-        replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations)
+        replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations, None)
             .expect("restore pending approval");
-        approve_pending_pdf_organization(&approval_state, "approval-1")
+        approve_pending_pdf_organization(&approval_state, "approval-1", None)
             .expect("approve restored plan");
 
         let approved_operations = take_approved_pdf_operations(
@@ -3634,6 +3859,7 @@ mod tests {
             ExecuteFileOrganizationRequest {
                 approval_id: "approval-1".to_string(),
                 operations: operations.clone(),
+                task_id: None,
             },
         )
         .expect("approved operations");
@@ -3642,6 +3868,7 @@ mod tests {
             ExecuteFileOrganizationRequest {
                 approval_id: "approval-1".to_string(),
                 operations,
+                task_id: None,
             },
         );
 
@@ -3668,7 +3895,7 @@ mod tests {
         }];
 
         let result =
-            replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations);
+            replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations, None);
 
         assert_eq!(
             result.expect_err("outside target should fail"),
@@ -3692,7 +3919,7 @@ mod tests {
         }];
 
         let result =
-            replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations);
+            replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations, None);
 
         assert_eq!(
             result.expect_err("non-pdf source should fail"),
@@ -3755,7 +3982,11 @@ mod tests {
         ));
         assert!(!is_allowed_read_only_command(
             "git",
-            &["checkout".to_string(), "--".to_string(), "src/lib.rs".to_string()]
+            &[
+                "checkout".to_string(),
+                "--".to_string(),
+                "src/lib.rs".to_string()
+            ]
         ));
         assert!(!is_allowed_read_only_command(
             "git",
@@ -3769,11 +4000,9 @@ mod tests {
 
         let result = resolve_workspace_path(Some(normalize_path(&missing_path)));
 
-        assert!(
-            result
-                .expect_err("missing workspace should fail")
-                .starts_with("Selected workspace path is not accessible:")
-        );
+        assert!(result
+            .expect_err("missing workspace should fail")
+            .starts_with("Selected workspace path is not accessible:"));
     }
 
     #[test]
@@ -3784,11 +4013,9 @@ mod tests {
 
         let result = resolve_workspace_path(Some(normalize_path(&file_path)));
 
-        assert!(
-            result
-                .expect_err("file workspace path should fail")
-                .starts_with("Selected workspace path is not a directory:")
-        );
+        assert!(result
+            .expect_err("file workspace path should fail")
+            .starts_with("Selected workspace path is not a directory:"));
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
 
@@ -4403,10 +4630,15 @@ mod tests {
         .expect("stream chunks");
 
         assert_eq!(
-            chunks.iter().map(|chunk| chunk.text.as_str()).collect::<Vec<_>>(),
+            chunks
+                .iter()
+                .map(|chunk| chunk.text.as_str())
+                .collect::<Vec<_>>(),
             vec!["Hel", "lo"]
         );
-        assert!(chunks.iter().all(|chunk| chunk.provider.as_deref() == Some("openai")));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.provider.as_deref() == Some("openai")));
     }
 
     #[test]
@@ -4425,6 +4657,8 @@ mod tests {
         };
 
         let prompt = create_opencode_proposal_prompt(&request);
+        assert!(prompt.contains("Javis terminology rules for Chinese output"));
+        assert!(prompt.contains("Agent: keep the English term"));
 
         assert!(prompt.contains("summary 字段必须使用中文"));
         assert!(prompt.contains("修复当前变更"));
@@ -4433,7 +4667,9 @@ mod tests {
     #[test]
     fn windows_process_initialization_exit_is_retryable() {
         #[cfg(windows)]
-        assert!(is_retryable_windows_process_initialization_exit(Some(-1073741502)));
+        assert!(is_retryable_windows_process_initialization_exit(Some(
+            -1073741502
+        )));
         assert!(!is_retryable_windows_process_initialization_exit(Some(1)));
         assert!(!is_retryable_windows_process_initialization_exit(Some(0)));
         assert!(!is_retryable_windows_process_initialization_exit(None));
@@ -4455,12 +4691,15 @@ mod tests {
             locale: None,
         };
 
-        let invocation =
-            create_opencode_proposal_invocation(&root, "Return JSON.", &request).expect("invocation");
+        let invocation = create_opencode_proposal_invocation(&root, "Return JSON.", &request)
+            .expect("invocation");
         let config: serde_json::Value =
             serde_json::from_str(&invocation.config_content).expect("config json");
 
-        assert!(invocation.args.windows(2).any(|pair| pair == ["--model", "openai/gpt-5.1-codex"]));
+        assert!(invocation
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--model", "openai/gpt-5.1-codex"]));
         assert_eq!(config["permission"]["edit"], "deny");
         assert_eq!(config["permission"]["bash"], "deny");
         assert_eq!(config["permission"]["webfetch"], "deny");
@@ -4490,9 +4729,18 @@ mod tests {
             serde_json::from_str(&create_opencode_config_content(&request).expect("config"))
                 .expect("config json");
 
-        assert_eq!(config["provider"]["custom"]["npm"], "@ai-sdk/openai-compatible");
-        assert_eq!(config["provider"]["custom"]["models"]["local-model"]["name"], "local-model");
-        assert_eq!(config["provider"]["custom"]["options"]["apiKey"], "local-key");
+        assert_eq!(
+            config["provider"]["custom"]["npm"],
+            "@ai-sdk/openai-compatible"
+        );
+        assert_eq!(
+            config["provider"]["custom"]["models"]["local-model"]["name"],
+            "local-model"
+        );
+        assert_eq!(
+            config["provider"]["custom"]["options"]["apiKey"],
+            "local-key"
+        );
         assert_eq!(
             config["provider"]["custom"]["options"]["baseURL"],
             "http://127.0.0.1:11434/v1"
@@ -4515,13 +4763,13 @@ mod tests {
             locale: None,
         };
 
-        let invocation =
-            create_opencode_proposal_invocation(&root, "Return JSON.", &request).expect("invocation");
+        let invocation = create_opencode_proposal_invocation(&root, "Return JSON.", &request)
+            .expect("invocation");
 
-        assert!(invocation.args.windows(2).any(|pair| pair == [
-            "--model",
-            "deepseek/deepseek-v4-flash"
-        ]));
+        assert!(invocation
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--model", "deepseek/deepseek-v4-flash"]));
         assert_eq!(
             normalize_openai_compatible_model_name(&request).as_deref(),
             Some("deepseek-v4-flash")
@@ -4545,25 +4793,33 @@ mod tests {
         };
 
         assert!(should_fallback_to_openai_compatible(&request));
-        assert!(!should_fallback_to_openai_compatible(&CodeProposeEditRequest {
-            api_key: None,
-            ..request.clone()
-        }));
-        assert!(!should_fallback_to_openai_compatible(&CodeProposeEditRequest {
-            provider_id: Some("custom".to_string()),
-            model: Some("custom/local-model".to_string()),
-            api_key: Some("custom-key".to_string()),
-            base_url: None,
-            ..request.clone()
-        }));
-        assert!(should_fallback_to_openai_compatible(&CodeProposeEditRequest {
-            provider_id: Some("custom".to_string()),
-            model: Some("custom/local-model".to_string()),
-            api_key: Some("custom-key".to_string()),
-            base_url: Some("http://127.0.0.1:11434/v1".to_string()),
-            ..request.clone()
-        }));
-        assert!(can_fallback_from_opencode_error("opencode proposal command failed without stderr."));
+        assert!(!should_fallback_to_openai_compatible(
+            &CodeProposeEditRequest {
+                api_key: None,
+                ..request.clone()
+            }
+        ));
+        assert!(!should_fallback_to_openai_compatible(
+            &CodeProposeEditRequest {
+                provider_id: Some("custom".to_string()),
+                model: Some("custom/local-model".to_string()),
+                api_key: Some("custom-key".to_string()),
+                base_url: None,
+                ..request.clone()
+            }
+        ));
+        assert!(should_fallback_to_openai_compatible(
+            &CodeProposeEditRequest {
+                provider_id: Some("custom".to_string()),
+                model: Some("custom/local-model".to_string()),
+                api_key: Some("custom-key".to_string()),
+                base_url: Some("http://127.0.0.1:11434/v1".to_string()),
+                ..request.clone()
+            }
+        ));
+        assert!(can_fallback_from_opencode_error(
+            "opencode proposal command failed without stderr."
+        ));
         assert!(!can_fallback_from_opencode_error(
             "opencode proposal configuration error: Invalid opencode provider or model id: bad/id"
         ));
@@ -4619,7 +4875,11 @@ mod tests {
             command.arg("5");
             command
         };
-        let child = command.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().expect("spawn sleeper");
+        let child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sleeper");
 
         let error = wait_with_timeout(child, Duration::from_millis(50)).expect_err("timeout");
 
@@ -4682,8 +4942,7 @@ mod tests {
             vec![GithubSearchItem {
                 full_name: "expert-vision-software/opencode-intellisearch".to_string(),
                 description: Some("Deep research plugin for OpenCode.".to_string()),
-                url: "https://github.com/expert-vision-software/opencode-intellisearch"
-                    .to_string(),
+                url: "https://github.com/expert-vision-software/opencode-intellisearch".to_string(),
                 updated_at: Some("2026-05-23T00:00:00Z".to_string()),
             }],
             3,
@@ -4695,7 +4954,10 @@ mod tests {
             "https://github.com/expert-vision-software/opencode-intellisearch"
         );
         assert_eq!(results[0].provider.as_deref(), Some("github-cli"));
-        assert_eq!(results[0].title.as_deref(), Some("expert-vision-software/opencode-intellisearch"));
+        assert_eq!(
+            results[0].title.as_deref(),
+            Some("expert-vision-software/opencode-intellisearch")
+        );
         assert_eq!(results[0].excerpt, "Deep research plugin for OpenCode.");
     }
 
@@ -4733,15 +4995,71 @@ mod tests {
     fn model_api_key_secret_round_trips_without_plaintext_storage() {
         let protected = protect_model_api_key_secret("sk-local-secret").expect("protect secret");
 
-        assert_eq!(
-            unprotect_model_api_key_secret(&protected).expect("unprotect secret"),
-            "sk-local-secret"
-        );
         #[cfg(windows)]
         {
+            assert_eq!(
+                unprotect_model_api_key_secret(&protected).expect("unprotect secret"),
+                "sk-local-secret"
+            );
             assert!(protected.starts_with(MODEL_API_KEY_SECRET_PREFIX));
             assert!(!protected.contains("sk-local-secret"));
         }
+        #[cfg(not(windows))]
+        {
+            assert!(protected.starts_with("keyring-v1:"));
+            assert_eq!(
+                unprotect_model_api_key_secret(&protected).expect_err("keyring marker"),
+                "Model API key must be read from the OS credential store."
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    struct FailingModelApiKeySecretStore;
+
+    #[cfg(not(windows))]
+    impl ModelApiKeySecretStore for FailingModelApiKeySecretStore {
+        fn save(&self, _key_reference: &str, _api_key: &str) -> Result<(), String> {
+            Err(
+                "Could not save model API key to OS credential store: backend unavailable"
+                    .to_string(),
+            )
+        }
+
+        fn load(&self, _key_reference: &str) -> Result<String, String> {
+            Err(
+                "Could not read model API key from OS credential store: backend unavailable"
+                    .to_string(),
+            )
+        }
+
+        fn delete(&self, _key_reference: &str) -> Result<(), String> {
+            Err(
+                "Could not delete model API key from OS credential store: backend unavailable"
+                    .to_string(),
+            )
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn non_windows_keyring_errors_are_returned() {
+        let store = FailingModelApiKeySecretStore;
+
+        assert_eq!(
+            save_model_api_key_secret_with_store(&store, "default", "sk-local-secret")
+                .expect_err("save should fail"),
+            "Could not save model API key to OS credential store: backend unavailable"
+        );
+        assert_eq!(
+            load_model_api_key_secret_with_store(&store, "default").expect_err("load should fail"),
+            "Could not read model API key from OS credential store: backend unavailable"
+        );
+        assert_eq!(
+            delete_model_api_key_secret_with_store(&store, "default")
+                .expect_err("delete should fail"),
+            "Could not delete model API key from OS credential store: backend unavailable"
+        );
     }
 
     #[test]
@@ -4869,10 +5187,18 @@ mod tests {
         let root = create_test_directory("task-session-jsonl");
         let path = root.join("task-session.jsonl");
 
-        append_jsonl_line_to_path(&path, "{\"kind\":\"task_session_snapshot\"}", "Task session")
-            .expect("append first session line");
-        append_jsonl_line_to_path(&path, "{\"kind\":\"task_session_snapshot\"}\n", "Task session")
-            .expect("append second session line");
+        append_jsonl_line_to_path(
+            &path,
+            "{\"kind\":\"task_session_snapshot\"}",
+            "Task session",
+        )
+        .expect("append first session line");
+        append_jsonl_line_to_path(
+            &path,
+            "{\"kind\":\"task_session_snapshot\"}\n",
+            "Task session",
+        )
+        .expect("append second session line");
 
         assert_eq!(
             fs::read_to_string(&path).expect("read session file"),
@@ -5252,8 +5578,8 @@ fn collect_lnk_files(
         seen_names.insert(normalized);
 
         // Resolve .lnk target using Windows COM IShellLink
-        let (resolved_path, icon_path) = resolve_lnk_target(&path)
-            .unwrap_or_else(|| (path.to_string_lossy().to_string(), None));
+        let (resolved_path, icon_path) =
+            resolve_lnk_target(&path).unwrap_or_else(|| (path.to_string_lossy().to_string(), None));
 
         apps.push(AppEntry {
             name,
@@ -5278,7 +5604,10 @@ fn scan_user_documents(
     ];
     let default_exts: Vec<String> = vec![
         "docx", "doc", "txt", "pdf", "xlsx", "xls", "csv", "pptx", "ppt", "md", "rtf", "odt",
-    ].into_iter().map(String::from).collect();
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
     let exts = extensions.unwrap_or(default_exts);
     let ext_refs: Vec<&str> = exts.iter().map(|s| s.as_str()).collect();
     let max = max_results.unwrap_or(200);
@@ -5286,9 +5615,7 @@ fn scan_user_documents(
 }
 
 #[tauri::command]
-fn scan_user_images(
-    max_results: Option<usize>,
-) -> Result<Vec<FileEntry>, String> {
+fn scan_user_images(max_results: Option<usize>) -> Result<Vec<FileEntry>, String> {
     let home = user_home();
     let roots = vec![
         home.join("Desktop"),
@@ -5314,7 +5641,9 @@ fn list_directory(path: String) -> Result<Vec<FileEntry>, String> {
     // Canonicalize to resolve `..` and symlinks before security checks.
     // A path like C:\Users\..\Windows would pass a naive string-prefix check
     // but resolve into the blocked C:\Windows tree.
-    let real = dir.canonicalize().map_err(|e| format!("Cannot resolve path: {}", e))?;
+    let real = dir
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve path: {}", e))?;
     let real_lower = real.to_string_lossy().to_lowercase();
 
     let blocked = [
@@ -5345,10 +5674,7 @@ fn list_directory(path: String) -> Result<Vec<FileEntry>, String> {
         let entry_path = entry.path();
         let metadata = fs::metadata(&entry_path).ok();
         let is_dir = entry_path.is_dir();
-        let name = entry
-            .file_name()
-            .to_string_lossy()
-            .to_string();
+        let name = entry.file_name().to_string_lossy().to_string();
         let size_bytes = if is_dir {
             None
         } else {
@@ -5389,8 +5715,8 @@ fn list_directory(path: String) -> Result<Vec<FileEntry>, String> {
 
 #[tauri::command]
 fn read_mcp_config() -> Result<Option<String>, String> {
-    let config_dir = dirs::config_dir()
-        .ok_or_else(|| "Cannot determine config directory".to_string())?;
+    let config_dir =
+        dirs::config_dir().ok_or_else(|| "Cannot determine config directory".to_string())?;
     let config_path = config_dir.join("javis").join("mcp.json");
 
     if !config_path.exists() {
@@ -5404,16 +5730,14 @@ fn read_mcp_config() -> Result<Option<String>, String> {
 
 #[tauri::command]
 fn write_mcp_config(json: String) -> Result<(), String> {
-    let config_dir = dirs::config_dir()
-        .ok_or_else(|| "Cannot determine config directory".to_string())?;
+    let config_dir =
+        dirs::config_dir().ok_or_else(|| "Cannot determine config directory".to_string())?;
     let javis_dir = config_dir.join("javis");
 
-    fs::create_dir_all(&javis_dir)
-        .map_err(|e| format!("Cannot create config directory: {}", e))?;
+    fs::create_dir_all(&javis_dir).map_err(|e| format!("Cannot create config directory: {}", e))?;
 
     let config_path = javis_dir.join("mcp.json");
-    fs::write(&config_path, &json)
-        .map_err(|e| format!("Cannot write MCP config: {}", e))?;
+    fs::write(&config_path, &json).map_err(|e| format!("Cannot write MCP config: {}", e))?;
 
     Ok(())
 }
@@ -5458,7 +5782,9 @@ fn append_jsonl_line_to_path(path: &Path, line: &str, label: &str) -> Result<(),
         return Err(format!("{label} JSONL line cannot be empty."));
     }
     if trimmed.lines().count() != 1 {
-        return Err(format!("{label} JSONL append accepts exactly one JSON line."));
+        return Err(format!(
+            "{label} JSONL append accepts exactly one JSON line."
+        ));
     }
     serde_json::from_str::<serde_json::Value>(trimmed)
         .map_err(|error| format!("{label} JSONL line must be valid JSON: {error}"))?;
@@ -5494,6 +5820,9 @@ pub fn run() {
             propose_code_edit,
             complete_model_prompt,
             stream_model_prompt,
+            streaming::stream_model_prompt_start,
+            streaming::stream_model_prompt_cancel,
+            streaming::cancel_all_model_streams,
             approve_code_patch,
             apply_code_patch,
             plan_pdf_organization,

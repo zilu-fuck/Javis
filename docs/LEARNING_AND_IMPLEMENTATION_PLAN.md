@@ -1,6 +1,6 @@
 # Javis 学习与落地路线
 
-最后更新：2026-05-24
+最后更新：2026-05-26
 
 这份文档把 Javis 下一阶段需要学习的外部项目和官方机制，整理成可执行的实现路线。目标不是把 LangGraph、Temporal、Aider、LiteLLM 或 AI SDK 全部引入项目，而是学习其中与 Javis 匹配的机制，再用最小实现落到当前仓库。
 
@@ -18,13 +18,17 @@
 
 | 领域 | 当前状态 | 与路线差距 |
 | --- | --- | --- |
-| confirmed-write 审批 | Core 已有 pending -> approved/denied/expired/cancelled 状态 helper，PDF flow 有一次性 native approval id，Code Patch apply 已通过 UI confirmed-write。Desktop 已新增 durable approval record 存储模型，并为 PDF restore 增加 native approval rehydration hook。 | packaged-app 跨重启 QA 尚未覆盖，durable approval 还没有迁移到 Code Patch，也还没有共享 native guard。 |
-| Code Patch proposal | opencode 只负责 proposal，Javis 已验证 patch hash、changed files、workspace 内路径，并通过 native `git apply` 写入；native apply 已在审批时记录 approved files 的当前内容 hash，并在应用前拒绝 stale file。 | proposal 仍是 `changedFiles + patch` 形态，还没有 `baseGitHead`、结构化 hunk 和 apply 前 dry-run 校验；Code Patch 跨重启 restore/apply 仍未开放。 |
-| Rust/native guard | PDF 和 Code Patch 都在 Rust 层做关键路径校验，PDF approval 具有一次性消费语义。 | approval binding、path、hash 校验已开始共享，但 task/tool binding、通用 preview hash 与更多 write command 迁移仍未完成。 |
-| 模型配置与密钥 | 桌面端能配置 provider/model/apiKey/baseUrl；local storage 只保存 provider/model/baseUrl/key reference，旧存储 key 会在加载时清理，Windows native secret store 使用 DPAPI 保护 key，proposal command 按 reference 单次读取。 | 仍需 live provider QA 证明跨重启可用，并决定非 Windows 的 Stronghold/OS credential 路线。 |
-| QA 证据 | 已有 packaged-app fixture QA 覆盖 Code Agent proposal deny 和 approve/apply，live DeepSeek provider smoke 已通过 native secret reference 注入临时凭据并到达 proposal 阶段，研究和工作区重启也有证据。 | real-provider prompt/parser 已新增有限别名、wrapper 解析和脱敏诊断；下一步需要重跑 live DeepSeek provider smoke，live approved apply 继续只由 fixture QA 覆盖。 |
+| confirmed-write 审批 | Core 已有状态 helper，PDF + Code Patch 双路径已接入 durable approval record。Packaged restart QA 覆盖 approve/apply/deny/expired。 | SQLite 迁移尚未开始。 |
+| Code Patch proposal | opencode 提案已包含 `baseGitHead`、结构化 hunk、apply 前 dry-run 校验。Packaged restart QA 覆盖审批恢复。 | 仍需 live provider QA 重跑。 |
+| Rust/native guard | PDF + Code Patch 共享 native approval binding（approval id、tool、preview hash、task id、one-shot consumption）。Path/scope guard 已共享。 | 更多 write command 迁移仍未完成。 |
+| 模型配置与密钥 | Windows DPAPI secret store 已实现，localStorage 只保留 reference。非 Windows 使用 OS credential store（keyring）。旧 key 迁移/清理已完成。 | live provider QA 证明跨重启可用。 |
+| QA 证据 | Packaged-app QA 覆盖 Code Agent approve/deny、PDF approve/deny/expired、workspace restart、research smoke。 | live Code Agent apply smoke 待重跑。
 
-因此，后续不应该先扩展更多 Agent 能力，而应该按下面的实施顺序补齐审批、proposal 和 native guard 三条安全主线。
+里程碑 A-D 已基本完成，后续重点：
+- SQLite 持久化迁移（替代 localStorage）
+- 更多 write-capable command 迁移到共享 native guard
+- Live Code Agent proposal/apply QA 重跑
+- Release 签名/版本化构建
 
 ## 已读官方资料
 
@@ -224,7 +228,9 @@ Task
 
 ## 近期里程碑
 
-### Milestone A：Durable Approval Records
+> **Status as of 2026-05-26**: Milestones A, B, D — Complete. Milestone C — Partial.
+
+### Milestone A：Durable Approval Records — Complete
 
 范围：
 
@@ -243,7 +249,7 @@ Task
 - 现有 PDF flow 继续通过。
 - 增加 packaged-app QA：在 PDF permission card 出现后关闭应用，重启后恢复卡片并完成 approve/deny。
 
-### Milestone B：Code Patch Confirmed-Write
+### Milestone B：Code Patch Confirmed-Write — Complete
 
 范围：
 
@@ -262,7 +268,7 @@ Task
 - 验证输出写入任务历史。
 - 应用前工作区文件变化导致 hash 过期时，native apply 拒绝执行。
 
-### Milestone C：Native Guard Refactor
+### Milestone C：Native Guard Refactor — Partial
 
 范围：
 
@@ -276,7 +282,7 @@ Task
 - 现有行为保持不变。
 - 新增 negative tests 在修复前失败，修复后通过。
 
-### Milestone D：Secret Storage Migration
+### Milestone D：Secret Storage Migration — Complete
 
 范围：
 
@@ -299,11 +305,14 @@ Task
 - 不在 Core 输出稳定 task trace 之前重做整个 UI。
 - 不把新的 secret 存进 local storage。
 
-## 推荐第一步
+## 当前阶段建议
 
-从 Milestone A 开始，用现有 PDF organization flow 作为试验场。它已经具备 dry-run、确认卡片、approval id、native execution 和 verification summary，是验证持久审批流的最小闭环。
+Milestones A-D 主体功能已实现。下一步建议：
 
-当 PDF approval 能跨重启恢复，并且 stale approval 能 fail closed 后，再把同一套机制复用到 Code Patch proposal。
+1. SQLite 迁移 — 将 task history、approval records、settings 从 localStorage 迁移到 SQLite
+2. Live QA — 用真实 provider 凭据重跑 Code Agent proposal/apply smoke
+3. Release 工程 — 签名/版本化构建 + 回滚文档
+4. 扩展 write command 迁移 — 更多工具接入共享 native guard
 
 ## 实施 Review 清单
 

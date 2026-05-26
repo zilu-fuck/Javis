@@ -55,6 +55,7 @@ import { createSourceBackedReport } from "./research";
 import {
   extractUrls,
   isCodeReviewGoal,
+  isDocumentScanGoal,
   isPdfOrganizationGoal,
   isProjectInspectionGoal,
   isResearchGoal,
@@ -63,6 +64,7 @@ import {
 import { createRuntimeState } from "./runtime-state";
 import { appendLog } from "./snapshot-utils";
 import { addModelUsage, createEmptyTokenUsageSummary } from "./token-usage";
+import type { TaskEventBus } from "./task-event-bus";
 
 export {
   createCodeApplyDryRun,
@@ -79,6 +81,23 @@ export {
 } from "./state/task-state";
 export { demoAgents, getAgentSystemPrompt } from "./agents";
 export {
+  CHINESE_REVIEW_SCORE_SCHEMA,
+  createChineseReviewPrompt,
+  createChineseRevisionPrompt,
+  parseChineseReviewResult,
+} from "./chinese-reviewer";
+export type {
+  ChineseReviewMode,
+  ChineseReviewResult,
+  ChineseReviewScore,
+} from "./chinese-reviewer";
+export {
+  JAVIS_TERMINOLOGY,
+  buildTerminologyPromptPrefix,
+  injectTerminologyPrompt,
+  shouldInjectTerminology,
+} from "./terminology";
+export {
   WORKBENCH_WORKFLOWS,
   getWorkbenchWorkflow,
   listWorkbenchWorkflows,
@@ -87,6 +106,8 @@ export {
   createTaskEventBus,
   taskEventToLogEntry,
 } from "./task-event-bus";
+export { createDeltaReducer } from "./delta-reducer";
+export type { DeltaReducer } from "./delta-reducer";
 export { createSharedTaskContext, CONTEXT_KEYS, contextKeyForLocale } from "./shared-context";
 export type { ContextKey, SharedTaskContext } from "./shared-context";
 export { localizeError, localizeOpenCodeError } from "./error-localizer";
@@ -136,7 +157,8 @@ export type AgentKind =
   | "scheduler"
   | "research"
   | "code"
-  | "verifier";
+  | "verifier"
+  | "chinese-reviewer";
 
 export type AgentRunStatus =
   | "queued"
@@ -360,6 +382,10 @@ export interface TaskSnapshot {
   sources?: WebSource[];
   tokenUsage?: TokenUsageSummary;
   verificationSummary?: string;
+  /** Accumulated partial text during streaming. Non-empty + isStreaming → UI renders StreamingMessage. */
+  streamingText?: string;
+  /** Whether an agent is currently generating streaming output. */
+  isStreaming?: boolean;
 }
 
 export type { ModelUsage, TokenUsageSummary };
@@ -394,6 +420,7 @@ export interface TaskRuntime {
 
 export interface FileScanRuntimeOptions {
   fileTool: FileTool;
+  chatTool?: ChatTool;
   commanderTool?: CommanderTool;
   computerTool?: ComputerTool;
   codeTool?: CodeTool;
@@ -403,6 +430,22 @@ export interface FileScanRuntimeOptions {
   verifierTool?: VerifierTool;
   webTool?: WebTool;
   delayMs?: number;
+  eventBus?: TaskEventBus;
+  onTaskStarted?: (taskId: string) => void;
+}
+
+export interface ChatTool {
+  complete(
+    prompt: string,
+    options?: {
+      maxTokens?: number;
+      temperature?: number;
+      locale?: string;
+    },
+  ): Promise<{
+    text: string;
+    tokenUsage?: ModelUsage;
+  }>;
 }
 
 export function createInitialTaskSnapshot(): TaskSnapshot {
@@ -435,6 +478,7 @@ export function createInitialTaskSnapshot(): TaskSnapshot {
 
 export function createFileScanTaskRuntime({
   fileTool,
+  chatTool,
   commanderTool,
   computerTool,
   codeTool,
@@ -444,8 +488,13 @@ export function createFileScanTaskRuntime({
   verifierTool,
   webTool,
   delayMs = 250,
+  eventBus,
+  onTaskStarted,
 }: FileScanRuntimeOptions): TaskRuntime {
   const runtimeState = createRuntimeState(createInitialTaskSnapshot(), delayMs);
+  if (eventBus) {
+    eventBus.on((e) => runtimeState.emitDelta(e));
+  }
   const permissionHandlers = new Map<string, PendingPermissionHandler>();
   const queuedPermissionDecisions = new Map<string, "approved" | "denied">();
   let queuedLegacyPermissionDecision: "approved" | "denied" | undefined;
@@ -484,6 +533,7 @@ export function createFileScanTaskRuntime({
       queuedPermissionDecisions.clear();
       queuedLegacyPermissionDecision = undefined;
       const taskId = `task-${Date.now()}`;
+      onTaskStarted?.(taskId);
       if (webTool && extractUrls(userGoal).length > 0) {
         void runResearchSourceTask(taskId, userGoal, webTool);
         return;
@@ -568,16 +618,26 @@ export function createFileScanTaskRuntime({
         });
         return;
       }
-      void runFileScanTask(
-        {
-          emit,
-          getSnapshot: runtimeState.getSnapshot,
-          wait,
-        },
-        fileTool,
-        taskId,
-        userGoal,
-      );
+      if (isDocumentScanGoal(userGoal)) {
+        void runFileScanTask(
+          {
+            emit,
+            getSnapshot: runtimeState.getSnapshot,
+            wait,
+          },
+          fileTool,
+          taskId,
+          userGoal,
+        );
+        return;
+      }
+
+      if (chatTool) {
+        void runChatTask(taskId, userGoal, chatTool);
+        return;
+      }
+
+      runClarificationTask(taskId, userGoal);
     },
     resolvePermission(decision, requestId) {
       if (requestId) {
@@ -604,6 +664,130 @@ export function createFileScanTaskRuntime({
       runtimeState.dispose();
     },
   };
+
+  async function runChatTask(taskId: ID, userGoal: string, activeChatTool: ChatTool) {
+    const isChinese = /[\u3400-\u9fff]/u.test(userGoal);
+    emit({
+      id: taskId,
+      title: isChinese ? "\u6b63\u5728\u56de\u7b54" : "Answering",
+      userGoal,
+      status: "running",
+      commanderMessage: isChinese
+        ? "\u6211\u6b63\u5728\u4f5c\u4e3a\u666e\u901a\u52a9\u624b\u56de\u7b54\uff0c\u6ca1\u6709\u542f\u52a8\u5de5\u4f5c\u6d41\u6216\u672c\u5730\u5de5\u5177\u3002"
+        : "I'm answering as a general assistant without starting a workflow or local tool.",
+      plan: [],
+      agents: demoAgents.map((agent) => ({
+        id: agent.id,
+        name: agent.displayName,
+        role: agent.description,
+        status: agent.kind === "commander" ? "running" : "completed",
+        task:
+          agent.kind === "commander"
+            ? isChinese
+              ? "\u666e\u901a\u5bf9\u8bdd\u56de\u7b54"
+              : "General chat response"
+            : isChinese
+              ? "\u672a\u5206\u914d\u5de5\u4f5c\u4efb\u52a1"
+              : "No workflow task assigned",
+      })),
+      tokenUsage: createEmptyTokenUsageSummary(),
+      logs: [
+        {
+          id: `${taskId}-created`,
+          kind: "event",
+          title: "task.created",
+          detail: "User input did not match a work intent; routing to general chat.",
+        },
+      ],
+    });
+
+    try {
+      const result = await activeChatTool.complete(createGeneralChatPrompt(userGoal, isChinese), {
+        maxTokens: 1200,
+        temperature: 0.7,
+        locale: isChinese ? "zh-CN" : "en",
+      });
+      const usage = result.tokenUsage ?? {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+      };
+
+      emit({
+        ...snapshot,
+        title: isChinese ? "\u5df2\u56de\u7b54" : "Answered",
+        status: "completed",
+        commanderMessage: result.text,
+        agents: demoAgents.map((agent) => ({
+          id: agent.id,
+          name: agent.displayName,
+          role: agent.description,
+          status: "completed",
+          task:
+            agent.kind === "commander"
+              ? isChinese
+                ? "\u666e\u901a\u5bf9\u8bdd\u5df2\u56de\u7b54"
+                : "General chat answered"
+              : isChinese
+                ? "\u672a\u5206\u914d\u5de5\u4f5c\u4efb\u52a1"
+                : "No workflow task assigned",
+        })),
+        tokenUsage: addModelUsage(snapshot.tokenUsage, "commander", usage),
+        logs: appendLog(snapshot, {
+          id: `${taskId}-done`,
+          kind: "event",
+          title: "task.completed",
+          detail: "General chat response completed without local tool calls.",
+        }),
+      });
+    } catch (error) {
+      runClarificationTask(taskId, userGoal, error);
+    }
+  }
+
+  function createGeneralChatPrompt(userGoal: string, isChinese: boolean): string {
+    return [
+      isChinese
+        ? "\u4f60\u662f Javis\uff0c\u4e00\u4e2a\u53ef\u4ee5\u666e\u901a\u804a\u5929\u3001\u4e5f\u53ef\u4ee5\u5728\u7528\u6237\u660e\u786e\u8981\u6c42\u65f6\u6267\u884c\u5de5\u4f5c\u6d41\u7684\u684c\u9762\u52a9\u624b\u3002"
+        : "You are Javis, a desktop assistant that can chat normally and can run workflows when the user clearly asks for work.",
+      isChinese
+        ? "\u8fd9\u4e00\u8f6e\u6ca1\u6709\u5339\u914d\u5230\u5de5\u4f5c\u6d41\u3002\u8bf7\u76f4\u63a5\u56de\u7b54\u7528\u6237\uff0c\u4fdd\u6301\u81ea\u7136\u3001\u7b80\u6d01\uff0c\u4e0d\u8981\u58f0\u79f0\u5df2\u7ecf\u6267\u884c\u672c\u5730\u5de5\u5177\u3002"
+        : "This turn did not match a workflow. Answer the user directly, naturally, and concisely. Do not claim that you ran local tools.",
+      `User: ${userGoal}`,
+    ].join("\n");
+  }
+
+  function runClarificationTask(taskId: ID, userGoal: string, error?: unknown) {
+    const isChinese = /[㐀-鿿]/u.test(userGoal);
+    emit({
+      id: taskId,
+      title: isChinese ? "需要更多信息" : "Need more details",
+      userGoal,
+      status: "completed",
+      commanderMessage: isChinese
+        ? "我还不太确定你想让我执行什么任务。你可以让我检查项目、审查代码、整理文件、搜索文档，或者进行普通问答。"
+        : "I'm not sure what task you want me to run. You can ask me to inspect the project, review code, organize files, search for documents, or have a general chat.",
+      plan: [],
+      agents: demoAgents.map((agent) => ({
+        id: agent.id,
+        name: agent.displayName,
+        role: agent.description,
+        status: "completed",
+        task: isChinese ? "无任务分配" : "No task assigned",
+      })),
+      tokenUsage: createEmptyTokenUsageSummary(),
+      logs: [
+        {
+          id: `${taskId}-created`,
+          kind: "event",
+          title: "task.created",
+          detail: error
+            ? `General chat fallback failed: ${error instanceof Error ? error.message : String(error)}`
+            : "User input did not match any known task intent.",
+        },
+      ],
+    });
+  }
 
   async function runCodeReviewTask(taskId: ID, userGoal: string, activeCodeTool: CodeTool, activeShellTool: ShellTool) {
     const plan = createCodeReviewPlan();

@@ -62,10 +62,11 @@ export interface FileOrganizationExecution {
 
 export interface FileTool {
   scanMarkdownDocuments(): Promise<MarkdownDocument[]>;
-  planPdfOrganization?(): Promise<FileOrganizationPlan>;
+  planPdfOrganization?(taskId?: string): Promise<FileOrganizationPlan>;
   executePdfOrganization?(
     operations: PlannedPathOperation[],
     approvalId: string,
+    taskId?: string,
   ): Promise<FileOrganizationExecution>;
   scanUserDocuments?(request?: {
     query?: string;

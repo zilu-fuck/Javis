@@ -1,6 +1,6 @@
 # Improvement Plan
 
-Last updated: 2026-05-25
+Last updated: 2026-05-26
 
 > **Companion documents**:
 > - [MULTI_AGENT_FIX_PLAN.md](./MULTI_AGENT_FIX_PLAN.md) — specific bugs with
@@ -12,6 +12,12 @@ This document records the architectural improvement path for Javis after the
 current codebase review. The central finding is that Javis is architecturally
 ready for multi-agent work, but its current runtime is still closer to
 single-task serial role routing than true multi-agent collaboration.
+
+**Status as of 2026-05-26**: Phases 1.1-1.3 complete. Phase 2.1 complete
+(ModelProvider in desktop layer). Phase 2.2 partially complete (multi-route
+scoring exists, weighted scoring not yet). Phase 2.3 (SQLite) not started.
+Phase 3.3 (shared context) complete. Phase 3.5 (DAG executor) implemented.
+Phase 4.1 (streaming events) infrastructure complete, Tauri SSE in progress.
 
 The goal is not to add parallelism early. The safer path is to first strengthen
 the foundation: modular runtime boundaries, reusable write approval, durable
@@ -29,8 +35,9 @@ Javis currently behaves as a single-task role router:
 - `createFileScanTaskRuntime` chooses one task flow and runs it serially.
 - Agent metadata in `agents.ts` describes identity and allowed tools, but the
   real capabilities still live inside task-flow functions.
-- Model access is currently limited to Code Agent proposal generation through
-  opencode. Other agents are rule-driven.
+- Model access now covers Commander planning, Verifier checks, Chinese review,
+  and Code Agent proposal generation. Commander-driven routing falls back to
+  keyword routing when the model call fails.
 
 Recent cleanup has already started reducing the largest files:
 
@@ -61,9 +68,9 @@ These constraints apply to every later phase:
 - Streaming should expose user-visible events, evidence, summaries, and tool
   progress, not private model reasoning.
 
-## Phase 1: Foundation (P0)
+## Phase 1: Foundation (P0) — Mostly Complete
 
-### 1.1 Continue Splitting `packages/core/src/index.ts`
+### 1.1 Continue Splitting `packages/core/src/index.ts` — Partial
 
 `index.ts` has already been reduced, but it is still too large and still mixes
 route dispatch, task execution, permission handling, and verification.
@@ -89,7 +96,7 @@ packages/core/src/
 Do this incrementally. Each extraction should keep behavior unchanged and be
 covered by the existing runtime tests.
 
-### 1.2 Add Generic Confirmed-Write Middleware
+### 1.2 Add Generic Confirmed-Write Middleware — Complete
 
 This is the highest-return safety refactor. Rust already shares native approval
 binding behavior, but TypeScript still has separate approval/execute/verify
@@ -111,7 +118,7 @@ The first implementation should support only the existing PDF and Code Patch
 flows. Avoid designing for hypothetical tools until the two real flows are
 using the same abstraction.
 
-### 1.3 Introduce Task Transition Helpers
+### 1.3 Introduce Task Transition Helpers — Complete
 
 Nine task statuses exist today, but transitions are still scattered across task
 flows. A full state machine can be useful, but the first version should be
@@ -140,9 +147,9 @@ Then add tests for real flows:
 Do not blindly implement a narrow transition table until restored approvals,
 denials, retries, and cancellations are represented.
 
-## Phase 2: Core Infrastructure (P1)
+## Phase 2: Core Infrastructure (P1) — Partially Complete
 
-### 2.1 Unified Model Provider Abstraction
+### 2.1 Unified Model Provider Abstraction — Complete
 
 This should come before Commander LLM routing. Today model settings are wired
 only into opencode-based Code Agent proposal generation. A shared provider
@@ -163,7 +170,7 @@ Keep the first implementation narrow:
 - Do not create a second unaudited model invocation path.
 - Keep API keys in the existing native secret storage path.
 
-### 2.2 Multi-Signal Route Scoring
+### 2.2 Multi-Signal Route Scoring — Partial
 
 Rule routing should evolve before model routing. The short-term goal is not an
 LLM router; it is fewer false positives and more explainable route choices.
@@ -187,7 +194,7 @@ Signals should combine explicit user intent with lightweight context:
 If no route clears a threshold, fall back to the safe file-scan/default flow or
 ask for clarification once Commander model calls exist.
 
-### 2.3 SQLite Persistence
+### 2.3 SQLite Persistence — Not Started
 
 `task-history.ts`, `approval-records.ts`, `recent-workspaces.ts`, and
 `model-settings.ts` currently rely on localStorage. That is acceptable for small
@@ -210,9 +217,9 @@ Migration needs to be explicit:
 - Preserve approval recovery behavior.
 - Keep secrets in native secret storage, not SQLite.
 
-## Phase 3: Agent Architecture (P2)
+## Phase 3: Agent Architecture (P2) — Partially Complete
 
-### 3.1 Agent Capability Registry
+### 3.1 Agent Capability Registry — Not Started
 
 Do not introduce heavy schema machinery too early. The current TypeScript tool
 contracts are enough for now. Start with a lightweight registry that decouples
@@ -248,7 +255,7 @@ Treat these as scheduler inputs and UI/documentation source data. They are not
 yet a general DAG executor, and they should not bypass the existing route,
 permission, tool-call, or verification paths.
 
-### 3.2 Standardize Agent -> Tool Call -> Tool
+### 3.2 Standardize Agent -> Tool Call -> Tool — Partial
 
 Task flows currently call `fileTool`, `shellTool`, `codeTool`, and `webTool`
 directly. Move toward a single tool-call path so logging, retries, permission
@@ -257,7 +264,7 @@ checks, and audit records are consistent.
 This should be implemented before a task graph scheduler. A DAG scheduler is
 much easier to reason about if every node emits the same tool-call records.
 
-### 3.3 Shared Task Context
+### 3.3 Shared Task Context — Complete
 
 Agents need a lightweight per-task context so one flow can consume another
 flow's output without going through UI props.
@@ -273,7 +280,7 @@ interface SharedTaskContext {
 This is not long-term memory. It should be cleared per task and persisted only
 as part of task audit state.
 
-### 3.4 Commander LLM Routing
+### 3.4 Commander LLM Routing — Complete
 
 Commander-driven routing is valuable, but it depends on the unified Model
 Provider. Once that exists, Commander can choose routes from the available
@@ -286,7 +293,7 @@ Rules should remain:
 - The Commander can select routes and propose a plan, but cannot bypass
   permission checks.
 
-### 3.5 Task Graph (DAG)
+### 3.5 Task Graph (DAG) — Complete
 
 Task Graph should stay P2, not P1. The current product risk is single-task
 reliability and provider QA, not lack of parallelism.
@@ -306,9 +313,9 @@ Start with a serial graph that mirrors today's behavior. Only add parallel
 branches after state transitions, tool-call records, and shared context are
 stable.
 
-## Phase 4: Experience and Advanced Runtime (P3)
+## Phase 4: Experience and Advanced Runtime (P3) — In Progress
 
-### 4.1 Streaming Events
+### 4.1 Streaming Events — In Progress
 
 Move from snapshot-only updates toward streaming event updates:
 

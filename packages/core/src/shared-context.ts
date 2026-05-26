@@ -28,6 +28,7 @@ export const CONTEXT_KEYS = {
   STEP_RESULTS: { en: "stepResults", zhCN: "步骤结果" },
   BASE_GIT_HEAD: { en: "baseGitHead", zhCN: "基准提交" },
   STRUCTURED_HUNKS: { en: "structuredHunks", zhCN: "结构化差异块" },
+  PREPROCESSED_INPUT: { en: "preprocessedInput", zhCN: "预处理输入" },
 } as const;
 
 export type ContextKey = (typeof CONTEXT_KEYS)[keyof typeof CONTEXT_KEYS];

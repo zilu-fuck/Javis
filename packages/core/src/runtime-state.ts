@@ -1,9 +1,13 @@
 import type { TaskSnapshot } from "./index";
+import type { TaskRuntimeEvent } from "./task-event-bus";
+import { createDeltaReducer } from "./delta-reducer";
 
 export interface RuntimeState {
   clearTimers(): void;
   dispose(): void;
   emit(nextSnapshot: TaskSnapshot): void;
+  /** Apply an incremental event and notify subscribers. For streaming LLM output paths. */
+  emitDelta(event: TaskRuntimeEvent): void;
   getSnapshot(): TaskSnapshot;
   isDisposed(): boolean;
   subscribe(listener: (snapshot: TaskSnapshot) => void): () => void;
@@ -18,6 +22,7 @@ export function createRuntimeState(
   const listeners = new Set<(nextSnapshot: TaskSnapshot) => void>();
   const timers = new Set<ReturnType<typeof setTimeout>>();
   let disposed = false;
+  const deltaReducer = createDeltaReducer(initialSnapshot);
 
   return {
     clearTimers() {
@@ -37,6 +42,16 @@ export function createRuntimeState(
         return;
       }
       snapshot = nextSnapshot;
+      deltaReducer.syncFrom(nextSnapshot);
+      for (const listener of listeners) {
+        listener(snapshot);
+      }
+    },
+    emitDelta(event) {
+      if (disposed) {
+        return;
+      }
+      snapshot = deltaReducer.apply(event);
       for (const listener of listeners) {
         listener(snapshot);
       }

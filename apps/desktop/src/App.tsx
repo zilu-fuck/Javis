@@ -170,6 +170,8 @@ function App() {
   );
   const didCheckRestoredApproval = useRef(false);
   const auditRecordIdsRef = useRef(new Set<string>());
+  const rafTaskRef = useRef<number>(0);
+  const pendingTaskRef = useRef<TaskSnapshot | null>(null);
   const [draftGoal, setDraftGoal] = useState(DEFAULT_DRAFT_GOAL);
 
   // ── Sidebar view state ────────────────────────────────────────────
@@ -299,7 +301,16 @@ function App() {
         (nextTask as any).scheduledTaskId = sid;
         pendingScheduledTaskIdRef.current = undefined;
       }
-      setTask(nextTask);
+      pendingTaskRef.current = nextTask;
+      if (rafTaskRef.current === 0) {
+        rafTaskRef.current = requestAnimationFrame(() => {
+          rafTaskRef.current = 0;
+          if (pendingTaskRef.current !== null) {
+            setTask(pendingTaskRef.current);
+            pendingTaskRef.current = null;
+          }
+        });
+      }
       void appendTaskSnapshotAuditJsonLines(
         createFileBackedTaskAuditJsonLineWriter(
           (line) =>
@@ -361,6 +372,10 @@ function App() {
       }
     });
     return () => {
+      if (rafTaskRef.current !== 0) {
+        cancelAnimationFrame(rafTaskRef.current);
+        rafTaskRef.current = 0;
+      }
       unsubscribe();
       runtime.dispose();
     };

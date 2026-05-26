@@ -107,7 +107,7 @@ export async function runPdfOrganizationPreviewTask({
   });
 
   try {
-    const organizationPlan = await fileTool.planPdfOrganization?.();
+    const organizationPlan = await fileTool.planPdfOrganization?.(taskId);
     if (!organizationPlan) {
       throw new Error("PDF organization preview tool is not available.");
     }
@@ -258,6 +258,7 @@ export async function runPdfOrganizationPreviewTask({
           const execution = await fileTool.executePdfOrganization(
             organizationPlan.dryRun.affectedPaths,
             organizationPlan.approvalId,
+            taskId,
           );
           const verificationStatus = execution.failedCount === 0 ? "completed" : "failed";
           agentTracker.setState("agent-commander", {

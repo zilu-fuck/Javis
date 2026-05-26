@@ -1,11 +1,29 @@
 # Multi-Agent Collaboration Fix Plan
 
-Last updated: 2026-05-25
+Last updated: 2026-05-26
+
+> **Status: ALL 9 FIXES RESOLVED** as of 2026-05-26. This document is retained
+> as a historical record of the specific changes that brought Javis from a
+> single-task role router to a working multi-agent system.
 
 This document is the concrete, code-level companion to `IMPROVEMENT_PLAN.md`.
 It names each broken piece with file:line references and proposes the minimal
 change. The IMPROVEMENT_PLAN covers *phases and architecture*; this covers
 *specific bugs and the smallest code change that fixes them*.
+
+## Resolution Summary
+
+| Fix | Description | Status |
+| --- | --- | --- |
+| Fix 1 | Tool name mismatch (web.search, shell.runReadOnlyCommand) | Resolved |
+| Fix 2 | Commander has no tools — `commander.plan` added | Resolved |
+| Fix 3 | No agent has an LLM — `systemPrompt` field added (bilingual) | Resolved |
+| Fix 4 | Verifier has no tools — `verifier.check` added | Resolved |
+| Fix 5 | WorkbenchWorkflows are dead code — `workflow-executor.ts` created | Resolved |
+| Fix 6 | Only single-route — `getTopRoutes()` and `getRecommendedWorkflowIds()` added | Resolved |
+| Fix 7 | No shared context — `SharedTaskContext` with bilingual keys created | Resolved |
+| Fix 8 | Single pendingPermissionHandler — replaced with Map keyed by request ID | Resolved |
+| Fix 9 | Hardcoded agent snapshots — `AgentStateTracker` created | Resolved |
 
 ---
 

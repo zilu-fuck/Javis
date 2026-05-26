@@ -174,6 +174,8 @@ export interface WorkbenchTask {
   sources?: WorkbenchSource[];
   tokenUsage?: WorkbenchTokenUsageSummary;
   verificationSummary?: string;
+  streamingText?: string;
+  isStreaming?: boolean;
 }
 
 export type ActiveView =

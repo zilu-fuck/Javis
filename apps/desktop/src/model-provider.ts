@@ -1,6 +1,8 @@
 import type { ModelSettings } from "./model-settings";
 import { localeDefaultModelSettings } from "./model-settings";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { injectTerminologyPrompt } from "@javis/core";
 
 export interface CompletionOptions {
   model?: string;
@@ -85,26 +87,122 @@ export function toModelProviderSettings(settings: ModelSettings): ModelProviderS
   };
 }
 
+interface StreamChunkPayload {
+  stream_id: string;
+  text: string;
+  model?: string;
+  provider?: string;
+  index: number;
+}
+
+interface StreamDonePayload {
+  stream_id: string;
+  finish_reason?: string;
+  total_chunks: number;
+}
+
+interface StreamErrorPayload {
+  stream_id: string;
+  error: string;
+}
+
 async function* streamModelPrompt(
   prompt: string,
   providerSettings: ModelProviderSettings,
   options?: StreamOptions,
-): AsyncIterable<CompletionChunk> {
-  let chunks: CompletionChunk[];
+): AsyncGenerator<CompletionChunk> {
+  let streamId: string;
   try {
-    chunks = await invoke<CompletionChunk[]>("stream_model_prompt", {
+    streamId = await invoke<string>("stream_model_prompt_start", {
       request: createModelRequest(prompt, providerSettings, options),
     });
   } catch (error) {
     throw normalizeModelProviderError(error, providerSettings.provider);
   }
 
-  for (const chunk of chunks) {
-    if (!chunk.text) {
-      continue;
+  const buffer: CompletionChunk[] = [];
+  let pendingResolve:
+    | ((value: IteratorResult<CompletionChunk>) => void)
+    | null = null;
+  let streamError: Error | null = null;
+  let finished = false;
+
+  function push(chunk: CompletionChunk) {
+    if (pendingResolve) {
+      pendingResolve({ value: chunk, done: false });
+      pendingResolve = null;
+    } else {
+      buffer.push(chunk);
     }
-    options?.onChunk?.(chunk);
-    yield chunk;
+  }
+
+  function finish(error?: Error) {
+    finished = true;
+    if (error) streamError = error;
+    if (pendingResolve) {
+      pendingResolve({ value: undefined as unknown as CompletionChunk, done: true });
+      pendingResolve = null;
+    }
+  }
+
+  const unlisteners: UnlistenFn[] = [];
+
+  try {
+    const unlistenChunk = await listen<StreamChunkPayload>(
+      "stream-model-chunk",
+      (event) => {
+        if (event.payload.stream_id !== streamId) return;
+        const chunk: CompletionChunk = {
+          text: event.payload.text,
+          model: event.payload.model,
+          provider: event.payload.provider,
+        };
+        options?.onChunk?.(chunk);
+        push(chunk);
+      },
+    );
+    unlisteners.push(unlistenChunk);
+
+    const unlistenDone = await listen<StreamDonePayload>(
+      "stream-model-done",
+      (event) => {
+        if (event.payload.stream_id !== streamId) return;
+        finish();
+      },
+    );
+    unlisteners.push(unlistenDone);
+
+    const unlistenError = await listen<StreamErrorPayload>(
+      "stream-model-error",
+      (event) => {
+        if (event.payload.stream_id !== streamId) return;
+        finish(new Error(event.payload.error));
+      },
+    );
+    unlisteners.push(unlistenError);
+
+    while (!finished) {
+      if (buffer.length > 0) {
+        yield buffer.shift()!;
+      } else {
+        await new Promise<IteratorResult<CompletionChunk>>((resolve) => {
+          pendingResolve = resolve;
+        }).then((result) => {
+          if (!result.done) buffer.push(result.value);
+        });
+      }
+    }
+
+    // Drain remaining buffered chunks
+    while (buffer.length > 0) {
+      yield buffer.shift()!;
+    }
+
+    if (streamError) throw streamError;
+  } finally {
+    for (const unlisten of unlisteners) {
+      unlisten();
+    }
   }
 }
 
@@ -114,7 +212,7 @@ function createModelRequest(
   options?: CompletionOptions,
 ) {
   return {
-    prompt,
+    prompt: injectTerminologyPrompt(prompt, options?.locale),
     providerId: options?.locale
       ? localeDefaultModelSettings(options.locale).provider
       : providerSettings.provider,

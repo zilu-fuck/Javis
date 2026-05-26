@@ -57,14 +57,18 @@ describe("createFileScanTaskRuntime", () => {
       "agent-computer",
       "agent-scheduler",
       "agent-verifier",
+      "agent-chinese-reviewer",
     ]);
     expect(snapshot.agents.every((agent) => agent.status === "queued")).toBe(true);
   });
 
   it("provides bilingual system prompts for built-in agents", () => {
     const commander = demoAgents.find((agent) => agent.kind === "commander");
+    const reviewer = demoAgents.find((agent) => agent.kind === "chinese-reviewer");
 
     expect(commander?.systemPrompt.en).toContain("Commander");
+    expect(reviewer?.allowedToolNames).toEqual([]);
+    expect(reviewer && getAgentSystemPrompt(reviewer, "zh-CN")).toContain("中文审校");
     expect(commander && getAgentSystemPrompt(commander, "zh-CN")).toContain("指挥官");
   });
 
@@ -1035,6 +1039,7 @@ describe("createFileScanTaskRuntime", () => {
     expect(executePdfOrganization).toHaveBeenCalledWith(
       plan.dryRun.affectedPaths,
       plan.approvalId,
+      expect.stringMatching(/^task-/),
     );
     expect(finalSnapshot.fileOrganizationExecution?.movedCount).toBe(1);
     expect(finalSnapshot.permissionRequest?.status).toBe("approved");
@@ -1110,7 +1115,7 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
-  it("does not route general Chinese organizing language to PDF organization", async () => {
+  it("does not route general Chinese organizing language to PDF or document scan", async () => {
     const planPdfOrganization = vi.fn(async () => createPdfPlan());
     const scanMarkdownDocuments = vi.fn(async () => []);
     const runtime = createFileScanTaskRuntime({
@@ -1127,6 +1132,89 @@ describe("createFileScanTaskRuntime", () => {
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(planPdfOrganization).not.toHaveBeenCalled();
+    expect(scanMarkdownDocuments).not.toHaveBeenCalled();
+    expect(finalSnapshot.title).toBe("需要更多信息");
+    expect(finalSnapshot.status).toBe("completed");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("routes casual Chinese chat input to general chat when available", async () => {
+    const scanMarkdownDocuments = vi.fn(async () => []);
+    const complete = vi.fn(async () => ({ text: "你好，我是 Javis。" }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments },
+      chatTool: { complete },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("你好");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(scanMarkdownDocuments).not.toHaveBeenCalled();
+    expect(complete).toHaveBeenCalledWith(expect.stringContaining("你好"), {
+      maxTokens: 1200,
+      temperature: 0.7,
+      locale: "zh-CN",
+    });
+    expect(finalSnapshot.title).toBe("已回答");
+    expect(finalSnapshot.commanderMessage).toBe("你好，我是 Javis。");
+    expect(finalSnapshot.tokenUsage?.modelCalls).toBe(1);
+    expect(finalSnapshot.status).toBe("completed");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("falls back to clarification when general chat is unavailable", async () => {
+    const scanMarkdownDocuments = vi.fn(async () => []);
+    const complete = vi.fn(async () => {
+      throw new Error("missing model settings");
+    });
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments },
+      chatTool: { complete },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("这个怎么弄");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(scanMarkdownDocuments).not.toHaveBeenCalled();
+    expect(complete).toHaveBeenCalled();
+    expect(finalSnapshot.title).toBe("需要更多信息");
+    expect(finalSnapshot.status).toBe("completed");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("scans documents for explicit Chinese document scan goal", async () => {
+    const documents: MarkdownDocument[] = [
+      {
+        path: "E:/Javis/README.md",
+        modifiedAt: "2026-05-25T00:00:00.000Z",
+        sizeBytes: 100,
+        heading: "Javis",
+        excerpt: "README",
+      },
+    ];
+    const scanMarkdownDocuments = vi.fn(async () => documents);
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("扫描工作区文档");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
     expect(scanMarkdownDocuments).toHaveBeenCalled();
     expect(finalSnapshot.title).toBe("Workspace documents scanned");
 

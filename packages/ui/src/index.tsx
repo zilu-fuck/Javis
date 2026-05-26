@@ -9,3 +9,4 @@ export { AppsView } from "./components/AppsView";
 export { DocumentsView } from "./components/DocumentsView";
 export { GalleryView } from "./components/GalleryView";
 export { ComputerView } from "./components/ComputerView";
+export { useStreamingSnapshot } from "./use-streaming-snapshot";

@@ -25,7 +25,17 @@ export type TaskRuntimeEvent =
       decision: "approved" | "denied";
     }
   | { kind: "task.completed"; taskId: ID; detail?: string }
-  | { kind: "task.failed"; taskId: ID; error: string };
+  | { kind: "task.failed"; taskId: ID; error: string }
+  // Streaming agent output events
+  | { kind: "agent.chunk_start"; taskId: ID; agentKind: AgentKind }
+  | { kind: "agent.chunk"; taskId: ID; agentKind: AgentKind; text: string }
+  | { kind: "agent.chunk_end"; taskId: ID; agentKind: AgentKind; fullText: string; error?: string }
+  // Step-level progress events
+  | { kind: "step.progress"; taskId: ID; stepId: ID; percent: number; detail: string }
+  | { kind: "step.started"; taskId: ID; stepId: ID }
+  | { kind: "step.completed"; taskId: ID; stepId: ID; summary: string }
+  // Tool partial output events
+  | { kind: "tool.partial"; taskId: ID; toolCallId: ID; partialOutput: string };
 
 export type TaskEventHandler = (event: TaskRuntimeEvent) => void;
 export type TaskEventMiddleware = (
@@ -132,6 +142,55 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "tool",
         title: "task.failed",
         detail: event.error,
+      };
+    case "agent.chunk_start":
+      return {
+        id: `${event.taskId}-chunk-start-${event.agentKind}`,
+        kind: "event",
+        title: "agent.chunk_start",
+        detail: `${event.agentKind} is generating output...`,
+      };
+    case "agent.chunk":
+      return {
+        id: `${event.taskId}-chunk-${event.agentKind}-${Date.now()}`,
+        kind: "event",
+        title: "agent.chunk",
+        detail: event.text,
+      };
+    case "agent.chunk_end":
+      return {
+        id: `${event.taskId}-chunk-end-${event.agentKind}`,
+        kind: "event",
+        title: "agent.chunk_end",
+        detail: `${event.agentKind} completed output (${event.fullText.length} chars).`,
+      };
+    case "step.progress":
+      return {
+        id: `${event.taskId}-step-${event.stepId}-progress`,
+        kind: "event",
+        title: "step.progress",
+        detail: event.detail,
+      };
+    case "step.started":
+      return {
+        id: `${event.taskId}-step-${event.stepId}-started`,
+        kind: "event",
+        title: "step.started",
+        detail: `Step ${event.stepId} started.`,
+      };
+    case "step.completed":
+      return {
+        id: `${event.taskId}-step-${event.stepId}-completed`,
+        kind: "event",
+        title: "step.completed",
+        detail: event.summary,
+      };
+    case "tool.partial":
+      return {
+        id: `${event.taskId}-tool-${event.toolCallId}-partial`,
+        kind: "tool",
+        title: "tool.partial",
+        detail: event.partialOutput,
       };
   }
 }

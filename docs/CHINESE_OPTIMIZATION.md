@@ -1,6 +1,10 @@
 # Javis 中文输出优化方案
 
-Last updated: 2026-05-25
+Last updated: 2026-05-26
+
+> **Status**: Both Layer 1 and Layer 2 are now implemented. This document is
+> retained as the original design reference. See `docs/2026-05-26_TASK_PLAN.md`
+> for implementation details.
 
 ## 现状诊断
 

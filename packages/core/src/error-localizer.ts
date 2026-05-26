@@ -95,7 +95,11 @@ const ERROR_TRANSLATIONS: Record<string, Record<string, string>> = {
     "Could not write patch to git apply": "无法写入补丁到 git apply：",
     "Could not finish git apply": "无法完成 git apply：",
     "git apply failed without stderr.": "git apply 失败，无错误输出。",
-
+    "Could not access OS credential store": "无法访问系统凭据存储",
+    "Could not save model API key to OS credential store": "无法将模型 API 密钥保存到系统凭据存储",
+    "Could not read model API key from OS credential store": "无法从系统凭据存储读取模型 API 密钥",
+    "Could not delete model API key from OS credential store": "无法从系统凭据存储删除模型 API 密钥",
+    "Model API key must be read from the OS credential store.": "模型 API 密钥必须从系统凭据存储读取。",
   },
 };
 

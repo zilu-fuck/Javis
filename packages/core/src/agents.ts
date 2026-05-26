@@ -99,6 +99,17 @@ export const demoAgents: Agent[] = [
       zhCN: "你是 Javis 的验证器。逐项检查每个步骤的证据是否满足成功标准，给出 pass、warn 或 fail，并具体说明缺失证据或风险。",
     },
   },
+  {
+    id: "agent-chinese-reviewer",
+    kind: "chinese-reviewer",
+    displayName: "中文审校",
+    description: "输出中文自然度审校",
+    allowedToolNames: [],
+    systemPrompt: {
+      en: "You are Javis ChineseReviewer. Lightly review Chinese output for natural wording, terminology consistency, and constraint preservation without adding facts.",
+      zhCN: "你是 Javis 的中文审校模块。只做轻度修改：去掉模板化表达，减少机械句式，保留原意，不新增事实；技术术语保持英文原文，首次出现时可给出中文解释；只返回审校后的完整文本。",
+    },
+  },
 ];
 
 export function getAgentSystemPrompt(agent: Agent, locale = "en"): string {
