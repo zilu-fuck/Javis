@@ -2,6 +2,16 @@
 
 Store dated manual QA evidence folders here.
 
+Use `PRODUCT_WORKFLOWS.md` for the complete-product workflow matrix. The
+strict evidence gate is:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/qa/check-product-workflow-evidence.ps1 -QaRoot docs/qa/YYYY-MM-DD
+```
+
+Use `-AllowKnownBlockers` only for development inventory across all dated
+folders.
+
 Recommended layout:
 
 ```text
@@ -21,6 +31,12 @@ docs/qa/YYYY-MM-DD/
   13-search-no-results-state.png
   14-search-live-github-cli-smoke.png
   15-search-live-agent-chrome-smoke.png
+  workspace-restart-qa-output.txt
+  code-agent-opencode-qa-output.txt
+  model-secret-redaction-qa-output.txt
+  pdf-durable-approval-qa-output.txt
+  code-patch-durable-approval-qa-output.txt
+  release-rollback-notes.md
 ```
 
 Do not commit screenshots that expose private file paths, credentials, or

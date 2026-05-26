@@ -68,6 +68,31 @@ import {
   type FileEntry,
 } from "./local-knowledge";
 import {
+  invokeDesktopDatabase,
+  runDesktopDatabaseMigrations,
+  type DesktopDatabase,
+} from "./desktop-database";
+import {
+  createTaskHistoryRepository,
+  TASK_HISTORY_SCHEMA_MIGRATIONS,
+} from "./task-history";
+import {
+  createWorkspaceSessionRepository,
+  WORKSPACE_SESSION_SCHEMA_MIGRATIONS,
+} from "./workspace-session";
+import {
+  createApprovalRecordsRepository,
+  APPROVAL_RECORDS_MIGRATIONS,
+} from "./approval-records-persistence";
+import {
+  createModelSettingsRepository,
+  MODEL_SETTINGS_MIGRATIONS,
+  type ModelSettingsRepository,
+} from "./model-settings-persistence";
+import {
+  TOOL_CALL_AUDIT_MIGRATIONS,
+} from "./tool-call-audit";
+import {
   appendTaskSnapshotAuditJsonLines,
   createFileBackedTaskAuditJsonLineWriter,
 } from "./tool-call-audit";
@@ -169,6 +194,12 @@ function App() {
     loadApprovalRecords(window.localStorage),
   );
   const didCheckRestoredApproval = useRef(false);
+  const databaseRef = useRef<DesktopDatabase | null>(null);
+  const taskHistoryRepoRef = useRef<ReturnType<typeof createTaskHistoryRepository> | null>(null);
+  const workspaceSessionRepoRef = useRef<ReturnType<typeof createWorkspaceSessionRepository> | null>(null);
+  const approvalRecordsRepoRef = useRef<ReturnType<typeof createApprovalRecordsRepository> | null>(null);
+  const modelSettingsRepoRef = useRef<ModelSettingsRepository | null>(null);
+  const didInitDatabaseRef = useRef(false);
   const auditRecordIdsRef = useRef(new Set<string>());
   const rafTaskRef = useRef<number>(0);
   const pendingTaskRef = useRef<TaskSnapshot | null>(null);
@@ -245,6 +276,44 @@ function App() {
   // ── Load MCP config on mount ──────────────────────────────────────
   useEffect(() => {
     loadMcpConfig().then(setMcpConfig).catch(() => {});
+  }, []);
+
+  // ── Initialize SQLite database ────────────────────────────────────
+  useEffect(() => {
+    if (didInitDatabaseRef.current) {
+      return;
+    }
+    didInitDatabaseRef.current = true;
+
+    void (async () => {
+      const database = invokeDesktopDatabase(invoke);
+      databaseRef.current = database;
+
+      // Run all schema migrations
+      await runDesktopDatabaseMigrations(database, TASK_HISTORY_SCHEMA_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, WORKSPACE_SESSION_SCHEMA_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, MODEL_SETTINGS_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, APPROVAL_RECORDS_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, TOOL_CALL_AUDIT_MIGRATIONS);
+
+      // One-time import from localStorage
+      const taskHistoryRepo = createTaskHistoryRepository(database);
+      const workspaceSessionRepo = createWorkspaceSessionRepository(database);
+      const approvalRecordsRepo = createApprovalRecordsRepository(database);
+      const modelSettingsRepo = createModelSettingsRepository(database);
+
+      taskHistoryRepoRef.current = taskHistoryRepo;
+      workspaceSessionRepoRef.current = workspaceSessionRepo;
+      approvalRecordsRepoRef.current = approvalRecordsRepo;
+      modelSettingsRepoRef.current = modelSettingsRepo;
+
+      await taskHistoryRepo.importFromLocalStorage(window.localStorage);
+      await workspaceSessionRepo.importFromLocalStorage(window.localStorage);
+      await approvalRecordsRepo.importFromLocalStorage(window.localStorage);
+      await modelSettingsRepo.importFromLocalStorage(window.localStorage);
+    })().catch((error) => {
+      console.error("Database initialization failed, using localStorage fallback", error);
+    });
   }, []);
 
   // ── Scheduled task trigger mechanism ──────────────────────────────
@@ -332,6 +401,7 @@ function App() {
         setHistory((current) =>
           saveTaskHistory(window.localStorage, upsertTaskHistory(current, nextTask)),
         );
+        void taskHistoryRepoRef.current?.upsert(nextTask);
       }
       persistDurableApprovalRecord(nextTask);
       if (nextTask.status === "completed") {
@@ -555,15 +625,19 @@ function App() {
     if (!record) {
       return;
     }
-    setApprovalRecords((current) =>
-      saveApprovalRecords(window.localStorage, upsertApprovalRecord(current, record)),
-    );
+    setApprovalRecords((current) => {
+      const updated = saveApprovalRecords(window.localStorage, upsertApprovalRecord(current, record));
+      void approvalRecordsRepoRef.current?.upsert(record);
+      return updated;
+    });
   }
 
   function updateApprovalRecord(record: DurableApprovalRecord) {
-    setApprovalRecords((current) =>
-      saveApprovalRecords(window.localStorage, upsertApprovalRecord(current, record)),
-    );
+    setApprovalRecords((current) => {
+      const updated = saveApprovalRecords(window.localStorage, upsertApprovalRecord(current, record));
+      void approvalRecordsRepoRef.current?.upsert(record);
+      return updated;
+    });
   }
 
   async function resolveRestoredApproval(decision: "approved" | "denied") {
@@ -624,6 +698,7 @@ function App() {
     setHistory((current) =>
       saveTaskHistory(window.localStorage, upsertTaskHistory(current, restoredTask)),
     );
+    void taskHistoryRepoRef.current?.upsert(restoredTask);
   }
 
   function handlePermissionDecision(decision: "approved" | "denied") {
@@ -753,7 +828,10 @@ function App() {
       onDeleteRecentWorkspacePath={deleteRecentWorkspacePath}
       onDeleteScheduledTask={deleteScheduledTask}
       onDraftGoalChange={setDraftGoal}
-      onModelSettingsChange={updateModelSettings}
+      onModelSettingsChange={async (settings) => {
+        await updateModelSettings(settings);
+        void modelSettingsRepoRef.current?.save(settings);
+      }}
       onNavigateDirectory={handleNavigateDirectory}
       onOpenFile={handleOpenFile}
       onPermissionDecision={

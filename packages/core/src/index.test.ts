@@ -1169,7 +1169,7 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
-  it("falls back to clarification when general chat is unavailable", async () => {
+  it("marks general chat failed when the configured model is unavailable", async () => {
     const scanMarkdownDocuments = vi.fn(async () => []);
     const complete = vi.fn(async () => {
       throw new Error("missing model settings");
@@ -1183,12 +1183,16 @@ describe("createFileScanTaskRuntime", () => {
 
     runtime.start("这个怎么弄");
 
-    const finalSnapshot = await waitForStatus(snapshots, "completed");
+    const finalSnapshot = await waitForStatus(snapshots, "failed");
 
     expect(scanMarkdownDocuments).not.toHaveBeenCalled();
     expect(complete).toHaveBeenCalled();
-    expect(finalSnapshot.title).toBe("需要更多信息");
-    expect(finalSnapshot.status).toBe("completed");
+    expect(finalSnapshot.title).toBe("模型调用失败");
+    expect(finalSnapshot.commanderMessage).toContain("模型请求失败");
+    expect(finalSnapshot.logs[finalSnapshot.logs.length - 1]?.detail).toContain(
+      "missing model settings",
+    );
+    expect(finalSnapshot.status).toBe("failed");
 
     unsubscribe();
     runtime.dispose();

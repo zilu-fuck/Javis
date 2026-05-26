@@ -213,9 +213,9 @@ function createModelRequest(
 ) {
   return {
     prompt: injectTerminologyPrompt(prompt, options?.locale),
-    providerId: options?.locale
-      ? localeDefaultModelSettings(options.locale).provider
-      : providerSettings.provider,
+    providerId: providerSettings.provider || (
+      options?.locale ? localeDefaultModelSettings(options.locale).provider : undefined
+    ),
     model: options?.model ?? providerSettings.model,
     apiKeyReference: providerSettings.apiKeyReference,
     baseUrl: providerSettings.baseUrl,

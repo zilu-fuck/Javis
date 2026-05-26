@@ -7,7 +7,7 @@ The scenarios below are the verified MVP baseline. A complete product release
 must also cover the product-readiness scenarios in `PRODUCT_READINESS.md`,
 including automated research search, Code Agent approved edits, persistence,
 workspace selection, generalized confirmed-write approvals, and release rollback
-notes.
+notes. Use `docs/qa/PRODUCT_WORKFLOWS.md` as the product workflow matrix.
 
 ## Setup
 
@@ -15,6 +15,10 @@ notes.
 - Run `pnpm check` and keep the command output with the QA notes.
 - Start the desktop app with `pnpm dev`.
 - Create a screenshot folder such as `docs/qa/2026-05-23/`.
+- For a product-release candidate, build the packaged app with
+  `pnpm --filter @javis/desktop tauri build` and run the product workflow
+  evidence gate:
+  `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/qa/check-product-workflow-evidence.ps1 -QaRoot docs/qa/YYYY-MM-DD`.
 - For repeatable search-backed research evidence, build the release app and run
   `docs/qa/2026-05-23/research-search-qa.ps1`.
 - For live `github-cli` and Agent Chrome provider smoke evidence, run
@@ -188,8 +192,23 @@ exist:
 
 ### Product Readiness Scenarios
 
-Before calling a build complete-product-ready, add and pass scenario scripts for
-every blocker listed in `PRODUCT_READINESS.md`.
+Before calling a build complete-product-ready, pass every workflow in
+`docs/qa/PRODUCT_WORKFLOWS.md` through the strict product evidence gate.
+
+At minimum, product QA must include:
+
+- MVP baseline screenshots and command output.
+- Search-backed research success, fallback, weak evidence, failed fetch, and
+  no-results states.
+- Workspace selection, recent-workspace persistence, and restart restore.
+- Code Agent fixture deny/apply safety plus live provider proposal/apply with
+  real temporary credentials and no API keys in notes or screenshots.
+- Durable PDF and Code Patch approval restore for approve, deny, and expiry.
+- Task history restore/delete after restart.
+- Model settings persistence and a redaction/secret-scan output showing no API
+  key findings.
+- Error recovery screenshots for failed provider/search/write paths.
+- Versioned signed build evidence and rollback notes.
 
 ## Regression Notes
 

@@ -25,7 +25,20 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "msi",
+      "nsis"
+    ],
+    "publisher": "Javis Contributors",
+    "windows": {
+      "allowDowngrades": false,
+      "wix": {
+        "upgradeCode": "b443f13b-df09-5c55-b75e-c66eed973e79"
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
     "resources": {
       "../../../node_modules/.pnpm/opencode-windows-x64@1.15.10/node_modules/opencode-windows-x64/bin/opencode.exe": "bin/opencode-windows-x64/opencode.exe",
       "../../../node_modules/.pnpm/opencode-windows-x64-baseline@1.15.10/node_modules/opencode-windows-x64-baseline/bin/opencode.exe": "bin/opencode-windows-x64-baseline/opencode.exe"

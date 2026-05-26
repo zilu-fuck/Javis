@@ -1,7 +1,7 @@
 import type { ProjectTool, ShellTool } from "@javis/tools";
 import { demoAgents } from "./agents";
 import { createAgentStateTracker } from "./agent-state-tracker";
-import type { FlowController } from "./file-scan-flow";
+import type { FlowController } from "./flow-controller";
 import type { ID } from "./index";
 import { createProjectInspectionPlan, markStep } from "./plans";
 import { createRecommendedCommandRequest } from "./routing";

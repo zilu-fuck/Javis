@@ -21,7 +21,7 @@ import {
   demoAgents,
 } from "./agents";
 import { createAgentStateTracker } from "./agent-state-tracker";
-import type { FlowController } from "./file-scan-flow";
+import type { FlowController } from "./flow-controller";
 import type { ID, TaskSnapshot, TaskStep } from "./index";
 import { markStep } from "./plans";
 import { createSourceBackedReport } from "./research";

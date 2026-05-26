@@ -157,20 +157,18 @@ fn execute_streaming_request(
     let body = create_openai_compatible_stream_body(&model, request);
     let body_text = serde_json::to_string(&body).map_err(|error| error.to_string())?;
 
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(STREAMING_READ_TIMEOUT))
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
-    let response = agent
+    let client = reqwest::blocking::Client::builder()
+        .timeout(STREAMING_READ_TIMEOUT)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = client
         .post(&endpoint)
         .header("Authorization", &format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
-        .send(&body_text)
+        .body(body_text)
+        .send()
         .map_err(|error| format!("Model stream request failed: {error}"))?;
-
-    let mut body = response.into_body();
-    let reader = body.as_reader();
-    let buf_reader = BufReader::new(reader);
+    let buf_reader = BufReader::new(response);
     let mut total_chunks: u32 = 0;
 
     for line in buf_reader.lines() {

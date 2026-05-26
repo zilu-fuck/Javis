@@ -8,7 +8,7 @@ import {
   createConfirmedWriteApproval,
   type PendingPermissionHandler,
 } from "./confirmed-write";
-import type { FlowController } from "./file-scan-flow";
+import type { FlowController } from "./flow-controller";
 import type { ID } from "./index";
 import { createPdfOrganizationPlan, markStep } from "./plans";
 import { appendLog } from "./snapshot-utils";

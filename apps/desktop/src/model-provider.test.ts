@@ -96,6 +96,7 @@ describe("model provider", () => {
     expect(invokeMock).toHaveBeenCalledWith("complete_model_prompt", {
       request: expect.objectContaining({
         prompt: expect.stringContaining("Javis terminology rules for Chinese output"),
+        providerId: "openai",
         locale: "zh-CN",
       }),
     });

@@ -5,13 +5,9 @@ import { demoAgents } from "./agents";
 import { createFileScanPlan, markStep } from "./plans";
 import { appendLog } from "./snapshot-utils";
 import { createEmptyTokenUsageSummary } from "./token-usage";
-import type { ID, TaskSnapshot } from "./index";
-
-export interface FlowController {
-  emit(nextSnapshot: TaskSnapshot): void;
-  getSnapshot(): TaskSnapshot;
-  wait(): Promise<void>;
-}
+import type { FlowController } from "./flow-controller";
+import type { ID } from "./index";
+export type { FlowController } from "./flow-controller";
 
 export async function runFileScanTask(
   controller: FlowController,

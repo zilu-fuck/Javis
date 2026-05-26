@@ -7,6 +7,9 @@ interface ModelSettingsProps {
 }
 
 export function ModelSettings({ labels, modelSettings, onModelSettingsChange }: ModelSettingsProps) {
+  const isWebPreview =
+    typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);
+
   function updateModelSetting(field: keyof WorkbenchModelSettings, value: string) {
     onModelSettingsChange?.({
       ...modelSettings,
@@ -22,6 +25,11 @@ export function ModelSettings({ labels, modelSettings, onModelSettingsChange }: 
       </summary>
       <div className="javis-model-settings-panel">
         <p>{labels.modelSettingsDescription}</p>
+        {isWebPreview ? (
+          <p className="javis-model-settings-warning">
+            {labels.modelBackendUnavailable}
+          </p>
+        ) : null}
         <label>
           <span>{labels.modelProvider}</span>
           <input

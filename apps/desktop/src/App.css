@@ -488,6 +488,14 @@ textarea:focus-visible {
   line-height: 16px;
 }
 
+.javis-model-settings-panel .javis-model-settings-warning {
+  border: 1px solid #efd49a;
+  border-radius: 8px;
+  padding: 8px 9px;
+  color: #765016;
+  background: #fff8e6;
+}
+
 .javis-model-settings-panel label {
   display: grid;
   gap: 5px;

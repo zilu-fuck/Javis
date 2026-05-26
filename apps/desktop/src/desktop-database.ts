@@ -13,6 +13,20 @@ export interface DesktopDatabaseMigration {
   sql: string;
 }
 
+export function invokeDesktopDatabase(
+  invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>,
+): DesktopDatabase {
+  return {
+    async execute(sql, bindValues = []) {
+      await invoke("db_execute", { sql, bindValues });
+    },
+    async select<T extends Record<string, unknown>>(sql: string, bindValues: DatabaseValue[] = []) {
+      const rows = await invoke("db_select", { sql, bindValues });
+      return (rows as T[]) ?? [];
+    },
+  };
+}
+
 export async function runDesktopDatabaseMigrations(
   database: DesktopDatabase,
   migrations: DesktopDatabaseMigration[],

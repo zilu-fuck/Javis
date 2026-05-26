@@ -12,6 +12,7 @@ use std::{
 use tauri::{AppHandle, Manager};
 
 mod streaming;
+mod database;
 
 const OPENCODE_PROPOSAL_TIMEOUT: Duration = Duration::from_secs(90);
 const MODEL_API_KEY_SECRET_REFERENCE: &str = "default";
@@ -555,18 +556,16 @@ fn fetch_web_source(request: WebSourceRequest) -> Result<WebSource, String> {
         return Err("Only http and https URLs are supported.".to_string());
     }
 
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(15)))
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
-    let mut response = agent
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let body = client
         .get(&request.url)
         .header("User-Agent", "Javis/0.1")
-        .call()
-        .map_err(|error| error.to_string())?;
-    let body = response
-        .body_mut()
-        .read_to_string()
+        .send()
+        .map_err(|error| error.to_string())?
+        .text()
         .map_err(|error| error.to_string())?;
     let plain_text = html_to_text(&body);
 
@@ -1383,19 +1382,21 @@ fn run_openai_compatible_proposal_request(
     let endpoint = create_chat_completions_endpoint(&base_url);
     let body = create_openai_compatible_proposal_body(&model, prompt);
     let body_text = serde_json::to_string(&body).map_err(|error| error.to_string())?;
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(OPENCODE_PROPOSAL_TIMEOUT))
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
-    let mut response = agent
+    let client = reqwest::blocking::Client::builder()
+        .timeout(OPENCODE_PROPOSAL_TIMEOUT)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response_text = client
         .post(&endpoint)
         .header("Authorization", &format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
-        .send(&body_text)
-        .map_err(|error| format!("OpenAI-compatible proposal fallback failed: {error}"))?;
-    let response_text = response.body_mut().read_to_string().map_err(|error| {
-        format!("OpenAI-compatible proposal fallback could not read response: {error}")
-    })?;
+        .body(body_text)
+        .send()
+        .map_err(|error| format!("OpenAI-compatible proposal fallback failed: {error}"))?
+        .text()
+        .map_err(|error| {
+            format!("OpenAI-compatible proposal fallback could not read response: {error}")
+        })?;
     let value = serde_json::from_str::<serde_json::Value>(&response_text).map_err(|error| {
         format!(
             "OpenAI-compatible proposal fallback returned invalid JSON: {error}; {}",
@@ -1468,19 +1469,18 @@ fn run_openai_compatible_completion_request(
     let endpoint = create_chat_completions_endpoint(&base_url);
     let body = create_openai_compatible_completion_body(&model, request);
     let body_text = serde_json::to_string(&body).map_err(|error| error.to_string())?;
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(OPENCODE_PROPOSAL_TIMEOUT))
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
-    let mut response = agent
+    let client = reqwest::blocking::Client::builder()
+        .timeout(OPENCODE_PROPOSAL_TIMEOUT)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response_text = client
         .post(&endpoint)
         .header("Authorization", &format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
-        .send(&body_text)
-        .map_err(|error| format!("Model completion request failed: {error}"))?;
-    let response_text = response
-        .body_mut()
-        .read_to_string()
+        .body(body_text)
+        .send()
+        .map_err(|error| format!("Model completion request failed: {error}"))?
+        .text()
         .map_err(|error| format!("Model completion could not read response: {error}"))?;
     let value = serde_json::from_str::<serde_json::Value>(&response_text).map_err(|error| {
         format!(
@@ -1548,19 +1548,18 @@ fn run_openai_compatible_stream_request(
     let endpoint = create_chat_completions_endpoint(&base_url);
     let body = create_openai_compatible_stream_body(&model, request);
     let body_text = serde_json::to_string(&body).map_err(|error| error.to_string())?;
-    let config = ureq::Agent::config_builder()
-        .timeout_global(Some(OPENCODE_PROPOSAL_TIMEOUT))
-        .build();
-    let agent = ureq::Agent::new_with_config(config);
-    let mut response = agent
+    let client = reqwest::blocking::Client::builder()
+        .timeout(OPENCODE_PROPOSAL_TIMEOUT)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response_text = client
         .post(&endpoint)
         .header("Authorization", &format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
-        .send(&body_text)
-        .map_err(|error| format!("Model stream request failed: {error}"))?;
-    let response_text = response
-        .body_mut()
-        .read_to_string()
+        .body(body_text)
+        .send()
+        .map_err(|error| format!("Model stream request failed: {error}"))?
+        .text()
         .map_err(|error| format!("Model stream could not read response: {error}"))?;
     parse_openai_compatible_stream_chunks(&response_text, &provider_id, &model, &endpoint)
 }
@@ -5813,7 +5812,10 @@ pub fn run() {
             read_mcp_config,
             write_mcp_config,
             append_task_audit_jsonl_line,
-            append_task_session_jsonl_line
+            append_task_session_jsonl_line,
+            database::db_execute,
+            database::db_select,
+            database::db_close
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

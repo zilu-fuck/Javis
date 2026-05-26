@@ -314,6 +314,7 @@ export interface WorkbenchLocale {
     modelApiKey?: string;
     modelBaseUrl?: string;
     modelSettingsDescription?: string;
+    modelBackendUnavailable?: string;
     modified: string;
     newChat: string;
     newChatTitle: string;

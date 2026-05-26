@@ -24,7 +24,7 @@ history intact.
 | Workspace management | Select and remember workspaces without relying on the launch directory. | Implemented. Desktop sidebar accepts manual paths and native directory picker, restores recent workspaces after restart, persists completed runs, supports deletion. Restart QA screenshots recorded. |
 | Permission enforcement | Confirmed writes require visible approval and native enforcement for the current dry-run. | Partial. PDF organization has one-time native approval-state enforcement and now validates restored/approved operations through a native path/source guard before they enter pending state. Code Agent patch apply is gated by Core confirmed-write plus native approval id, proposal hash, one-shot consumption, path checks, current-file hashes, native tool binding, and native preview-hash binding. Restored durable approvals recompute the dry-run binding hash and Code Patch restore checks persisted proposal files against the approved dry-run. Code Patch proposal/apply now share the native relative path, approved-file, and current-file guard. |
 | Error recovery | Failed tools show actionable errors and allow retry or alternate paths. | Partial. MVP failure states exist, failed tasks expose retry action. Chinese error messages localized through `error-localizer.ts` (70+ mappings). Keyring errors get readable Chinese messages on non-Windows. Broader alternate-path recovery not yet complete. |
-| Release operations | Signed/versioned builds, repeatable QA evidence, release notes, and rollback notes. | Partial. Unsigned Windows build and QA evidence exist. |
+| Release operations | Signed/versioned builds, repeatable QA evidence, release notes, and rollback notes. | Partial. Unsigned Windows build and QA evidence exist. Product workflow QA now has a matrix and evidence gate in `docs/qa/PRODUCT_WORKFLOWS.md`, but strict release evidence still has blockers. |
 
 ## Product Release Blockers
 
@@ -40,7 +40,9 @@ Do not call Javis a complete usable product while any of these are true:
 - Confirmed-write enforcement shares native approval binding for PDF and Code
   Patch (approval ID, tool, preview hash, one-shot consumption, path guards).
   Remaining guard work is broader write-command migration.
-- Manual QA covers only MVP scenarios plus Chinese optimization.
+- Product workflow QA gate does not pass strictly, including live Code Agent
+  provider apply, task history restore/delete, model secret redaction scan, and
+  signed release rollback evidence.
 - Release builds are unsigned or lack version/rollback notes.
 - A primary user workflow requires editing docs, scripts, or fixtures by hand.
 
@@ -50,7 +52,8 @@ The project has a verified MVP foundation with Chinese optimization complete and
 streaming infrastructure in place. The next stage is product completion:
 
 1. Rerun live DeepSeek-compatible Code Agent proposal smoke with real credentials.
-2. Expand QA from MVP scenarios to complete-product workflows.
+2. Run the complete-product workflow QA matrix in `docs/qa/PRODUCT_WORKFLOWS.md`
+   and close any strict gate blockers.
 3. Migrate durable records from localStorage to SQLite.
 4. Add release signing/versioning/rollback documentation.
 
