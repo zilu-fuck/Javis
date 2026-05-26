@@ -188,6 +188,7 @@ export function createJavisRuntime({
               changedFiles: edit.changedFiles,
               patch: edit.patch,
               patchHash: edit.patchHash,
+              baseGitHead: edit.baseGitHead,
             },
           }),
         ),

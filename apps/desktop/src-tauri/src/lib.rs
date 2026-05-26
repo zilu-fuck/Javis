@@ -1142,29 +1142,16 @@ fn propose_code_edit_with_opencode(
     }
 
     let prompt = create_opencode_proposal_prompt(&request);
-    let output = match run_opencode_proposal_command(&canonical_workspace, &prompt, &request) {
-        Ok(output) => output,
-        Err(error)
-            if should_fallback_to_openai_compatible(&request)
-                && can_fallback_from_opencode_error(&error) =>
-        {
-            run_openai_compatible_proposal_request(&request, &prompt)?
-        }
-        Err(error) => return Err(error),
-    };
-    match parse_code_proposal_from_text_for_request(&canonical_workspace, &output, &request) {
-        Ok(proposal) => Ok(proposal),
-        Err(error) if should_fallback_to_openai_compatible(&request) => {
-            let fallback_output = run_openai_compatible_proposal_request(&request, &prompt)?;
-            parse_code_proposal_from_text_for_request(
-                &canonical_workspace,
-                &fallback_output,
-                &request,
-            )
-            .map_err(|fallback_error| format!("{error}; fallback failed: {fallback_error}"))
-        }
-        Err(error) => Err(error),
+    if should_fallback_to_openai_compatible(&request) {
+        let output = run_openai_compatible_proposal_request(&request, &prompt)?;
+        return parse_code_proposal_from_text_for_request(
+            &canonical_workspace,
+            &output,
+            &request,
+        );
     }
+    let output = run_opencode_proposal_command(&canonical_workspace, &prompt, &request)?;
+    parse_code_proposal_from_text_for_request(&canonical_workspace, &output, &request)
 }
 
 fn run_opencode_proposal_command(
@@ -1381,10 +1368,6 @@ fn should_fallback_to_openai_compatible(request: &CodeProposeEditRequest) -> boo
     let has_custom_base_url =
         normalize_optional_config_value(request.base_url.as_deref()).is_some();
     has_credentials && (provider_id == "deepseek" || provider_id == "custom" && has_custom_base_url)
-}
-
-fn can_fallback_from_opencode_error(error: &str) -> bool {
-    !error.starts_with("opencode proposal configuration error:")
 }
 
 fn run_openai_compatible_proposal_request(
@@ -4816,12 +4799,6 @@ mod tests {
                 base_url: Some("http://127.0.0.1:11434/v1".to_string()),
                 ..request.clone()
             }
-        ));
-        assert!(can_fallback_from_opencode_error(
-            "opencode proposal command failed without stderr."
-        ));
-        assert!(!can_fallback_from_opencode_error(
-            "opencode proposal configuration error: Invalid opencode provider or model id: bad/id"
         ));
         assert_eq!(
             create_chat_completions_endpoint("https://api.deepseek.com"),
