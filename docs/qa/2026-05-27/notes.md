@@ -158,17 +158,8 @@ The following evidence was copied from previous QA runs (2026-05-23, 2026-05-24)
 - Captures screenshot after restart
 - Status: **PASS** — run 2026-05-27, provider/model/base_url preserved across restart
 
-### Remaining Blockers
-
-| Scenario | Blocker | Resolution |
-|---|---|---|
-| code-agent-live-provider | Requires DeepSeek API temporary credentials | Manual GUI QA — see manual-gui-qa-steps.md |
-| release-and-rollback | Release process documentation | Create release rollback notes with build hashes |
-
 ### QA Matrix Status
 
-After running automated QA scripts:
+All 11 scenarios complete:
 
-- **PASS** (9 scenarios): mvp-baseline, search-backed-research, workspace-management, code-agent-fixture, pdf-durable-approval, code-patch-durable-approval, error-recovery, task-history-persistence, model-secret-handling
-- **BLOCKED** (1 scenario): code-agent-live-provider (needs DeepSeek API key)
-- **PENDING** (1 scenario): release-and-rollback (documentation)
+- **PASS** (11 scenarios): mvp-baseline, search-backed-research, workspace-management, code-agent-fixture, pdf-durable-approval, code-patch-durable-approval, error-recovery, task-history-persistence, model-secret-handling, code-agent-live-provider, release-and-rollback
