@@ -256,14 +256,6 @@ struct ModelCompletionResponse {
     provider: Option<String>,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ModelCompletionChunk {
-    text: String,
-    model: Option<String>,
-    provider: Option<String>,
-}
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ModelApiKeySecretRequest {
@@ -719,15 +711,6 @@ fn complete_model_prompt(
 ) -> Result<ModelCompletionResponse, String> {
     hydrate_model_completion_api_key_secret(&app, &mut request)?;
     run_openai_compatible_completion_request(&request)
-}
-
-#[tauri::command]
-fn stream_model_prompt(
-    app: AppHandle,
-    mut request: ModelCompletionRequest,
-) -> Result<Vec<ModelCompletionChunk>, String> {
-    hydrate_model_completion_api_key_secret(&app, &mut request)?;
-    run_openai_compatible_stream_request(&request)
 }
 
 fn is_allowed_read_only_command(program: &str, args: &[String]) -> bool {
@@ -1534,36 +1517,6 @@ fn run_openai_compatible_completion_request(
     })
 }
 
-fn run_openai_compatible_stream_request(
-    request: &ModelCompletionRequest,
-) -> Result<Vec<ModelCompletionChunk>, String> {
-    let api_key = normalize_optional_config_value(request.api_key.as_deref())
-        .ok_or_else(|| "Model stream requires an API key.".to_string())?;
-    let model = normalize_model_completion_model_name(request)
-        .ok_or_else(|| "Model stream requires a model.".to_string())?;
-    let provider_id = normalize_optional_config_value(request.provider_id.as_deref())
-        .unwrap_or_else(|| infer_model_completion_provider_id(request));
-    let base_url = normalize_optional_config_value(request.base_url.as_deref())
-        .unwrap_or_else(|| default_openai_compatible_base_url_for_provider(&provider_id));
-    let endpoint = create_chat_completions_endpoint(&base_url);
-    let body = create_openai_compatible_stream_body(&model, request);
-    let body_text = serde_json::to_string(&body).map_err(|error| error.to_string())?;
-    let client = reqwest::blocking::Client::builder()
-        .timeout(OPENCODE_PROPOSAL_TIMEOUT)
-        .build()
-        .map_err(|error| error.to_string())?;
-    let response_text = client
-        .post(&endpoint)
-        .header("Authorization", &format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .body(body_text)
-        .send()
-        .map_err(|error| format!("Model stream request failed: {error}"))?
-        .text()
-        .map_err(|error| format!("Model stream could not read response: {error}"))?;
-    parse_openai_compatible_stream_chunks(&response_text, &provider_id, &model, &endpoint)
-}
-
 fn create_openai_compatible_completion_body(
     model: &str,
     request: &ModelCompletionRequest,
@@ -1610,50 +1563,6 @@ fn append_completion_stop_sequences(
     }
 }
 
-fn parse_openai_compatible_stream_chunks(
-    response_text: &str,
-    provider_id: &str,
-    model: &str,
-    endpoint: &str,
-) -> Result<Vec<ModelCompletionChunk>, String> {
-    let mut chunks = Vec::new();
-    for line in response_text.lines() {
-        let trimmed = line.trim();
-        if !trimmed.starts_with("data:") {
-            continue;
-        }
-        let data = trimmed.trim_start_matches("data:").trim();
-        if data.is_empty() || data == "[DONE]" {
-            continue;
-        }
-        let value = serde_json::from_str::<serde_json::Value>(data).map_err(|error| {
-            format!(
-                "Model stream returned invalid JSON chunk: {error}; {}",
-                create_model_completion_response_diagnostic(provider_id, model, endpoint, data)
-            )
-        })?;
-        if let Some(text) = extract_openai_compatible_stream_text(&value) {
-            chunks.push(ModelCompletionChunk {
-                text,
-                model: Some(model.to_string()),
-                provider: Some(provider_id.to_string()),
-            });
-        }
-    }
-    if chunks.is_empty() {
-        return Err(format!(
-            "Model stream returned no content chunks. {}",
-            create_model_completion_response_diagnostic(
-                provider_id,
-                model,
-                endpoint,
-                response_text
-            )
-        ));
-    }
-    Ok(chunks)
-}
-
 pub(crate) fn extract_openai_compatible_stream_text(value: &serde_json::Value) -> Option<String> {
     let choice = value
         .get("choices")
@@ -1695,7 +1604,7 @@ pub(crate) fn infer_model_completion_provider_id(request: &ModelCompletionReques
 
 pub(crate) fn default_openai_compatible_base_url_for_provider(provider_id: &str) -> String {
     match provider_id {
-        "deepseek" => "https://api.deepseek.com".to_string(),
+        "deepseek" => "https://api.deepseek.com/v1".to_string(),
         _ => "https://api.openai.com/v1".to_string(),
     }
 }
@@ -1718,7 +1627,7 @@ fn default_openai_compatible_base_url(request: &CodeProposeEditRequest) -> Strin
     let provider_id = normalize_optional_config_value(request.provider_id.as_deref())
         .unwrap_or_else(|| infer_provider_id_from_model(request));
     match provider_id.as_str() {
-        "deepseek" => "https://api.deepseek.com".to_string(),
+        "deepseek" => "https://api.deepseek.com/v1".to_string(),
         _ => "https://api.openai.com/v1".to_string(),
     }
 }
@@ -4595,32 +4504,25 @@ mod tests {
     }
 
     #[test]
-    fn parses_openai_compatible_stream_chunks() {
-        let text = concat!(
-            "event: message\n",
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
-            "data: [DONE]\n",
-        );
-
-        let chunks = parse_openai_compatible_stream_chunks(
-            text,
-            "openai",
-            "gpt-test",
-            "https://api.openai.com/v1/chat/completions",
-        )
-        .expect("stream chunks");
-
+    fn extracts_openai_compatible_stream_text_from_delta() {
+        let value: serde_json::Value = serde_json::json!({
+            "choices": [{"delta": {"content": "Hello"}}]
+        });
         assert_eq!(
-            chunks
-                .iter()
-                .map(|chunk| chunk.text.as_str())
-                .collect::<Vec<_>>(),
-            vec!["Hel", "lo"]
+            extract_openai_compatible_stream_text(&value).as_deref(),
+            Some("Hello")
         );
-        assert!(chunks
-            .iter()
-            .all(|chunk| chunk.provider.as_deref() == Some("openai")));
+    }
+
+    #[test]
+    fn extracts_openai_compatible_stream_text_from_message() {
+        let value: serde_json::Value = serde_json::json!({
+            "choices": [{"message": {"content": "World"}}]
+        });
+        assert_eq!(
+            extract_openai_compatible_stream_text(&value).as_deref(),
+            Some("World")
+        );
     }
 
     #[test]
@@ -4805,6 +4707,17 @@ mod tests {
         );
         assert_eq!(
             create_chat_completions_endpoint("https://api.deepseek.com/v1/chat/completions"),
+            "https://api.deepseek.com/v1/chat/completions"
+        );
+        // DeepSeek default base URL includes /v1 so the final endpoint is correct.
+        assert_eq!(
+            default_openai_compatible_base_url_for_provider("deepseek"),
+            "https://api.deepseek.com/v1"
+        );
+        assert_eq!(
+            create_chat_completions_endpoint(&default_openai_compatible_base_url_for_provider(
+                "deepseek"
+            )),
             "https://api.deepseek.com/v1/chat/completions"
         );
     }
@@ -5795,7 +5708,6 @@ pub fn run() {
             delete_model_api_key_secret,
             propose_code_edit,
             complete_model_prompt,
-            stream_model_prompt,
             streaming::stream_model_prompt_start,
             streaming::stream_model_prompt_cancel,
             streaming::cancel_all_model_streams,
