@@ -8,6 +8,7 @@ import {
   createTaskEventBus,
   parseChineseReviewResult,
 } from "@javis/core";
+import type { AgentKind } from "@javis/core";
 import type {
   CodeApplyResult,
   CodeProposedEdit,
@@ -119,6 +120,7 @@ export function createJavisRuntime({
   const sharedContext = createSharedTaskContext();
   const eventBus = createTaskEventBus();
   const taskIdRef: { current: string | null } = { current: null };
+  const streamingAgentRef: { current: AgentKind } = { current: "commander" };
   const runReadOnlyCommand = (request: ShellCommandRequest) => {
     const workspacePath = getWorkspacePath();
     return invoke<ShellCommandOutput>("run_read_only_command", {
@@ -137,6 +139,7 @@ export function createJavisRuntime({
     commanderTool: {
       plan: async (request) => {
         const taskId = taskIdRef.current ?? "task-unknown";
+        streamingAgentRef.current = "commander";
         eventBus.emit({ kind: "agent.chunk_start", taskId, agentKind: "commander" });
         try {
           const result = await planWithModelProviderStreaming(
@@ -170,6 +173,7 @@ export function createJavisRuntime({
       },
       synthesize: async (request) => {
         const taskId = taskIdRef.current ?? "task-unknown";
+        streamingAgentRef.current = "commander";
         eventBus.emit({ kind: "agent.chunk_start", taskId, agentKind: "commander" });
         try {
           const evidenceEntries = Object.entries(request.evidence)
@@ -339,6 +343,7 @@ export function createJavisRuntime({
     verifierTool: {
       check: async (request) => {
         const taskId = taskIdRef.current ?? "task-unknown";
+        streamingAgentRef.current = "verifier";
         eventBus.emit({ kind: "agent.chunk_start", taskId, agentKind: "verifier" });
         try {
           const result = await verifyWithModelProviderStreaming(
@@ -404,7 +409,7 @@ export function createJavisRuntime({
         eventBus.emit({
           kind: "agent.chunk_end",
           taskId,
-          agentKind: "commander",
+          agentKind: streamingAgentRef.current,
           fullText: "",
           error: "cancelled",
         });
