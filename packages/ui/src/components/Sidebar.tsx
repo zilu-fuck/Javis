@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import type {
   ActiveView,
   WorkbenchHistoryEntry,
@@ -25,10 +31,15 @@ interface SidebarProps {
   sidebarSearchQuery: string;
   activeView?: ActiveView;
   scheduledTaskCount?: number;
+  sidebarResizeMax?: number;
+  sidebarResizeMin?: number;
+  sidebarResizeValue?: number;
   skillCount?: number;
   onDeleteHistoryEntry?: (id: string) => void;
   onModelSettingsChange?: (settings: WorkbenchModelSettings) => void;
   onModelConfigurationChange?: (config: WorkbenchModelConfiguration) => void;
+  onResizeKeyDown?: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+  onResizeStart?: (event: ReactPointerEvent<HTMLDivElement>) => void;
   onSelectHistoryEntry?: (id: string) => void;
   onSidebarSearchQueryChange: (query: string) => void;
   onChangeActiveView?: (view: ActiveView) => void;
@@ -49,10 +60,15 @@ export function Sidebar({
   sidebarSearchQuery,
   activeView = "chat",
   scheduledTaskCount = 0,
+  sidebarResizeMax,
+  sidebarResizeMin,
+  sidebarResizeValue,
   skillCount = 0,
   onDeleteHistoryEntry,
   onModelSettingsChange,
   onModelConfigurationChange,
+  onResizeKeyDown,
+  onResizeStart,
   onSelectHistoryEntry,
   onSidebarSearchQueryChange,
   onChangeActiveView,
@@ -298,6 +314,19 @@ export function Sidebar({
         modelConfiguration={modelConfiguration}
         onModelSettingsChange={onModelSettingsChange}
         onModelConfigurationChange={onModelConfigurationChange}
+      />
+      <div
+        aria-label={labels.sidebarResize}
+        aria-orientation="vertical"
+        aria-valuemax={sidebarResizeMax}
+        aria-valuemin={sidebarResizeMin}
+        aria-valuenow={sidebarResizeValue}
+        className="javis-sidebar-resize-handle"
+        onKeyDown={onResizeKeyDown}
+        onPointerDown={onResizeStart}
+        role="separator"
+        tabIndex={0}
+        title={labels.sidebarResize}
       />
     </aside>
   );

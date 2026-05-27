@@ -7,6 +7,7 @@ import type {
 import { useSmoothStream } from "../use-smooth-stream";
 import { formatTokenCount, translateWorkbenchText } from "../utils";
 import { ChatComposer } from "./ChatComposer";
+import { Markdown } from "./Markdown";
 import { StreamingMessage } from "./StreamingMessage";
 import { TaskSections } from "./TaskSections";
 
@@ -87,7 +88,7 @@ export function ThreadView({
       <section className="javis-thread" aria-label={labels.activeTask}>
         <article className="javis-message user">
           <p className="javis-message-title">{labels.user}</p>
-          <p className="javis-message-body">{translateWorkbenchText(task.userGoal, locale)}</p>
+          <Markdown className="javis-message-body" text={translateWorkbenchText(task.userGoal, locale)} />
         </article>
 
         {showStreaming ? (
@@ -99,9 +100,7 @@ export function ThreadView({
         ) : (
           <article className="javis-message">
             <p className="javis-message-title">{labels.commander}</p>
-            <p className="javis-message-body">
-              {translateWorkbenchText(task.commanderMessage, locale)}
-            </p>
+            <Markdown className="javis-message-body" text={translateWorkbenchText(task.commanderMessage, locale)} />
             {task.tokenUsage && task.tokenUsage.modelCalls > 0 ? (
               <p className="javis-token-inline" aria-label={labels.tokenUsage}>
                 <span>{labels.tokenUsage}</span>

@@ -407,6 +407,7 @@ export interface WorkbenchLocale {
     user: string;
     verifier: string;
     workspaceNavigation: string;
+    sidebarResize: string;
     browseWorkspace: string;
     currentWorkspace: string;
     recentWorkspaces: string;

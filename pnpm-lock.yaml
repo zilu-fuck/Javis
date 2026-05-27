@@ -82,6 +82,9 @@ importers:
 
   packages/ui:
     dependencies:
+      marked:
+        specifier: ^18.0.4
+        version: 18.0.4
       react:
         specifier: ^19.1.0
         version: 19.2.6
@@ -89,6 +92,9 @@ importers:
         specifier: ^1.8.11
         version: 1.8.11(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
     devDependencies:
+      '@types/marked':
+        specifier: ^6.0.0
+        version: 6.0.0
       '@types/react':
         specifier: ^19.1.8
         version: 19.2.15
@@ -616,6 +622,10 @@ packages:
   '@types/estree@1.0.8':
     resolution: {integrity: sha512-dWHzHa2WqEXI/O1E9OjrocMTKJl2mSrEolh1Iomrv6U+JuNwaHXsXx9bLu5gG7BUWFIN0skIQJQ/L1rIex4X6w==}
 
+  '@types/marked@6.0.0':
+    resolution: {integrity: sha512-jmjpa4BwUsmhxcfsgUit/7A9KbrC48Q0q8KvnY107ogcjGgTFDlIL3RpihNpx2Mu1hM4mdFQjoVc4O6JoGKHsA==}
+    deprecated: This is a stub types definition. marked provides its own type definitions, so you do not need this installed.
+
   '@types/react-dom@19.2.3':
     resolution: {integrity: sha512-jp2L/eY6fn+KgVVQAOqYItbF0VY/YApe5Mz2F0aykSO8gx31bYCZyvSeYxCHKvzHG5eZjc+zyaS5BrBWya2+kQ==}
     peerDependencies:
@@ -756,6 +766,11 @@ packages:
 
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
+
+  marked@18.0.4:
+    resolution: {integrity: sha512-c/BTaKzg0G6ezQx97DAkYU7k0HM6ys0FqYeKBL6hlBByZwy+ycA1+f0vDdjMHKKeEjdgkx0GOv9Il6D+85cOqA==}
+    engines: {node: '>= 20'}
+    hasBin: true
 
   memoize-one@5.2.1:
     resolution: {integrity: sha512-zYiwtZUcYyXKo/np96AGZAckk+FWWsUdJ3cHGGmld7+AhvcWmQyGCYUh1hc4Q/pkOhb65dQR/pqCyK0cOaHz4Q==}
@@ -1394,6 +1409,10 @@ snapshots:
 
   '@types/estree@1.0.8': {}
 
+  '@types/marked@6.0.0':
+    dependencies:
+      marked: 18.0.4
+
   '@types/react-dom@19.2.3(@types/react@19.2.15)':
     dependencies:
       '@types/react': 19.2.15
@@ -1546,6 +1565,8 @@ snapshots:
   magic-string@0.30.21:
     dependencies:
       '@jridgewell/sourcemap-codec': 1.5.5
+
+  marked@18.0.4: {}
 
   memoize-one@5.2.1: {}
 

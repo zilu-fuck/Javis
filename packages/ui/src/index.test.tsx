@@ -70,6 +70,33 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).not.toContain("Task planning and orchestration");
   });
 
+  it("renders a draggable sidebar resize separator", () => {
+    const html = renderToStaticMarkup(
+      <JavisWorkbench
+        draftGoal="Inspect project"
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={{
+          title: "Ready",
+          userGoal: "Waiting for a task",
+          status: "created",
+          commanderMessage:
+            "Javis desktop is ready. Enter a goal to start the Core event stream.",
+          plan: [],
+          agents: [],
+          logs: [],
+        }}
+      />,
+    );
+
+    expect(html).toContain("javis-sidebar-resize-handle");
+    expect(html).toContain("role=\"separator\"");
+    expect(html).toContain("aria-orientation=\"vertical\"");
+    expect(html).toContain("aria-valuemin=\"188\"");
+    expect(html).toContain("aria-valuemax=\"360\"");
+    expect(html).toContain("aria-valuenow=\"220\"");
+  });
+
   it("labels active verifier streaming output as verifier", () => {
     const html = renderWorkbench({
       id: "task-streaming-verifier",

@@ -29,7 +29,7 @@ describe("workspace session persistence", () => {
     const recent = persistWorkspaceForTaskStatus(
       storage,
       [],
-      " E:/Javis ",
+      " \\\\?\\E:\\Javis ",
       "completed",
     );
 
@@ -79,7 +79,7 @@ describe("workspace session persistence", () => {
         agents: [],
         logs: [],
         project: {
-          workspacePath: "E:/Javis",
+          workspacePath: "\\\\?\\E:\\Javis",
           packageManager: "pnpm",
           scripts: [],
         },
@@ -113,7 +113,7 @@ describe("workspace session persistence", () => {
 
     const saved = await repository.save({
       workspacePath: "G:/Current",
-      recentWorkspacePaths: [" E:/Javis ", "e:/javis", "F:/Other"],
+      recentWorkspacePaths: [" \\\\?\\E:\\Javis ", "e:/javis", "F:/Other"],
     });
     const loaded = await repository.load();
 

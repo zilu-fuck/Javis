@@ -9,7 +9,7 @@ import {
   type WorkspaceSessionRepository,
 } from "./workspace-session";
 import type { TaskSnapshot } from "@javis/core";
-import { removeRecentWorkspacePath } from "./recent-workspaces";
+import { normalizeWorkspacePath, removeRecentWorkspacePath } from "./recent-workspaces";
 
 export function useWorkspaceSessionControls(
   storage: Storage,
@@ -59,7 +59,7 @@ export function useWorkspaceSessionControls(
   const useWorkspacePath = useCallback((path: string) => {
     setWorkspaceSession((current) => ({
       ...current,
-      workspacePath: path.trim(),
+      workspacePath: normalizeWorkspacePath(path),
     }));
   }, []);
 
@@ -77,19 +77,20 @@ export function useWorkspaceSessionControls(
   const deleteRecentWorkspacePath = useCallback((path: string) => {
     setWorkspaceSession((current) => {
       const repository = repositoryRef?.current;
+      const normalizedPath = normalizeWorkspacePath(path);
       const recentWorkspacePaths = repository
-        ? removeRecentWorkspacePath(current.recentWorkspacePaths, path)
-        : deletePersistedWorkspacePath(storage, current.recentWorkspacePaths, path);
+        ? removeRecentWorkspacePath(current.recentWorkspacePaths, normalizedPath)
+        : deletePersistedWorkspacePath(storage, current.recentWorkspacePaths, normalizedPath);
       if (repository) {
         void repository
-          .deleteWorkspacePath(current.recentWorkspacePaths, path)
+          .deleteWorkspacePath(current.recentWorkspacePaths, normalizedPath)
           .catch(() => {
-            deletePersistedWorkspacePath(storage, current.recentWorkspacePaths, path);
+            deletePersistedWorkspacePath(storage, current.recentWorkspacePaths, normalizedPath);
           });
       }
       return {
         workspacePath:
-          current.workspacePath.toLocaleLowerCase() === path.trim().toLocaleLowerCase()
+          normalizeWorkspacePath(current.workspacePath).toLocaleLowerCase() === normalizedPath.toLocaleLowerCase()
             ? recentWorkspacePaths[0] ?? ""
             : current.workspacePath,
         recentWorkspacePaths,

@@ -4,6 +4,7 @@ import {
   loadRecentWorkspacePathsFromDatabase,
   loadRecentWorkspacePaths,
   removeRecentWorkspacePath,
+  normalizeWorkspacePath,
   sanitizeWorkspacePaths,
   saveRecentWorkspacePathsToDatabase,
   saveRecentWorkspacePaths,
@@ -50,14 +51,14 @@ export function persistWorkspaceForTaskStatus(
     return currentPaths;
   }
 
-  const normalizedPath = workspacePath.trim();
-  if (!normalizedPath) {
+  const normalizedWorkspacePath = normalizeWorkspacePath(workspacePath);
+  if (!normalizedWorkspacePath) {
     return currentPaths;
   }
 
   return saveRecentWorkspacePaths(
     storage,
-    upsertRecentWorkspacePath(currentPaths, normalizedPath),
+    upsertRecentWorkspacePath(currentPaths, normalizedWorkspacePath),
   );
 }
 
@@ -66,7 +67,7 @@ export function getCompletedTaskWorkspacePath(task: TaskSnapshot): string {
     return "";
   }
 
-  return task.project?.workspacePath ?? task.codeReviewPreview?.workspacePath ?? "";
+  return normalizeWorkspacePath(task.project?.workspacePath ?? task.codeReviewPreview?.workspacePath ?? "");
 }
 
 export function deletePersistedWorkspacePath(
@@ -184,7 +185,7 @@ export function getPersistedWorkspacePaths(
 
 function sanitizeWorkspaceSession(session: WorkspaceSession): WorkspaceSession {
   const recentWorkspacePaths = sanitizeWorkspacePaths(session.recentWorkspacePaths);
-  const workspacePath = session.workspacePath.trim();
+  const workspacePath = normalizeWorkspacePath(session.workspacePath);
   const activeWorkspacePath = workspacePath || recentWorkspacePaths[0] || "";
   return {
     workspacePath: activeWorkspacePath,

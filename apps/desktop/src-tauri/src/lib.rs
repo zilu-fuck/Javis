@@ -669,7 +669,7 @@ fn inspect_project(workspace_path: Option<String>) -> Result<ProjectInspection, 
     let runner = package_manager.as_deref().unwrap_or("pnpm");
 
     Ok(ProjectInspection {
-        workspace_path: workspace.to_string_lossy().to_string(),
+        workspace_path: normalize_path(&workspace),
         recommended_start_command: recommend_script(&scripts, runner, &["dev", "start"]),
         recommended_test_command: recommend_script(&scripts, runner, &["typecheck", "test"]),
         package_manager,
@@ -3139,7 +3139,14 @@ fn infer_pdf_category(path: &Path) -> &'static str {
 }
 
 fn normalize_path(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
+        return format!("//{}", rest);
+    }
+    if let Some(rest) = normalized.strip_prefix("//?/") {
+        return rest.to_string();
+    }
+    normalized
 }
 
 fn execute_pdf_move_operation(
@@ -3437,6 +3444,13 @@ fn html_decode(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_path_strips_windows_verbatim_prefix() {
+        let path = PathBuf::from(r"\\?\E:\Javis");
+
+        assert_eq!(normalize_path(&path), "E:/Javis");
+    }
 
     #[test]
     fn execute_pdf_move_moves_file_inside_downloads() {

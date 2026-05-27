@@ -71,23 +71,23 @@ export function saveRecentWorkspacePaths(
 }
 
 export function upsertRecentWorkspacePath(paths: string[], path: string): string[] {
-  const normalizedPath = path.trim();
+  const normalizedPath = normalizeWorkspacePath(path);
   if (!normalizedPath) {
     return paths;
   }
   const normalizedKey = normalizedPath.toLocaleLowerCase();
   return [
     normalizedPath,
-    ...paths.filter((entry) => entry.toLocaleLowerCase() !== normalizedKey),
+    ...paths.filter((entry) => normalizeWorkspacePath(entry).toLocaleLowerCase() !== normalizedKey),
   ].slice(0, RECENT_WORKSPACES_LIMIT);
 }
 
 export function removeRecentWorkspacePath(paths: string[], path: string): string[] {
-  const normalizedKey = path.trim().toLocaleLowerCase();
+  const normalizedKey = normalizeWorkspacePath(path).toLocaleLowerCase();
   if (!normalizedKey) {
     return paths;
   }
-  return paths.filter((entry) => entry.toLocaleLowerCase() !== normalizedKey);
+  return paths.filter((entry) => normalizeWorkspacePath(entry).toLocaleLowerCase() !== normalizedKey);
 }
 
 export function createRecentWorkspacesRepository(
@@ -212,7 +212,7 @@ export function sanitizeWorkspacePaths(value: unknown[]): string[] {
     if (typeof entry !== "string") {
       continue;
     }
-    const path = entry.trim();
+    const path = normalizeWorkspacePath(entry);
     if (!path) {
       continue;
     }
@@ -225,6 +225,23 @@ export function sanitizeWorkspacePaths(value: unknown[]): string[] {
   }
 
   return paths;
+}
+
+export function normalizeWorkspacePath(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const normalized = trimmed.replace(/\\/g, "/");
+  if (normalized.startsWith("//?/UNC/")) {
+    return `//${normalized.slice("//?/UNC/".length)}`;
+  }
+  if (normalized.startsWith("//?/")) {
+    return normalized.slice("//?/".length);
+  }
+
+  return normalized;
 }
 
 function parseRecentWorkspaceEntries(value: unknown): unknown[] | null {

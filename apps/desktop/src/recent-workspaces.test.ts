@@ -15,6 +15,7 @@ import {
   loadRecentWorkspacePathsWithStorageFallback,
   removeRecentWorkspacePath,
   saveRecentWorkspacePaths,
+  normalizeWorkspacePath,
   upsertRecentWorkspacePath,
 } from "./recent-workspaces";
 import type { DatabaseValue, DesktopDatabase } from "./desktop-database";
@@ -28,6 +29,13 @@ describe("recent workspace persistence", () => {
     );
 
     expect(loadRecentWorkspacePaths(storage)).toEqual(["E:/Javis", "F:/Other"]);
+  });
+
+  it("normalizes Windows verbatim workspace paths", () => {
+    expect(normalizeWorkspacePath("\\\\?\\E:\\Javis")).toBe("E:/Javis");
+    expect(
+      loadRecentWorkspacePaths(createStorage(["\\\\?\\E:\\Javis", "E:\\Javis"])),
+    ).toEqual(["E:/Javis"]);
   });
 
   it("loads versioned recent workspace storage envelopes", () => {
@@ -60,6 +68,12 @@ describe("recent workspace persistence", () => {
     const paths = upsertRecentWorkspacePath(["E:/Javis", "F:/Other"], "e:/javis");
 
     expect(paths).toEqual(["e:/javis", "F:/Other"]);
+  });
+
+  it("upserts verbatim Windows paths without duplicating the same workspace", () => {
+    const paths = upsertRecentWorkspacePath(["E:/Javis", "F:/Other"], "\\\\?\\E:\\Javis");
+
+    expect(paths).toEqual(["E:/Javis", "F:/Other"]);
   });
 
   it("saves only the configured limit", () => {
@@ -166,6 +180,12 @@ function createMemoryStorage(): Pick<Storage, "getItem" | "setItem" | "removeIte
       values.set(key, value);
     },
   };
+}
+
+function createStorage(paths: string[]): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
+  const storage = createMemoryStorage();
+  storage.setItem(RECENT_WORKSPACES_STORAGE_KEY, JSON.stringify(paths));
+  return storage;
 }
 
 function createMemoryRecentWorkspacesDatabase(initialRows: RecentWorkspaceRow[] = []) {
