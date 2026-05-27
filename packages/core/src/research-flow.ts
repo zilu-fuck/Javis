@@ -202,9 +202,15 @@ export async function runResearchSearchTask({
       validCount === sources.length && reportEvidenceCount === researchReport.rows.length
         ? "completed"
         : "failed";
+    const sourceSummaries = sources.slice(0, 5).map((s) => ({
+      url: s.url,
+      title: s.title,
+      provider: s.provider,
+    }));
     const synthesis = verificationStatus === "completed"
       ? await safeSynthesizeConclusion(commanderTool, userGoal, "Research sources collected", {
-          sources,
+          sourceSummaries,
+          totalSources: sources.length,
           researchReport,
           validSources: validCount,
           failedFetches: failedFetches.length,
@@ -373,9 +379,15 @@ export async function runResearchSourceTask({
       validCount === sources.length && reportEvidenceCount === researchReport.rows.length
         ? "completed"
         : "failed";
+    const sourceSummaries = sources.slice(0, 5).map((s) => ({
+      url: s.url,
+      title: s.title,
+      provider: s.provider,
+    }));
     const synthesis = verificationStatus === "completed"
       ? await safeSynthesizeConclusion(commanderTool, userGoal, "Research sources collected", {
-          sources,
+          sourceSummaries,
+          totalSources: sources.length,
           researchReport,
           validSources: validCount,
           sourceMode: "manual",
