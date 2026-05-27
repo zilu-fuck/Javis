@@ -5,6 +5,7 @@ import {
   filterWorkbenchHistoryEntries,
   zhCNWorkbenchLocale,
 } from "./index";
+import { normalizeWorkspacePath } from "./utils";
 import type { WorkbenchTask } from "./index";
 
 describe("JavisWorkbench permission cards", () => {
@@ -564,6 +565,45 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).toContain("展开显示");
     expect(html).toContain("Fallback history entry");
     expect(html).toContain("Research sources collected");
+  });
+
+  it("normalizes verbatim workspace paths in history grouping", () => {
+    const html = renderToStaticMarkup(
+      <JavisWorkbench
+        currentWorkspacePath="E:/Javis"
+        draftGoal="Inspect project"
+        recentWorkspacePaths={["E:/Javis"]}
+        historyEntries={[
+          {
+            id: "history-1",
+            title: "Project environment inspected",
+            status: "completed",
+            userGoal: "Inspect project",
+            updatedAt: "2026-05-23T00:00:00.000Z",
+            workspacePath: "\\\\?\\E:\\Javis",
+          },
+        ]}
+        onDeleteHistoryEntry={vi.fn()}
+        onDraftGoalChange={vi.fn()}
+        onSelectHistoryEntry={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={{
+          title: "Ready",
+          userGoal: "Waiting for a task",
+          status: "created",
+          commanderMessage:
+            "Javis desktop is ready. Enter a goal to start the Core event stream.",
+          plan: [],
+          agents: [],
+          logs: [],
+        }}
+      />,
+    );
+
+    expect(normalizeWorkspacePath("\\\\?\\E:\\Javis")).toBe("E:/Javis");
+    expect(html).toContain("Project environment inspected");
+    expect(html).toContain("E:/Javis");
+    expect(html).not.toContain("\\\\?\\");
   });
 
   it("filters task history by title, goal, status, and update time", () => {

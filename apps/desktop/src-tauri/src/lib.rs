@@ -511,7 +511,7 @@ fn run_read_only_command(request: ShellCommandRequest) -> Result<ShellCommandOut
         command: format!("{} {}", request.program, request.args.join(" "))
             .trim()
             .to_string(),
-        cwd: cwd.to_string_lossy().to_string(),
+        cwd: normalize_path(&cwd),
         exit_code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),

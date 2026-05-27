@@ -230,6 +230,7 @@ export function JavisWorkbench({
             onDeleteRecentWorkspacePath={onDeleteRecentWorkspacePath}
             onDraftGoalChange={onDraftGoalChange}
             onPermissionDecision={onPermissionDecision}
+            modelConfiguration={modelConfiguration}
             onRetryTask={onRetryTask}
             onStopTask={onStopTask}
             onSubmitGoal={onSubmitGoal}

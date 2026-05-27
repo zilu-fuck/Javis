@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState, type FormEventHandler } from "react";
 import type {
   WorkbenchLocale,
+  WorkbenchModelConfiguration,
   WorkbenchStreamingAgentKind,
   WorkbenchTask,
 } from "../types";
 import { useSmoothStream } from "../use-smooth-stream";
 import { translateWorkbenchText } from "../utils";
 import { ChatComposer } from "./ChatComposer";
+import { ContextRing } from "./ContextRing";
 import { ContextStats } from "./ContextStats";
 import { Markdown } from "./Markdown";
 import { StreamingMessage } from "./StreamingMessage";
@@ -17,6 +19,7 @@ interface ThreadViewProps {
   draftGoal: string;
   labels: WorkbenchLocale["labels"];
   locale: WorkbenchLocale;
+  modelConfiguration?: WorkbenchModelConfiguration;
   recentWorkspacePaths: string[];
   task: WorkbenchTask;
   onBrowseWorkspacePath?: () => void;
@@ -35,6 +38,7 @@ export function ThreadView({
   draftGoal,
   labels,
   locale,
+  modelConfiguration,
   recentWorkspacePaths,
   task,
   onBrowseWorkspacePath,
@@ -134,6 +138,8 @@ export function ThreadView({
         ) : null}
         <div aria-hidden="true" ref={scrollAnchorRef} />
       </section>
+
+      <ContextRing task={task} modelConfiguration={modelConfiguration} />
 
       <ChatComposer
         actionsClassName="javis-composer-actions"

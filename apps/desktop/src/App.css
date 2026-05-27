@@ -1125,6 +1125,7 @@ textarea:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  align-self: start;
   gap: 12px;
   min-height: 56px;
   padding: 10px 18px;
@@ -1347,6 +1348,31 @@ textarea:focus-visible {
 .javis-context-tokens {
   color: var(--color-muted);
 }
+
+.javis-context-ring {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 18px 4px;
+  padding: 0;
+}
+
+.javis-context-ring-detail {
+  display: grid;
+  gap: 1px;
+}
+
+.javis-context-ring-tokens {
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 550;
+}
+
+.javis-context-ring-calls {
+  color: var(--color-subtle);
+  font-size: 11px;
+  line-height: 14px;
 }
 
 .javis-task-status,

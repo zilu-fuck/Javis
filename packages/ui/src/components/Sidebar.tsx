@@ -19,6 +19,7 @@ import {
   translateWorkbenchText,
 } from "../utils";
 import { ModelSettings } from "./ModelSettings";
+import { normalizeWorkspacePath } from "../utils";
 
 interface SidebarProps {
   labels: WorkbenchLocale["labels"];
@@ -420,8 +421,4 @@ function getEntrySortValue(entry: WorkbenchHistoryEntry | undefined): number {
   }
   const parsed = Date.parse(entry.updatedAt);
   return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
-}
-
-function normalizeWorkspacePath(path: string): string {
-  return path.trim().replace(/[\\/]+$/, "");
 }

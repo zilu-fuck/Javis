@@ -20,6 +20,23 @@ export function formatWorkspaceName(path: string) {
   return parts[parts.length - 1] ?? normalizedPath;
 }
 
+export function normalizeWorkspacePath(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const normalized = trimmed.replace(/\\/g, "/");
+  if (normalized.startsWith("//?/UNC/")) {
+    return `//${normalized.slice("//?/UNC/".length)}`;
+  }
+  if (normalized.startsWith("//?/")) {
+    return normalized.slice("//?/".length);
+  }
+
+  return normalized.replace(/[\\/]+$/, "");
+}
+
 export function formatTokenCount(value: number) {
   return new Intl.NumberFormat().format(value);
 }

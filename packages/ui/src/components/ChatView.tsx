@@ -1,5 +1,5 @@
 import { type FormEvent } from "react";
-import type { WorkbenchLocale, WorkbenchTask } from "../types";
+import type { WorkbenchLocale, WorkbenchModelConfiguration, WorkbenchTask } from "../types";
 import { NewChat } from "./NewChat";
 import { ThreadView } from "./ThreadView";
 
@@ -8,6 +8,7 @@ interface ChatViewProps {
   draftGoal: string;
   currentWorkspacePath: string;
   locale: WorkbenchLocale;
+  modelConfiguration?: WorkbenchModelConfiguration;
   recentWorkspacePaths: string[];
   onDraftGoalChange: (goal: string) => void;
   onBrowseWorkspacePath?: () => void;
@@ -25,6 +26,7 @@ export function ChatView({
   draftGoal,
   currentWorkspacePath,
   locale,
+  modelConfiguration,
   recentWorkspacePaths,
   onDraftGoalChange,
   onBrowseWorkspacePath,
@@ -67,6 +69,7 @@ export function ChatView({
       draftGoal={draftGoal}
       labels={labels}
       locale={locale}
+      modelConfiguration={modelConfiguration}
       onBrowseWorkspacePath={onBrowseWorkspacePath}
       onDeleteRecentWorkspacePath={onDeleteRecentWorkspacePath}
       onDraftGoalChange={onDraftGoalChange}
