@@ -5,8 +5,9 @@ import type {
   WorkbenchTask,
 } from "../types";
 import { useSmoothStream } from "../use-smooth-stream";
-import { formatTokenCount, translateWorkbenchText } from "../utils";
+import { translateWorkbenchText } from "../utils";
 import { ChatComposer } from "./ChatComposer";
+import { ContextStats } from "./ContextStats";
 import { Markdown } from "./Markdown";
 import { StreamingMessage } from "./StreamingMessage";
 import { TaskSections } from "./TaskSections";
@@ -101,20 +102,7 @@ export function ThreadView({
           <article className="javis-message">
             <p className="javis-message-title">{labels.commander}</p>
             <Markdown className="javis-message-body" text={translateWorkbenchText(task.commanderMessage, locale)} />
-            {task.tokenUsage && task.tokenUsage.modelCalls > 0 ? (
-              <p className="javis-token-inline" aria-label={labels.tokenUsage}>
-                <span>{labels.tokenUsage}</span>
-                <span>
-                  {formatTokenCount(task.tokenUsage.totalTokens)}
-                </span>
-                <span>
-                  {labels.tokenInput} {formatTokenCount(task.tokenUsage.inputTokens)}
-                </span>
-                <span>
-                  {labels.tokenOutput} {formatTokenCount(task.tokenUsage.outputTokens)}
-                </span>
-              </p>
-            ) : null}
+            <ContextStats task={task} labels={labels} />
           </article>
         )}
 
