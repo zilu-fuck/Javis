@@ -174,8 +174,19 @@ export interface CommanderPlanResult {
   }>;
 }
 
+export interface CommanderSynthesizeRequest {
+  userGoal: string;
+  workflowTitle: string;
+  evidence: Record<string, unknown>;
+}
+
+export interface CommanderSynthesizeResult {
+  message: string;
+}
+
 export interface CommanderTool {
   plan(request: CommanderPlanRequest): Promise<CommanderPlanResult>;
+  synthesize?(request: CommanderSynthesizeRequest): Promise<CommanderSynthesizeResult>;
 }
 
 export interface VerifierCheckRequest {

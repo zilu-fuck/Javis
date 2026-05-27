@@ -88,6 +88,16 @@ export const WORKBENCH_WORKFLOWS: WorkbenchWorkflow[] = [
         ["analyze-code"],
         false,
       ),
+      createStep(
+        "commander-synthesize",
+        "Commander writes a user-facing conclusion from all collected evidence",
+        "commander",
+        "All step outputs and verification results",
+        "Natural-language answer to the user's original goal",
+        "read",
+        ["summarize-project"],
+        false,
+      ),
     ],
   },
   {

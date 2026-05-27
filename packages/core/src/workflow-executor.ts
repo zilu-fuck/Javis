@@ -1,5 +1,6 @@
 import type {
   CommanderPlanResult,
+  CommanderSynthesizeResult,
   ComputerFileCandidate,
   ComputerTool,
   CodeTool,
@@ -187,6 +188,20 @@ export async function runReadCurrentProjectWorkflow({
                 contextSnapshot: context.snapshot(),
               }),
             };
+          case "commander-synthesize":
+            return {
+              output: await runCommanderSynthesisStep({
+                agentTracker,
+                controller,
+                emit,
+                emitEvent,
+                commanderTool,
+                taskId,
+                userGoal,
+                workflowTitle: workflow.title,
+                contextSnapshot: context.snapshot(),
+              }),
+            };
           default:
             throw new Error(`Unsupported workflow step: ${step.id}`);
         }
@@ -211,6 +226,10 @@ export async function runReadCurrentProjectWorkflow({
         }
         if (step.id === "summarize-project") {
           context.set("verifierCheck", output);
+        }
+        if (step.id === "commander-synthesize" && output) {
+          const result = output as CommanderSynthesizeResult;
+          context.set("commanderConclusion", result.message);
         }
       },
     });
@@ -380,15 +399,28 @@ export async function runGenericWorkbenchWorkflow({
     }
 
     const verifierCheck = await safeVerifyGenericWorkflow(verifierTool, workflow, context.snapshot());
-    const finalStatus = verifierCheck?.status === "fail" ? "failed" : "completed";
+    const verified = verifierCheck?.status !== "fail";
     const finalPlan = snapshot.plan.map((step) => ({
       ...step,
       status: step.status === "pending" || step.status === "running" ? "skipped" as const : step.status,
     }));
 
+    // Commander synthesizes a user-facing conclusion from all evidence
+    const synthesis = await safeSynthesizeConclusion(
+      commanderTool,
+      userGoal,
+      workflow.title,
+      context.snapshot(),
+    );
+    const conclusion = synthesis?.message
+      ?? (verified
+          ? `${workflow.title} completed. Tool-specific implementation is still required for executable side effects.`
+          : `${workflow.title} reached verifier.check but did not pass.`);
+    const finalStatus = verified ? "completed" : "failed";
+
     agentTracker.setState("agent-commander", {
       status: finalStatus === "completed" ? "completed" : "failed",
-      task: finalStatus === "completed" ? "Workflow blueprint reviewed" : "Workflow verification failed",
+      task: finalStatus === "completed" ? "Workflow conclusion written" : "Workflow verification failed",
     });
     for (const agent of workflow.participatingAgentKinds) {
       const agentId = `agent-${agent}`;
@@ -403,10 +435,7 @@ export async function runGenericWorkbenchWorkflow({
     emit({
       ...snapshot,
       status: finalStatus,
-      commanderMessage:
-        finalStatus === "completed"
-          ? `${workflow.title} is routed through the generic workflow executor. Tool-specific implementation is still required for executable side effects.`
-          : `${workflow.title} reached verifier.check but did not pass.`,
+      commanderMessage: conclusion,
       plan: finalPlan,
       agents: agentTracker.getSnapshots(),
       ...(deriveGenericWorkflowSnapshotData(context.snapshot())),
@@ -1234,54 +1263,157 @@ async function runSummarizeProjectStep({
     task: `${passingCommands}/${commands.length} commands passed`,
   });
 
+  agentTracker.setState("agent-commander", {
+    status: "running",
+    task: "Synthesizing project conclusion",
+    currentStepId: "commander-synthesize",
+  });
+
   emit({
     ...controller.getSnapshot(),
-    title:
-      verificationStatus === "completed"
-        ? "Current project read"
-        : "Current project read with missing evidence",
-    status: verificationStatus,
+    status: "verifying",
     commanderMessage:
       verificationStatus === "completed"
-        ? "Verifier confirmed the read-current-project workflow evidence."
-        : "Verifier found missing or failing evidence in the read-current-project workflow.",
-    plan:
-      verificationStatus === "completed"
-        ? controller.getSnapshot().plan.map((step) => ({ ...step, status: "completed" }))
-        : markStep(controller.getSnapshot().plan, "summarize-project", "failed"),
+        ? "Verifier confirmed the evidence. Commander is writing the project conclusion."
+        : "Verifier found issues in the evidence. Commander will summarize the findings.",
+    plan: markStep(
+      controller.getSnapshot().plan,
+      "summarize-project",
+      verificationStatus === "completed" ? "completed" : "failed",
+      "commander-synthesize",
+      "running",
+    ),
     agents: agentTracker.getSnapshots(),
     verificationSummary,
-    logs: [
-      ...appendLog(controller.getSnapshot(), verifierCheck
-        ? emitEvent({
-            kind: "tool.completed",
-            taskId,
-            toolName: "verifier.check",
-            detail: verifierCheck.detail,
-          })
-        : verificationStatus === "completed"
-          ? emitEvent({
-              kind: "task.completed",
-              taskId,
-              detail: `Verifier checked project evidence for workspace ${project.workspacePath || "(unknown)"}.`,
-            })
-          : {
-              id: `${taskId}-verification-failed`,
-              kind: "verification",
-              title: "verification.failed",
-              detail: `Verifier checked project evidence for workspace ${project.workspacePath || "(unknown)"}.`,
-            }),
-      ...(verifierCheck && verificationStatus === "completed"
-        ? [emitEvent({
-            kind: "task.completed",
-            taskId,
-            detail: `Verifier checked project evidence for workspace ${project.workspacePath || "(unknown)"}.`,
-          })]
-        : []),
-    ],
+    logs: appendLog(controller.getSnapshot(), verifierCheck
+      ? emitEvent({
+          kind: "tool.completed",
+          taskId,
+          toolName: "verifier.check",
+          detail: verifierCheck.detail,
+        })
+      : {
+          id: `${taskId}-verification-done`,
+          kind: "event",
+          title: "verification.completed",
+          detail: `Verifier checked project evidence for workspace ${project.workspacePath || "(unknown)"}.`,
+        }),
   });
 
   return verifierCheck;
+}
+
+async function runCommanderSynthesisStep({
+  agentTracker,
+  controller,
+  emit,
+  emitEvent,
+  commanderTool,
+  taskId,
+  userGoal,
+  workflowTitle,
+  contextSnapshot,
+}: {
+  agentTracker: ReadCurrentProjectAgentTracker;
+  controller: FlowController;
+  emit: SnapshotEmitter;
+  emitEvent: RuntimeEventEmitter;
+  commanderTool?: CommanderTool;
+  taskId: ID;
+  userGoal: string;
+  workflowTitle: string;
+  contextSnapshot: Record<string, unknown>;
+}): Promise<CommanderSynthesizeResult | undefined> {
+  const result = await safeSynthesizeConclusion(
+    commanderTool,
+    userGoal,
+    workflowTitle,
+    contextSnapshot,
+  );
+
+  const conclusion = result?.message ?? createFallbackConclusion(contextSnapshot);
+  const hasConclusion = Boolean(result);
+
+  agentTracker.setState("agent-commander", {
+    status: "completed",
+    task: "Project conclusion written",
+  });
+  for (const agentId of ["agent-file", "agent-shell", "agent-code", "agent-verifier"] as const) {
+    if (agentTracker.getState(agentId)) {
+      agentTracker.setState(agentId, { status: "completed", task: "Contributed to project analysis" });
+    }
+  }
+
+  emit({
+    ...controller.getSnapshot(),
+    title: workflowTitle,
+    status: "completed",
+    commanderMessage: conclusion,
+    plan: controller.getSnapshot().plan.map((step) => ({
+      ...step,
+      status: step.id === "commander-synthesize" ? "completed" as const : step.status,
+    })),
+    agents: agentTracker.getSnapshots(),
+    logs: appendLog(controller.getSnapshot(), hasConclusion
+      ? emitEvent({
+          kind: "task.completed",
+          taskId,
+          detail: "Commander wrote the project conclusion from all collected evidence.",
+        })
+      : {
+          id: `${taskId}-synthesis-fallback`,
+          kind: "event",
+          title: "commander.synthesize",
+          detail: "No synthesis model available. Used rule-based evidence summary.",
+        }),
+  });
+
+  return result;
+}
+
+async function safeSynthesizeConclusion(
+  commanderTool: CommanderTool | undefined,
+  userGoal: string,
+  workflowTitle: string,
+  contextSnapshot: Record<string, unknown>,
+): Promise<CommanderSynthesizeResult | undefined> {
+  if (!commanderTool?.synthesize) return undefined;
+  try {
+    return await commanderTool.synthesize({
+      userGoal,
+      workflowTitle,
+      evidence: contextSnapshot,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function createFallbackConclusion(contextSnapshot: Record<string, unknown>): string {
+  const parts: string[] = [];
+  const project = contextSnapshot.projectInspection as ProjectInspection | undefined;
+  const fileScan = contextSnapshot.fileScan as { count?: number } | undefined;
+  const commands = Array.isArray(contextSnapshot.shellCommands)
+    ? (contextSnapshot.shellCommands as Array<{ command?: string; exitCode?: number }>)
+    : [];
+  const analysisSummary = contextSnapshot.analysisSummary as string | undefined;
+
+  if (project) {
+    parts.push(`项目使用 ${project.packageManager ?? "未知"} 包管理器`);
+    if (project.scripts.length > 0) {
+      parts.push(`${project.scripts.length} 个脚本（${project.scripts.map((s) => s.name).join("、")}）`);
+    }
+    if (project.recommendedStartCommand) parts.push(`启动命令: ${project.recommendedStartCommand}`);
+    if (project.recommendedTestCommand) parts.push(`测试命令: ${project.recommendedTestCommand}`);
+  }
+  if (fileScan?.count) parts.push(`扫描到 ${fileScan.count} 个 Markdown 文档`);
+  if (commands.length > 0) {
+    const passed = commands.filter((c) => c.exitCode === 0).length;
+    parts.push(`${passed}/${commands.length} 个环境检查命令通过`);
+  }
+  if (analysisSummary) parts.push(analysisSummary);
+
+  return parts.length > 0 ? parts.join("。\n") : "项目分析已完成，但未收集到足够的证据来生成结论。";
 }
 
 async function safeVerifyWorkflow(

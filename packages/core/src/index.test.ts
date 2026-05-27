@@ -244,12 +244,13 @@ describe("createFileScanTaskRuntime", () => {
 
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
-    expect(finalSnapshot.title).toBe("Current project read");
+    expect(finalSnapshot.title).toBe("Read current project");
     expect(finalSnapshot.plan.map((step) => step.id)).toEqual([
       "scan-files",
       "inspect-project",
       "analyze-code",
       "summarize-project",
+      "commander-synthesize",
     ]);
     expect(finalSnapshot.documents).toHaveLength(1);
     expect(finalSnapshot.project).toEqual(project);

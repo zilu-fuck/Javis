@@ -168,6 +168,48 @@ export function createJavisRuntime({
           throw error;
         }
       },
+      synthesize: async (request) => {
+        const taskId = taskIdRef.current ?? "task-unknown";
+        eventBus.emit({ kind: "agent.chunk_start", taskId, agentKind: "commander" });
+        try {
+          const evidenceEntries = Object.entries(request.evidence)
+            .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
+            .join("\n");
+          const prompt = [
+            "You are Javis Commander Agent.",
+            "Write a concise natural-language answer to the user's original goal.",
+            "Base your answer ONLY on the evidence collected by the agent team below.",
+            "Write in the same language as the user's goal.",
+            "Do NOT describe internal processes — speak directly to the user.",
+            `User goal: ${request.userGoal}`,
+            `Workflow: ${request.workflowTitle}`,
+            `Collected evidence:\n${evidenceEntries}`,
+          ].join("\n");
+          const result = await completeWithChineseReview(
+            prompt,
+            { maxTokens: 800, temperature: 0.3, locale: "zh-CN" },
+            providerFor("commander"),
+            "none",
+          );
+          const message = result.text.trim();
+          eventBus.emit({
+            kind: "agent.chunk_end",
+            taskId,
+            agentKind: "commander",
+            fullText: message,
+          });
+          return { message };
+        } catch (error) {
+          eventBus.emit({
+            kind: "agent.chunk_end",
+            taskId,
+            agentKind: "commander",
+            fullText: "",
+            error: String(error),
+          });
+          throw error;
+        }
+      },
     },
     fileTool: {
       scanMarkdownDocuments: () => {
