@@ -89,6 +89,32 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).toContain("checking streamed evidence");
   });
 
+  it("keeps task sections visible while a response is streaming", () => {
+    const html = renderWorkbench({
+      id: "task-streaming-with-plan",
+      title: "Inspecting project",
+      userGoal: "Inspect project",
+      status: "running",
+      commanderMessage: "Commander is coordinating a project inspection.",
+      plan: [
+        {
+          id: "step-1",
+          title: "Inspect package scripts",
+          status: "running",
+        },
+      ],
+      agents: [],
+      logs: [],
+      streamingText: "Shell Agent is checking package metadata",
+      streamingAgentKind: "commander",
+      isStreaming: true,
+    });
+
+    expect(html).toContain("Shell Agent is checking package metadata");
+    expect(html).toContain("Plan");
+    expect(html).toContain("Inspect package scripts");
+  });
+
   it("renders the confirmed-write dry-run and keeps activity log collapsed by default", () => {
     const html = renderWorkbench(createTaskWithPermission("pending"));
 
@@ -127,7 +153,7 @@ describe("JavisWorkbench permission cards", () => {
     const html = renderWorkbench({
       title: "Research sources collected",
       userGoal: "Research Javis search integration",
-      status: "completed",
+      status: "running",
       commanderMessage: "Research Agent produced a source-backed report.",
       plan: [],
       agents: [],
@@ -146,6 +172,36 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).toContain("opencode-intellisearch");
     expect(html).toContain("github-cli");
     expect(html).toContain("Deep research plugin for OpenCode.");
+  });
+
+  it("collapses completed process details behind a user-controlled toggle", () => {
+    const html = renderWorkbench({
+      id: "task-completed-process-collapse",
+      title: "Project inspected",
+      userGoal: "Inspect project",
+      status: "completed",
+      commanderMessage: "Final conclusion: the project can be started with pnpm dev.",
+      plan: [
+        {
+          id: "hidden-step",
+          title: "Hidden intermediate package inspection",
+          status: "completed",
+        },
+      ],
+      agents: [],
+      logs: [],
+      project: {
+        workspacePath: "E:/Javis",
+        packageManager: "pnpm",
+        scripts: [{ name: "dev", command: "pnpm dev" }],
+        recommendedStartCommand: "pnpm dev",
+      },
+    });
+
+    expect(html).toContain("Final conclusion: the project can be started with pnpm dev.");
+    expect(html).toContain("Show process");
+    expect(html).not.toContain("Hidden intermediate package inspection");
+    expect(html).not.toContain("Project Inspection");
   });
 
   it("renders code review diff preview", () => {
@@ -279,7 +335,7 @@ describe("JavisWorkbench permission cards", () => {
     const html = renderWorkbench({
       title: "Code Agent patch applied",
       userGoal: "Review code changes",
-      status: "completed",
+      status: "running",
       commanderMessage: "Approved patch was applied.",
       plan: [],
       agents: [],

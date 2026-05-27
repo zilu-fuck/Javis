@@ -47,6 +47,21 @@ export function ThreadView({
 }: ThreadViewProps) {
   const streaming = useRenderedStreamingText(task);
   const showStreaming = streaming.isVisible;
+  const scrollAnchorRef = useRef<HTMLDivElement | null>(null);
+  const processKey = task.id ?? task.userGoal;
+  const [expandedProcessKey, setExpandedProcessKey] = useState<string | null>(null);
+  const isConclusionReady = task.status === "completed" && !showStreaming;
+  const hasProcessDetails = hasTaskProcessDetails(task);
+  const isProcessExpanded = expandedProcessKey === processKey;
+  const shouldShowProcessDetails =
+    hasProcessDetails && (!isConclusionReady || isProcessExpanded);
+
+  useEffect(() => {
+    scrollAnchorRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "end",
+    });
+  }, [isProcessExpanded, showStreaming, streaming.text, task]);
 
   return (
     <>
@@ -104,14 +119,33 @@ export function ThreadView({
           </article>
         )}
 
-        {!showStreaming && (
+        {isConclusionReady && hasProcessDetails ? (
+          <button
+            aria-expanded={isProcessExpanded}
+            className="javis-process-toggle"
+            onClick={() =>
+              setExpandedProcessKey((current) =>
+                current === processKey ? null : processKey,
+              )
+            }
+            type="button"
+          >
+            <span>{labels.processDetails}</span>
+            <strong>
+              {isProcessExpanded ? labels.hideProcessDetails : labels.showProcessDetails}
+            </strong>
+          </button>
+        ) : null}
+
+        {shouldShowProcessDetails ? (
           <TaskSections
             labels={labels}
             locale={locale}
             onPermissionDecision={onPermissionDecision}
             task={task}
           />
-        )}
+        ) : null}
+        <div aria-hidden="true" ref={scrollAnchorRef} />
       </section>
 
       <ChatComposer
@@ -131,6 +165,24 @@ export function ThreadView({
         recentWorkspacePaths={recentWorkspacePaths}
       />
     </>
+  );
+}
+
+function hasTaskProcessDetails(task: WorkbenchTask): boolean {
+  return Boolean(
+    task.status === "failed" ||
+      task.plan.length > 0 ||
+      task.documents?.length ||
+      task.commands?.length ||
+      task.codeReviewPreview ||
+      task.codeProposedEdit ||
+      task.codeApplyResult ||
+      task.fileOrganizationExecution ||
+      task.permissionRequest ||
+      task.project ||
+      task.researchReport ||
+      task.sources?.length ||
+      task.verificationSummary,
   );
 }
 
@@ -188,24 +240,21 @@ function useRenderedStreamingText(task: WorkbenchTask): {
     task.streamingAgentKind,
   ]);
 
+  // When streaming ends and rawText is already cleared, exit only after the
+  // displayed text has caught up. This preserves the typewriter handoff while
+  // avoiding a stale streaming bubble when the final text is byte-identical.
   useEffect(() => {
-    if (!isStreaming && active && isSettled) {
+    if (
+      !isStreaming &&
+      active &&
+      !rawText &&
+      targetText === finalText &&
+      displayedContent === finalText
+    ) {
       setActive(false);
       setTargetText("");
     }
-  }, [active, isSettled, isStreaming]);
-
-  // When streaming ends and rawText is already cleared, force-exit the
-  // streaming state.  Without this, the hook deadlocks when the final
-  // text (commanderMessage) is byte-identical to the last streamed text:
-  // setTargetText(finalText) produces no content change in useSmoothStream,
-  // so isSettled stays false forever.
-  useEffect(() => {
-    if (!isStreaming && active && !rawText) {
-      setActive(false);
-      setTargetText("");
-    }
-  }, [active, isStreaming, rawText]);
+  }, [active, displayedContent, finalText, isStreaming, rawText, targetText]);
 
   const shouldShowText = active || isStreaming || Boolean(rawText);
 

@@ -1166,6 +1166,45 @@ textarea:focus-visible {
   background: linear-gradient(135deg, #f5fbf8, #eaf4f1);
 }
 
+.javis-process-toggle {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  width: min(760px, 100%);
+  min-height: 42px;
+  border: 1px solid #d9e1db;
+  border-radius: 8px;
+  padding: 9px 12px;
+  color: var(--color-muted);
+  background: #ffffff;
+  box-shadow: 0 8px 22px rgba(28, 41, 35, 0.04);
+  text-align: left;
+}
+
+.javis-process-toggle:hover {
+  border-color: #b9cac3;
+  background: var(--color-accent-soft);
+}
+
+.javis-process-toggle span,
+.javis-process-toggle strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-process-toggle span {
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.javis-process-toggle strong {
+  color: var(--color-accent-strong);
+  font-size: 13px;
+  font-weight: 720;
+}
+
 .javis-message-title {
   margin: 0 0 6px;
   color: var(--color-ink);

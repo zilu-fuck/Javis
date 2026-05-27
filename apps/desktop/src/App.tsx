@@ -112,6 +112,8 @@ import { demoAgents } from "@javis/core";
 import "./App.css";
 
 export const DEFAULT_DRAFT_GOAL = "";
+const TASK_SNAPSHOT_REVEAL_DELAY_MS = 120;
+const STREAMING_SNAPSHOT_REVEAL_DELAY_MS = 16;
 
 const DOC_EXTENSIONS = [
   "docx", "doc", "txt", "pdf", "xlsx", "xls", "csv", "pptx", "ppt", "md", "rtf", "odt",
@@ -172,6 +174,10 @@ function scheduledTaskToWorkbench(
   };
 }
 
+function isStreamingTaskSnapshot(task: TaskSnapshot): boolean {
+  return Boolean(task.isStreaming || task.streamingText);
+}
+
 function App() {
   const databaseRef = useRef<DesktopDatabase | null>(null);
   const taskHistoryRepoRef = useRef<ReturnType<typeof createTaskHistoryRepository> | null>(null);
@@ -227,8 +233,8 @@ function App() {
   const didCheckRestoredApproval = useRef(false);
   const didInitDatabaseRef = useRef(false);
   const auditRecordIdsRef = useRef(new Set<string>());
-  const rafTaskRef = useRef<number>(0);
-  const pendingTaskRef = useRef<TaskSnapshot | null>(null);
+  const taskQueueRef = useRef<TaskSnapshot[]>([]);
+  const taskFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [draftGoal, setDraftGoal] = useState(DEFAULT_DRAFT_GOAL);
 
   // ── Sidebar view state ────────────────────────────────────────────
@@ -424,16 +430,7 @@ function App() {
         (nextTask as any).scheduledTaskId = sid;
         pendingScheduledTaskIdRef.current = undefined;
       }
-      pendingTaskRef.current = nextTask;
-      if (rafTaskRef.current === 0) {
-        rafTaskRef.current = requestAnimationFrame(() => {
-          rafTaskRef.current = 0;
-          if (pendingTaskRef.current !== null) {
-            setTask(pendingTaskRef.current);
-            pendingTaskRef.current = null;
-          }
-        });
-      }
+      enqueueTaskSnapshot(nextTask);
       void appendTaskSnapshotAuditJsonLines(
         createFileBackedTaskAuditJsonLineWriter(
           (line) =>
@@ -504,10 +501,7 @@ function App() {
       }
     });
     return () => {
-      if (rafTaskRef.current !== 0) {
-        cancelAnimationFrame(rafTaskRef.current);
-        rafTaskRef.current = 0;
-      }
+      clearQueuedTaskSnapshots();
       unsubscribe();
       runtime.dispose();
     };
@@ -534,9 +528,11 @@ function App() {
         updateApprovalRecord(expireApprovalRecord(pendingRecord, new Date().toISOString()));
         return;
       }
+      clearQueuedTaskSnapshots();
       setTask(createRestoredCodePatchApprovalTask(pendingRecord));
       return;
     }
+    clearQueuedTaskSnapshots();
     setTask(createRestoredPdfApprovalTask(pendingRecord));
   }, [approvalRecords, areDurableApprovalRecordsReady]);
 
@@ -623,6 +619,54 @@ function App() {
     }
   }, [activeView, scanVersion]);
 
+  function clearQueuedTaskSnapshots() {
+    if (taskFlushTimerRef.current) {
+      clearTimeout(taskFlushTimerRef.current);
+      taskFlushTimerRef.current = null;
+    }
+    taskQueueRef.current = [];
+  }
+
+  function scheduleQueuedTaskSnapshot(delayMs = 0) {
+    if (taskFlushTimerRef.current) {
+      return;
+    }
+
+    taskFlushTimerRef.current = setTimeout(() => {
+      taskFlushTimerRef.current = null;
+      const nextTask = taskQueueRef.current.shift();
+      if (!nextTask) {
+        return;
+      }
+
+      setTask(nextTask);
+
+      if (taskQueueRef.current.length > 0) {
+        scheduleQueuedTaskSnapshot(
+          isStreamingTaskSnapshot(nextTask)
+            ? STREAMING_SNAPSHOT_REVEAL_DELAY_MS
+            : TASK_SNAPSHOT_REVEAL_DELAY_MS,
+        );
+      }
+    }, delayMs);
+  }
+
+  function enqueueTaskSnapshot(nextTask: TaskSnapshot) {
+    const queue = taskQueueRef.current;
+    const lastQueuedTask = queue[queue.length - 1];
+    if (
+      lastQueuedTask &&
+      isStreamingTaskSnapshot(lastQueuedTask) &&
+      isStreamingTaskSnapshot(nextTask) &&
+      lastQueuedTask.id === nextTask.id
+    ) {
+      queue[queue.length - 1] = nextTask;
+    } else {
+      queue.push(nextTask);
+    }
+    scheduleQueuedTaskSnapshot();
+  }
+
   // Holds the scheduledTaskId for the currently-starting task so that
   // the subscription callback can attach it to the TaskSnapshot before
   // it's saved to history. Cleared after being consumed.
@@ -633,6 +677,7 @@ function App() {
     if (!goal) {
       return;
     }
+    clearQueuedTaskSnapshots();
     // Update workspace ref synchronously so the runtime reads the correct
     // path for this run. The state setter (useWorkspacePath) updates the UI
     // asynchronously and would arrive too late for the current run.
@@ -664,6 +709,7 @@ function App() {
     if (!goal) {
       return;
     }
+    clearQueuedTaskSnapshots();
     setDraftGoal(goal);
     workspaceRef.current = workspacePath;
     setIsTaskActive(true);
@@ -782,6 +828,7 @@ function App() {
   }
 
   function archiveRestoredTask(restoredTask: TaskSnapshot) {
+    clearQueuedTaskSnapshots();
     setTask(restoredTask);
     setHistory((current) => {
       const updated = upsertTaskHistory(current, restoredTask);
@@ -815,6 +862,7 @@ function App() {
   function selectHistoryEntry(id: string) {
     const entry = history.find((item) => item.id === id);
     if (entry) {
+      clearQueuedTaskSnapshots();
       setTask(entry);
       setDraftGoal("");
       setActiveView("chat");

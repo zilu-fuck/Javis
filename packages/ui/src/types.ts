@@ -354,6 +354,7 @@ export interface WorkbenchLocale {
     historyEmptyGroup: string;
     historyNoMatches: string;
     expandHistoryGroup: string;
+    hideProcessDetails: string;
     localKnowledgeBase: string;
     mainThread: string;
     manualSourceFallbackTitle: string;
@@ -376,6 +377,7 @@ export interface WorkbenchLocale {
     planMode: string;
     plugins: string;
     projectInspection: string;
+    processDetails: string;
     projects: string;
     profileName: string;
     researchReport: string;
@@ -386,6 +388,7 @@ export interface WorkbenchLocale {
     searchPlaceholder: string;
     settings: string;
     settingsPlaceholder: string;
+    showProcessDetails: string;
     skillMarket: string;
     source: string;
     status: string;
