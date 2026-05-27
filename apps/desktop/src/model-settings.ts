@@ -2,6 +2,38 @@ export const MODEL_SETTINGS_STORAGE_KEY = "javis.modelSettings.v1";
 
 type ModelSettingsStorage = Pick<Storage, "getItem" | "setItem">;
 
+// --- Multi-model configuration types ---
+
+/** The three built-in model slots. */
+export type ModelSlot = "primary" | "secondary" | "multimodal";
+
+/** A named model configuration persisted in model_profiles table. */
+export interface ModelProfile {
+  id: string;
+  slot: ModelSlot | null;
+  displayName: string;
+  provider: string;
+  model: string;
+  apiKeyReference: string;
+  baseUrl: string;
+  capabilities: {
+    vision: boolean;
+    code: boolean;
+    longContext: boolean;
+  };
+}
+
+/** Per-agent override: maps agentKind → profile id. */
+export type AgentModelOverrides = Partial<Record<string, string>>;
+
+/** Full model configuration loaded from SQLite. */
+export interface ModelConfiguration {
+  profiles: ModelProfile[];
+  agentOverrides: AgentModelOverrides;
+}
+
+// --- Legacy single-model settings (kept for migration) ---
+
 export interface ModelSettings {
   provider: string;
   model: string;
@@ -31,6 +63,75 @@ export function localeDefaultModelSettings(locale = "en"): ModelSettings {
     };
   }
   return DEFAULT_MODEL_SETTINGS;
+}
+
+// --- Default ModelConfiguration ---
+
+function defaultCapabilities(): ModelProfile["capabilities"] {
+  return { vision: false, code: false, longContext: false };
+}
+
+function defaultProfileForSlot(slot: ModelSlot, locale = "en"): ModelProfile {
+  const isZh = locale.toLowerCase().startsWith("zh");
+  switch (slot) {
+    case "primary":
+      return {
+        id: "primary",
+        slot: "primary",
+        displayName: isZh ? "主力模型" : "Primary",
+        provider: isZh ? "deepseek" : "openai",
+        model: isZh ? "deepseek-chat" : "",
+        apiKeyReference: "model.primary",
+        baseUrl: isZh ? "https://api.deepseek.com" : "",
+        capabilities: { vision: false, code: true, longContext: false },
+      };
+    case "secondary":
+      return {
+        id: "secondary",
+        slot: "secondary",
+        displayName: isZh ? "轻量模型" : "Secondary",
+        provider: "openai",
+        model: "gpt-4o-mini",
+        apiKeyReference: "model.secondary",
+        baseUrl: "",
+        capabilities: defaultCapabilities(),
+      };
+    case "multimodal":
+      return {
+        id: "multimodal",
+        slot: "multimodal",
+        displayName: isZh ? "视觉模型" : "Multimodal",
+        provider: "openai",
+        model: "gpt-4o",
+        apiKeyReference: "model.multimodal",
+        baseUrl: "",
+        capabilities: { vision: true, code: false, longContext: false },
+      };
+  }
+}
+
+/** Default agent → slot mapping. Agents not listed default to "primary". */
+export const DEFAULT_AGENT_SLOT: Record<string, ModelSlot> = {
+  commander: "primary",
+  code: "primary",
+  "chinese-reviewer": "primary",
+  verifier: "secondary",
+  scheduler: "secondary",
+  research: "secondary",
+  file: "secondary",
+  shell: "secondary",
+  computer: "multimodal",
+};
+
+export function createDefaultModelConfiguration(locale = "en"): ModelConfiguration {
+  return {
+    profiles: [
+      defaultProfileForSlot("primary", locale),
+      defaultProfileForSlot("secondary", locale),
+      defaultProfileForSlot("multimodal", locale),
+    ],
+    agentOverrides: {},
+  };
 }
 
 export function loadModelSettings(storage: ModelSettingsStorage): ModelSettings {

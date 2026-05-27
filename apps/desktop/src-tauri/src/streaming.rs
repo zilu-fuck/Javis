@@ -14,6 +14,7 @@ use tauri::{AppHandle, Emitter};
 use crate::{
     create_chat_completions_endpoint,
     create_openai_compatible_stream_body,
+    extract_openai_compatible_usage,
     default_openai_compatible_base_url_for_provider,
     extract_openai_compatible_stream_text,
     hydrate_model_completion_api_key_secret,
@@ -21,6 +22,7 @@ use crate::{
     normalize_model_completion_model_name,
     normalize_optional_config_value,
     ModelCompletionRequest,
+    ModelUsage,
 };
 
 const STREAMING_READ_TIMEOUT: Duration = Duration::from_secs(120);
@@ -43,6 +45,7 @@ pub struct StreamDonePayload {
     pub stream_id: String,
     pub finish_reason: Option<String>,
     pub total_chunks: u32,
+    pub token_usage: Option<ModelUsage>,
 }
 
 #[derive(Clone, Serialize)]
@@ -114,13 +117,14 @@ pub fn stream_model_prompt_start(
             streams.retain(|s| s.stream_id != stream_id_clone);
         }
         match result {
-            Ok(total) => {
+            Ok(result) => {
                 let _ = app.emit(
                     "stream-model-done",
                     StreamDonePayload {
                         stream_id: stream_id_clone,
                         finish_reason: Some("stop".into()),
-                        total_chunks: total,
+                        total_chunks: result.total_chunks,
+                        token_usage: result.token_usage,
                     },
                 );
             }
@@ -144,7 +148,7 @@ fn execute_streaming_request(
     app: &AppHandle,
     stream_id: &str,
     cancelled: &AtomicBool,
-) -> Result<u32, String> {
+) -> Result<StreamingRequestResult, String> {
     let api_key = normalize_optional_config_value(request.api_key.as_deref())
         .ok_or_else(|| "Model stream requires an API key.".to_string())?;
     let model = normalize_model_completion_model_name(request)
@@ -170,6 +174,7 @@ fn execute_streaming_request(
         .map_err(|error| format!("Model stream request failed: {error}"))?;
     let buf_reader = BufReader::new(response);
     let mut total_chunks: u32 = 0;
+    let mut token_usage: Option<ModelUsage> = None;
 
     for line in buf_reader.lines() {
         if cancelled.load(Ordering::Relaxed) {
@@ -188,6 +193,9 @@ fn execute_streaming_request(
         let value = serde_json::from_str::<serde_json::Value>(data).map_err(|error| {
             format!("Model stream returned invalid JSON chunk: {error}")
         })?;
+        if let Some(usage) = extract_openai_compatible_usage(&value) {
+            token_usage = Some(usage);
+        }
         if let Some(text) = extract_openai_compatible_stream_text(&value) {
             let _ = app.emit(
                 "stream-model-chunk",
@@ -207,7 +215,15 @@ fn execute_streaming_request(
         return Err("Model stream returned no content chunks.".to_string());
     }
 
-    Ok(total_chunks)
+    Ok(StreamingRequestResult {
+        total_chunks,
+        token_usage,
+    })
+}
+
+struct StreamingRequestResult {
+    total_chunks: u32,
+    token_usage: Option<ModelUsage>,
 }
 
 /// Cancel all active streams — called during app shutdown or task disposal.

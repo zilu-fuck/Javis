@@ -409,6 +409,7 @@ describe("task history persistence", () => {
 
     expect(imported.map((task) => task.id)).toEqual(["task-1000"]);
     expect(loaded.map((task) => task.id)).toEqual(["task-1000"]);
+    expect(storage.getItem(TASK_HISTORY_STORAGE_KEY)).toBeNull();
   });
 
   it("keeps existing repository history when localStorage import is empty", async () => {
@@ -476,10 +477,13 @@ function createTask(
   };
 }
 
-function createMemoryStorage(): Pick<Storage, "getItem" | "setItem"> {
+function createMemoryStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
   const values = new Map<string, string>();
   return {
     getItem: (key) => values.get(key) ?? null,
+    removeItem: (key) => {
+      values.delete(key);
+    },
     setItem: (key, value) => {
       values.set(key, value);
     },

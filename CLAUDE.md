@@ -78,13 +78,14 @@ pnpm rust:test           # Rust tests only
 - opencode/Code Agent: proposal only, never writes files directly
 - PDF operations: Downloads-scoped, move-only, one-time approval
 
-## Current State (2026-05-26)
+## Current State (2026-05-27)
 
 - Desktop workbench: implemented and packaged (Windows MSI/NSIS)
 - File scan, project inspection, research, PDF organization: implemented
-- Code Agent (opencode-backed): implemented with live QA in progress
+- Code Agent (opencode-backed): fixture QA passes (deny + approve), live DeepSeek QA needs reqwest request debugging
 - Chinese optimization: input preprocessor + terminology + reviewer agent done
-- Streaming output: infrastructure done (delta-reducer, event bus), Tauri SSE in progress
-- Persistence: localStorage for settings, durable approval records for PDF/Code Patch
+- Streaming output: Rust SSE backend fully implemented (background thread → Tauri events → frontend AsyncGenerator), task-flow UI consumption TBD
+- Persistence: model-settings in SQLite; task history, approval records, workspaces still in localStorage pending migration
 - Multi-agent workflow executor: implemented (DAG with parallel step support)
-- SQLite migration: planned, not started
+- SQLite infrastructure: database.rs with rusqlite, Tauri commands, migration system, model-settings already migrated
+- HTTP client: reqwest 0.12 with native-tls (not ureq — project has never used ureq)

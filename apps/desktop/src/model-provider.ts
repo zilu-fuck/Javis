@@ -14,18 +14,26 @@ export interface CompletionOptions {
 
 export interface StreamOptions extends CompletionOptions {
   onChunk?: (chunk: CompletionChunk) => void;
+  onUsage?: (usage: ModelUsage) => void;
 }
 
 export interface CompletionResult {
   text: string;
   model?: string;
   provider?: string;
+  tokenUsage?: ModelUsage;
 }
 
 export interface CompletionChunk {
   text: string;
   model?: string;
   provider?: string;
+}
+
+export interface ModelUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens?: number;
 }
 
 export class ModelProviderError extends Error {
@@ -78,6 +86,34 @@ export function createConfiguredModelProvider(settings: ModelSettings): ModelPro
   };
 }
 
+export function createModelProviderFromProfile(
+  profile: { provider: string; model: string; apiKeyReference: string; baseUrl: string },
+): ModelProvider {
+  const providerSettings: ModelProviderSettings = {
+    provider: profile.provider,
+    model: profile.model,
+    apiKeyReference: profile.apiKeyReference,
+    baseUrl: profile.baseUrl,
+  };
+  return {
+    id: (profile as any).id ?? profile.provider,
+    settings: providerSettings,
+    defaultSettingsForLocale: localeDefaultModelSettings,
+    async complete(prompt, options) {
+      try {
+        return await invoke<CompletionResult>("complete_model_prompt", {
+          request: createModelRequest(prompt, providerSettings, options),
+        });
+      } catch (error) {
+        throw normalizeModelProviderError(error, providerSettings.provider);
+      }
+    },
+    stream(prompt, options) {
+      return streamModelPrompt(prompt, providerSettings, options);
+    },
+  };
+}
+
 export function toModelProviderSettings(settings: ModelSettings): ModelProviderSettings {
   return {
     provider: settings.provider,
@@ -88,7 +124,8 @@ export function toModelProviderSettings(settings: ModelSettings): ModelProviderS
 }
 
 interface StreamChunkPayload {
-  stream_id: string;
+  streamId?: string;
+  stream_id?: string;
   text: string;
   model?: string;
   provider?: string;
@@ -96,13 +133,18 @@ interface StreamChunkPayload {
 }
 
 interface StreamDonePayload {
-  stream_id: string;
+  streamId?: string;
+  stream_id?: string;
   finish_reason?: string;
-  total_chunks: number;
+  totalChunks?: number;
+  total_chunks?: number;
+  tokenUsage?: ModelUsage;
+  token_usage?: ModelUsage;
 }
 
 interface StreamErrorPayload {
-  stream_id: string;
+  streamId?: string;
+  stream_id?: string;
   error: string;
 }
 
@@ -151,7 +193,7 @@ async function* streamModelPrompt(
     const unlistenChunk = await listen<StreamChunkPayload>(
       "stream-model-chunk",
       (event) => {
-        if (event.payload.stream_id !== streamId) return;
+        if (getPayloadStreamId(event.payload) !== streamId) return;
         const chunk: CompletionChunk = {
           text: event.payload.text,
           model: event.payload.model,
@@ -166,7 +208,9 @@ async function* streamModelPrompt(
     const unlistenDone = await listen<StreamDonePayload>(
       "stream-model-done",
       (event) => {
-        if (event.payload.stream_id !== streamId) return;
+        if (getPayloadStreamId(event.payload) !== streamId) return;
+        const usage = event.payload.tokenUsage ?? event.payload.token_usage;
+        if (usage) options?.onUsage?.(usage);
         finish();
       },
     );
@@ -175,7 +219,7 @@ async function* streamModelPrompt(
     const unlistenError = await listen<StreamErrorPayload>(
       "stream-model-error",
       (event) => {
-        if (event.payload.stream_id !== streamId) return;
+        if (getPayloadStreamId(event.payload) !== streamId) return;
         finish(new Error(event.payload.error));
       },
     );
@@ -204,6 +248,13 @@ async function* streamModelPrompt(
       unlisten();
     }
   }
+}
+
+function getPayloadStreamId(payload: {
+  streamId?: string;
+  stream_id?: string;
+}): string | undefined {
+  return payload.streamId ?? payload.stream_id;
 }
 
 function createModelRequest(

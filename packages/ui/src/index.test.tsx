@@ -69,6 +69,25 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).not.toContain("Task planning and orchestration");
   });
 
+  it("labels active verifier streaming output as verifier", () => {
+    const html = renderWorkbench({
+      id: "task-streaming-verifier",
+      title: "Checking evidence",
+      userGoal: "Inspect project",
+      status: "verifying",
+      commanderMessage: "Commander prepared a workflow plan.",
+      plan: [],
+      agents: [],
+      logs: [],
+      streamingText: "checking streamed evidence",
+      streamingAgentKind: "verifier",
+      isStreaming: true,
+    });
+
+    expect(html).toContain("Verifier");
+    expect(html).toContain("checking streamed evidence");
+  });
+
   it("renders the confirmed-write dry-run and keeps activity log collapsed by default", () => {
     const html = renderWorkbench(createTaskWithPermission("pending"));
 
@@ -205,7 +224,7 @@ describe("JavisWorkbench permission cards", () => {
     expect(genericFailedHtml).not.toContain("Manual source fallback");
   });
 
-  it("renders token usage totals and empty model-call state", () => {
+  it("renders token usage totals only after model calls", () => {
     const usedHtml = renderWorkbench({
       title: "Code Agent patch applied",
       userGoal: "Review code changes",
@@ -249,10 +268,10 @@ describe("JavisWorkbench permission cards", () => {
 
     expect(usedHtml).toContain("Token usage");
     expect(usedHtml).toContain("1,540");
-    expect(usedHtml).toContain("Input: 1,200");
-    expect(usedHtml).toContain("Output: 340");
-    expect(usedHtml).toContain("Calls: 1");
-    expect(unusedHtml).toContain("No model calls");
+    expect(usedHtml).toContain("Input 1,200");
+    expect(usedHtml).toContain("Output 340");
+    expect(unusedHtml).not.toContain("Token usage");
+    expect(unusedHtml).not.toContain("No model calls");
   });
 
   it("renders Code Agent patch proposals and apply results", () => {
@@ -428,7 +447,7 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).toContain("aria-label=\"Remove: E:/Javis\"");
   });
 
-  it("renders desktop opencode model settings controls", () => {
+  it("renders settings entry instead of the profile footer", () => {
     const html = renderToStaticMarkup(
       <JavisWorkbench
         draftGoal="Review code changes"
@@ -455,13 +474,10 @@ describe("JavisWorkbench permission cards", () => {
       />,
     );
 
-    expect(html).toContain("Desktop code tasks use this opencode model.");
-    expect(html).toContain("aria-label=\"Provider\"");
-    expect(html).toContain("value=\"openai\"");
-    expect(html).toContain("aria-label=\"Model\"");
-    expect(html).toContain("value=\"openai/gpt-5.1-codex\"");
-    expect(html).toContain("type=\"password\"");
-    expect(html).toContain("value=\"https://api.openai.com/v1\"");
+    expect(html).toContain("Settings");
+    expect(html).toContain("javis-settings-trigger");
+    expect(html).not.toContain("javis-sidebar-footer");
+    expect(html).not.toContain(">User</span>");
   });
 
   it("renders localized workspace controls", () => {

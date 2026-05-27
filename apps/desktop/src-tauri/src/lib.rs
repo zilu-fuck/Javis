@@ -254,6 +254,15 @@ struct ModelCompletionResponse {
     text: String,
     model: Option<String>,
     provider: Option<String>,
+    token_usage: Option<ModelUsage>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ModelUsage {
+    input_tokens: u32,
+    output_tokens: u32,
+    total_tokens: u32,
 }
 
 #[derive(Deserialize)]
@@ -887,10 +896,23 @@ fn normalize_model_api_key_reference(value: &str) -> Result<String, String> {
     if value.is_empty() {
         return Err("Model API key reference is required.".to_string());
     }
+    // Accept "default" for backward compatibility
     if value == MODEL_API_KEY_SECRET_REFERENCE {
         return Ok(value.to_string());
     }
-    Err("Unknown model API key reference.".to_string())
+    // Accept "model.<slot>" or "model.<uuid>" for multi-model profiles
+    if let Some(suffix) = value.strip_prefix("model.") {
+        if !suffix.is_empty()
+            && suffix
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        {
+            return Ok(value.to_string());
+        }
+    }
+    Err(format!(
+        "Unknown model API key reference: {value}. Expected 'default' or 'model.<name>'."
+    ))
 }
 
 #[cfg(windows)]
@@ -1514,6 +1536,7 @@ fn run_openai_compatible_completion_request(
         text,
         model: Some(model),
         provider: Some(provider_id),
+        token_usage: extract_openai_compatible_usage(&value),
     })
 }
 
@@ -1543,6 +1566,7 @@ pub(crate) fn create_openai_compatible_stream_body(
 ) -> serde_json::Value {
     let mut body = create_openai_compatible_completion_body(model, request);
     body["stream"] = serde_json::Value::Bool(true);
+    body["stream_options"] = serde_json::json!({ "include_usage": true });
     body
 }
 
@@ -1579,6 +1603,32 @@ pub(crate) fn extract_openai_compatible_stream_text(value: &serde_json::Value) -
         .and_then(|content| content.as_str())
         .map(str::to_string)
         .filter(|content| !content.is_empty())
+}
+
+pub(crate) fn extract_openai_compatible_usage(value: &serde_json::Value) -> Option<ModelUsage> {
+    let usage = value.get("usage")?;
+    let input_tokens = usage
+        .get("prompt_tokens")
+        .or_else(|| usage.get("input_tokens"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0) as u32;
+    let output_tokens = usage
+        .get("completion_tokens")
+        .or_else(|| usage.get("output_tokens"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0) as u32;
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(u64::from(input_tokens + output_tokens)) as u32;
+    if input_tokens == 0 && output_tokens == 0 && total_tokens == 0 {
+        return None;
+    }
+    Some(ModelUsage {
+        input_tokens,
+        output_tokens,
+        total_tokens,
+    })
 }
 
 pub(crate) fn normalize_model_completion_model_name(request: &ModelCompletionRequest) -> Option<String> {
@@ -4501,6 +4551,7 @@ mod tests {
         assert_eq!(body["model"], "gpt-test");
         assert_eq!(body["max_tokens"], 42);
         assert_eq!(body["stop"], serde_json::json!(["\n\n", " "]));
+        assert_eq!(body["stream_options"]["include_usage"], true);
     }
 
     #[test]
@@ -4523,6 +4574,22 @@ mod tests {
             extract_openai_compatible_stream_text(&value).as_deref(),
             Some("World")
         );
+    }
+
+    #[test]
+    fn extracts_openai_compatible_usage() {
+        let value: serde_json::Value = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 4,
+                "total_tokens": 16
+            }
+        });
+        let usage = extract_openai_compatible_usage(&value).expect("usage");
+
+        assert_eq!(usage.input_tokens, 12);
+        assert_eq!(usage.output_tokens, 4);
+        assert_eq!(usage.total_tokens, 16);
     }
 
     #[test]
@@ -4958,13 +5025,35 @@ mod tests {
             MODEL_API_KEY_SECRET_REFERENCE
         );
         assert_eq!(
-            normalize_model_api_key_reference("other").expect_err("unknown reference"),
-            "Unknown model API key reference."
-        );
-        assert_eq!(
             normalize_model_api_key_reference(" ").expect_err("missing reference"),
             "Model API key reference is required."
         );
+    }
+
+    #[test]
+    fn model_api_key_reference_accepts_model_prefix() {
+        assert_eq!(
+            normalize_model_api_key_reference("model.primary").unwrap(),
+            "model.primary"
+        );
+        assert_eq!(
+            normalize_model_api_key_reference("model.secondary").unwrap(),
+            "model.secondary"
+        );
+        assert_eq!(
+            normalize_model_api_key_reference("model.multimodal").unwrap(),
+            "model.multimodal"
+        );
+        assert_eq!(
+            normalize_model_api_key_reference("model.custom-uuid_123").unwrap(),
+            "model.custom-uuid_123"
+        );
+        // Reject empty suffix
+        assert!(normalize_model_api_key_reference("model.").is_err());
+        // Reject bare "other"
+        assert!(normalize_model_api_key_reference("other").is_err());
+        // Reject invalid characters in suffix
+        assert!(normalize_model_api_key_reference("model/foo").is_err());
     }
 
     #[test]
@@ -5727,6 +5816,7 @@ pub fn run() {
             append_task_session_jsonl_line,
             database::db_execute,
             database::db_select,
+            database::db_debug_path,
             database::db_close
         ])
         .run(tauri::generate_context!())

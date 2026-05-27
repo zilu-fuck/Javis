@@ -13,11 +13,15 @@ current codebase review. The central finding is that Javis is architecturally
 ready for multi-agent work, but its current runtime is still closer to
 single-task serial role routing than true multi-agent collaboration.
 
-**Status as of 2026-05-26**: Phases 1.1-1.3 complete. Phase 2.1 complete
+**Status as of 2026-05-27**: Phases 1.1-1.3 complete. Phase 2.1 complete
 (ModelProvider in desktop layer). Phase 2.2 partially complete (multi-route
-scoring exists, weighted scoring not yet). Phase 2.3 (SQLite) not started.
+scoring exists, weighted scoring not yet). Phase 2.3 (SQLite) infrastructure
+complete — rusqlite, Tauri commands, migration system, model-settings already
+migrated; task history, approval records, and workspaces pending migration.
 Phase 3.3 (shared context) complete. Phase 3.5 (DAG executor) implemented.
-Phase 4.1 (streaming events) infrastructure complete, Tauri SSE in progress.
+Phase 4.1 (streaming events) Rust SSE backend complete (background thread →
+Tauri events → frontend AsyncGenerator, with cancellation); task-flow UI
+consumption of streamed output still TBD.
 
 The goal is not to add parallelism early. The safer path is to first strengthen
 the foundation: modular runtime boundaries, reusable write approval, durable

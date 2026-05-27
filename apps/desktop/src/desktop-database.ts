@@ -13,15 +13,43 @@ export interface DesktopDatabaseMigration {
   sql: string;
 }
 
+function directInvoke(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<unknown> {
+  const internals = (window as any).__TAURI_INTERNALS__;
+  if (!internals?.invoke) {
+    throw new Error("Tauri IPC not ready — __TAURI_INTERNALS__ missing");
+  }
+  return internals.invoke(command, args ?? {});
+}
+
+async function retryInvoke(
+  command: string,
+  args?: Record<string, unknown>,
+  maxRetries = 150,
+  delayMs = 100,
+): Promise<unknown> {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await directInvoke(command, args);
+    } catch (error) {
+      if (i === maxRetries - 1) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw new Error("unreachable");
+}
+
 export function invokeDesktopDatabase(
-  invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>,
+  _moduleInvoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>,
 ): DesktopDatabase {
   return {
     async execute(sql, bindValues = []) {
-      await invoke("db_execute", { sql, bindValues });
+      await retryInvoke("db_execute", { sql, bindValues });
     },
     async select<T extends Record<string, unknown>>(sql: string, bindValues: DatabaseValue[] = []) {
-      const rows = await invoke("db_select", { sql, bindValues });
+      const rows = await retryInvoke("db_select", { sql, bindValues });
       return (rows as T[]) ?? [];
     },
   };

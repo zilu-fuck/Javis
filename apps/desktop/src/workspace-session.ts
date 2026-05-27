@@ -1,36 +1,24 @@
 import type { TaskSnapshot } from "@javis/core";
 import {
+  importRecentWorkspacePathsFromLocalStorage,
+  loadRecentWorkspacePathsFromDatabase,
   loadRecentWorkspacePaths,
   removeRecentWorkspacePath,
+  sanitizeWorkspacePaths,
+  saveRecentWorkspacePathsToDatabase,
   saveRecentWorkspacePaths,
   upsertRecentWorkspacePath,
 } from "./recent-workspaces";
-import type { DatabaseValue, DesktopDatabase, DesktopDatabaseMigration } from "./desktop-database";
+import type { DesktopDatabase } from "./desktop-database";
 
-type WorkspaceStorage = Pick<Storage, "getItem" | "setItem">;
+type WorkspaceReadStorage = Pick<Storage, "getItem">;
+type WorkspaceWriteStorage = Pick<Storage, "setItem">;
+type WorkspaceMigrationStorage = Pick<Storage, "getItem" | "removeItem">;
 
 export interface WorkspaceSession {
   workspacePath: string;
   recentWorkspacePaths: string[];
 }
-
-export const WORKSPACE_SESSION_TABLE_NAME = "workspace_session";
-export const WORKSPACE_SESSION_DEFAULT_ID = "default";
-export const WORKSPACE_SESSION_SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS workspace_session (
-  id TEXT PRIMARY KEY,
-  workspace_path TEXT NOT NULL,
-  recent_workspace_paths_json TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-)
-`.trim();
-export const WORKSPACE_SESSION_SCHEMA_MIGRATION: DesktopDatabaseMigration = {
-  id: "001_workspace_session",
-  sql: WORKSPACE_SESSION_SCHEMA_SQL,
-};
-export const WORKSPACE_SESSION_SCHEMA_MIGRATIONS: DesktopDatabaseMigration[] = [
-  WORKSPACE_SESSION_SCHEMA_MIGRATION,
-];
 
 export interface WorkspaceSessionRepository {
   load(): Promise<WorkspaceSession>;
@@ -41,10 +29,10 @@ export interface WorkspaceSessionRepository {
     taskStatus: TaskSnapshot["status"],
   ): Promise<WorkspaceSession>;
   deleteWorkspacePath(currentPaths: string[], workspacePath: string): Promise<WorkspaceSession>;
-  importFromLocalStorage(storage: WorkspaceStorage): Promise<WorkspaceSession>;
+  importFromLocalStorage(storage: WorkspaceMigrationStorage): Promise<WorkspaceSession>;
 }
 
-export function loadWorkspaceSession(storage: WorkspaceStorage): WorkspaceSession {
+export function loadWorkspaceSession(storage: WorkspaceReadStorage): WorkspaceSession {
   const recentWorkspacePaths = loadRecentWorkspacePaths(storage);
   return {
     workspacePath: recentWorkspacePaths[0] ?? "",
@@ -53,7 +41,7 @@ export function loadWorkspaceSession(storage: WorkspaceStorage): WorkspaceSessio
 }
 
 export function persistWorkspaceForTaskStatus(
-  storage: WorkspaceStorage,
+  storage: WorkspaceWriteStorage,
   currentPaths: string[],
   workspacePath: string,
   taskStatus: TaskSnapshot["status"],
@@ -82,7 +70,7 @@ export function getCompletedTaskWorkspacePath(task: TaskSnapshot): string {
 }
 
 export function deletePersistedWorkspacePath(
-  storage: WorkspaceStorage,
+  storage: WorkspaceWriteStorage,
   currentPaths: string[],
   workspacePath: string,
 ): string[] {
@@ -97,13 +85,26 @@ export function createWorkspaceSessionRepository(
 ): WorkspaceSessionRepository {
   return {
     async load() {
-      return loadWorkspaceSessionRow(database);
+      const recentWorkspacePaths = await loadRecentWorkspacePathsFromDatabase(database);
+      return sanitizeWorkspaceSession({
+        workspacePath: recentWorkspacePaths[0] ?? "",
+        recentWorkspacePaths,
+      });
     },
 
     async save(session) {
       const sanitized = sanitizeWorkspaceSession(session);
-      await saveWorkspaceSessionRow(database, sanitized);
-      return sanitized;
+      const nextRecentWorkspacePaths = sanitized.workspacePath
+        ? upsertRecentWorkspacePath(sanitized.recentWorkspacePaths, sanitized.workspacePath)
+        : sanitized.recentWorkspacePaths;
+      const savedRecentWorkspacePaths = await saveRecentWorkspacePathsToDatabase(
+        database,
+        nextRecentWorkspacePaths,
+      );
+      return sanitizeWorkspaceSession({
+        workspacePath: sanitized.workspacePath || savedRecentWorkspacePaths[0] || "",
+        recentWorkspacePaths: savedRecentWorkspacePaths,
+      });
     },
 
     async persistCompletedWorkspace(currentPaths, workspacePath, taskStatus) {
@@ -116,8 +117,14 @@ export function createWorkspaceSessionRepository(
         workspacePath: recentWorkspacePaths[0] ?? "",
         recentWorkspacePaths,
       });
-      await saveWorkspaceSessionRow(database, session);
-      return session;
+      const savedPaths = await saveRecentWorkspacePathsToDatabase(
+        database,
+        session.recentWorkspacePaths,
+      );
+      return sanitizeWorkspaceSession({
+        workspacePath: session.workspacePath,
+        recentWorkspacePaths: savedPaths,
+      });
     },
 
     async deleteWorkspacePath(currentPaths, workspacePath) {
@@ -126,24 +133,32 @@ export function createWorkspaceSessionRepository(
         workspacePath: recentWorkspacePaths[0] ?? "",
         recentWorkspacePaths,
       });
-      await saveWorkspaceSessionRow(database, session);
-      return session;
+      const savedPaths = await saveRecentWorkspacePathsToDatabase(
+        database,
+        session.recentWorkspacePaths,
+      );
+      return sanitizeWorkspaceSession({
+        workspacePath: session.workspacePath,
+        recentWorkspacePaths: savedPaths,
+      });
     },
 
     async importFromLocalStorage(storage) {
-      const importedSession = loadWorkspaceSession(storage);
-      if (importedSession.recentWorkspacePaths.length === 0) {
-        return loadWorkspaceSessionRow(database);
-      }
-      await saveWorkspaceSessionRow(database, importedSession);
-      return importedSession;
+      const recentWorkspacePaths = await importRecentWorkspacePathsFromLocalStorage(
+        database,
+        storage,
+      );
+      return sanitizeWorkspaceSession({
+        workspacePath: recentWorkspacePaths[0] ?? "",
+        recentWorkspacePaths,
+      });
     },
   };
 }
 
 export async function loadWorkspaceSessionWithStorageFallback(
   repository: Pick<WorkspaceSessionRepository, "load"> | null | undefined,
-  storage: WorkspaceStorage,
+  storage: WorkspaceReadStorage,
 ): Promise<WorkspaceSession> {
   if (!repository) {
     return loadWorkspaceSession(storage);
@@ -155,7 +170,7 @@ export async function loadWorkspaceSessionWithStorageFallback(
   }
 }
 
-function getPersistedWorkspacePaths(
+export function getPersistedWorkspacePaths(
   currentPaths: string[],
   workspacePath: string,
   taskStatus: TaskSnapshot["status"],
@@ -167,56 +182,6 @@ function getPersistedWorkspacePaths(
   return upsertRecentWorkspacePath(currentPaths, workspacePath);
 }
 
-async function loadWorkspaceSessionRow(
-  database: Pick<DesktopDatabase, "select">,
-): Promise<WorkspaceSession> {
-  const rows = await database.select<{
-    workspace_path: string;
-    recent_workspace_paths_json: string;
-  }>(
-    `SELECT workspace_path, recent_workspace_paths_json FROM ${WORKSPACE_SESSION_TABLE_NAME} WHERE id = ? LIMIT 1`,
-    [WORKSPACE_SESSION_DEFAULT_ID],
-  );
-  const row = rows[0];
-  if (!row) {
-    return { workspacePath: "", recentWorkspacePaths: [] };
-  }
-
-  return sanitizeWorkspaceSession({
-    workspacePath: row.workspace_path,
-    recentWorkspacePaths: parseWorkspacePathArray(row.recent_workspace_paths_json),
-  });
-}
-
-async function saveWorkspaceSessionRow(
-  database: Pick<DesktopDatabase, "execute">,
-  session: WorkspaceSession,
-  updatedAt = new Date().toISOString(),
-): Promise<void> {
-  const sanitized = sanitizeWorkspaceSession(session);
-  await database.execute(
-    `INSERT INTO ${WORKSPACE_SESSION_TABLE_NAME} (id, workspace_path, recent_workspace_paths_json, updated_at)
-VALUES (?, ?, ?, ?)
-ON CONFLICT(id) DO UPDATE SET
-  workspace_path = excluded.workspace_path,
-  recent_workspace_paths_json = excluded.recent_workspace_paths_json,
-  updated_at = excluded.updated_at`,
-    workspaceSessionBindValues(sanitized, updatedAt),
-  );
-}
-
-function workspaceSessionBindValues(
-  session: WorkspaceSession,
-  updatedAt: string,
-): DatabaseValue[] {
-  return [
-    WORKSPACE_SESSION_DEFAULT_ID,
-    session.workspacePath,
-    JSON.stringify(session.recentWorkspacePaths),
-    updatedAt,
-  ];
-}
-
 function sanitizeWorkspaceSession(session: WorkspaceSession): WorkspaceSession {
   const recentWorkspacePaths = sanitizeWorkspacePaths(session.recentWorkspacePaths);
   const workspacePath = session.workspacePath.trim();
@@ -225,36 +190,4 @@ function sanitizeWorkspaceSession(session: WorkspaceSession): WorkspaceSession {
     workspacePath: activeWorkspacePath,
     recentWorkspacePaths,
   };
-}
-
-function sanitizeWorkspacePaths(paths: unknown[]): string[] {
-  const seen = new Set<string>();
-  const sanitized: string[] = [];
-
-  for (const entry of paths) {
-    if (typeof entry !== "string") {
-      continue;
-    }
-    const path = entry.trim();
-    if (!path) {
-      continue;
-    }
-    const key = path.toLocaleLowerCase();
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-    sanitized.push(path);
-  }
-
-  return sanitized;
-}
-
-function parseWorkspacePathArray(value: string): string[] {
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? sanitizeWorkspacePaths(parsed) : [];
-  } catch {
-    return [];
-  }
 }

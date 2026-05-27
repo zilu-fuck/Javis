@@ -127,6 +127,7 @@ describe("approval records persistence", () => {
 
     expect(imported).toEqual([pending, approved]);
     expect(await loadApprovalRecordsFromDatabase(database)).toEqual([approved, pending]);
+    expect(storage.getItem(APPROVAL_RECORDS_STORAGE_KEY)).toBeNull();
   });
 
   it("falls back to localStorage when the database is unavailable", async () => {
@@ -268,10 +269,13 @@ function createApprovalRecord(
   };
 }
 
-function createMemoryStorage(): Pick<Storage, "getItem" | "setItem"> {
+function createMemoryStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
   const values = new Map<string, string>();
   return {
     getItem: (key) => values.get(key) ?? null,
+    removeItem: (key) => {
+      values.delete(key);
+    },
     setItem: (key, value) => {
       values.set(key, value);
     },

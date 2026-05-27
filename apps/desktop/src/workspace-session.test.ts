@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  WORKSPACE_SESSION_DEFAULT_ID,
-  WORKSPACE_SESSION_SCHEMA_MIGRATION,
-  WORKSPACE_SESSION_SCHEMA_MIGRATIONS,
-  WORKSPACE_SESSION_SCHEMA_SQL,
   deletePersistedWorkspacePath,
   createWorkspaceSessionRepository,
   getCompletedTaskWorkspacePath,
@@ -111,38 +107,22 @@ describe("workspace session persistence", () => {
     ).toBe("");
   });
 
-  it("exposes SQLite-ready workspace session schema migration SQL", () => {
-    expect(WORKSPACE_SESSION_SCHEMA_MIGRATION).toEqual({
-      id: "001_workspace_session",
-      sql: WORKSPACE_SESSION_SCHEMA_SQL,
-    });
-    expect(WORKSPACE_SESSION_SCHEMA_MIGRATIONS).toEqual([
-      WORKSPACE_SESSION_SCHEMA_MIGRATION,
-    ]);
-    expect(WORKSPACE_SESSION_SCHEMA_SQL).toContain(
-      "CREATE TABLE IF NOT EXISTS workspace_session",
-    );
-    expect(WORKSPACE_SESSION_SCHEMA_SQL).toContain(
-      "recent_workspace_paths_json TEXT NOT NULL",
-    );
-  });
-
-  it("persists workspace sessions through the async repository", async () => {
+  it("persists workspace sessions through the async recent workspace repository", async () => {
     const database = createMemoryWorkspaceSessionDatabase();
     const repository = createWorkspaceSessionRepository(database);
 
     const saved = await repository.save({
-      workspacePath: "",
+      workspacePath: "G:/Current",
       recentWorkspacePaths: [" E:/Javis ", "e:/javis", "F:/Other"],
     });
     const loaded = await repository.load();
 
     expect(saved).toEqual({
-      workspacePath: "E:/Javis",
-      recentWorkspacePaths: ["E:/Javis", "F:/Other"],
+      workspacePath: "G:/Current",
+      recentWorkspacePaths: ["G:/Current", "E:/Javis", "F:/Other"],
     });
     expect(loaded).toEqual(saved);
-    expect(database.row?.id).toBe(WORKSPACE_SESSION_DEFAULT_ID);
+    expect(database.rows.map((row) => row.path)).toEqual(["G:/Current", "E:/Javis", "F:/Other"]);
   });
 
   it("imports existing localStorage workspace session into the repository", async () => {
@@ -163,6 +143,7 @@ describe("workspace session persistence", () => {
       recentWorkspacePaths: ["E:/Javis", "F:/Other"],
     });
     expect(loaded).toEqual(imported);
+    expect(storage.getItem(RECENT_WORKSPACES_STORAGE_KEY)).toBeNull();
   });
 
   it("falls back to localStorage when workspace repository loading fails", async () => {
@@ -189,10 +170,13 @@ describe("workspace session persistence", () => {
   });
 });
 
-function createMemoryStorage(): Pick<Storage, "getItem" | "setItem"> {
+function createMemoryStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> {
   const values = new Map<string, string>();
   return {
     getItem: (key) => values.get(key) ?? null,
+    removeItem: (key) => {
+      values.delete(key);
+    },
     setItem: (key, value) => {
       values.set(key, value);
     },
@@ -200,39 +184,48 @@ function createMemoryStorage(): Pick<Storage, "getItem" | "setItem"> {
 }
 
 function createMemoryWorkspaceSessionDatabase() {
+  const rows: WorkspaceSessionRow[] = [];
   const database: DesktopDatabase & {
-    row: WorkspaceSessionRow | null;
+    rows: WorkspaceSessionRow[];
   } = {
-    row: null,
+    rows,
     async execute(sql: string, values: DatabaseValue[] = []) {
-      if (!sql.startsWith("INSERT INTO workspace_session")) {
+      if (sql.startsWith("DELETE FROM recent_workspaces")) {
+        rows.splice(0, rows.length);
         return;
       }
-      this.row = {
-        id: String(values[0]),
-        workspace_path: String(values[1]),
-        recent_workspace_paths_json: String(values[2]),
-        updated_at: String(values[3]),
-      };
-    },
-    async select<T extends Record<string, unknown>>() {
-      if (!this.row) {
-        return [];
+      if (!sql.startsWith("INSERT INTO recent_workspaces")) {
+        return;
       }
-      return [
-        {
-          workspace_path: this.row.workspace_path,
-          recent_workspace_paths_json: this.row.recent_workspace_paths_json,
-        } as unknown as T,
-      ];
+      const row = {
+        path: String(values[0]),
+        sort_order: Number(values[1]),
+        updated_at: String(values[2]),
+      };
+      const existingIndex = rows.findIndex((entry) => entry.path === row.path);
+      if (existingIndex >= 0) {
+        rows[existingIndex] = row;
+      } else {
+        rows.push(row);
+      }
+    },
+    async select<T extends Record<string, unknown>>(_sql: string, values: DatabaseValue[] = []) {
+      const limit = Number(values[0]);
+      return [...rows]
+        .sort(
+          (left, right) =>
+            left.sort_order - right.sort_order ||
+            right.updated_at.localeCompare(left.updated_at),
+        )
+        .slice(0, limit)
+        .map((row) => ({ path: row.path }) as unknown as T);
     },
   };
   return database;
 }
 
 interface WorkspaceSessionRow {
-  id: string;
-  workspace_path: string;
-  recent_workspace_paths_json: string;
+  path: string;
+  sort_order: number;
   updated_at: string;
 }

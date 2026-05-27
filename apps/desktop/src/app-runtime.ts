@@ -33,11 +33,17 @@ import type {
 import { parseGitStatusFiles } from "./git-status";
 import {
   createConfiguredModelProvider,
+  createModelProviderFromProfile,
   type CompletionOptions,
   type CompletionResult,
   type ModelProvider,
 } from "./model-provider";
-import type { ModelSettings } from "./model-settings";
+import {
+  DEFAULT_AGENT_SLOT,
+  type ModelConfiguration,
+  type ModelProfile,
+  type ModelSettings,
+} from "./model-settings";
 import { scanUserDocuments } from "./local-knowledge";
 import { preprocessChineseInput } from "./input-preprocessor";
 import {
@@ -49,13 +55,82 @@ import {
 interface CreateJavisRuntimeOptions {
   getWorkspacePath: () => string;
   modelSettings: ModelSettings;
+  modelConfiguration?: ModelConfiguration;
+}
+
+/**
+ * Resolve the ModelProvider for a given agentKind based on ModelConfiguration.
+ * Falls back to the primary profile if no override or match is found.
+ */
+function resolveModelForAgent(
+  agentKind: string,
+  config: ModelConfiguration,
+  providerCache: Map<string, ModelProvider>,
+): ModelProvider {
+  // Check explicit override first
+  const overrideProfileId = config.agentOverrides[agentKind];
+  if (overrideProfileId) {
+    const profile = config.profiles.find((p) => p.id === overrideProfileId);
+    if (profile) {
+      return getOrCreateProvider(profile, providerCache);
+    }
+  }
+
+  // Check DEFAULT_AGENT_SLOT mapping
+  const defaultSlot = DEFAULT_AGENT_SLOT[agentKind] ?? "primary";
+  const slotProfile = config.profiles.find((p) => p.slot === defaultSlot);
+  if (slotProfile) {
+    return getOrCreateProvider(slotProfile, providerCache);
+  }
+
+  // Fallback to primary or first profile
+  const primary = config.profiles.find((p) => p.slot === "primary") ?? config.profiles[0];
+  return getOrCreateProvider(primary, providerCache);
+}
+
+function getOrCreateProvider(
+  profile: ModelProfile,
+  cache: Map<string, ModelProvider>,
+): ModelProvider {
+  let provider = cache.get(profile.id);
+  if (!provider) {
+    provider = createModelProviderFromProfile(profile);
+    cache.set(profile.id, provider);
+  }
+  return provider;
 }
 
 export function createJavisRuntime({
   getWorkspacePath,
   modelSettings,
+  modelConfiguration,
 }: CreateJavisRuntimeOptions) {
-  const modelProvider = createConfiguredModelProvider(modelSettings);
+  const fallbackProvider = createConfiguredModelProvider(modelSettings);
+  const providerCache = new Map<string, ModelProvider>();
+  // Pre-populate cache with fallback for backward compatibility
+  providerCache.set("fallback", fallbackProvider);
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const getConfig = () => modelConfiguration ?? {
+    profiles: [{
+      id: "primary",
+      slot: "primary" as const,
+      displayName: "Primary",
+      provider: modelSettings.provider,
+      model: modelSettings.model,
+      apiKeyReference: modelSettings.apiKeyReference,
+      baseUrl: modelSettings.baseUrl,
+      capabilities: { vision: false, code: false, longContext: false },
+    }],
+    agentOverrides: {},
+  };
+  void getConfig;
+
+  const providerFor = (agentKind: string): ModelProvider => {
+    if (!modelConfiguration) return fallbackProvider;
+    return resolveModelForAgent(agentKind, modelConfiguration, providerCache);
+  };
+
   const sharedContext = createSharedTaskContext();
   const eventBus = createTaskEventBus();
   const taskIdRef: { current: string | null } = { current: null };
@@ -71,7 +146,8 @@ export function createJavisRuntime({
 
   const runtime = createFileScanTaskRuntime({
     chatTool: {
-      complete: (prompt, options) => modelProvider.complete(prompt, options),
+      complete: (prompt, options) => providerFor("commander").complete(prompt, options),
+      stream: (prompt, options) => providerFor("commander").stream(prompt, options),
     },
     commanderTool: {
       plan: async (request) => {
@@ -80,7 +156,7 @@ export function createJavisRuntime({
         try {
           const result = await planWithModelProviderStreaming(
             request,
-            modelProvider,
+            providerFor("commander"),
             (chunk) =>
               eventBus.emit({
                 kind: "agent.chunk",
@@ -169,7 +245,7 @@ export function createJavisRuntime({
         };
       },
       proposeEdit: ({ userGoal, preview }) =>
-        proposeCodeEditWithModelProvider(userGoal, preview, modelProvider),
+        proposeCodeEditWithModelProvider(userGoal, preview, providerFor("code")),
       applyProposedEdit: (edit: CodeProposedEdit, approval) =>
         invoke("approve_code_patch", {
           request: {
@@ -240,7 +316,7 @@ export function createJavisRuntime({
         try {
           const result = await verifyWithModelProviderStreaming(
             request,
-            modelProvider,
+            providerFor("verifier"),
             (chunk) =>
               eventBus.emit({
                 kind: "agent.chunk",
@@ -280,7 +356,7 @@ export function createJavisRuntime({
       void (async () => {
         sharedContext.clear();
         sharedContext.set(sharedContext.resolveKey(CONTEXT_KEYS.USER_GOAL, "zh-CN"), userGoal);
-        const result = await preprocessChineseInput(userGoal, modelProvider);
+        const result = await preprocessChineseInput(userGoal, providerFor("commander"));
         if (result) {
           sharedContext.set(
             sharedContext.resolveKey(CONTEXT_KEYS.PREPROCESSED_INPUT, "zh-CN"),

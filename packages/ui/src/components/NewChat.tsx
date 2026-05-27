@@ -1,6 +1,6 @@
 import type { FormEventHandler } from "react";
 import type { WorkbenchLocale } from "../types";
-import { WorkspaceContext } from "./WorkspaceContext";
+import { ChatComposer } from "./ChatComposer";
 
 interface NewChatProps {
   currentWorkspacePath: string;
@@ -30,27 +30,21 @@ export function NewChat({
   return (
     <section className="javis-new-chat" aria-label={labels.newChat}>
       <h1>{labels.newChatTitle}</h1>
-      <form className="javis-new-chat-composer" onSubmit={onSubmit}>
-        <textarea
-          aria-label={labels.taskInput}
-          onChange={(event) => onDraftGoalChange(event.currentTarget.value)}
-          placeholder={labels.taskInputPlaceholder}
-          value={draftGoal}
-        />
-        <div className="javis-new-chat-actions">
-          <button className="javis-attach-button" type="button">+</button>
-          <WorkspaceContext
-            currentWorkspacePath={currentWorkspacePath}
-            labels={labels}
-            onBrowseWorkspacePath={onBrowseWorkspacePath}
-            onDeleteRecentWorkspacePath={onDeleteRecentWorkspacePath}
-            onUseWorkspacePath={onUseWorkspacePath}
-            onWorkspacePathChange={onWorkspacePathChange}
-            recentWorkspacePaths={recentWorkspacePaths}
-          />
-          <button className="javis-send-button" type="submit">{labels.send}</button>
-        </div>
-      </form>
+      <ChatComposer
+        actionsClassName="javis-new-chat-actions"
+        className="javis-new-chat-composer"
+        currentWorkspacePath={currentWorkspacePath}
+        draftGoal={draftGoal}
+        labels={labels}
+        onBrowseWorkspacePath={onBrowseWorkspacePath}
+        onDeleteRecentWorkspacePath={onDeleteRecentWorkspacePath}
+        onDraftGoalChange={onDraftGoalChange}
+        onSubmit={onSubmit}
+        onUseWorkspacePath={onUseWorkspacePath}
+        onWorkspacePathChange={onWorkspacePathChange}
+        recentWorkspacePaths={recentWorkspacePaths}
+        sendButtonClassName="javis-send-button"
+      />
     </section>
   );
 }

@@ -108,6 +108,11 @@ pub fn db_select(
 }
 
 #[tauri::command]
+pub fn db_debug_path(app: AppHandle) -> Result<String, String> {
+    db_path(&app).map(|p| p.to_string_lossy().to_string())
+}
+
+#[tauri::command]
 pub fn db_close() -> Result<(), String> {
     let mut guard = DB.lock().map_err(|error| format!("Database lock error: {error}"))?;
     *guard = None;

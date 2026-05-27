@@ -3,6 +3,7 @@ import type {
   ActiveView,
   WorkbenchHistoryEntry,
   WorkbenchLocale,
+  WorkbenchModelConfiguration,
   WorkbenchModelSettings,
 } from "../types";
 import { filterWorkbenchHistoryEntries, formatModifiedTime, translateWorkbenchText } from "../utils";
@@ -12,6 +13,7 @@ interface SidebarProps {
   labels: WorkbenchLocale["labels"];
   locale: WorkbenchLocale;
   modelSettings: WorkbenchModelSettings;
+  modelConfiguration?: WorkbenchModelConfiguration;
   historyEntries: WorkbenchHistoryEntry[];
   sidebarSearchQuery: string;
   activeView?: ActiveView;
@@ -19,6 +21,7 @@ interface SidebarProps {
   skillCount?: number;
   onDeleteHistoryEntry?: (id: string) => void;
   onModelSettingsChange?: (settings: WorkbenchModelSettings) => void;
+  onModelConfigurationChange?: (config: WorkbenchModelConfiguration) => void;
   onSelectHistoryEntry?: (id: string) => void;
   onSidebarSearchQueryChange: (query: string) => void;
   onChangeActiveView?: (view: ActiveView) => void;
@@ -30,6 +33,7 @@ export function Sidebar({
   labels,
   locale,
   modelSettings,
+  modelConfiguration,
   historyEntries,
   sidebarSearchQuery,
   activeView = "chat",
@@ -37,6 +41,7 @@ export function Sidebar({
   skillCount = 0,
   onDeleteHistoryEntry,
   onModelSettingsChange,
+  onModelConfigurationChange,
   onSelectHistoryEntry,
   onSidebarSearchQueryChange,
   onChangeActiveView,
@@ -228,13 +233,10 @@ export function Sidebar({
       <ModelSettings
         labels={labels}
         modelSettings={modelSettings}
+        modelConfiguration={modelConfiguration}
         onModelSettingsChange={onModelSettingsChange}
+        onModelConfigurationChange={onModelConfigurationChange}
       />
-      <div className="javis-sidebar-footer">
-        <span className="javis-avatar">J</span>
-        <span>{labels.profileName}</span>
-        <span className="javis-device-mark">▯</span>
-      </div>
     </aside>
   );
 }

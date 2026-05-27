@@ -8,7 +8,8 @@ export const APPROVAL_RECORDS_STORAGE_KEY = "javis.approvalRecords.v1";
 export const APPROVAL_RECORDS_STORAGE_VERSION = 1;
 export const APPROVAL_RECORDS_LIMIT = 20;
 
-type ApprovalRecordStorage = Pick<Storage, "getItem" | "setItem">;
+type ApprovalRecordReadStorage = Pick<Storage, "getItem">;
+type ApprovalRecordWriteStorage = Pick<Storage, "setItem">;
 
 export type DurableApprovalStatus = "pending" | "approved" | "denied" | "expired";
 type PlannedPath = PermissionRequest["dryRun"]["affectedPaths"][number];
@@ -45,7 +46,7 @@ interface ApprovalRecordsEnvelope {
   records: DurableApprovalRecord[];
 }
 
-export function loadApprovalRecords(storage: ApprovalRecordStorage): DurableApprovalRecord[] {
+export function loadApprovalRecords(storage: ApprovalRecordReadStorage): DurableApprovalRecord[] {
   try {
     const raw = storage.getItem(APPROVAL_RECORDS_STORAGE_KEY);
     if (!raw) {
@@ -65,7 +66,7 @@ export function loadApprovalRecords(storage: ApprovalRecordStorage): DurableAppr
 }
 
 export function saveApprovalRecords(
-  storage: ApprovalRecordStorage,
+  storage: ApprovalRecordWriteStorage,
   records: DurableApprovalRecord[],
 ): DurableApprovalRecord[] {
   const sanitized = records

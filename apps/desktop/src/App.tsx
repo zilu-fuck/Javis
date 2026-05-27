@@ -28,6 +28,10 @@ import {
   upsertApprovalRecord,
   type DurableApprovalRecord,
 } from "./approval-records";
+import {
+  APPROVAL_RECORDS_MIGRATIONS,
+  createApprovalRecordsRepository,
+} from "./approval-records-persistence";
 import { createJavisRuntime } from "./app-runtime";
 import {
   CODE_PATCH_APPROVAL_TITLE,
@@ -78,17 +82,19 @@ import {
 } from "./task-history";
 import {
   createWorkspaceSessionRepository,
-  WORKSPACE_SESSION_SCHEMA_MIGRATIONS,
+  type WorkspaceSessionRepository,
 } from "./workspace-session";
-import {
-  createApprovalRecordsRepository,
-  APPROVAL_RECORDS_MIGRATIONS,
-} from "./approval-records-persistence";
+import { RECENT_WORKSPACES_SCHEMA_MIGRATIONS } from "./recent-workspaces";
 import {
   createModelSettingsRepository,
   MODEL_SETTINGS_MIGRATIONS,
   type ModelSettingsRepository,
 } from "./model-settings-persistence";
+import {
+  createModelProfileRepository,
+  MODEL_PROFILES_MIGRATIONS,
+  type ModelProfileRepository,
+} from "./model-profile-persistence";
 import {
   TOOL_CALL_AUDIT_MIGRATIONS,
 } from "./tool-call-audit";
@@ -166,13 +172,20 @@ function scheduledTaskToWorkbench(
 }
 
 function App() {
+  const databaseRef = useRef<DesktopDatabase | null>(null);
+  const taskHistoryRepoRef = useRef<ReturnType<typeof createTaskHistoryRepository> | null>(null);
+  const workspaceSessionRepoRef = useRef<WorkspaceSessionRepository | null>(null);
+  const approvalRecordsRepoRef = useRef<ReturnType<typeof createApprovalRecordsRepository> | null>(null);
+  const modelSettingsRepoRef = useRef<ModelSettingsRepository | null>(null);
+  const modelProfileRepoRef = useRef<ModelProfileRepository | null>(null);
   const {
     browseWorkspacePath,
     deleteRecentWorkspacePath,
     persistWorkspaceForTask,
+    replaceWorkspaceSession,
     useWorkspacePath,
     workspaceSession,
-  } = useWorkspaceSessionControls(window.localStorage);
+  } = useWorkspaceSessionControls(window.localStorage, workspaceSessionRepoRef);
   const { recentWorkspacePaths, workspacePath } = workspaceSession;
   const { modelSettings, updateModelSettings } = useModelSettingsControls(window.localStorage);
   // Ref always holds the effective workspace for the current/next run.
@@ -193,12 +206,17 @@ function App() {
   const [approvalRecords, setApprovalRecords] = useState(() =>
     loadApprovalRecords(window.localStorage),
   );
+  const historyInitialRef = useRef(history);
+  const historyCurrentRef = useRef(history);
+  historyCurrentRef.current = history;
+  const approvalRecordsInitialRef = useRef(approvalRecords);
+  const approvalRecordsCurrentRef = useRef(approvalRecords);
+  approvalRecordsCurrentRef.current = approvalRecords;
+  const workspaceSessionInitialRef = useRef(workspaceSession);
+  const workspaceSessionCurrentRef = useRef(workspaceSession);
+  workspaceSessionCurrentRef.current = workspaceSession;
+  const [areDurableApprovalRecordsReady, setDurableApprovalRecordsReady] = useState(false);
   const didCheckRestoredApproval = useRef(false);
-  const databaseRef = useRef<DesktopDatabase | null>(null);
-  const taskHistoryRepoRef = useRef<ReturnType<typeof createTaskHistoryRepository> | null>(null);
-  const workspaceSessionRepoRef = useRef<ReturnType<typeof createWorkspaceSessionRepository> | null>(null);
-  const approvalRecordsRepoRef = useRef<ReturnType<typeof createApprovalRecordsRepository> | null>(null);
-  const modelSettingsRepoRef = useRef<ModelSettingsRepository | null>(null);
   const didInitDatabaseRef = useRef(false);
   const auditRecordIdsRef = useRef(new Set<string>());
   const rafTaskRef = useRef<number>(0);
@@ -291,8 +309,9 @@ function App() {
 
       // Run all schema migrations
       await runDesktopDatabaseMigrations(database, TASK_HISTORY_SCHEMA_MIGRATIONS);
-      await runDesktopDatabaseMigrations(database, WORKSPACE_SESSION_SCHEMA_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, RECENT_WORKSPACES_SCHEMA_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, MODEL_SETTINGS_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, MODEL_PROFILES_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, APPROVAL_RECORDS_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, TOOL_CALL_AUDIT_MIGRATIONS);
 
@@ -301,20 +320,39 @@ function App() {
       const workspaceSessionRepo = createWorkspaceSessionRepository(database);
       const approvalRecordsRepo = createApprovalRecordsRepository(database);
       const modelSettingsRepo = createModelSettingsRepository(database);
+      const modelProfileRepo = createModelProfileRepository(database);
 
       taskHistoryRepoRef.current = taskHistoryRepo;
       workspaceSessionRepoRef.current = workspaceSessionRepo;
       approvalRecordsRepoRef.current = approvalRecordsRepo;
       modelSettingsRepoRef.current = modelSettingsRepo;
+      modelProfileRepoRef.current = modelProfileRepo;
 
-      await taskHistoryRepo.importFromLocalStorage(window.localStorage);
-      await workspaceSessionRepo.importFromLocalStorage(window.localStorage);
-      await approvalRecordsRepo.importFromLocalStorage(window.localStorage);
-      await modelSettingsRepo.importFromLocalStorage(window.localStorage);
+      const importedHistory = await taskHistoryRepo.importFromLocalStorage(window.localStorage);
+      const importedWorkspaceSession = await workspaceSessionRepo.importFromLocalStorage(
+        window.localStorage,
+      );
+      const importedApprovalRecords = await approvalRecordsRepo.importFromLocalStorage(
+        window.localStorage,
+      );
+      const legacySettings = await modelSettingsRepo.importFromLocalStorage(window.localStorage);
+      await modelProfileRepo.importFromLegacySettings(legacySettings);
+
+      if (historyCurrentRef.current === historyInitialRef.current) {
+        setHistory(importedHistory);
+      }
+      if (workspaceSessionCurrentRef.current === workspaceSessionInitialRef.current) {
+        replaceWorkspaceSession(importedWorkspaceSession);
+      }
+      if (approvalRecordsCurrentRef.current === approvalRecordsInitialRef.current) {
+        setApprovalRecords(importedApprovalRecords);
+      }
+      setDurableApprovalRecordsReady(true);
     })().catch((error) => {
       console.error("Database initialization failed, using localStorage fallback", error);
+      setDurableApprovalRecordsReady(true);
     });
-  }, []);
+  }, [replaceWorkspaceSession]);
 
   // ── Scheduled task trigger mechanism ──────────────────────────────
   useEffect(() => {
@@ -398,10 +436,18 @@ function App() {
         nextTask,
       );
       if (isArchivableTask(nextTask)) {
-        setHistory((current) =>
-          saveTaskHistory(window.localStorage, upsertTaskHistory(current, nextTask)),
-        );
-        void taskHistoryRepoRef.current?.upsert(nextTask);
+        setHistory((current) => {
+          const updated = upsertTaskHistory(current, nextTask);
+          const repository = taskHistoryRepoRef.current;
+          if (repository) {
+            void repository.upsert(nextTask).catch(() => {
+              saveTaskHistory(window.localStorage, updated);
+            });
+          } else {
+            saveTaskHistory(window.localStorage, updated);
+          }
+          return updated;
+        });
       }
       persistDurableApprovalRecord(nextTask);
       if (nextTask.status === "completed") {
@@ -452,6 +498,9 @@ function App() {
   }, [persistWorkspaceForTask, runtime]);
 
   useEffect(() => {
+    if (!areDurableApprovalRecordsReady) {
+      return;
+    }
     if (didCheckRestoredApproval.current) {
       return;
     }
@@ -473,7 +522,7 @@ function App() {
       return;
     }
     setTask(createRestoredPdfApprovalTask(pendingRecord));
-  }, [approvalRecords]);
+  }, [approvalRecords, areDurableApprovalRecordsReady]);
 
   // Incremented by refresh handlers to force re-scan even when activeView
   // hasn't changed. Without this, clicking refresh while already on a view
@@ -581,6 +630,9 @@ function App() {
       setActiveScheduledTaskId(scheduledTaskId);
       pendingScheduledTaskIdRef.current = scheduledTaskId;
     }
+    if (!goalOverride) {
+      setDraftGoal("");
+    }
     auditRecordIdsRef.current.clear();
     runtime.start(goal);
   }
@@ -626,16 +678,30 @@ function App() {
       return;
     }
     setApprovalRecords((current) => {
-      const updated = saveApprovalRecords(window.localStorage, upsertApprovalRecord(current, record));
-      void approvalRecordsRepoRef.current?.upsert(record);
+      const updated = upsertApprovalRecord(current, record);
+      const repository = approvalRecordsRepoRef.current;
+      if (repository) {
+        void repository.upsert(record).catch(() => {
+          saveApprovalRecords(window.localStorage, updated);
+        });
+      } else {
+        saveApprovalRecords(window.localStorage, updated);
+      }
       return updated;
     });
   }
 
   function updateApprovalRecord(record: DurableApprovalRecord) {
     setApprovalRecords((current) => {
-      const updated = saveApprovalRecords(window.localStorage, upsertApprovalRecord(current, record));
-      void approvalRecordsRepoRef.current?.upsert(record);
+      const updated = upsertApprovalRecord(current, record);
+      const repository = approvalRecordsRepoRef.current;
+      if (repository) {
+        void repository.upsert(record).catch(() => {
+          saveApprovalRecords(window.localStorage, updated);
+        });
+      } else {
+        saveApprovalRecords(window.localStorage, updated);
+      }
       return updated;
     });
   }
@@ -695,10 +761,18 @@ function App() {
 
   function archiveRestoredTask(restoredTask: TaskSnapshot) {
     setTask(restoredTask);
-    setHistory((current) =>
-      saveTaskHistory(window.localStorage, upsertTaskHistory(current, restoredTask)),
-    );
-    void taskHistoryRepoRef.current?.upsert(restoredTask);
+    setHistory((current) => {
+      const updated = upsertTaskHistory(current, restoredTask);
+      const repository = taskHistoryRepoRef.current;
+      if (repository) {
+        void repository.upsert(restoredTask).catch(() => {
+          saveTaskHistory(window.localStorage, updated);
+        });
+      } else {
+        saveTaskHistory(window.localStorage, updated);
+      }
+      return updated;
+    });
   }
 
   function handlePermissionDecision(decision: "approved" | "denied") {
@@ -726,12 +800,18 @@ function App() {
   }
 
   function deleteHistoryEntry(id: string) {
-    setHistory((current) =>
-      saveTaskHistory(
-        window.localStorage,
-        current.filter((entry) => entry.id !== id),
-      ),
-    );
+    setHistory((current) => {
+      const updated = current.filter((entry) => entry.id !== id);
+      const repository = taskHistoryRepoRef.current;
+      if (repository) {
+        void repository.save(updated).catch(() => {
+          saveTaskHistory(window.localStorage, updated);
+        });
+      } else {
+        saveTaskHistory(window.localStorage, updated);
+      }
+      return updated;
+    });
   }
 
   function toggleScheduledTask(id: string) {

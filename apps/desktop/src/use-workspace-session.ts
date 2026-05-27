@@ -1,13 +1,20 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState, type RefObject } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   deletePersistedWorkspacePath,
+  getPersistedWorkspacePaths,
   loadWorkspaceSession,
   persistWorkspaceForTaskStatus,
+  type WorkspaceSession,
+  type WorkspaceSessionRepository,
 } from "./workspace-session";
 import type { TaskSnapshot } from "@javis/core";
+import { removeRecentWorkspacePath } from "./recent-workspaces";
 
-export function useWorkspaceSessionControls(storage: Storage) {
+export function useWorkspaceSessionControls(
+  storage: Storage,
+  repositoryRef?: RefObject<WorkspaceSessionRepository | null>,
+) {
   const [workspaceSession, setWorkspaceSession] = useState(() =>
     loadWorkspaceSession(storage),
   );
@@ -16,16 +23,38 @@ export function useWorkspaceSessionControls(storage: Storage) {
     status: TaskSnapshot["status"],
     completedWorkspacePath: string,
   ) => {
-    setWorkspaceSession((current) => ({
-      ...current,
-      recentWorkspacePaths: persistWorkspaceForTaskStatus(
-        storage,
+    setWorkspaceSession((current) => {
+      const recentWorkspacePaths = getPersistedWorkspacePaths(
         current.recentWorkspacePaths,
         completedWorkspacePath,
         status,
-      ),
-    }));
-  }, [storage]);
+      );
+      const repository = repositoryRef?.current;
+      if (repository) {
+        void repository
+          .persistCompletedWorkspace(current.recentWorkspacePaths, completedWorkspacePath, status)
+          .catch(() => {
+            persistWorkspaceForTaskStatus(
+              storage,
+              current.recentWorkspacePaths,
+              completedWorkspacePath,
+              status,
+            );
+          });
+      } else {
+        persistWorkspaceForTaskStatus(
+          storage,
+          current.recentWorkspacePaths,
+          completedWorkspacePath,
+          status,
+        );
+      }
+      return {
+        ...current,
+        recentWorkspacePaths,
+      };
+    });
+  }, [repositoryRef, storage]);
 
   const useWorkspacePath = useCallback((path: string) => {
     setWorkspaceSession((current) => ({
@@ -47,11 +76,17 @@ export function useWorkspaceSessionControls(storage: Storage) {
 
   const deleteRecentWorkspacePath = useCallback((path: string) => {
     setWorkspaceSession((current) => {
-      const recentWorkspacePaths = deletePersistedWorkspacePath(
-        storage,
-        current.recentWorkspacePaths,
-        path,
-      );
+      const repository = repositoryRef?.current;
+      const recentWorkspacePaths = repository
+        ? removeRecentWorkspacePath(current.recentWorkspacePaths, path)
+        : deletePersistedWorkspacePath(storage, current.recentWorkspacePaths, path);
+      if (repository) {
+        void repository
+          .deleteWorkspacePath(current.recentWorkspacePaths, path)
+          .catch(() => {
+            deletePersistedWorkspacePath(storage, current.recentWorkspacePaths, path);
+          });
+      }
       return {
         workspacePath:
           current.workspacePath.toLocaleLowerCase() === path.trim().toLocaleLowerCase()
@@ -60,12 +95,17 @@ export function useWorkspaceSessionControls(storage: Storage) {
         recentWorkspacePaths,
       };
     });
-  }, [storage]);
+  }, [repositoryRef, storage]);
+
+  const replaceWorkspaceSession = useCallback((session: WorkspaceSession) => {
+    setWorkspaceSession(session);
+  }, []);
 
   return {
     browseWorkspacePath,
     deleteRecentWorkspacePath,
     persistWorkspaceForTask,
+    replaceWorkspaceSession,
     useWorkspacePath,
     workspaceSession,
   };

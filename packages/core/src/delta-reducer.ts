@@ -16,23 +16,32 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
   let current = structuredClone(initial);
   const logs: TaskLogEntry[] = [...initial.logs];
   const partialTexts = new Map<AgentKind, string>();
+  let activeStreamingAgentKind: AgentKind | undefined = initial.streamingAgentKind;
 
   return {
     getSnapshot(): TaskSnapshot {
+      const activeStreamingText = activeStreamingAgentKind
+        ? partialTexts.get(activeStreamingAgentKind)
+        : undefined;
       return {
         ...current,
         logs: [...logs],
         streamingText:
+          activeStreamingText ??
           partialTexts.get("commander") ??
           partialTexts.get("verifier") ??
           partialTexts.get("research") ??
           undefined,
+        streamingAgentKind: activeStreamingAgentKind,
       };
     },
     syncFrom(snapshot: TaskSnapshot) {
       current = structuredClone(snapshot);
       logs.length = 0;
       logs.push(...snapshot.logs);
+      activeStreamingAgentKind = snapshot.isStreaming
+        ? (snapshot.streamingAgentKind ?? activeStreamingAgentKind)
+        : undefined;
       // Keep partialTexts as-is — streaming sessions may span emit boundaries
     },
     apply(event: TaskRuntimeEvent): TaskSnapshot {
@@ -40,6 +49,7 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
         case "agent.chunk_start": {
           current = { ...current, isStreaming: true };
           partialTexts.set(event.agentKind, "");
+          activeStreamingAgentKind = event.agentKind;
           logs.push({
             id: `${event.taskId}-chunk-start-${event.agentKind}-${Date.now()}`,
             kind: "event",
@@ -54,8 +64,15 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
           break;
         }
         case "agent.chunk_end": {
-          current = { ...current, isStreaming: false };
           partialTexts.delete(event.agentKind);
+          if (activeStreamingAgentKind === event.agentKind) {
+            const nextStreamingAgentKind = partialTexts.keys().next().value;
+            activeStreamingAgentKind =
+              typeof nextStreamingAgentKind === "string"
+                ? nextStreamingAgentKind
+                : undefined;
+          }
+          current = { ...current, isStreaming: partialTexts.size > 0 };
           if (!event.error) {
             switch (event.agentKind) {
               case "commander":
@@ -101,6 +118,7 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
         case "task.failed": {
           current = { ...current, isStreaming: false };
           partialTexts.clear();
+          activeStreamingAgentKind = undefined;
           break;
         }
         // Existing event types are handled by full emit path, not DeltaReducer

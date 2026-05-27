@@ -2,7 +2,6 @@ import type { WorkbenchLocale, WorkbenchTask } from "../types";
 import {
   formatModifiedTime,
   formatSize,
-  formatTokenCount,
   isResearchFallbackTask,
   translateWorkbenchText,
 } from "../utils";
@@ -28,29 +27,6 @@ export function TaskSections({ labels, locale, task, onPermissionDecision }: Tas
                       <section className="javis-recovery" aria-label={labels.manualSourceFallbackTitle}>
                         <p className="javis-message-title">{labels.manualSourceFallbackTitle}</p>
                         <p>{labels.manualSourceFallbackMessage}</p>
-                      </section>
-                    ) : null}
-
-                    {task.tokenUsage ? (
-                      <section className="javis-token-usage" aria-label={labels.tokenUsage}>
-                        <div className="javis-token-usage-header">
-                          <p className="javis-message-title">{labels.tokenUsage}</p>
-                          <strong>{formatTokenCount(task.tokenUsage.totalTokens)}</strong>
-                        </div>
-                        <div className="javis-token-grid">
-                          <span>
-                            {labels.tokenInput}: {formatTokenCount(task.tokenUsage.inputTokens)}
-                          </span>
-                          <span>
-                            {labels.tokenOutput}: {formatTokenCount(task.tokenUsage.outputTokens)}
-                          </span>
-                          <span>
-                            {labels.tokenCalls}: {formatTokenCount(task.tokenUsage.modelCalls)}
-                          </span>
-                        </div>
-                        {task.tokenUsage.modelCalls === 0 ? (
-                          <p>{labels.noModelCalls}</p>
-                        ) : null}
                       </section>
                     ) : null}
 

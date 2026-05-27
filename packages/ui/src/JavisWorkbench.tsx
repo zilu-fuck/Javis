@@ -19,6 +19,7 @@ export function JavisWorkbench({
   historyEntries = [],
   locale = defaultWorkbenchLocale,
   modelSettings,
+  modelConfiguration,
   recentWorkspacePaths = [],
   activeView: activeViewProp,
   scheduledTasks = [],
@@ -42,6 +43,7 @@ export function JavisWorkbench({
   onDeleteRecentWorkspacePath,
   onBrowseWorkspacePath,
   onModelSettingsChange,
+  onModelConfigurationChange,
   onSelectHistoryEntry,
   onUseWorkspacePath,
   onWorkspacePathChange,
@@ -188,9 +190,11 @@ export function JavisWorkbench({
         labels={labels}
         locale={effectiveLocale}
         modelSettings={effectiveModelSettings}
+        modelConfiguration={modelConfiguration}
         onChangeActiveView={handleChangeActiveView}
         onDeleteHistoryEntry={onDeleteHistoryEntry}
         onModelSettingsChange={onModelSettingsChange}
+        onModelConfigurationChange={onModelConfigurationChange}
         onSelectHistoryEntry={onSelectHistoryEntry}
         onSidebarSearchQueryChange={setSidebarSearchQuery}
         scheduledTaskCount={scheduledTasks.filter((t) => t.enabled).length}

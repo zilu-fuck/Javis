@@ -213,26 +213,6 @@ export interface AgentRun {
   endedAt?: ISODateTime;
 }
 
-export interface ModelProfile {
-  id: ID;
-  provider: string;
-  model: string;
-  displayName: string;
-  tags: string[];
-  capabilities: {
-    text: boolean;
-    vision: boolean;
-    code: boolean;
-    longContext: boolean;
-    local: boolean;
-    toolCalling: boolean;
-  };
-  limits?: {
-    contextTokens?: number;
-    outputTokens?: number;
-  };
-}
-
 export interface ToolCall {
   id: ID;
   taskId: ID;
@@ -369,6 +349,8 @@ export interface TaskSnapshot {
   verificationSummary?: string;
   /** Accumulated partial text during streaming. Non-empty + isStreaming → UI renders StreamingMessage. */
   streamingText?: string;
+  /** Agent currently producing streaming output. */
+  streamingAgentKind?: AgentKind;
   /** Whether an agent is currently generating streaming output. */
   isStreaming?: boolean;
 }
@@ -411,6 +393,17 @@ export interface ChatTool {
   ): Promise<{
     text: string;
     tokenUsage?: ModelUsage;
+  }>;
+  stream?(
+    prompt: string,
+    options?: {
+      maxTokens?: number;
+      temperature?: number;
+      locale?: string;
+      onUsage?: (usage: ModelUsage) => void;
+    },
+  ): AsyncIterable<{
+    text: string;
   }>;
 }
 
@@ -464,10 +457,8 @@ export function createFileScanTaskRuntime({
   const permissionHandlers = new Map<string, PendingPermissionHandler>();
   const queuedPermissionDecisions = new Map<string, "approved" | "denied">();
   let queuedLegacyPermissionDecision: "approved" | "denied" | undefined;
-  let snapshot = runtimeState.getSnapshot();
   function emit(nextSnapshot: TaskSnapshot) {
     runtimeState.emit(nextSnapshot);
-    snapshot = runtimeState.getSnapshot();
   }
   function setPendingPermissionHandler(
     requestId: string,
@@ -660,19 +651,25 @@ export function createFileScanTaskRuntime({
     });
 
     try {
-      const result = await activeChatTool.complete(createGeneralChatPrompt(userGoal, isChinese), {
-        maxTokens: 1200,
-        temperature: 0.7,
-        locale: isChinese ? "zh-CN" : "en",
-      });
+      const result = await completeGeneralChat(
+        taskId,
+        createGeneralChatPrompt(userGoal, isChinese),
+        activeChatTool,
+        {
+          maxTokens: 1200,
+          temperature: 0.7,
+          locale: isChinese ? "zh-CN" : "en",
+        },
+      );
       const usage = result.tokenUsage ?? {
         inputTokens: 0,
         outputTokens: 0,
         totalTokens: 0,
       };
+      const currentSnapshot = runtimeState.getSnapshot();
 
       emit({
-        ...snapshot,
+        ...currentSnapshot,
         title: isChinese ? "\u5df2\u56de\u7b54" : "Answered",
         status: "completed",
         commanderMessage: result.text,
@@ -690,8 +687,8 @@ export function createFileScanTaskRuntime({
                 ? "\u672a\u5206\u914d\u5de5\u4f5c\u4efb\u52a1"
                 : "No workflow task assigned",
         })),
-        tokenUsage: addModelUsage(snapshot.tokenUsage, "commander", usage),
-        logs: appendLog(snapshot, {
+        tokenUsage: addModelUsage(currentSnapshot.tokenUsage, "commander", usage),
+        logs: appendLog(currentSnapshot, {
           id: `${taskId}-done`,
           kind: "event",
           title: "task.completed",
@@ -700,6 +697,57 @@ export function createFileScanTaskRuntime({
       });
     } catch (error) {
       runModelFailureTask(taskId, userGoal, error);
+    }
+  }
+
+  async function completeGeneralChat(
+    taskId: ID,
+    prompt: string,
+    activeChatTool: ChatTool,
+    options: {
+      maxTokens?: number;
+      temperature?: number;
+      locale?: string;
+    },
+  ): Promise<{ text: string; tokenUsage?: ModelUsage }> {
+    if (!activeChatTool.stream || !eventBus) {
+      return activeChatTool.complete(prompt, options);
+    }
+
+    let text = "";
+    let tokenUsage: ModelUsage | undefined;
+    eventBus.emit({ kind: "agent.chunk_start", taskId, agentKind: "commander" });
+    try {
+      for await (const chunk of activeChatTool.stream(prompt, {
+        ...options,
+        onUsage: (usage) => {
+          tokenUsage = usage;
+        },
+      })) {
+        text += chunk.text;
+        eventBus.emit({
+          kind: "agent.chunk",
+          taskId,
+          agentKind: "commander",
+          text: chunk.text,
+        });
+      }
+      eventBus.emit({
+        kind: "agent.chunk_end",
+        taskId,
+        agentKind: "commander",
+        fullText: text,
+      });
+      return { text, tokenUsage };
+    } catch {
+      eventBus.emit({
+        kind: "agent.chunk_end",
+        taskId,
+        agentKind: "commander",
+        fullText: "",
+        error: "stream failed",
+      });
+      return activeChatTool.complete(prompt, options);
     }
   }
 

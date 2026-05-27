@@ -1,28 +1,12 @@
+import type { DatabaseValue, DesktopDatabaseMigration } from "./desktop-database";
 import {
   APPROVAL_RECORDS_LIMIT,
   loadApprovalRecords,
   sanitizeApprovalRecord,
   type DurableApprovalRecord,
 } from "./approval-records";
-import type { DatabaseValue, DesktopDatabaseMigration } from "./desktop-database";
 
-export interface ApprovalRecordsDatabase {
-  execute(sql: string, bindValues?: DatabaseValue[]): Promise<void>;
-  select<T extends Record<string, unknown>>(
-    sql: string,
-    bindValues?: DatabaseValue[],
-  ): Promise<T[]>;
-}
-
-type ApprovalRecordStorage = Pick<Storage, "getItem" | "setItem">;
-
-export interface ApprovalRecordsRepository {
-  list(): Promise<DurableApprovalRecord[]>;
-  save(records: DurableApprovalRecord[]): Promise<DurableApprovalRecord[]>;
-  upsert(record: DurableApprovalRecord): Promise<DurableApprovalRecord | null>;
-  importFromLocalStorage(storage: ApprovalRecordStorage): Promise<DurableApprovalRecord[]>;
-}
-
+export const APPROVAL_RECORDS_TABLE_NAME = "approval_records";
 export const APPROVAL_RECORDS_CREATE_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS approval_records (
   approval_id TEXT PRIMARY KEY NOT NULL,
@@ -41,15 +25,12 @@ CREATE TABLE IF NOT EXISTS approval_records (
   record_json TEXT NOT NULL,
   updated_at TEXT NOT NULL
 )`.trim();
-
 export const APPROVAL_RECORDS_CREATE_STATUS_INDEX_SQL = `
 CREATE INDEX IF NOT EXISTS approval_records_status_tool_idx
 ON approval_records (status, tool_name, created_at DESC)`.trim();
-
 export const APPROVAL_RECORDS_CREATE_EXPIRATION_INDEX_SQL = `
 CREATE INDEX IF NOT EXISTS approval_records_expiration_idx
 ON approval_records (expires_at)`.trim();
-
 export const APPROVAL_RECORDS_MIGRATIONS: DesktopDatabaseMigration[] = [
   {
     id: "approval-records-v1-table",
@@ -65,14 +46,29 @@ export const APPROVAL_RECORDS_MIGRATIONS: DesktopDatabaseMigration[] = [
   },
 ];
 
+export interface ApprovalRecordsDatabase {
+  execute(sql: string, bindValues?: DatabaseValue[]): Promise<void>;
+  select<T extends Record<string, unknown>>(
+    sql: string,
+    bindValues?: DatabaseValue[],
+  ): Promise<T[]>;
+}
+
+export interface ApprovalRecordsRepository {
+  list(): Promise<DurableApprovalRecord[]>;
+  save(records: DurableApprovalRecord[]): Promise<DurableApprovalRecord[]>;
+  upsert(record: DurableApprovalRecord): Promise<DurableApprovalRecord | null>;
+  importFromLocalStorage(storage: Pick<Storage, "getItem" | "removeItem">): Promise<DurableApprovalRecord[]>;
+}
+
 const SELECT_APPROVAL_RECORDS_SQL = `
 SELECT record_json
-FROM approval_records
+FROM ${APPROVAL_RECORDS_TABLE_NAME}
 ORDER BY created_at DESC
 LIMIT ?`.trim();
 
 const UPSERT_APPROVAL_RECORD_SQL = `
-INSERT INTO approval_records (
+INSERT INTO ${APPROVAL_RECORDS_TABLE_NAME} (
   approval_id,
   task_id,
   tool_name,
@@ -106,10 +102,10 @@ ON CONFLICT(approval_id) DO UPDATE SET
   updated_at = excluded.updated_at`.trim();
 
 const DELETE_OVER_LIMIT_SQL = `
-DELETE FROM approval_records
+DELETE FROM ${APPROVAL_RECORDS_TABLE_NAME}
 WHERE approval_id NOT IN (
   SELECT approval_id
-  FROM approval_records
+  FROM ${APPROVAL_RECORDS_TABLE_NAME}
   ORDER BY created_at DESC
   LIMIT ?
 )`.trim();
@@ -188,16 +184,27 @@ export async function saveApprovalRecordsToDatabase(
 
 export async function importApprovalRecordsFromLocalStorage(
   database: ApprovalRecordsDatabase,
-  storage: ApprovalRecordStorage,
+  storage: Pick<Storage, "getItem" | "removeItem">,
   updatedAt = new Date().toISOString(),
 ): Promise<DurableApprovalRecord[]> {
+  const hasLegacyValue = storage.getItem("javis.approvalRecords.v1") !== null;
   const records = loadApprovalRecords(storage);
-  return saveApprovalRecordsToDatabase(database, records, updatedAt);
+  if (records.length > 0) {
+    const saved = await saveApprovalRecordsToDatabase(database, records, updatedAt);
+    removeLegacyApprovalRecordsStorage(storage);
+    return saved;
+  }
+
+  const currentRecords = await loadApprovalRecordsFromDatabase(database);
+  if (hasLegacyValue) {
+    removeLegacyApprovalRecordsStorage(storage);
+  }
+  return currentRecords;
 }
 
 export async function loadApprovalRecordsWithStorageFallback(
   database: ApprovalRecordsDatabase | null | undefined,
-  storage: ApprovalRecordStorage,
+  storage: Pick<Storage, "getItem">,
 ): Promise<DurableApprovalRecord[]> {
   if (!database) {
     return loadApprovalRecords(storage);
@@ -240,5 +247,13 @@ function parsePersistedApprovalRecord(value: unknown): DurableApprovalRecord | n
     return sanitizeApprovalRecord(JSON.parse(value));
   } catch {
     return null;
+  }
+}
+
+function removeLegacyApprovalRecordsStorage(storage: Pick<Storage, "removeItem">): void {
+  try {
+    storage.removeItem("javis.approvalRecords.v1");
+  } catch {
+    // Legacy cleanup should not block SQLite startup.
   }
 }

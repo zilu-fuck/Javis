@@ -25,6 +25,7 @@ describe("model provider", () => {
       text: "done",
       model: "gpt-test",
       provider: "openai",
+      tokenUsage: { inputTokens: 12, outputTokens: 4, totalTokens: 16 },
     });
     const provider = createConfiguredModelProvider(createSettings());
 
@@ -32,6 +33,7 @@ describe("model provider", () => {
       text: "done",
       model: "gpt-test",
       provider: "openai",
+      tokenUsage: { inputTokens: 12, outputTokens: 4, totalTokens: 16 },
     });
     expect(invokeMock).toHaveBeenCalledWith("complete_model_prompt", {
       request: {
@@ -52,28 +54,37 @@ describe("model provider", () => {
     invokeMock.mockResolvedValueOnce("stream-1");
     listenMock.mockImplementation(async (eventName, handler) => {
       if (eventName === "stream-model-chunk") {
-        handler({ payload: { stream_id: "stream-1", text: "Hel", model: "gpt-test", provider: "openai", index: 0 } } as never);
-        handler({ payload: { stream_id: "other", text: "skip", index: 0 } } as never);
-        handler({ payload: { stream_id: "stream-1", text: "lo", model: "gpt-test", provider: "openai", index: 1 } } as never);
+        handler({ payload: { streamId: "stream-1", text: "Hel", model: "gpt-test", provider: "openai", index: 0 } } as never);
+        handler({ payload: { streamId: "other", text: "skip", index: 0 } } as never);
+        handler({ payload: { streamId: "stream-1", text: "lo", model: "gpt-test", provider: "openai", index: 1 } } as never);
       }
       if (eventName === "stream-model-done") {
-        handler({ payload: { stream_id: "stream-1", total_chunks: 2 } } as never);
+        handler({
+          payload: {
+            streamId: "stream-1",
+            totalChunks: 2,
+            tokenUsage: { inputTokens: 8, outputTokens: 2, totalTokens: 10 },
+          },
+        } as never);
       }
       return (() => {}) as () => void;
     });
     const provider = createConfiguredModelProvider(createSettings());
     const seen: string[] = [];
+    const usages: Array<{ inputTokens: number; outputTokens: number; totalTokens?: number }> = [];
 
     const chunks = [];
     for await (const chunk of provider.stream("Say hello", {
       stopSequences: ["\n\n"],
       onChunk: (chunk) => seen.push(chunk.text),
+      onUsage: (usage) => usages.push(usage),
     })) {
       chunks.push(chunk.text);
     }
 
     expect(chunks).toEqual(["Hel", "lo"]);
     expect(seen).toEqual(["Hel", "lo"]);
+    expect(usages).toEqual([{ inputTokens: 8, outputTokens: 2, totalTokens: 10 }]);
     expect(invokeMock).toHaveBeenCalledWith("stream_model_prompt_start", {
       request: expect.objectContaining({
         prompt: "Say hello",

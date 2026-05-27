@@ -4,11 +4,11 @@
 
 ## 背景
 
-在 Code Agent live QA 遇到 ureq TLS 问题后，提出了是否应将底层从 opencode 换为 Pi Agent 的问题。本文档记录分析结论和参考信息。
+在 Code Agent live QA 遇到 HTTP 请求问题后，提出了是否应将底层从 opencode 换为 Pi Agent 的问题。本文档记录分析结论和参考信息。
 
 ## 结论：不换
 
-**Javis 的问题不是 opencode 的问题，是 ureq 的 TLS 配置问题。**
+**Javis 的问题不是 opencode 的问题，是 reqwest 的 HTTP 请求构造问题。**
 
 当前的 Code Agent proposal 路径已经修好——有 API 凭证时直接走 HTTP API，完全跳过 opencode CLI：
 
@@ -23,9 +23,9 @@ if should_fallback_to_openai_compatible(&request) {
 // opencode 路径只在没有 API 凭证时才会走到（极少情况）
 ```
 
-Python 测试已验证 HTTP API 连通正常（HTTP 200 + 有效 JSON proposal）。问题出在 `ureq`（Rust HTTP 客户端）在 Windows release 构建中的 TLS 证书链。
+Python 测试已验证 HTTP API 连通正常（HTTP 200 + 有效 JSON proposal）。问题出在 `reqwest`（Rust HTTP 客户端，使用 native-tls/Schannel）在 Windows release 构建中的请求构造或证书处理。
 
-**修复方向**：`ureq` → `reqwest`（带 `native-tls` feature），或给 `ureq` 配置 Windows 根证书。
+**修复方向**：调试 reqwest 请求构造（项目已使用 reqwest 0.12 + native-tls），对比 Rust 和 Python 的请求 headers 与响应 body 差异。
 
 ---
 

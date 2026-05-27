@@ -1,9 +1,14 @@
-import type { FormEventHandler } from "react";
-import type { WorkbenchLocale, WorkbenchTask } from "../types";
-import { translateWorkbenchText } from "../utils";
+import { useEffect, useRef, useState, type FormEventHandler } from "react";
+import type {
+  WorkbenchLocale,
+  WorkbenchStreamingAgentKind,
+  WorkbenchTask,
+} from "../types";
+import { useSmoothStream } from "../use-smooth-stream";
+import { formatTokenCount, translateWorkbenchText } from "../utils";
+import { ChatComposer } from "./ChatComposer";
 import { StreamingMessage } from "./StreamingMessage";
 import { TaskSections } from "./TaskSections";
-import { WorkspaceContext } from "./WorkspaceContext";
 
 interface ThreadViewProps {
   currentWorkspacePath: string;
@@ -38,7 +43,8 @@ export function ThreadView({
   onUseWorkspacePath,
   onWorkspacePathChange,
 }: ThreadViewProps) {
-  const showStreaming = Boolean(task.isStreaming && task.streamingText);
+  const streaming = useRenderedStreamingText(task);
+  const showStreaming = streaming.isVisible;
 
   return (
     <>
@@ -69,9 +75,9 @@ export function ThreadView({
 
         {showStreaming ? (
           <StreamingMessage
-            text={task.streamingText!}
-            isStreaming={task.isStreaming!}
-            agentLabel={labels.commander}
+            text={streaming.text}
+            isStreaming={streaming.showCursor}
+            agentLabel={getStreamingAgentLabel(streaming.agentKind, labels)}
           />
         ) : (
           <article className="javis-message">
@@ -79,6 +85,20 @@ export function ThreadView({
             <p className="javis-message-body">
               {translateWorkbenchText(task.commanderMessage, locale)}
             </p>
+            {task.tokenUsage && task.tokenUsage.modelCalls > 0 ? (
+              <p className="javis-token-inline" aria-label={labels.tokenUsage}>
+                <span>{labels.tokenUsage}</span>
+                <span>
+                  {formatTokenCount(task.tokenUsage.totalTokens)}
+                </span>
+                <span>
+                  {labels.tokenInput} {formatTokenCount(task.tokenUsage.inputTokens)}
+                </span>
+                <span>
+                  {labels.tokenOutput} {formatTokenCount(task.tokenUsage.outputTokens)}
+                </span>
+              </p>
+            ) : null}
           </article>
         )}
 
@@ -92,27 +112,122 @@ export function ThreadView({
         )}
       </section>
 
-      <form className="javis-composer" onSubmit={onSubmit}>
-        <textarea
-          aria-label={labels.taskInput}
-          disabled={showStreaming}
-          onChange={(event) => onDraftGoalChange(event.currentTarget.value)}
-          placeholder={labels.taskInputPlaceholder}
-          value={draftGoal}
-        />
-        <div className="javis-composer-actions">
-          <WorkspaceContext
-            currentWorkspacePath={currentWorkspacePath}
-            labels={labels}
-            onBrowseWorkspacePath={onBrowseWorkspacePath}
-            onDeleteRecentWorkspacePath={onDeleteRecentWorkspacePath}
-            onUseWorkspacePath={onUseWorkspacePath}
-            onWorkspacePathChange={onWorkspacePathChange}
-            recentWorkspacePaths={recentWorkspacePaths}
-          />
-          <button type="submit" disabled={showStreaming}>{labels.send}</button>
-        </div>
-      </form>
+      <ChatComposer
+        actionsClassName="javis-composer-actions"
+        className="javis-composer"
+        currentWorkspacePath={currentWorkspacePath}
+        disabled={showStreaming}
+        draftGoal={draftGoal}
+        labels={labels}
+        onBrowseWorkspacePath={onBrowseWorkspacePath}
+        onDeleteRecentWorkspacePath={onDeleteRecentWorkspacePath}
+        onDraftGoalChange={onDraftGoalChange}
+        onSubmit={onSubmit}
+        onUseWorkspacePath={onUseWorkspacePath}
+        onWorkspacePathChange={onWorkspacePathChange}
+        recentWorkspacePaths={recentWorkspacePaths}
+      />
     </>
   );
+}
+
+function useRenderedStreamingText(task: WorkbenchTask): {
+  agentKind: WorkbenchStreamingAgentKind;
+  isVisible: boolean;
+  showCursor: boolean;
+  text: string;
+} {
+  const rawText = task.streamingText ?? "";
+  const isStreaming = Boolean(task.isStreaming);
+  const resetKey = task.id ?? task.userGoal;
+  const [active, setActive] = useState(Boolean(isStreaming || rawText));
+  const [targetText, setTargetText] = useState(rawText);
+  const [activeAgentKind, setActiveAgentKind] =
+    useState<WorkbenchStreamingAgentKind>(task.streamingAgentKind ?? "commander");
+  const resetKeyRef = useRef(resetKey);
+  const resetPending = resetKeyRef.current !== resetKey;
+  const resolvedAgentKind = task.streamingAgentKind ?? activeAgentKind;
+  const effectiveAgentKind = resetPending
+    ? (task.streamingAgentKind ?? "commander")
+    : resolvedAgentKind;
+  const finalText = getFinalStreamingText(task, resolvedAgentKind);
+  const { displayedContent, isSettled } = useSmoothStream({
+    content: targetText,
+    isStreaming: isStreaming || active,
+  });
+
+  useEffect(() => {
+    if (resetKeyRef.current !== resetKey) {
+      resetKeyRef.current = resetKey;
+      setActive(Boolean(isStreaming || rawText));
+      setActiveAgentKind(task.streamingAgentKind ?? "commander");
+      setTargetText(rawText);
+      return;
+    }
+
+    if (isStreaming || rawText) {
+      setActive(true);
+      setActiveAgentKind(resolvedAgentKind);
+      setTargetText(rawText);
+      return;
+    }
+
+    if (active) {
+      setTargetText(finalText);
+    }
+  }, [
+    active,
+    finalText,
+    isStreaming,
+    rawText,
+    resetKey,
+    resolvedAgentKind,
+    task.streamingAgentKind,
+  ]);
+
+  useEffect(() => {
+    if (!isStreaming && active && isSettled) {
+      setActive(false);
+      setTargetText("");
+    }
+  }, [active, isSettled, isStreaming]);
+
+  const shouldShowText = active || isStreaming || Boolean(rawText);
+
+  return {
+    agentKind: effectiveAgentKind,
+    isVisible: resetPending
+      ? Boolean(isStreaming || rawText)
+      : isStreaming || active || Boolean(rawText),
+    showCursor: resetPending ? isStreaming : isStreaming || (active && !isSettled),
+    text: resetPending ? rawText : shouldShowText ? displayedContent : "",
+  };
+}
+
+function getFinalStreamingText(
+  task: WorkbenchTask,
+  agentKind: WorkbenchStreamingAgentKind,
+): string {
+  switch (agentKind) {
+    case "verifier":
+      return task.verificationSummary ?? task.commanderMessage;
+    case "research":
+      return task.researchReport?.summary ?? task.commanderMessage;
+    default:
+      return task.commanderMessage;
+  }
+}
+
+function getStreamingAgentLabel(
+  agentKind: WorkbenchStreamingAgentKind,
+  labels: WorkbenchLocale["labels"],
+): string {
+  switch (agentKind) {
+    case "verifier":
+      return labels.verifier;
+    case "research":
+      return labels.researchReport;
+    default:
+      return labels.commander;
+  }
 }

@@ -58,5 +58,5 @@ Base URL: https://api.deepseek.com
 ## Notes
 
 - The `can_fallback_from_opencode_error` function was removed as dead code since opencode is now skipped entirely for credentialed providers.
-- Live provider QA continues to show "provider-hardening-needed" - the ureq HTTP client in the Rust release binary may have TLS/certificate configuration issues on this Windows system. The API call succeeds from Python (urllib) and curl. Further investigation should check ureq TLS configuration for the release build.
+- Live provider QA continues to show "provider-hardening-needed" - the reqwest HTTP client (with native-tls / Schannel on Windows) in the Rust release binary may have request construction or TLS/certificate configuration issues on this Windows system. The API call succeeds from Python (urllib) and curl. Further investigation should compare Rust vs Python request headers and response bodies. Note: the project uses reqwest 0.12 with native-tls, not ureq (ureq has never been a dependency).
 - The `deepseek-v4-flash` model uses reasoning tokens (thinking) by default. The Rust code sends `"thinking": {"type": "disabled"}` which is silently ignored by DeepSeek API (not an error). The model correctly returns `content` with the proposal JSON in tests.

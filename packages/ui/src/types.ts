@@ -136,12 +136,50 @@ export interface WorkbenchTokenUsageSummary {
   }>;
 }
 
+export type WorkbenchStreamingAgentKind =
+  | "commander"
+  | "file"
+  | "shell"
+  | "browser"
+  | "computer"
+  | "scheduler"
+  | "research"
+  | "code"
+  | "verifier"
+  | "chinese-reviewer";
+
 export interface WorkbenchModelSettings {
   provider: string;
   model: string;
   apiKey: string;
   apiKeyReference: string;
   baseUrl: string;
+}
+
+/** The three built-in model slots. */
+export type WorkbenchModelSlot = "primary" | "secondary" | "multimodal";
+
+/** A named model configuration for the UI. */
+export interface WorkbenchModelProfile {
+  id: string;
+  slot: WorkbenchModelSlot | null;
+  displayName: string;
+  provider: string;
+  model: string;
+  apiKeyReference: string;
+  baseUrl: string;
+  apiKey: string;  // only used in UI, never persisted
+  capabilities: {
+    vision: boolean;
+    code: boolean;
+    longContext: boolean;
+  };
+}
+
+/** Full model configuration for the UI. */
+export interface WorkbenchModelConfiguration {
+  profiles: WorkbenchModelProfile[];
+  agentOverrides: Record<string, string>;
 }
 
 export interface WorkbenchHistoryEntry {
@@ -175,6 +213,7 @@ export interface WorkbenchTask {
   tokenUsage?: WorkbenchTokenUsageSummary;
   verificationSummary?: string;
   streamingText?: string;
+  streamingAgentKind?: WorkbenchStreamingAgentKind;
   isStreaming?: boolean;
 }
 
@@ -233,6 +272,7 @@ export interface JavisWorkbenchProps {
   historyEntries?: WorkbenchHistoryEntry[];
   locale?: WorkbenchLocale;
   modelSettings?: WorkbenchModelSettings;
+  modelConfiguration?: WorkbenchModelConfiguration;
   recentWorkspacePaths?: string[];
   activeView?: ActiveView;
   scheduledTasks?: WorkbenchScheduledTask[];
@@ -256,6 +296,7 @@ export interface JavisWorkbenchProps {
   onDeleteRecentWorkspacePath?: (path: string) => void;
   onBrowseWorkspacePath?: () => void;
   onModelSettingsChange?: (settings: WorkbenchModelSettings) => void;
+  onModelConfigurationChange?: (config: WorkbenchModelConfiguration) => void;
   onSelectHistoryEntry?: (id: string) => void;
   onUseWorkspacePath?: (path: string) => void;
   onWorkspacePathChange?: (path: string) => void;
@@ -276,6 +317,10 @@ export interface WorkbenchLocale {
   labels: {
     activeTask: string;
     activityLog: string;
+    addPhotosAndFiles: string;
+    addedAttachments: string;
+    accountSettings: string;
+    aiModeSettings: string;
     apps: string;
     automatedTasks: string;
     collapseActivityLog: string;
@@ -288,6 +333,7 @@ export interface WorkbenchLocale {
     commander: string;
     codeReview: string;
     changedFiles: string;
+    closeSettings: string;
     currentTask: string;
     deny: string;
     deleteHistoryEntry: string;
@@ -300,6 +346,7 @@ export interface WorkbenchLocale {
     failedRecoveryTitle: string;
     failedRecoveryMessage: string;
     gallery: string;
+    generalSettings: string;
     history: string;
     historyEmpty: string;
     historyNoMatches: string;
@@ -316,11 +363,14 @@ export interface WorkbenchLocale {
     modelSettingsDescription?: string;
     modelBackendUnavailable?: string;
     modified: string;
+    moreInputOptions: string;
     newChat: string;
     newChatTitle: string;
     office: string;
     packageScript: string;
     plan: string;
+    planMode: string;
+    plugins: string;
     projectInspection: string;
     projects: string;
     profileName: string;
@@ -330,6 +380,7 @@ export interface WorkbenchLocale {
     send: string;
     searchPlaceholder: string;
     settings: string;
+    settingsPlaceholder: string;
     skillMarket: string;
     source: string;
     status: string;
@@ -351,6 +402,7 @@ export interface WorkbenchLocale {
     browseWorkspace: string;
     currentWorkspace: string;
     recentWorkspaces: string;
+    removeAttachment: string;
     removeWorkspace: string;
     useWorkspace: string;
     workspaceBrowseError: string;
@@ -366,6 +418,8 @@ export interface WorkbenchLocale {
     skillCategoryMcp: string;
     noMcpConfig: string;
     skillUiFeatureLabel: string;
+    privacySecuritySettings: string;
+    aboutFeedbackSettings: string;
     appsTitle: string;
     documentsTitle: string;
     galleryTitle: string;
