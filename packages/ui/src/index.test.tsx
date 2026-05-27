@@ -17,6 +17,7 @@ describe("JavisWorkbench permission cards", () => {
         onDeleteRecentWorkspacePath={vi.fn()}
         onSubmitGoal={vi.fn()}
         task={{
+          id: "task-idle",
           title: "Ready",
           userGoal: "Waiting for a task",
           status: "created",
@@ -365,6 +366,7 @@ describe("JavisWorkbench permission cards", () => {
             status: "completed",
             userGoal: "Inspect project",
             updatedAt: "2026-05-23T00:00:00.000Z",
+            workspacePath: "E:/Javis",
           },
         ]}
         onDeleteHistoryEntry={vi.fn()}
@@ -390,6 +392,97 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).not.toContain("No history yet");
   });
 
+  it("groups task history by workspace path", () => {
+    const html = renderToStaticMarkup(
+      <JavisWorkbench
+        currentWorkspacePath="E:/Javis"
+        draftGoal="Inspect project"
+        locale={zhCNWorkbenchLocale}
+        recentWorkspacePaths={["E:/Javis", "F:/Other", "G:/Empty"]}
+        historyEntries={[
+          {
+            id: "history-1",
+            title: "Project environment inspected",
+            status: "completed",
+            userGoal: "Inspect project",
+            updatedAt: "2026-05-23T00:00:00.000Z",
+            workspacePath: "E:/Javis",
+          },
+          {
+            id: "history-3",
+            title: "Add Windows signing note",
+            status: "completed",
+            userGoal: "Inspect project",
+            updatedAt: "2026-05-22T00:00:00.000Z",
+            workspacePath: "E:/Javis",
+          },
+          {
+            id: "history-4",
+            title: "Expand QA coverage",
+            status: "completed",
+            userGoal: "Inspect project",
+            updatedAt: "2026-05-21T00:00:00.000Z",
+            workspacePath: "E:/Javis",
+          },
+          {
+            id: "history-5",
+            title: "Migrate localStorage to SQLite",
+            status: "completed",
+            userGoal: "Inspect project",
+            updatedAt: "2026-05-20T00:00:00.000Z",
+            workspacePath: "E:/Javis",
+          },
+          {
+            id: "history-6",
+            title: "Clone Proma and study",
+            status: "completed",
+            userGoal: "Inspect project",
+            updatedAt: "2026-05-19T00:00:00.000Z",
+            workspacePath: "E:/Javis",
+          },
+          {
+            id: "history-2",
+            title: "Research sources collected",
+            status: "completed",
+            userGoal: "Research Javis search integration",
+            updatedAt: "2026-05-24T00:00:00.000Z",
+            workspacePath: "F:/Other",
+          },
+          {
+            id: "history-7",
+            title: "Fallback history entry",
+            status: "completed",
+            userGoal: "Inspect project",
+            updatedAt: "2026-05-18T00:00:00.000Z",
+          },
+        ]}
+        onDeleteHistoryEntry={vi.fn()}
+        onDraftGoalChange={vi.fn()}
+        onSelectHistoryEntry={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={{
+          title: "Ready",
+          userGoal: "Waiting for a task",
+          status: "created",
+          commanderMessage:
+            "Javis desktop is ready. Enter a goal to start the Core event stream.",
+          plan: [], 
+          agents: [],
+          logs: [],
+        }}
+      />,
+    );
+
+    expect(html).toContain("项目");
+    expect(html).toContain("Javis");
+    expect(html).toContain("F:/Other");
+    expect(html).toContain("暂无对话");
+    expect(html).toContain("未知");
+    expect(html).toContain("展开显示");
+    expect(html).toContain("Fallback history entry");
+    expect(html).toContain("Research sources collected");
+  });
+
   it("filters task history by title, goal, status, and update time", () => {
     const entries = [
       {
@@ -398,6 +491,7 @@ describe("JavisWorkbench permission cards", () => {
         status: "completed",
         userGoal: "Inspect project",
         updatedAt: "2026-05-23T00:00:00.000Z",
+        workspacePath: "E:/Javis",
       },
       {
         id: "history-2",
@@ -405,12 +499,14 @@ describe("JavisWorkbench permission cards", () => {
         status: "failed",
         userGoal: "Research Javis search integration",
         updatedAt: "2026-05-24T00:00:00.000Z",
+        workspacePath: "F:/Other",
       },
     ];
 
     expect(filterWorkbenchHistoryEntries(entries, "research")).toEqual([entries[1]]);
     expect(filterWorkbenchHistoryEntries(entries, "COMPLETED")).toEqual([entries[0]]);
     expect(filterWorkbenchHistoryEntries(entries, "05-24")).toEqual([entries[1]]);
+    expect(filterWorkbenchHistoryEntries(entries, "F:/Other")).toEqual([entries[1]]);
     expect(filterWorkbenchHistoryEntries(entries, "  ")).toEqual(entries);
     expect(filterWorkbenchHistoryEntries(entries, "missing")).toEqual([]);
   });

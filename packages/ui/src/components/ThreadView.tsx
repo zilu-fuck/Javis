@@ -22,6 +22,7 @@ interface ThreadViewProps {
   onDraftGoalChange: (nextGoal: string) => void;
   onPermissionDecision?: (decision: "approved" | "denied") => void;
   onRetryTask?: () => void;
+  onStopTask?: () => void;
   onSubmit: FormEventHandler<HTMLFormElement>;
   onUseWorkspacePath?: (path: string) => void;
   onWorkspacePathChange?: (path: string) => void;
@@ -39,6 +40,7 @@ export function ThreadView({
   onDraftGoalChange,
   onPermissionDecision,
   onRetryTask,
+  onStopTask,
   onSubmit,
   onUseWorkspacePath,
   onWorkspacePathChange,
@@ -116,12 +118,13 @@ export function ThreadView({
         actionsClassName="javis-composer-actions"
         className="javis-composer"
         currentWorkspacePath={currentWorkspacePath}
-        disabled={showStreaming}
+        isStreaming={showStreaming}
         draftGoal={draftGoal}
         labels={labels}
         onBrowseWorkspacePath={onBrowseWorkspacePath}
         onDeleteRecentWorkspacePath={onDeleteRecentWorkspacePath}
         onDraftGoalChange={onDraftGoalChange}
+        onStopTask={onStopTask}
         onSubmit={onSubmit}
         onUseWorkspacePath={onUseWorkspacePath}
         onWorkspacePathChange={onWorkspacePathChange}
@@ -191,6 +194,18 @@ function useRenderedStreamingText(task: WorkbenchTask): {
       setTargetText("");
     }
   }, [active, isSettled, isStreaming]);
+
+  // When streaming ends and rawText is already cleared, force-exit the
+  // streaming state.  Without this, the hook deadlocks when the final
+  // text (commanderMessage) is byte-identical to the last streamed text:
+  // setTargetText(finalText) produces no content change in useSmoothStream,
+  // so isSettled stays false forever.
+  useEffect(() => {
+    if (!isStreaming && active && !rawText) {
+      setActive(false);
+      setTargetText("");
+    }
+  }, [active, isStreaming, rawText]);
 
   const shouldShowText = active || isStreaming || Boolean(rawText);
 

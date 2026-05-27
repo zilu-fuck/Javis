@@ -1,5 +1,11 @@
-import { useState } from "react";
-import type { WorkbenchLocale, WorkbenchModelConfiguration, WorkbenchModelSettings } from "../types";
+import { useEffect, useState } from "react";
+import type {
+  WorkbenchLocale,
+  WorkbenchModelConfiguration,
+  WorkbenchModelProfile,
+  WorkbenchModelSettings,
+  WorkbenchModelSlot,
+} from "../types";
 
 interface ModelSettingsProps {
   labels: WorkbenchLocale["labels"];
@@ -11,17 +17,65 @@ interface ModelSettingsProps {
 
 type SettingsTab = "account" | "general" | "ai" | "privacy" | "about";
 
+const SLOT_LABELS: Record<WorkbenchModelSlot, { zh: string; en: string }> = {
+  primary: { zh: "主力模型", en: "Primary" },
+  secondary: { zh: "轻量模型", en: "Secondary" },
+  multimodal: { zh: "视觉模型", en: "Multimodal" },
+};
+
+const KNOWN_AGENT_KINDS = [
+  "commander",
+  "code",
+  "chinese-reviewer",
+  "verifier",
+  "scheduler",
+  "research",
+  "file",
+  "shell",
+  "computer",
+];
+
+function emptyProfile(slot: WorkbenchModelSlot): WorkbenchModelProfile {
+  return {
+    id: slot,
+    slot,
+    displayName: SLOT_LABELS[slot].en,
+    provider: "",
+    model: "",
+    apiKeyReference: `model.${slot}`,
+    baseUrl: "",
+    apiKey: "",
+    capabilities: { vision: false, code: false, longContext: false },
+  };
+}
+
 export function ModelSettings({
   labels,
   modelSettings,
-  modelConfiguration: _modelConfiguration,
+  modelConfiguration,
   onModelSettingsChange,
-  onModelConfigurationChange: _onModelConfigurationChange,
+  onModelConfigurationChange,
 }: ModelSettingsProps) {
   const [isOpen, setOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
   const isWebPreview =
     typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);
+  const isZh = labels.aiModeSettings === "AI 模式";
+
+  // Local editing state for multi-model configuration
+  const [slotProfiles, setSlotProfiles] = useState<WorkbenchModelProfile[]>([]);
+  const [agentOverrides, setAgentOverrides] = useState<Record<string, string>>({});
+
+  // Sync from props when configuration changes or modal opens
+  useEffect(() => {
+    if (modelConfiguration) {
+      setSlotProfiles(
+        modelConfiguration.profiles.map((p) => ({ ...p, apiKey: "" })),
+      );
+      setAgentOverrides({ ...modelConfiguration.agentOverrides });
+    }
+  }, [modelConfiguration, isOpen]);
+
   const tabs: Array<{ id: SettingsTab; icon: string; label: string }> = [
     { id: "account", icon: "●", label: labels.accountSettings },
     { id: "general", icon: "◆", label: labels.generalSettings },
@@ -36,6 +90,28 @@ export function ModelSettings({
       [field]: value,
     });
   }
+
+  function updateSlotProfile(slot: WorkbenchModelSlot, field: string, value: string) {
+    setSlotProfiles((current) =>
+      current.map((p) =>
+        p.slot === slot ? { ...p, [field]: value } : p,
+      ),
+    );
+  }
+
+  function handleSaveConfiguration() {
+    if (!onModelConfigurationChange) return;
+    onModelConfigurationChange({
+      profiles: slotProfiles.map((p) => ({ ...p })),
+      agentOverrides: { ...agentOverrides },
+    });
+  }
+
+  function getProfileForSlot(slot: WorkbenchModelSlot): WorkbenchModelProfile {
+    return slotProfiles.find((p) => p.slot === slot) ?? emptyProfile(slot);
+  }
+
+  const hasConfiguration = slotProfiles.length > 0;
 
   return (
     <div className="javis-settings">
@@ -134,6 +210,101 @@ export function ModelSettings({
                       />
                     </label>
                   </div>
+
+                  {hasConfiguration && (
+                    <>
+                      <h2 style={{ marginTop: "1.5rem" }}>
+                        {isZh ? "多模型配置" : "Multi-Model Configuration"}
+                      </h2>
+                      {(["primary", "secondary", "multimodal"] as const).map((slot) => {
+                        const profile = getProfileForSlot(slot);
+                        const slotLabel = isZh ? SLOT_LABELS[slot].zh : SLOT_LABELS[slot].en;
+                        return (
+                          <div className="javis-settings-card" key={slot} style={{ marginBottom: "1rem" }}>
+                            <h3>{slotLabel}</h3>
+                            <label>
+                              <span>{labels.modelProvider}</span>
+                              <input
+                                aria-label={`${slotLabel} ${labels.modelProvider}`}
+                                onChange={(event) => updateSlotProfile(slot, "provider", event.currentTarget.value)}
+                                placeholder="deepseek"
+                                value={profile.provider}
+                              />
+                            </label>
+                            <label>
+                              <span>{labels.modelName}</span>
+                              <input
+                                aria-label={`${slotLabel} ${labels.modelName}`}
+                                onChange={(event) => updateSlotProfile(slot, "model", event.currentTarget.value)}
+                                placeholder="deepseek-chat"
+                                value={profile.model}
+                              />
+                            </label>
+                            <label>
+                              <span>{labels.modelApiKey}</span>
+                              <input
+                                aria-label={`${slotLabel} ${labels.modelApiKey}`}
+                                onChange={(event) => updateSlotProfile(slot, "apiKey", event.currentTarget.value)}
+                                type="password"
+                                value={profile.apiKey}
+                              />
+                            </label>
+                            <label>
+                              <span>{labels.modelBaseUrl}</span>
+                              <input
+                                aria-label={`${slotLabel} ${labels.modelBaseUrl}`}
+                                onChange={(event) => updateSlotProfile(slot, "baseUrl", event.currentTarget.value)}
+                                placeholder="https://api.deepseek.com"
+                                value={profile.baseUrl}
+                              />
+                            </label>
+                          </div>
+                        );
+                      })}
+
+                      <h2 style={{ marginTop: "1.5rem" }}>
+                        {isZh ? "代理模型分配" : "Agent Model Assignment"}
+                      </h2>
+                      <div className="javis-settings-card">
+                        {KNOWN_AGENT_KINDS.map((agentKind) => (
+                          <label key={agentKind}>
+                            <span>{agentKind}</span>
+                            <select
+                              aria-label={`${agentKind} model`}
+                              onChange={(event) =>
+                                setAgentOverrides((current) => ({
+                                  ...current,
+                                  [agentKind]: event.currentTarget.value,
+                                }))
+                              }
+                              value={agentOverrides[agentKind] ?? ""}
+                            >
+                              <option value="">
+                                {isZh ? "默认" : "Default"}
+                              </option>
+                              {(["primary", "secondary", "multimodal"] as const).map((slot) => {
+                                const p = getProfileForSlot(slot);
+                                const slotLabel = isZh ? SLOT_LABELS[slot].zh : SLOT_LABELS[slot].en;
+                                return (
+                                  <option key={slot} value={p.id}>
+                                    {slotLabel}{p.model ? ` (${p.model})` : ""}
+                                  </option>
+                                );
+                              })}
+                            </select>
+                          </label>
+                        ))}
+                      </div>
+
+                      <button
+                        className="javis-settings-save-btn"
+                        onClick={handleSaveConfiguration}
+                        type="button"
+                      >
+                        {isZh ? "保存模型配置" : "Save Model Configuration"}
+                      </button>
+                    </>
+                  )}
                 </section>
               ) : (
                 <SettingsPlaceholder

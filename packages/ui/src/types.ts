@@ -188,6 +188,7 @@ export interface WorkbenchHistoryEntry {
   status: string;
   userGoal: string;
   updatedAt: string;
+  workspacePath?: string;
   scheduledTaskId?: string;
 }
 
@@ -302,6 +303,7 @@ export interface JavisWorkbenchProps {
   onWorkspacePathChange?: (path: string) => void;
   onPermissionDecision?: (decision: "approved" | "denied") => void;
   onRetryTask?: () => void;
+  onStopTask?: () => void;
   onSubmitGoal: (goal?: string, workspacePath?: string, scheduledTaskId?: string) => void;
   onChangeActiveView?: (view: ActiveView) => void;
   onToggleScheduledTask?: (id: string) => void;
@@ -349,7 +351,9 @@ export interface WorkbenchLocale {
     generalSettings: string;
     history: string;
     historyEmpty: string;
+    historyEmptyGroup: string;
     historyNoMatches: string;
+    expandHistoryGroup: string;
     localKnowledgeBase: string;
     mainThread: string;
     manualSourceFallbackTitle: string;
@@ -378,6 +382,7 @@ export interface WorkbenchLocale {
     researchSources: string;
     retryTask: string;
     send: string;
+    stopTask: string;
     searchPlaceholder: string;
     settings: string;
     settingsPlaceholder: string;

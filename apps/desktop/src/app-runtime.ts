@@ -55,7 +55,7 @@ import {
 interface CreateJavisRuntimeOptions {
   getWorkspacePath: () => string;
   modelSettings: ModelSettings;
-  modelConfiguration?: ModelConfiguration;
+  getModelConfiguration?: () => ModelConfiguration | undefined;
 }
 
 /**
@@ -103,32 +103,17 @@ function getOrCreateProvider(
 export function createJavisRuntime({
   getWorkspacePath,
   modelSettings,
-  modelConfiguration,
+  getModelConfiguration,
 }: CreateJavisRuntimeOptions) {
   const fallbackProvider = createConfiguredModelProvider(modelSettings);
   const providerCache = new Map<string, ModelProvider>();
   // Pre-populate cache with fallback for backward compatibility
   providerCache.set("fallback", fallbackProvider);
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const getConfig = () => modelConfiguration ?? {
-    profiles: [{
-      id: "primary",
-      slot: "primary" as const,
-      displayName: "Primary",
-      provider: modelSettings.provider,
-      model: modelSettings.model,
-      apiKeyReference: modelSettings.apiKeyReference,
-      baseUrl: modelSettings.baseUrl,
-      capabilities: { vision: false, code: false, longContext: false },
-    }],
-    agentOverrides: {},
-  };
-  void getConfig;
-
   const providerFor = (agentKind: string): ModelProvider => {
-    if (!modelConfiguration) return fallbackProvider;
-    return resolveModelForAgent(agentKind, modelConfiguration, providerCache);
+    const config = getModelConfiguration?.();
+    if (!config) return fallbackProvider;
+    return resolveModelForAgent(agentKind, config, providerCache);
   };
 
   const sharedContext = createSharedTaskContext();
@@ -352,6 +337,10 @@ export function createJavisRuntime({
 
   return {
     ...runtime,
+    clearProviderCache() {
+      providerCache.clear();
+      providerCache.set("fallback", fallbackProvider);
+    },
     start(userGoal: string) {
       void (async () => {
         sharedContext.clear();
@@ -365,6 +354,19 @@ export function createJavisRuntime({
         }
         runtime.start(userGoal);
       })();
+    },
+    stopTask() {
+      void invoke("cancel_all_model_streams");
+      const taskId = taskIdRef.current;
+      if (taskId) {
+        eventBus.emit({
+          kind: "agent.chunk_end",
+          taskId,
+          agentKind: "commander",
+          fullText: "",
+          error: "cancelled",
+        });
+      }
     },
     dispose() {
       void invoke("cancel_all_model_streams");

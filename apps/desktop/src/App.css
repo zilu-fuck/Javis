@@ -691,6 +691,79 @@ textarea:focus-visible {
   background: #fff4f2;
 }
 
+.javis-history-workspace-group {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.javis-history-workspace-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 4px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--color-ink);
+  text-align: left;
+  width: 100%;
+}
+
+.javis-history-workspace-icon {
+  color: var(--color-muted);
+  font-size: 13px;
+}
+
+.javis-history-workspace-name {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.javis-history-workspace-name small {
+  overflow: hidden;
+  color: var(--color-subtle);
+  font-size: 11px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-history-workspace-caret {
+  color: var(--color-subtle);
+  font-size: 12px;
+}
+
+.javis-history-workspace-body {
+  display: grid;
+  gap: 4px;
+  padding-left: 14px;
+}
+
+.javis-history-empty-group {
+  padding: 8px 8px 10px 24px;
+  color: var(--color-subtle);
+  font-size: 12px;
+}
+
+.javis-history-expand {
+  border: 0;
+  background: transparent;
+  justify-self: start;
+  margin-left: 24px;
+  padding: 4px 0;
+  color: var(--color-subtle);
+  font-size: 12px;
+}
+
+.javis-history-expand:hover {
+  color: var(--color-accent-strong);
+}
+
 .javis-nav-icon {
   display: inline-flex;
   width: 18px;
@@ -1393,6 +1466,7 @@ textarea:focus-visible {
   transform: translateY(-1px);
   box-shadow: 0 10px 22px rgba(23, 79, 73, 0.18);
 }
+
 
 .javis-inspector {
   display: grid;

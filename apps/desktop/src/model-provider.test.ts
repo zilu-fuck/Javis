@@ -51,17 +51,23 @@ describe("model provider", () => {
   });
 
   it("adapts stream chunks to an AsyncIterable and optional callback", async () => {
-    invokeMock.mockResolvedValueOnce("stream-1");
+    const NOW = 1000;
+    const RAND = 0.123;
+    const PREDICTABLE_ID = `stream-${NOW}-${RAND.toString(36).slice(2)}`;
+    vi.spyOn(Date, "now").mockReturnValue(NOW);
+    vi.spyOn(Math, "random").mockReturnValue(RAND);
+
+    invokeMock.mockResolvedValueOnce(undefined);
     listenMock.mockImplementation(async (eventName, handler) => {
       if (eventName === "stream-model-chunk") {
-        handler({ payload: { streamId: "stream-1", text: "Hel", model: "gpt-test", provider: "openai", index: 0 } } as never);
+        handler({ payload: { streamId: PREDICTABLE_ID, text: "Hel", model: "gpt-test", provider: "openai", index: 0 } } as never);
         handler({ payload: { streamId: "other", text: "skip", index: 0 } } as never);
-        handler({ payload: { streamId: "stream-1", text: "lo", model: "gpt-test", provider: "openai", index: 1 } } as never);
+        handler({ payload: { streamId: PREDICTABLE_ID, text: "lo", model: "gpt-test", provider: "openai", index: 1 } } as never);
       }
       if (eventName === "stream-model-done") {
         handler({
           payload: {
-            streamId: "stream-1",
+            streamId: PREDICTABLE_ID,
             totalChunks: 2,
             tokenUsage: { inputTokens: 8, outputTokens: 2, totalTokens: 10 },
           },
@@ -91,6 +97,7 @@ describe("model provider", () => {
         providerId: "openai",
         stopSequences: ["\n\n"],
       }),
+      streamId: PREDICTABLE_ID,
     });
   });
 
@@ -114,6 +121,8 @@ describe("model provider", () => {
   });
 
   it("normalizes provider errors for complete and stream", async () => {
+    // listen is called before invoke now, so provide a no-op unlisten
+    listenMock.mockResolvedValue((() => {}) as () => void);
     invokeMock.mockRejectedValueOnce("missing key").mockRejectedValueOnce(new Error("offline"));
     const provider = createConfiguredModelProvider(createSettings());
 

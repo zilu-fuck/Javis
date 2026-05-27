@@ -6,6 +6,7 @@ import type {
   ActiveView,
   WorkbenchAppEntry,
   WorkbenchFileEntry,
+  WorkbenchModelConfiguration,
   WorkbenchScheduledTask,
   WorkbenchSkillEntry,
 } from "@javis/ui";
@@ -110,7 +111,7 @@ import { initialToolDescriptors } from "@javis/tools";
 import { demoAgents } from "@javis/core";
 import "./App.css";
 
-export const DEFAULT_DRAFT_GOAL = "检查当前项目，说明如何启动，并运行一次检查";
+export const DEFAULT_DRAFT_GOAL = "";
 
 const DOC_EXTENSIONS = [
   "docx", "doc", "txt", "pdf", "xlsx", "xls", "csv", "pptx", "ppt", "md", "rtf", "odt",
@@ -188,6 +189,9 @@ function App() {
   } = useWorkspaceSessionControls(window.localStorage, workspaceSessionRepoRef);
   const { recentWorkspacePaths, workspacePath } = workspaceSession;
   const { modelSettings, updateModelSettings } = useModelSettingsControls(window.localStorage);
+  const [modelConfiguration, setModelConfiguration] = useState<WorkbenchModelConfiguration | undefined>();
+  const modelConfigRef = useRef(modelConfiguration);
+  modelConfigRef.current = modelConfiguration;
   // Ref always holds the effective workspace for the current/next run.
   // When a scheduled task fires with its own workspace, the ref is updated
   // synchronously so the runtime reads the correct path even before React
@@ -196,7 +200,11 @@ function App() {
   const workspaceRef = useRef(workspacePath);
   workspaceRef.current = workspacePath;
   const runtime = useMemo(
-    () => createJavisRuntime({ modelSettings, getWorkspacePath: () => workspaceRef.current }),
+    () => createJavisRuntime({
+      modelSettings,
+      getModelConfiguration: () => modelConfigRef.current,
+      getWorkspacePath: () => workspaceRef.current,
+    }),
     [modelSettings],
   );
   const [task, setTask] = useState(createInitialTaskSnapshot);
@@ -336,7 +344,15 @@ function App() {
         window.localStorage,
       );
       const legacySettings = await modelSettingsRepo.importFromLocalStorage(window.localStorage);
-      await modelProfileRepo.importFromLegacySettings(legacySettings);
+      const loadedConfig = await modelProfileRepo.importFromLegacySettings(legacySettings);
+      const cleanOverrides: Record<string, string> = {};
+      for (const [key, value] of Object.entries(loadedConfig.agentOverrides)) {
+        if (value) cleanOverrides[key] = value;
+      }
+      setModelConfiguration({
+        profiles: loadedConfig.profiles.map((p) => ({ ...p, apiKey: "" })),
+        agentOverrides: cleanOverrides,
+      });
 
       if (historyCurrentRef.current === historyInitialRef.current) {
         setHistory(importedHistory);
@@ -637,6 +653,12 @@ function App() {
     runtime.start(goal);
   }
 
+  function handleStopTask() {
+    runtime.stopTask();
+    setIsTaskActive(false);
+    isTaskActiveRef.current = false;
+  }
+
   function retryCurrentTask() {
     const goal = task.userGoal.trim();
     if (!goal) {
@@ -794,7 +816,7 @@ function App() {
     const entry = history.find((item) => item.id === id);
     if (entry) {
       setTask(entry);
-      setDraftGoal(entry.userGoal);
+      setDraftGoal("");
       setActiveView("chat");
     }
   }
@@ -894,6 +916,12 @@ function App() {
         status: entry.status,
         userGoal: entry.userGoal,
         updatedAt: getTaskUpdatedAt(entry),
+        workspacePath:
+          entry.project?.workspacePath ??
+          entry.codeReviewPreview?.workspacePath ??
+          entry.codeProposedEdit?.workspacePath ??
+          entry.codeApplyResult?.workspacePath ??
+          "",
         scheduledTaskId: (entry as any).scheduledTaskId,
       }))}
       imagesError={imagesError}
@@ -912,6 +940,39 @@ function App() {
         await updateModelSettings(settings);
         void modelSettingsRepoRef.current?.save(settings);
       }}
+      modelConfiguration={modelConfiguration}
+      onModelConfigurationChange={async (config) => {
+        setModelConfiguration(config);
+        const repo = modelProfileRepoRef.current;
+        if (repo) {
+          const { profiles, agentOverrides } = config;
+          repo.save(
+            profiles.map(({ apiKey: _apiKey, ...rest }) => rest),
+            agentOverrides,
+          ).catch((error) => console.error("Failed to save model profiles", error));
+        }
+        // Save or delete API keys in OS credential store
+        for (const profile of config.profiles) {
+          try {
+            if (profile.apiKey?.trim()) {
+              await invoke("save_model_api_key_secret", {
+                request: {
+                  keyReference: profile.apiKeyReference,
+                  apiKey: profile.apiKey,
+                },
+              });
+            } else {
+              await invoke("delete_model_api_key_secret", {
+                keyReference: profile.apiKeyReference,
+              });
+            }
+          } catch (error) {
+            console.error(`Failed to manage API key for ${profile.id}`, error);
+          }
+        }
+        // Clear cached providers so new config takes effect
+        runtime.clearProviderCache();
+      }}
       onNavigateDirectory={handleNavigateDirectory}
       onOpenFile={handleOpenFile}
       onPermissionDecision={
@@ -921,6 +982,7 @@ function App() {
       onRefreshDocuments={handleRefreshDocuments}
       onRefreshImages={handleRefreshImages}
       onRetryTask={retryCurrentTask}
+      onStopTask={handleStopTask}
       onSelectHistoryEntry={selectHistoryEntry}
       onSubmitGoal={submitGoal}
       onToggleScheduledTask={toggleScheduledTask}

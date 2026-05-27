@@ -52,6 +52,7 @@ export function filterWorkbenchHistoryEntries(
       entry.status,
       entry.userGoal,
       entry.updatedAt,
+      entry.workspacePath ?? "",
     ].join(" ");
     return searchableText.toLocaleLowerCase().includes(normalizedQuery);
   });

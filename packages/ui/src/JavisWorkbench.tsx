@@ -49,6 +49,7 @@ export function JavisWorkbench({
   onWorkspacePathChange,
   onPermissionDecision,
   onRetryTask,
+  onStopTask,
   onSubmitGoal,
   onChangeActiveView,
   onToggleScheduledTask,
@@ -102,6 +103,7 @@ export function JavisWorkbench({
             onDraftGoalChange={onDraftGoalChange}
             onPermissionDecision={onPermissionDecision}
             onRetryTask={onRetryTask}
+            onStopTask={onStopTask}
             onSubmitGoal={onSubmitGoal}
             onUseWorkspacePath={onUseWorkspacePath}
             onWorkspacePathChange={onWorkspacePathChange}
@@ -186,11 +188,13 @@ export function JavisWorkbench({
     >
       <Sidebar
         activeView={activeView}
+        currentWorkspacePath={currentWorkspacePath}
         historyEntries={historyEntries}
         labels={labels}
         locale={effectiveLocale}
         modelSettings={effectiveModelSettings}
         modelConfiguration={modelConfiguration}
+        recentWorkspacePaths={recentWorkspacePaths}
         onChangeActiveView={handleChangeActiveView}
         onDeleteHistoryEntry={onDeleteHistoryEntry}
         onModelSettingsChange={onModelSettingsChange}

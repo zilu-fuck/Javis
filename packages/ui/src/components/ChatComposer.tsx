@@ -5,6 +5,7 @@ import {
   type ClipboardEvent,
   type ChangeEvent,
   type FormEventHandler,
+  type KeyboardEvent,
 } from "react";
 import type { WorkbenchLocale } from "../types";
 import { WorkspaceContext } from "./WorkspaceContext";
@@ -15,12 +16,14 @@ interface ChatComposerProps {
   currentWorkspacePath: string;
   disabled?: boolean;
   draftGoal: string;
+  isStreaming?: boolean;
   labels: WorkbenchLocale["labels"];
   recentWorkspacePaths: string[];
   sendButtonClassName?: string;
   onBrowseWorkspacePath?: () => void;
   onDeleteRecentWorkspacePath?: (path: string) => void;
   onDraftGoalChange: (nextGoal: string) => void;
+  onStopTask?: () => void;
   onSubmit: FormEventHandler<HTMLFormElement>;
   onUseWorkspacePath?: (path: string) => void;
   onWorkspacePathChange?: (path: string) => void;
@@ -38,12 +41,14 @@ export function ChatComposer({
   currentWorkspacePath,
   disabled = false,
   draftGoal,
+  isStreaming = false,
   labels,
   recentWorkspacePaths,
   sendButtonClassName,
   onBrowseWorkspacePath,
   onDeleteRecentWorkspacePath,
   onDraftGoalChange,
+  onStopTask,
   onSubmit,
   onUseWorkspacePath,
   onWorkspacePathChange,
@@ -112,6 +117,16 @@ export function ChatComposer({
     event.currentTarget.value = "";
   }
 
+  function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      const form = textAreaRef.current?.form;
+      if (form) {
+        form.requestSubmit();
+      }
+    }
+  }
+
   const handleSubmit: FormEventHandler<HTMLFormElement> = (event) => {
     onSubmit(event);
   };
@@ -144,6 +159,7 @@ export function ChatComposer({
         aria-label={labels.taskInput}
         disabled={disabled}
         onChange={(event) => onDraftGoalChange(event.currentTarget.value)}
+        onKeyDown={handleKeyDown}
         onPaste={handlePaste}
         placeholder={labels.taskInputPlaceholder}
         ref={textAreaRef}
@@ -205,9 +221,22 @@ export function ChatComposer({
           onWorkspacePathChange={onWorkspacePathChange}
           recentWorkspacePaths={recentWorkspacePaths}
         />
-        <button className={sendButtonClassName} disabled={disabled} type="submit">
-          {labels.send}
-        </button>
+        {isStreaming ? (
+          <button
+            className={sendButtonClassName}
+            onClick={(event) => {
+              event.preventDefault();
+              onStopTask?.();
+            }}
+            type="button"
+          >
+            {labels.stopTask}
+          </button>
+        ) : (
+          <button className={sendButtonClassName} disabled={disabled} type="submit">
+            {labels.send}
+          </button>
+        )}
       </div>
     </form>
   );

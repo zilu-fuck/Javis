@@ -16,6 +16,7 @@ interface ChatViewProps {
   onWorkspacePathChange?: (path: string) => void;
   onPermissionDecision?: (decision: "approved" | "denied") => void;
   onRetryTask?: () => void;
+  onStopTask?: () => void;
   onSubmitGoal: (goal?: string, workspacePath?: string, scheduledTaskId?: string) => void;
 }
 
@@ -32,23 +33,11 @@ export function ChatView({
   onWorkspacePathChange,
   onPermissionDecision,
   onRetryTask,
+  onStopTask,
   onSubmitGoal,
 }: ChatViewProps) {
   const labels = locale.labels;
-  const isNewChat =
-    task.status === "created" &&
-    task.plan.length === 0 &&
-    !task.documents &&
-    !task.commands &&
-    !task.fileOrganizationExecution &&
-    !task.permissionRequest &&
-    !task.project &&
-    !task.codeReviewPreview &&
-    !task.codeProposedEdit &&
-    !task.codeApplyResult &&
-    !task.researchReport &&
-    !task.sources &&
-    !task.verificationSummary;
+  const isNewChat = task.id === "task-idle";
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -83,6 +72,7 @@ export function ChatView({
       onDraftGoalChange={onDraftGoalChange}
       onPermissionDecision={onPermissionDecision}
       onRetryTask={onRetryTask}
+      onStopTask={onStopTask}
       onSubmit={handleSubmit}
       onUseWorkspacePath={onUseWorkspacePath}
       onWorkspacePathChange={onWorkspacePathChange}

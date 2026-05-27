@@ -87,7 +87,7 @@ export function createConfiguredModelProvider(settings: ModelSettings): ModelPro
 }
 
 export function createModelProviderFromProfile(
-  profile: { provider: string; model: string; apiKeyReference: string; baseUrl: string },
+  profile: { id?: string; provider: string; model: string; apiKeyReference: string; baseUrl: string },
 ): ModelProvider {
   const providerSettings: ModelProviderSettings = {
     provider: profile.provider,
@@ -96,7 +96,7 @@ export function createModelProviderFromProfile(
     baseUrl: profile.baseUrl,
   };
   return {
-    id: (profile as any).id ?? profile.provider,
+    id: profile.id ?? profile.provider,
     settings: providerSettings,
     defaultSettingsForLocale: localeDefaultModelSettings,
     async complete(prompt, options) {
@@ -153,14 +153,11 @@ async function* streamModelPrompt(
   providerSettings: ModelProviderSettings,
   options?: StreamOptions,
 ): AsyncGenerator<CompletionChunk> {
-  let streamId: string;
-  try {
-    streamId = await invoke<string>("stream_model_prompt_start", {
-      request: createModelRequest(prompt, providerSettings, options),
-    });
-  } catch (error) {
-    throw normalizeModelProviderError(error, providerSettings.provider);
-  }
+  // Generate stream ID on the JS side so we can register listeners
+  // BEFORE invoking the Rust command — prevents a race where the Rust
+  // thread emits stream-model-done / stream-model-error before the JS
+  // listeners are attached, which would cause the generator to hang.
+  const streamId = `stream-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
   const buffer: CompletionChunk[] = [];
   let pendingResolve:
@@ -190,6 +187,7 @@ async function* streamModelPrompt(
   const unlisteners: UnlistenFn[] = [];
 
   try {
+    // Register event listeners BEFORE starting the stream
     const unlistenChunk = await listen<StreamChunkPayload>(
       "stream-model-chunk",
       (event) => {
@@ -224,6 +222,16 @@ async function* streamModelPrompt(
       },
     );
     unlisteners.push(unlistenError);
+
+    // Start streaming — listeners are already registered
+    try {
+      await invoke("stream_model_prompt_start", {
+        request: createModelRequest(prompt, providerSettings, options),
+        streamId,
+      });
+    } catch (error) {
+      throw normalizeModelProviderError(error, providerSettings.provider);
+    }
 
     while (!finished) {
       if (buffer.length > 0) {

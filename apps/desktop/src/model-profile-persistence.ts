@@ -49,7 +49,7 @@ export const MODEL_PROFILES_MIGRATIONS: DesktopDatabaseMigration[] = [
 
 export interface ModelProfileRepository {
   load(): Promise<ModelConfiguration>;
-  save(profiles: ModelProfile[], overrides: AgentModelOverrides): Promise<ModelConfiguration>;
+  save(profiles: Omit<ModelProfile, "apiKey">[], overrides: AgentModelOverrides): Promise<ModelConfiguration>;
   importFromLegacySettings(
     legacySettings: { provider: string; model: string; apiKeyReference: string; baseUrl: string },
     locale?: string,

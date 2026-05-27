@@ -102,9 +102,12 @@ pub fn stream_model_prompt_cancel(stream_id: String) -> Result<(), String> {
 pub fn stream_model_prompt_start(
     app_handle: AppHandle,
     mut request: ModelCompletionRequest,
+    stream_id: Option<String>,
 ) -> Result<String, String> {
     hydrate_model_completion_api_key_secret(&app_handle, &mut request)?;
-    let stream_id = format!("stream-{}", NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed));
+    let stream_id = stream_id.unwrap_or_else(|| {
+        format!("stream-{}", NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed))
+    });
     let stream_id_clone = stream_id.clone();
     let app = app_handle.clone();
     let cancelled = register_stream(&stream_id);
