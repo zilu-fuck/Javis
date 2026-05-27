@@ -497,7 +497,7 @@ export function createFileScanTaskRuntime({
       const taskId = `task-${Date.now()}`;
       onTaskStarted?.(taskId);
       if (webTool && extractUrls(userGoal).length > 0) {
-        void runResearchSourceTask({ controller, taskId, userGoal, webTool });
+        void runResearchSourceTask({ controller, taskId, userGoal, webTool, commanderTool });
         return;
       }
       const recommendedWorkflowIds = getRecommendedWorkflowIds(userGoal);
@@ -517,7 +517,7 @@ export function createFileScanTaskRuntime({
         return;
       }
       if (webTool?.searchWeb && isResearchGoal(userGoal)) {
-        void runResearchSearchTask({ controller, taskId, userGoal, webTool });
+        void runResearchSearchTask({ controller, taskId, userGoal, webTool, commanderTool });
         return;
       }
       if (recommendedWorkflowId && recommendedWorkflowId !== "read-current-project") {
@@ -547,6 +547,7 @@ export function createFileScanTaskRuntime({
           userGoal,
           shellTool,
           projectTool,
+          commanderTool,
         );
         return;
       }
@@ -557,6 +558,7 @@ export function createFileScanTaskRuntime({
           userGoal,
           codeTool,
           shellTool,
+          commanderTool,
           setPendingPermissionHandler,
         });
         return;
@@ -567,6 +569,7 @@ export function createFileScanTaskRuntime({
           fileTool,
           taskId,
           userGoal,
+          commanderTool,
           setPendingPermissionHandler,
         });
         return;
@@ -577,6 +580,7 @@ export function createFileScanTaskRuntime({
           fileTool,
           taskId,
           userGoal,
+          commanderTool,
         );
         return;
       }

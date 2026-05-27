@@ -1,6 +1,7 @@
 import type {
   CodeProposedEdit,
   CodeTool,
+  CommanderTool,
   PermissionRequest as ToolPermissionRequest,
   ShellTool,
 } from "@javis/tools";
@@ -17,6 +18,7 @@ import { appendLog } from "./snapshot-utils";
 import { addModelUsage, createEmptyTokenUsageSummary } from "./token-usage";
 import type { ID, TaskSnapshot, TaskStep } from "./index";
 import { createScopedAgentTracker, setTrackedAgentStates } from "./flow-agent-utils";
+import { safeSynthesizeConclusion } from "./workflow-executor";
 
 export interface CodeReviewFlowOptions {
   controller: FlowController;
@@ -24,6 +26,7 @@ export interface CodeReviewFlowOptions {
   userGoal: string;
   codeTool: CodeTool;
   shellTool: ShellTool;
+  commanderTool?: CommanderTool;
   setPendingPermissionHandler(
     requestId: string,
     handler: PendingPermissionHandler | undefined,
@@ -36,6 +39,7 @@ export async function runCodeReviewTask({
   userGoal,
   codeTool,
   shellTool,
+  commanderTool,
   setPendingPermissionHandler,
 }: CodeReviewFlowOptions) {
   let snapshot = controller.getSnapshot();
@@ -262,12 +266,19 @@ export async function runCodeReviewTask({
         }
 
         if (!codeTool.proposeEdit) {
+          const synthesis = await safeSynthesizeConclusion(
+            commanderTool, userGoal, "Code review completed", {
+              codeReviewPreview,
+              changedFileCount,
+              verification,
+            },
+          );
           emit({
             ...snapshot,
             title: "Code review completed",
             status: "completed",
-            commanderMessage:
-              "Code Agent reviewed the current diff and the read-only verification check passed. No edit proposal backend is configured yet.",
+            commanderMessage: synthesis?.message
+              ?? "Code Agent reviewed the current diff and the read-only verification check passed. No edit proposal backend is configured yet.",
             plan: snapshot.plan.map((step) => ({
               ...step,
               status:
@@ -594,6 +605,18 @@ export async function runCodeReviewTask({
             const applyStatus =
               applyResult.applied && postApplyVerification.exitCode === 0 ? "completed" : "failed";
 
+            const applySynthesis = applyStatus === "completed"
+              ? await safeSynthesizeConclusion(
+                  commanderTool, userGoal, "Code Agent patch applied", {
+                    codeReviewPreview,
+                    codeProposedEdit: proposedEdit,
+                    codeApplyResult: applyResult,
+                    verification,
+                    postApplyVerification,
+                  },
+                )
+              : undefined;
+
             emit({
               ...snapshot,
               title:
@@ -601,10 +624,10 @@ export async function runCodeReviewTask({
                   ? "Code Agent patch applied"
                   : "Code Agent patch verification failed",
               status: applyStatus,
-              commanderMessage:
-                applyStatus === "completed"
+              commanderMessage: applySynthesis?.message
+                ?? (applyStatus === "completed"
                   ? "Approved patch was applied and the post-apply diff check passed."
-                  : "The patch apply step finished, but post-apply verification did not pass.",
+                  : "The patch apply step finished, but post-apply verification did not pass."),
               plan:
                 applyStatus === "completed"
                   ? snapshot.plan.map((step) => ({ ...step, status: "completed" }))

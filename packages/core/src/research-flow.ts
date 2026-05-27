@@ -1,4 +1,4 @@
-import type { WebSource, WebTool } from "@javis/tools";
+import type { CommanderTool, WebSource, WebTool } from "@javis/tools";
 import type { FlowController } from "./flow-controller";
 import type { ID, TaskSnapshot } from "./index";
 import { createResearchSearchPlan, createResearchSourcePlan, markStep } from "./plans";
@@ -7,12 +7,14 @@ import { extractUrls } from "./routing";
 import { appendLog } from "./snapshot-utils";
 import { createEmptyTokenUsageSummary } from "./token-usage";
 import { createScopedAgentTracker, setTrackedAgentStates } from "./flow-agent-utils";
+import { safeSynthesizeConclusion } from "./workflow-executor";
 
 interface ResearchFlowOptions {
   controller: FlowController;
   taskId: ID;
   userGoal: string;
   webTool: WebTool;
+  commanderTool?: CommanderTool;
 }
 
 export async function runResearchSearchTask({
@@ -20,6 +22,7 @@ export async function runResearchSearchTask({
   taskId,
   userGoal,
   webTool,
+  commanderTool,
 }: ResearchFlowOptions) {
   let snapshot = controller.getSnapshot();
   function emit(nextSnapshot: TaskSnapshot) {
@@ -199,6 +202,15 @@ export async function runResearchSearchTask({
       validCount === sources.length && reportEvidenceCount === researchReport.rows.length
         ? "completed"
         : "failed";
+    const synthesis = verificationStatus === "completed"
+      ? await safeSynthesizeConclusion(commanderTool, userGoal, "Research sources collected", {
+          sources,
+          researchReport,
+          validSources: validCount,
+          failedFetches: failedFetches.length,
+          providerSummary,
+        })
+      : undefined;
     emit({
       ...snapshot,
       title:
@@ -206,10 +218,10 @@ export async function runResearchSearchTask({
           ? "Research sources collected"
           : "Research source verification failed",
       status: verificationStatus,
-      commanderMessage:
-        verificationStatus === "completed"
+      commanderMessage: synthesis?.message
+        ?? (verificationStatus === "completed"
           ? "Research Agent produced a source-backed report from searched public sources."
-          : "Research Agent fetched searched sources, but Verifier found missing source evidence.",
+          : "Research Agent fetched searched sources, but Verifier found missing source evidence."),
       plan:
         verificationStatus === "completed"
           ? snapshot.plan.map((step) => ({ ...step, status: "completed" }))
@@ -265,6 +277,7 @@ export async function runResearchSourceTask({
   taskId,
   userGoal,
   webTool,
+  commanderTool,
 }: ResearchFlowOptions) {
   let snapshot = controller.getSnapshot();
   function emit(nextSnapshot: TaskSnapshot) {
@@ -360,6 +373,14 @@ export async function runResearchSourceTask({
       validCount === sources.length && reportEvidenceCount === researchReport.rows.length
         ? "completed"
         : "failed";
+    const synthesis = verificationStatus === "completed"
+      ? await safeSynthesizeConclusion(commanderTool, userGoal, "Research sources collected", {
+          sources,
+          researchReport,
+          validSources: validCount,
+          sourceMode: "manual",
+        })
+      : undefined;
     emit({
       ...snapshot,
       title:
@@ -367,10 +388,10 @@ export async function runResearchSourceTask({
           ? "Research sources collected"
           : "Research source verification failed",
       status: verificationStatus,
-      commanderMessage:
-        verificationStatus === "completed"
+      commanderMessage: synthesis?.message
+        ?? (verificationStatus === "completed"
           ? "Research Agent produced a source-backed report from user-provided URLs. Search-backed source discovery is available for research goals without URLs."
-          : "Research Agent fetched the provided URLs, but Verifier found missing source evidence.",
+          : "Research Agent fetched the provided URLs, but Verifier found missing source evidence."),
       plan:
         verificationStatus === "completed"
           ? snapshot.plan.map((step) => ({ ...step, status: "completed" }))

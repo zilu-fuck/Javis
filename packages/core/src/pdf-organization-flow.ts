@@ -1,4 +1,5 @@
 import type {
+  CommanderTool,
   FileTool,
   PermissionRequest as ToolPermissionRequest,
 } from "@javis/tools";
@@ -13,12 +14,14 @@ import type { ID } from "./index";
 import { createPdfOrganizationPlan, markStep } from "./plans";
 import { appendLog } from "./snapshot-utils";
 import { createEmptyTokenUsageSummary } from "./token-usage";
+import { safeSynthesizeConclusion } from "./workflow-executor";
 
 interface PdfOrganizationFlowOptions {
   controller: FlowController;
   fileTool: FileTool;
   taskId: ID;
   userGoal: string;
+  commanderTool?: CommanderTool;
   setPendingPermissionHandler(
     requestId: string,
     handler: PendingPermissionHandler | undefined,
@@ -30,6 +33,7 @@ export async function runPdfOrganizationPreviewTask({
   fileTool,
   taskId,
   userGoal,
+  commanderTool,
   setPendingPermissionHandler,
 }: PdfOrganizationFlowOptions) {
   const plan = createPdfOrganizationPlan();
@@ -261,6 +265,17 @@ export async function runPdfOrganizationPreviewTask({
             taskId,
           );
           const verificationStatus = execution.failedCount === 0 ? "completed" : "failed";
+          const synthesis = verificationStatus === "completed"
+            ? await safeSynthesizeConclusion(
+                commanderTool, userGoal, "PDF organization completed", {
+                  fileOrganizationPlan: organizationPlan,
+                  fileOrganizationExecution: execution,
+                  movedCount: execution.movedCount,
+                  skippedCount: execution.skippedCount,
+                },
+              )
+            : undefined;
+
           agentTracker.setState("agent-commander", {
             status: "completed",
             task: "Task finished",
@@ -281,10 +296,10 @@ export async function runPdfOrganizationPreviewTask({
                 ? "PDF organization completed"
                 : "PDF organization completed with failures",
             status: verificationStatus,
-            commanderMessage:
-              verificationStatus === "completed"
+            commanderMessage: synthesis?.message
+              ?? (verificationStatus === "completed"
                 ? "Approved PDF moves finished and Verifier checked the execution summary."
-                : "Approved PDF moves finished, but at least one operation failed.",
+                : "Approved PDF moves finished, but at least one operation failed."),
             plan:
               verificationStatus === "completed"
                 ? snapshot.plan.map((step) => ({ ...step, status: "completed" }))

@@ -1,4 +1,4 @@
-import type { FileTool } from "@javis/tools";
+import type { CommanderTool, FileTool } from "@javis/tools";
 import { summarizeMarkdownDocuments } from "@javis/tools";
 import { createAgentStateTracker } from "./agent-state-tracker";
 import { demoAgents } from "./agents";
@@ -7,6 +7,7 @@ import { appendLog } from "./snapshot-utils";
 import { createEmptyTokenUsageSummary } from "./token-usage";
 import type { FlowController } from "./flow-controller";
 import type { ID } from "./index";
+import { safeSynthesizeConclusion } from "./workflow-executor";
 export type { FlowController } from "./flow-controller";
 
 export async function runFileScanTask(
@@ -14,6 +15,7 @@ export async function runFileScanTask(
   fileTool: FileTool,
   taskId: ID,
   userGoal: string,
+  commanderTool?: CommanderTool,
 ) {
   const plan = createFileScanPlan();
   const agentTracker = createAgentStateTracker(
@@ -181,6 +183,13 @@ export async function runFileScanTask(
         Boolean(document.purpose),
     ).length;
     const verificationStatus = validCount === documents.length ? "completed" : "failed";
+    const synthesis = verificationStatus === "completed"
+      ? await safeSynthesizeConclusion(commanderTool, userGoal, "Workspace documents scanned", {
+          fileScan: { documents, count: documents.length },
+          verificationStatus,
+        })
+      : undefined;
+
     agentTracker.setState("agent-commander", {
       status: "completed",
       task: "Task finished",
@@ -201,10 +210,10 @@ export async function runFileScanTask(
           ? "Workspace documents scanned"
           : "Document scan verification failed",
       status: verificationStatus,
-      commanderMessage:
-        verificationStatus === "completed"
+      commanderMessage: synthesis?.message
+        ?? (verificationStatus === "completed"
           ? "Document scan completed with read-only filesystem evidence."
-          : "Document scan finished, but Verifier found incomplete records.",
+          : "Document scan finished, but Verifier found incomplete records."),
       plan:
         verificationStatus === "completed"
           ? controller.getSnapshot().plan.map((step) => ({ ...step, status: "completed" }))

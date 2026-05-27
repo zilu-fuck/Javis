@@ -1,4 +1,4 @@
-import type { ProjectTool, ShellTool } from "@javis/tools";
+import type { CommanderTool, ProjectTool, ShellTool } from "@javis/tools";
 import { demoAgents } from "./agents";
 import { createAgentStateTracker } from "./agent-state-tracker";
 import type { FlowController } from "./flow-controller";
@@ -7,6 +7,7 @@ import { createProjectInspectionPlan, markStep } from "./plans";
 import { createRecommendedCommandRequest } from "./routing";
 import { appendLog } from "./snapshot-utils";
 import { createEmptyTokenUsageSummary } from "./token-usage";
+import { safeSynthesizeConclusion } from "./workflow-executor";
 
 export async function runProjectInspectionTask(
   controller: FlowController,
@@ -14,6 +15,7 @@ export async function runProjectInspectionTask(
   userGoal: string,
   activeShellTool: ShellTool,
   activeProjectTool: ProjectTool,
+  commanderTool?: CommanderTool,
 ) {
   const plan = createProjectInspectionPlan();
   const agentTracker = createAgentStateTracker(
@@ -179,6 +181,15 @@ export async function runProjectInspectionTask(
 
     const passingCount = commands.filter((command) => command.exitCode === 0).length;
     const verificationStatus = passingCount === commands.length ? "completed" : "failed";
+    const synthesis = verificationStatus === "completed"
+      ? await safeSynthesizeConclusion(commanderTool, userGoal, "Project environment inspected", {
+          project,
+          commands,
+          passingCount,
+          totalCommands: commands.length,
+        })
+      : undefined;
+
     agentTracker.setState("agent-commander", {
       status: "completed",
       task: "Task finished",
@@ -199,10 +210,10 @@ export async function runProjectInspectionTask(
           ? "Project environment inspected"
           : "Project environment check failed",
       status: verificationStatus,
-      commanderMessage:
-        verificationStatus === "completed"
+      commanderMessage: synthesis?.message
+        ?? (verificationStatus === "completed"
           ? "Project inspection completed through the Tauri desktop process and a read-only command allowlist."
-          : "Project inspection finished, but Verifier found a failing command.",
+          : "Project inspection finished, but Verifier found a failing command."),
       plan:
         verificationStatus === "completed"
           ? snapshot.plan.map((step) => ({ ...step, status: "completed" }))

@@ -1380,7 +1380,7 @@ async function runCommanderSynthesisStep({
   return result;
 }
 
-async function safeSynthesizeConclusion(
+export async function safeSynthesizeConclusion(
   commanderTool: CommanderTool | undefined,
   userGoal: string,
   workflowTitle: string,
