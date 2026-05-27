@@ -1324,6 +1324,9 @@ async function runCommanderSynthesisStep({
   workflowTitle: string;
   contextSnapshot: Record<string, unknown>;
 }): Promise<CommanderSynthesizeResult | undefined> {
+  const verifierCheck = contextSnapshot.verifierCheck as VerifierCheckResult | undefined;
+  const evidencePassed = verifierCheck?.status !== "fail";
+
   const result = await safeSynthesizeConclusion(
     commanderTool,
     userGoal,
@@ -1331,27 +1334,33 @@ async function runCommanderSynthesisStep({
     contextSnapshot,
   );
 
-  const conclusion = result?.message ?? createFallbackConclusion(contextSnapshot);
+  const conclusion = result?.message ?? createFallbackConclusion(contextSnapshot, userGoal);
   const hasConclusion = Boolean(result);
+  const finalStatus = evidencePassed ? "completed" : "failed";
 
   agentTracker.setState("agent-commander", {
-    status: "completed",
-    task: "Project conclusion written",
+    status: finalStatus,
+    task: finalStatus === "completed" ? "Project conclusion written" : "Conclusion written with evidence gaps",
   });
   for (const agentId of ["agent-file", "agent-shell", "agent-code", "agent-verifier"] as const) {
     if (agentTracker.getState(agentId)) {
-      agentTracker.setState(agentId, { status: "completed", task: "Contributed to project analysis" });
+      agentTracker.setState(agentId, {
+        status: finalStatus,
+        task: "Contributed to project analysis",
+      });
     }
   }
 
   emit({
     ...controller.getSnapshot(),
-    title: workflowTitle,
-    status: "completed",
+    title: finalStatus === "completed" ? workflowTitle : `${workflowTitle} with missing evidence`,
+    status: finalStatus,
     commanderMessage: conclusion,
     plan: controller.getSnapshot().plan.map((step) => ({
       ...step,
-      status: step.id === "commander-synthesize" ? "completed" as const : step.status,
+      status: step.id === "commander-synthesize"
+        ? (finalStatus === "completed" ? "completed" as const : "failed" as const)
+        : step.status,
     })),
     agents: agentTracker.getSnapshots(),
     logs: appendLog(controller.getSnapshot(), hasConclusion
@@ -1384,12 +1393,17 @@ async function safeSynthesizeConclusion(
       workflowTitle,
       evidence: contextSnapshot,
     });
-  } catch {
+  } catch (error) {
+    console.error("Commander synthesis failed, falling back to rule-based conclusion:", error);
     return undefined;
   }
 }
 
-function createFallbackConclusion(contextSnapshot: Record<string, unknown>): string {
+function createFallbackConclusion(
+  contextSnapshot: Record<string, unknown>,
+  userGoal: string,
+): string {
+  const isZh = /[一-鿿]/.test(userGoal);
   const parts: string[] = [];
   const project = contextSnapshot.projectInspection as ProjectInspection | undefined;
   const fileScan = contextSnapshot.fileScan as { count?: number } | undefined;
@@ -1398,22 +1412,43 @@ function createFallbackConclusion(contextSnapshot: Record<string, unknown>): str
     : [];
   const analysisSummary = contextSnapshot.analysisSummary as string | undefined;
 
-  if (project) {
-    parts.push(`项目使用 ${project.packageManager ?? "未知"} 包管理器`);
-    if (project.scripts.length > 0) {
-      parts.push(`${project.scripts.length} 个脚本（${project.scripts.map((s) => s.name).join("、")}）`);
+  if (isZh) {
+    if (project) {
+      parts.push(`项目使用 ${project.packageManager ?? "未知"} 包管理器`);
+      if (project.scripts.length > 0) {
+        parts.push(`${project.scripts.length} 个脚本（${project.scripts.map((s) => s.name).join("、")}）`);
+      }
+      if (project.recommendedStartCommand) parts.push(`启动命令: ${project.recommendedStartCommand}`);
+      if (project.recommendedTestCommand) parts.push(`测试命令: ${project.recommendedTestCommand}`);
     }
-    if (project.recommendedStartCommand) parts.push(`启动命令: ${project.recommendedStartCommand}`);
-    if (project.recommendedTestCommand) parts.push(`测试命令: ${project.recommendedTestCommand}`);
+    if (fileScan?.count) parts.push(`扫描到 ${fileScan.count} 个 Markdown 文档`);
+    if (commands.length > 0) {
+      const passed = commands.filter((c) => c.exitCode === 0).length;
+      parts.push(`${passed}/${commands.length} 个环境检查命令通过`);
+    }
+    if (analysisSummary) parts.push(analysisSummary);
+    return parts.length > 0
+      ? parts.join("。\n")
+      : "项目分析已完成，但未收集到足够的证据来生成结论。";
   }
-  if (fileScan?.count) parts.push(`扫描到 ${fileScan.count} 个 Markdown 文档`);
+
+  if (project) {
+    parts.push(`Project uses ${project.packageManager ?? "unknown"} as package manager`);
+    if (project.scripts.length > 0) {
+      parts.push(`${project.scripts.length} script(s): ${project.scripts.map((s) => s.name).join(", ")}`);
+    }
+    if (project.recommendedStartCommand) parts.push(`Start command: ${project.recommendedStartCommand}`);
+    if (project.recommendedTestCommand) parts.push(`Test command: ${project.recommendedTestCommand}`);
+  }
+  if (fileScan?.count) parts.push(`Scanned ${fileScan.count} Markdown document(s)`);
   if (commands.length > 0) {
     const passed = commands.filter((c) => c.exitCode === 0).length;
-    parts.push(`${passed}/${commands.length} 个环境检查命令通过`);
+    parts.push(`${passed}/${commands.length} environment check command(s) passed`);
   }
   if (analysisSummary) parts.push(analysisSummary);
-
-  return parts.length > 0 ? parts.join("。\n") : "项目分析已完成，但未收集到足够的证据来生成结论。";
+  return parts.length > 0
+    ? parts.join(".\n")
+    : "Project analysis completed, but insufficient evidence was collected to form a conclusion.";
 }
 
 async function safeVerifyWorkflow(
