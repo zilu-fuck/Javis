@@ -85,6 +85,9 @@ export function Sidebar({
     computer: activeView !== "computer",
   });
   const [expandedHistoryGroups, setExpandedHistoryGroups] = useState<Record<string, boolean>>({});
+  const [collapsedWorkspaceGroups, setCollapsedWorkspaceGroups] = useState<Record<string, boolean>>(
+    {},
+  );
 
   useEffect(() => {
     if (activeView === "documents" || activeView === "gallery" || activeView === "computer") {
@@ -118,7 +121,7 @@ export function Sidebar({
           }
         }}
       >
-        <span className="javis-nav-icon">{icon}</span>
+        <span className={`javis-nav-icon icon-${view}`}>{icon}</span>
         <span>{label}</span>
         {badge != null && badge > 0 ? <span className="javis-nav-badge">{badge}</span> : null}
       </div>
@@ -152,7 +155,7 @@ export function Sidebar({
           }
         }}
       >
-        <span className="javis-nav-icon">{icon}</span>
+        <span className={`javis-nav-icon icon-${view}`}>{icon}</span>
         <span>{label}</span>
         <span className="javis-nav-caret">{isCollapsed ? "v" : "^"}</span>
       </div>
@@ -225,6 +228,7 @@ export function Sidebar({
             workspaceGroups.map((group) => {
               const hasPreview = group.entries.length > HISTORY_PREVIEW_COUNT;
               const isExpanded = expandedHistoryGroups[group.key] ?? false;
+              const isCollapsed = collapsedWorkspaceGroups[group.key] ?? false;
               const visibleEntries = isExpanded
                 ? group.entries
                 : group.entries.slice(0, HISTORY_PREVIEW_COUNT);
@@ -232,9 +236,10 @@ export function Sidebar({
               return (
                 <section className="javis-history-workspace-group" key={group.key}>
                   <button
+                    aria-expanded={!isCollapsed}
                     className="javis-history-workspace-header"
                     onClick={() =>
-                      setExpandedHistoryGroups((current) => ({
+                      setCollapsedWorkspaceGroups((current) => ({
                         ...current,
                         [group.key]: !current[group.key],
                       }))
@@ -247,11 +252,12 @@ export function Sidebar({
                       {group.displayPath ? <small>{group.displayPath}</small> : null}
                     </span>
                     <span className="javis-history-workspace-caret">
-                      {isExpanded || !hasPreview ? "v" : "^"}
+                      {isCollapsed ? ">" : "v"}
                     </span>
                   </button>
 
-                  <div className="javis-history-workspace-body">
+                  {!isCollapsed ? (
+                    <div className="javis-history-workspace-body">
                     {visibleEntries.length > 0 ? (
                       visibleEntries.map((entry) => (
                         <div className="javis-history-entry" key={entry.id}>
@@ -297,7 +303,8 @@ export function Sidebar({
                         {labels.expandHistoryGroup}
                       </button>
                     ) : null}
-                  </div>
+                    </div>
+                  ) : null}
                 </section>
               );
             })

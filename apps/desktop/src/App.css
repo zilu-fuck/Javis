@@ -8,6 +8,7 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+
   --color-ink: #161817;
   --color-muted: #5f6863;
   --color-subtle: #8b938d;
@@ -22,9 +23,31 @@
   --color-blue: #3f6ea8;
   --color-amber: #b77a19;
   --color-danger: #c8463b;
+
   --shadow-soft: 0 14px 34px rgba(28, 41, 35, 0.08);
   --shadow-panel: 0 24px 70px rgba(28, 41, 35, 0.12);
   --shadow-focus: 0 0 0 4px rgba(45, 111, 103, 0.16);
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
+  --radius-pill: 999px;
+
+  --glass-bg: rgba(255, 255, 255, 0.68);
+  --glass-bg-strong: rgba(255, 255, 255, 0.82);
+  --glass-bg-soft: rgba(255, 255, 255, 0.48);
+  --glass-border: rgba(220, 226, 220, 0.42);
+  --glass-border-accent: rgba(45, 111, 103, 0.18);
+  --glass-blur: 18px;
+  --glass-blur-strong: 28px;
+  --glass-shadow: 0 8px 32px rgba(28, 41, 35, 0.06);
+
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-smooth: cubic-bezier(0.22, 1, 0.36, 1);
+  --duration-fast: 140ms;
+  --duration-normal: 220ms;
+  --duration-slow: 380ms;
 }
 
 * {
@@ -40,6 +63,100 @@ body {
     linear-gradient(135deg, #f4f7f3 0%, #eef5f2 45%, #f7f3ea 100%);
 }
 
+#root,
+.javis-desktop-frame {
+  display: grid;
+  grid-template-rows: 36px minmax(0, 1fr);
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.javis-titlebar {
+  position: relative;
+  z-index: 1000;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  height: 36px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.16);
+  color: rgba(255, 255, 255, 0.92);
+  background: rgba(22, 29, 32, 0.42);
+  backdrop-filter: blur(22px) saturate(1.15);
+  -webkit-backdrop-filter: blur(22px) saturate(1.15);
+  user-select: none;
+}
+
+.javis-titlebar-brand {
+  display: inline-flex;
+  min-width: 0;
+  height: 100%;
+  align-items: center;
+  gap: 9px;
+  padding-left: 9px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.javis-titlebar-icon {
+  display: block;
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+}
+
+.javis-titlebar-controls {
+  display: inline-grid;
+  grid-template-columns: repeat(3, 46px);
+  height: 100%;
+}
+
+.javis-titlebar-controls button {
+  display: inline-grid;
+  place-items: center;
+  border: 0;
+  border-radius: 0;
+  color: rgba(255, 255, 255, 0.9);
+  background: transparent;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.javis-titlebar-controls button span {
+  width: 12px;
+  height: 12px;
+  background: currentColor;
+  mask-position: center;
+  mask-repeat: no-repeat;
+  mask-size: 10px 10px;
+  -webkit-mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-size: 10px 10px;
+}
+
+.javis-titlebar-controls button.minimize span {
+  mask-image: url("./assets/570icons/titlebar-minus.svg");
+  -webkit-mask-image: url("./assets/570icons/titlebar-minus.svg");
+}
+
+.javis-titlebar-controls button.maximize span {
+  mask-image: url("./assets/570icons/titlebar-maximize.svg");
+  -webkit-mask-image: url("./assets/570icons/titlebar-maximize.svg");
+}
+
+.javis-titlebar-controls button.close span {
+  mask-image: url("./assets/570icons/titlebar-close.svg");
+  -webkit-mask-image: url("./assets/570icons/titlebar-close.svg");
+}
+
+.javis-titlebar-controls button:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.javis-titlebar-controls button.close:hover {
+  background: rgba(200, 70, 59, 0.88);
+}
+
 button,
 textarea {
   font: inherit;
@@ -48,11 +165,11 @@ textarea {
 button {
   cursor: pointer;
   transition:
-    background-color 140ms ease,
-    border-color 140ms ease,
-    box-shadow 140ms ease,
-    color 140ms ease,
-    transform 140ms ease;
+    background-color var(--duration-normal) var(--ease-smooth),
+    border-color var(--duration-normal) var(--ease-smooth),
+    box-shadow var(--duration-normal) var(--ease-smooth),
+    color var(--duration-normal) var(--ease-smooth),
+    transform var(--duration-fast) var(--ease-spring);
 }
 
 button:disabled {
@@ -72,7 +189,8 @@ textarea:focus-visible {
   grid-template-columns: minmax(188px, var(--javis-sidebar-width, 228px)) minmax(420px, 1fr) 344px;
   grid-template-rows: 1fr 196px;
   width: 100vw;
-  height: 100vh;
+  height: 100%;
+  min-height: 0;
   overflow: hidden;
   background:
     linear-gradient(145deg, rgba(238, 245, 242, 0.92), rgba(250, 247, 239, 0.88)),
@@ -99,7 +217,7 @@ textarea:focus-visible {
 
 .javis-shell.mode-resource .javis-sidebar {
   grid-row: 1;
-  height: calc(100vh - 28px);
+  height: auto;
   margin: 0 24px 0 16px;
 }
 
@@ -139,17 +257,24 @@ textarea:focus-visible {
 .javis-sidebar {
   position: relative;
   grid-row: 1 / 3;
+  align-self: stretch;
   display: grid;
   grid-template-rows: auto auto 1fr auto;
   gap: 18px;
-  height: calc(100vh - 24px);
+  height: auto;
   margin: 12px;
   padding: 22px 12px 12px;
-  border: 1px solid rgba(220, 226, 220, 0.78);
-  border-radius: 18px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 251, 248, 0.98));
-  box-shadow: var(--shadow-soft);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-xl);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  box-shadow:
+    var(--glass-shadow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  transition:
+    box-shadow var(--duration-normal) var(--ease-smooth),
+    border-color var(--duration-normal) var(--ease-smooth);
 }
 
 .javis-sidebar-resize-handle {
@@ -173,11 +298,11 @@ textarea:focus-visible {
   right: 5px;
   width: 3px;
   height: 46px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: transparent;
   content: "";
   transform: translateY(-50%);
-  transition: background-color 120ms ease;
+  transition: background-color var(--duration-fast) var(--ease-smooth);
 }
 
 .javis-sidebar-resize-handle:hover::after,
@@ -213,17 +338,21 @@ textarea:focus-visible {
 
 .javis-sidebar-search {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: 18px 1fr;
   align-items: center;
   gap: 8px;
   min-height: 36px;
-  border: 1px solid var(--color-line);
-  border-radius: 8px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
   padding: 0 11px;
   color: var(--color-subtle);
-  background: #ffffff;
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(8px);
   font-size: 13px;
-  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.8) inset;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  transition:
+    border-color var(--duration-normal) var(--ease-smooth),
+    box-shadow var(--duration-normal) var(--ease-smooth);
 }
 
 .javis-sidebar-search input {
@@ -289,15 +418,16 @@ textarea:focus-visible {
   min-height: 36px;
   padding: 8px 9px;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: #222522;
   font-size: 14px;
   line-height: 18px;
   transition:
-    background-color 120ms ease,
-    border-color 120ms ease,
-    color 120ms ease,
-    transform 120ms ease;
+    background-color var(--duration-normal) var(--ease-smooth),
+    border-color var(--duration-normal) var(--ease-smooth),
+    color var(--duration-normal) var(--ease-smooth),
+    transform var(--duration-fast) var(--ease-spring),
+    box-shadow var(--duration-normal) var(--ease-smooth);
 }
 
 .javis-nav-item.muted {
@@ -306,15 +436,20 @@ textarea:focus-visible {
 
 .javis-nav-item:hover {
   background: var(--color-surface-soft);
-  transform: translateX(1px);
+  border-color: var(--glass-border);
+  transform: translateX(2px);
+  box-shadow: 0 4px 12px rgba(28, 41, 35, 0.06);
 }
 
 .javis-nav-item.active {
   color: var(--color-accent-strong);
-  border-color: #cde3dc;
-  background: linear-gradient(135deg, #e8f4f0, #f6f8f4);
+  border-color: var(--glass-border-accent);
+  background: linear-gradient(135deg, rgba(232, 244, 240, 0.8), rgba(246, 248, 244, 0.6));
+  backdrop-filter: blur(8px);
   font-weight: 560;
-  box-shadow: inset 3px 0 0 var(--color-accent);
+  box-shadow:
+    inset 3px 0 0 var(--color-accent),
+    0 4px 12px rgba(45, 111, 103, 0.08);
 }
 
 .javis-nav-item.collapsible {
@@ -333,11 +468,14 @@ textarea:focus-visible {
   align-items: center;
   min-width: 0;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
+  transition:
+    border-color var(--duration-normal) var(--ease-smooth),
+    background var(--duration-normal) var(--ease-smooth);
 }
 
 .javis-history-entry:hover {
-  border-color: var(--color-line-soft);
+  border-color: var(--glass-border);
   background: var(--color-surface-soft);
 }
 
@@ -356,13 +494,16 @@ textarea:focus-visible {
   min-height: 30px;
   align-items: center;
   gap: 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   padding: 5px 10px;
   color: #3f4944;
   list-style: none;
   font-size: 13px;
   line-height: 18px;
   cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-smooth),
+    color var(--duration-fast) var(--ease-smooth);
 }
 
 .javis-workspace-menu summary::-webkit-details-marker {
@@ -396,10 +537,13 @@ textarea:focus-visible {
   width: min(360px, calc(100vw - 48px));
   gap: 10px;
   padding: 12px;
-  border: 1px solid var(--color-line);
-  border-radius: 12px;
-  background: #ffffff;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(var(--glass-blur-strong));
+  -webkit-backdrop-filter: blur(var(--glass-blur-strong));
   box-shadow: var(--shadow-panel);
+  animation: javis-scale-in var(--duration-normal) var(--ease-spring) both;
 }
 
 .javis-new-chat-actions .javis-workspace-popover {
@@ -419,12 +563,24 @@ textarea:focus-visible {
 
 .javis-workspace-popover input {
   min-width: 0;
-  border: 1px solid var(--color-line);
-  border-radius: 8px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
   padding: 9px 10px;
   color: var(--color-ink);
-  background: #ffffff;
+  background: var(--glass-bg-strong);
   font-size: 12px;
+  transition:
+    border-color var(--duration-normal) var(--ease-smooth),
+    box-shadow var(--duration-normal) var(--ease-smooth);
+}
+
+.javis-sidebar-search > span {
+  width: 16px;
+  height: 16px;
+  color: transparent;
+  background: var(--color-subtle);
+  mask: url("./assets/570icons/search.svg") center / 15px 15px no-repeat;
+  -webkit-mask: url("./assets/570icons/search.svg") center / 15px 15px no-repeat;
 }
 
 .javis-workspace-actions {
@@ -435,17 +591,20 @@ textarea:focus-visible {
 
 .javis-workspace-actions button,
 .javis-workspace-recent button {
-  border: 1px solid var(--color-line);
-  border-radius: 8px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
   padding: 7px 8px;
   color: var(--color-ink);
-  background: #ffffff;
+  background: var(--glass-bg-strong);
   font-size: 12px;
+  transition:
+    border-color var(--duration-normal) var(--ease-smooth),
+    background var(--duration-normal) var(--ease-smooth);
 }
 
 .javis-workspace-actions button:hover,
 .javis-workspace-recent button:hover {
-  border-color: #c5d4ce;
+  border-color: var(--glass-border-accent);
   background: var(--color-accent-soft);
 }
 
@@ -511,16 +670,20 @@ textarea:focus-visible {
   min-height: 44px;
   border: 0;
   padding: 9px 8px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: #3f4944;
   background: transparent;
   font-size: 13px;
   text-align: left;
   cursor: pointer;
+  transition:
+    background var(--duration-normal) var(--ease-smooth),
+    transform var(--duration-fast) var(--ease-spring);
 }
 
 .javis-settings-trigger:hover {
   background: var(--color-surface-soft);
+  transform: translateX(1px);
 }
 
 .javis-settings-modal-backdrop {
@@ -530,8 +693,10 @@ textarea:focus-visible {
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgba(19, 28, 24, 0.24);
-  backdrop-filter: blur(6px);
+  background: rgba(19, 28, 24, 0.28);
+  backdrop-filter: blur(var(--glass-blur-strong));
+  -webkit-backdrop-filter: blur(var(--glass-blur-strong));
+  animation: javis-backdrop-in var(--duration-slow) var(--ease-smooth) both;
 }
 
 .javis-settings-modal {
@@ -540,10 +705,15 @@ textarea:focus-visible {
   width: min(800px, calc(100vw - 48px));
   height: min(600px, calc(100vh - 48px));
   overflow: hidden;
-  border: 1px solid #d8ddd8;
-  border-radius: 18px;
-  background: #f6f6f5;
-  box-shadow: 0 24px 70px rgba(25, 38, 32, 0.22);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-xl);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(var(--glass-blur-strong));
+  -webkit-backdrop-filter: blur(var(--glass-blur-strong));
+  box-shadow:
+    0 24px 70px rgba(25, 38, 32, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  animation: javis-modal-in var(--duration-slow) var(--ease-smooth) both;
 }
 
 .javis-settings-tabs {
@@ -551,7 +721,7 @@ textarea:focus-visible {
   align-content: start;
   gap: 8px;
   padding: 24px 12px;
-  background: #ffffff;
+  background: var(--glass-bg-strong);
 }
 
 .javis-settings-tabs p {
@@ -567,12 +737,15 @@ textarea:focus-visible {
   gap: 9px;
   min-height: 38px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 8px 12px;
   color: #111714;
   background: transparent;
   font-size: 14px;
   text-align: left;
+  transition:
+    background var(--duration-fast) var(--ease-smooth),
+    transform var(--duration-fast) var(--ease-spring);
 }
 
 .javis-settings-tabs button.active,
@@ -595,6 +768,8 @@ textarea:focus-visible {
   min-width: 0;
   overflow: auto;
   padding: 26px 48px 36px;
+  border-left: 1px solid var(--glass-border);
+  background: rgba(250, 252, 250, 0.86);
 }
 
 .javis-settings-section h2 {
@@ -615,16 +790,19 @@ textarea:focus-visible {
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: #9aa09c;
   background: transparent;
   font-size: 18px;
   line-height: 1;
+  transition:
+    color var(--duration-fast) var(--ease-smooth),
+    background var(--duration-fast) var(--ease-smooth);
 }
 
 .javis-settings-close:hover {
   color: #111714;
-  background: #eeeeec;
+  background: var(--glass-bg-soft);
 }
 
 .javis-settings-panel {
@@ -636,6 +814,7 @@ textarea:focus-visible {
 .javis-settings-section {
   display: grid;
   gap: 20px;
+  max-width: 560px;
 }
 
 .javis-settings-section p {
@@ -648,14 +827,17 @@ textarea:focus-visible {
 .javis-settings-card {
   display: grid;
   gap: 14px;
-  border-radius: 18px;
+  min-height: 72px;
+  border-radius: var(--radius-lg);
   padding: 18px 20px;
-  background: #ffffff;
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(8px);
 }
 
 .javis-settings-section .javis-model-settings-warning {
   border: 1px solid #efd49a;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 8px 9px;
   color: #765016;
   background: #fff8e6;
@@ -670,12 +852,15 @@ textarea:focus-visible {
 
 .javis-settings-section input {
   min-width: 0;
-  border: 1px solid var(--color-line);
-  border-radius: 10px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
   padding: 10px 11px;
   color: var(--color-ink);
-  background: #fafafa;
+  background: var(--glass-bg-strong);
   font-size: 13px;
+  transition:
+    border-color var(--duration-normal) var(--ease-smooth),
+    box-shadow var(--duration-normal) var(--ease-smooth);
 }
 
 .javis-history-select {
@@ -727,7 +912,7 @@ textarea:focus-visible {
 
 .javis-history-delete:hover {
   color: var(--color-danger);
-  background: #fff4f2;
+  background: rgba(255, 244, 242, 0.72);
 }
 
 .javis-history-workspace-group {
@@ -751,8 +936,12 @@ textarea:focus-visible {
 }
 
 .javis-history-workspace-icon {
-  color: var(--color-muted);
-  font-size: 13px;
+  width: 16px;
+  height: 16px;
+  color: transparent;
+  background: var(--color-muted);
+  mask: url("./assets/570icons/folder.svg") center / 15px 15px no-repeat;
+  -webkit-mask: url("./assets/570icons/folder.svg") center / 15px 15px no-repeat;
 }
 
 .javis-history-workspace-name {
@@ -814,6 +1003,57 @@ textarea:focus-visible {
   font-weight: 800;
 }
 
+.javis-nav-icon[class*="icon-"] {
+  background: currentColor;
+  font-size: 0;
+  mask-position: center;
+  mask-repeat: no-repeat;
+  mask-size: 16px 16px;
+  -webkit-mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-size: 16px 16px;
+}
+
+.javis-nav-icon.icon-chat {
+  mask-image: url("./assets/570icons/add.svg");
+  -webkit-mask-image: url("./assets/570icons/add.svg");
+}
+
+.javis-nav-icon.icon-automated {
+  mask-image: url("./assets/570icons/tasks.svg");
+  -webkit-mask-image: url("./assets/570icons/tasks.svg");
+}
+
+.javis-nav-icon.icon-skills {
+  mask-image: url("./assets/570icons/skills.svg");
+  -webkit-mask-image: url("./assets/570icons/skills.svg");
+}
+
+.javis-nav-icon.icon-apps {
+  mask-image: url("./assets/570icons/apps.svg");
+  -webkit-mask-image: url("./assets/570icons/apps.svg");
+}
+
+.javis-nav-icon.icon-documents {
+  mask-image: url("./assets/570icons/document.svg");
+  -webkit-mask-image: url("./assets/570icons/document.svg");
+}
+
+.javis-nav-icon.icon-gallery {
+  mask-image: url("./assets/570icons/gallery.svg");
+  -webkit-mask-image: url("./assets/570icons/gallery.svg");
+}
+
+.javis-nav-icon.icon-computer {
+  mask-image: url("./assets/570icons/computer.svg");
+  -webkit-mask-image: url("./assets/570icons/computer.svg");
+}
+
+.javis-nav-icon.icon-settings {
+  mask-image: url("./assets/570icons/settings.svg");
+  -webkit-mask-image: url("./assets/570icons/settings.svg");
+}
+
 .javis-nav-caret {
   color: var(--color-subtle);
   font-size: 14px;
@@ -851,10 +1091,10 @@ textarea:focus-visible {
 .javis-main {
   display: grid;
   grid-template-rows: max-content minmax(0, 1fr) max-content;
-  border-right: 1px solid var(--color-line);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.72), rgba(248, 251, 248, 0.9)),
-    var(--color-surface);
+  border-right: 1px solid var(--glass-border);
+  background: var(--glass-bg-soft);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
 }
 
 .javis-main.new-chat {
@@ -869,7 +1109,7 @@ textarea:focus-visible {
   min-height: 0;
   padding: 48px 32px 118px;
   background:
-    linear-gradient(180deg, rgba(225, 241, 237, 0.58), rgba(251, 252, 250, 0) 46%);
+    linear-gradient(180deg, rgba(225, 241, 237, 0.34), rgba(251, 252, 250, 0) 46%);
 }
 
 .javis-new-chat h1 {
@@ -887,18 +1127,26 @@ textarea:focus-visible {
   display: grid;
   width: min(728px, 100%);
   min-height: 148px;
-  border: 1px solid #cfdad2;
-  border-radius: 16px;
-  background: #ffffff;
-  box-shadow: var(--shadow-panel);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-xl);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(var(--glass-blur-strong));
+  -webkit-backdrop-filter: blur(var(--glass-blur-strong));
+  box-shadow:
+    var(--shadow-panel),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
   overflow: visible;
+  transition:
+    border-color var(--duration-normal) var(--ease-smooth),
+    box-shadow var(--duration-normal) var(--ease-smooth);
 }
 
 .javis-new-chat-composer:focus-within {
-  border-color: #91bbb2;
+  border-color: var(--glass-border-accent);
   box-shadow:
     var(--shadow-panel),
-    var(--shadow-focus);
+    var(--shadow-focus),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
 }
 
 .javis-new-chat-composer textarea {
@@ -972,9 +1220,11 @@ textarea:focus-visible {
   width: 224px;
   gap: 4px;
   padding: 8px;
-  border: 1px solid #d8ddd8;
-  border-radius: 12px;
-  background: #ffffff;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(var(--glass-blur-strong));
+  -webkit-backdrop-filter: blur(var(--glass-blur-strong));
   box-shadow: var(--shadow-panel);
 }
 
@@ -985,12 +1235,15 @@ textarea:focus-visible {
   gap: 8px;
   min-height: 34px;
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   padding: 6px 8px;
   color: #26302b;
   background: transparent;
   font-size: 13px;
   text-align: left;
+  transition:
+    background var(--duration-fast) var(--ease-smooth),
+    transform var(--duration-fast) var(--ease-spring);
 }
 
 .javis-attach-popover button:hover:not(:disabled) {
@@ -1006,8 +1259,9 @@ textarea:focus-visible {
   position: relative;
   width: 28px;
   height: 16px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: #ccd3ce;
+  transition: background var(--duration-normal) var(--ease-smooth);
 }
 
 .javis-toggle::after {
@@ -1016,10 +1270,10 @@ textarea:focus-visible {
   left: 2px;
   width: 12px;
   height: 12px;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   background: #ffffff;
   content: "";
-  transition: transform 120ms ease;
+  transition: transform var(--duration-normal) var(--ease-spring);
 }
 
 .javis-toggle.on {
@@ -1055,9 +1309,9 @@ textarea:focus-visible {
 .javis-composer-file-icon {
   width: 84px;
   height: 64px;
-  border: 1px solid #d9e1db;
-  border-radius: 8px;
-  background: #f5f7f5;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  background: var(--glass-bg-soft);
   object-fit: cover;
 }
 
@@ -1101,16 +1355,20 @@ textarea:focus-visible {
   color: #ffffff;
   background: linear-gradient(135deg, var(--color-accent-strong), var(--color-accent));
   box-shadow: 0 10px 22px rgba(23, 79, 73, 0.18);
+  transition:
+    transform var(--duration-fast) var(--ease-spring),
+    box-shadow var(--duration-normal) var(--ease-smooth);
 }
 
 .javis-send-button:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 14px 28px rgba(23, 79, 73, 0.22);
+  transform: translateY(-2px);
+  box-shadow: 0 16px 32px rgba(23, 79, 73, 0.24);
 }
 
 .javis-attach-button:hover {
-  border-color: #b9cac3;
+  border-color: rgba(45, 111, 103, 0.24);
   background: var(--color-accent-soft);
+  transform: translateY(-1px);
 }
 
 .javis-attach-button[aria-disabled="true"] {
@@ -1129,9 +1387,10 @@ textarea:focus-visible {
   gap: 12px;
   min-height: 56px;
   padding: 10px 18px;
-  border-bottom: 1px solid var(--color-line-soft);
-  background: rgba(251, 252, 250, 0.92);
-  backdrop-filter: blur(18px);
+  border-bottom: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur-strong));
+  -webkit-backdrop-filter: blur(var(--glass-blur-strong));
 }
 
 .javis-eyebrow {
@@ -1161,18 +1420,23 @@ textarea:focus-visible {
 
 .javis-retry-button {
   min-height: 30px;
-  border: 1px solid var(--color-line);
-  border-radius: 8px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
   padding: 5px 10px;
   color: var(--color-ink);
-  background: #ffffff;
+  background: var(--glass-bg-strong);
   font-size: 12px;
   font-weight: 650;
+  transition:
+    border-color var(--duration-normal) var(--ease-smooth),
+    background var(--duration-normal) var(--ease-smooth),
+    transform var(--duration-fast) var(--ease-spring);
 }
 
 .javis-retry-button:hover {
-  border-color: #b9cac3;
+  border-color: var(--glass-border-accent);
   background: var(--color-accent-soft);
+  transform: translateY(-1px);
 }
 
 .javis-thread {
@@ -1189,10 +1453,14 @@ textarea:focus-visible {
 .javis-documents,
 .javis-recovery,
 .javis-confirmation {
-  border: 1px solid #e1ded6;
-  border-radius: 8px;
-  background: #ffffff;
-  box-shadow: 0 8px 22px rgba(28, 41, 35, 0.04);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  box-shadow:
+    0 8px 22px rgba(28, 41, 35, 0.04),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
 }
 
 .javis-message {
@@ -1202,8 +1470,9 @@ textarea:focus-visible {
 
 .javis-message.user {
   justify-self: end;
-  border-color: #cfe3dd;
-  background: linear-gradient(135deg, #f5fbf8, #eaf4f1);
+  border-color: var(--glass-border-accent);
+  background: linear-gradient(135deg, rgba(245, 251, 248, 0.8), rgba(234, 244, 241, 0.6));
+  backdrop-filter: blur(12px);
 }
 
 .javis-process-toggle {
@@ -1213,18 +1482,24 @@ textarea:focus-visible {
   gap: 12px;
   width: min(760px, 100%);
   min-height: 42px;
-  border: 1px solid #d9e1db;
-  border-radius: 8px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
   padding: 9px 12px;
   color: var(--color-muted);
-  background: #ffffff;
-  box-shadow: 0 8px 22px rgba(28, 41, 35, 0.04);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(12px);
+  box-shadow: var(--glass-shadow);
   text-align: left;
+  transition:
+    border-color var(--duration-normal) var(--ease-smooth),
+    background var(--duration-normal) var(--ease-smooth),
+    box-shadow var(--duration-normal) var(--ease-smooth);
 }
 
 .javis-process-toggle:hover {
-  border-color: #b9cac3;
+  border-color: var(--glass-border-accent);
   background: var(--color-accent-soft);
+  box-shadow: 0 8px 22px rgba(45, 111, 103, 0.08);
 }
 
 .javis-process-toggle span,
@@ -1300,10 +1575,11 @@ textarea:focus-visible {
 
 .javis-message-body pre {
   margin: 10px 0;
-  border: 1px solid var(--color-line);
-  border-radius: 8px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
   padding: 12px 14px;
   background: rgba(23, 24, 23, 0.04);
+  backdrop-filter: blur(4px);
   overflow-x: auto;
 }
 
@@ -1359,24 +1635,29 @@ textarea:focus-visible {
   gap: 12px;
   width: min(420px, 100%);
   min-height: 72px;
-  border: 1px solid #d9e1db;
-  border-radius: 8px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
   padding: 10px 12px;
   color: var(--color-ink);
-  background: #ffffff;
-  box-shadow: 0 8px 22px rgba(28, 41, 35, 0.04);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(12px);
+  box-shadow: var(--glass-shadow);
   text-align: left;
+  transition:
+    border-color var(--duration-normal) var(--ease-smooth),
+    background var(--duration-normal) var(--ease-smooth),
+    box-shadow var(--duration-normal) var(--ease-smooth);
 }
 
 .javis-context-window-trigger:hover {
-  border-color: #b9cac3;
-  background: #f7fbf8;
+  border-color: var(--glass-border-accent);
+  background: rgba(247, 251, 248, 0.82);
 }
 
 .javis-context-window-trigger[aria-expanded="true"] {
-  border-color: #b9d7cf;
+  border-color: var(--glass-border-accent);
   box-shadow:
-    0 8px 22px rgba(28, 41, 35, 0.04),
+    var(--glass-shadow),
     var(--shadow-focus);
 }
 
@@ -1425,8 +1706,8 @@ textarea:focus-visible {
   font-size: 12px;
   line-height: 1;
   transition:
-    color 140ms ease,
-    transform 140ms ease;
+    color var(--duration-normal) var(--ease-smooth),
+    transform var(--duration-normal) var(--ease-spring);
 }
 
 .javis-context-window-caret.open {
@@ -1443,10 +1724,13 @@ textarea:focus-visible {
   width: min(420px, calc(100vw - 36px));
   gap: 12px;
   padding: 12px;
-  border: 1px solid var(--color-line);
-  border-radius: 8px;
-  background: #ffffff;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(var(--glass-blur-strong));
+  -webkit-backdrop-filter: blur(var(--glass-blur-strong));
   box-shadow: var(--shadow-panel);
+  animation: javis-scale-in var(--duration-normal) var(--ease-spring) both;
 }
 
 .javis-context-window-meter {
@@ -1495,9 +1779,9 @@ textarea:focus-visible {
   gap: 2px;
   min-width: 0;
   padding: 10px 11px;
-  border: 1px solid var(--color-line-soft);
-  border-radius: 8px;
-  background: var(--color-surface);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  background: var(--glass-bg-soft);
 }
 
 .javis-context-window-stat span {
@@ -1531,9 +1815,9 @@ textarea:focus-visible {
   display: grid;
   gap: 6px;
   padding: 10px 11px;
-  border: 1px solid var(--color-line-soft);
-  border-radius: 8px;
-  background: #ffffff;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  background: var(--glass-bg-strong);
 }
 
 .javis-context-window-agent-head {
@@ -1599,11 +1883,15 @@ textarea:focus-visible {
   gap: 10px;
   max-width: 860px;
   padding: 15px;
+  transition:
+    box-shadow var(--duration-normal) var(--ease-smooth),
+    transform var(--duration-normal) var(--ease-smooth);
 }
 
 .javis-recovery {
-  border-color: #e4cfc4;
-  background: #fff8f4;
+  border-color: rgba(228, 207, 196, 0.38);
+  background: linear-gradient(135deg, rgba(255, 248, 244, 0.72), rgba(255, 248, 244, 0.52));
+  backdrop-filter: blur(12px);
 }
 
 .javis-recovery p:last-child {
@@ -1618,8 +1906,13 @@ textarea:focus-visible {
 }
 
 .javis-confirmation {
-  border-color: #e2c46f;
-  background: linear-gradient(135deg, #fffaf0, #fff7df);
+  border-color: rgba(226, 196, 111, 0.34);
+  background: linear-gradient(135deg, rgba(255, 250, 240, 0.72), rgba(255, 247, 223, 0.52));
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  box-shadow:
+    0 8px 32px rgba(183, 122, 25, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
 }
 
 .javis-confirmation-header,
@@ -1639,10 +1932,13 @@ textarea:focus-visible {
 .javis-composer-actions > button[type="submit"] {
   min-height: 36px;
   border: 1px solid var(--color-accent-strong);
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   color: #ffffff;
   background: linear-gradient(135deg, var(--color-accent-strong), var(--color-accent));
   font-weight: 650;
+  transition:
+    transform var(--duration-fast) var(--ease-spring),
+    box-shadow var(--duration-normal) var(--ease-smooth);
 }
 
 .javis-confirmation-actions button {
@@ -1652,8 +1948,8 @@ textarea:focus-visible {
 
 .javis-confirmation-actions button + button {
   color: #2c3430;
-  border-color: var(--color-line);
-  background: #ffffff;
+  border-color: var(--glass-border);
+  background: var(--glass-bg-strong);
 }
 
 .javis-confirmation-actions span {
@@ -1684,9 +1980,10 @@ textarea:focus-visible {
   display: grid;
   gap: 4px;
   padding: 10px;
-  border: 1px solid #eadfc7;
-  border-radius: 7px;
-  background: #ffffff;
+  border: 1px solid rgba(234, 223, 199, 0.5);
+  border-radius: var(--radius-md);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(8px);
 }
 
 .javis-dry-run-item strong,
@@ -1768,23 +2065,23 @@ textarea:focus-visible {
   display: grid;
   gap: 0;
   padding: 14px 18px;
-  border-top: 1px solid var(--color-line-soft);
-  background: rgba(251, 252, 250, 0.94);
+  border-top: 1px solid var(--glass-border);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
 }
 
 .javis-composer textarea {
   min-height: 72px;
   resize: none;
-  border: 1px solid var(--color-line);
+  border: 1px solid var(--glass-border);
   border-bottom: 0;
-  border-radius: 8px;
-  border-bottom-right-radius: 0;
-  border-bottom-left-radius: 0;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
   padding: 11px 12px;
   color: var(--color-ink);
-  background: #ffffff;
+  background: var(--glass-bg-strong);
   line-height: 21px;
-  box-shadow: 0 1px 2px rgba(17, 17, 17, 0.04);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
   overflow: hidden;
 }
 
@@ -1798,20 +2095,20 @@ textarea:focus-visible {
   align-items: center;
   gap: 12px;
   min-height: 48px;
-  border: 1px solid var(--color-line);
+  border: 1px solid var(--glass-border);
   border-top: 0;
-  border-radius: 0 0 8px 8px;
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
   padding: 7px 10px 10px;
-  background: #ffffff;
-  box-shadow: 0 1px 2px rgba(17, 17, 17, 0.04);
+  background: var(--glass-bg-strong);
+  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.3);
 }
 
 .javis-composer .javis-composer-attachments {
-  border: 1px solid var(--color-line);
+  border: 1px solid var(--glass-border);
   border-bottom: 0;
-  border-radius: 8px 8px 0 0;
-  background: #ffffff;
-  box-shadow: 0 1px 2px rgba(17, 17, 17, 0.04);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  background: var(--glass-bg-strong);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
 }
 
 .javis-composer .javis-composer-attachments + textarea {
@@ -1825,7 +2122,7 @@ textarea:focus-visible {
 
 .javis-composer:focus-within textarea,
 .javis-composer:focus-within .javis-composer-actions {
-  border-color: #91bbb2;
+  border-color: var(--glass-border-accent);
 }
 
 .javis-composer-actions > button {
@@ -1836,8 +2133,8 @@ textarea:focus-visible {
 
 .javis-composer-actions > button:hover,
 .javis-confirmation-actions button:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 10px 22px rgba(23, 79, 73, 0.18);
+  transform: translateY(-2px);
+  box-shadow: 0 12px 24px rgba(23, 79, 73, 0.2);
 }
 
 
@@ -1845,7 +2142,9 @@ textarea:focus-visible {
   display: grid;
   grid-template-columns: auto 1fr;
   grid-template-rows: 1fr;
-  background: rgba(246, 249, 246, 0.86);
+  background: var(--glass-bg-soft);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
 }
 
 .javis-inspector-toggle {
@@ -1858,21 +2157,27 @@ textarea:focus-visible {
   justify-content: center;
   gap: 8px;
   margin: 12px 6px;
-  border: 1px solid var(--color-line);
-  border-radius: 999px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-pill);
   padding: 10px 5px;
   color: #34413c;
-  background: #ffffff;
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(8px);
   font-size: 12px;
   font-weight: 650;
   writing-mode: vertical-rl;
-  box-shadow: 0 10px 24px rgba(28, 41, 35, 0.06);
+  box-shadow: var(--glass-shadow);
+  transition:
+    border-color var(--duration-normal) var(--ease-smooth),
+    background var(--duration-normal) var(--ease-smooth),
+    transform var(--duration-fast) var(--ease-spring);
 }
 
 .javis-inspector-toggle:hover,
 .javis-activity-toggle:hover {
-  border-color: #b9cac3;
+  border-color: var(--glass-border-accent);
   background: var(--color-accent-soft);
+  transform: translateY(-1px);
 }
 
 .javis-inspector-panel {
@@ -1880,7 +2185,7 @@ textarea:focus-visible {
   grid-template-rows: auto 1fr;
   min-width: 0;
   min-height: 0;
-  border-left: 1px solid var(--color-line);
+  border-left: 1px solid var(--glass-border);
 }
 
 .javis-agent-list,
@@ -1895,10 +2200,11 @@ textarea:focus-visible {
 
 .javis-agent,
 .javis-log {
-  border: 1px solid var(--color-line-soft);
-  border-radius: 8px;
-  background: #ffffff;
-  box-shadow: 0 7px 18px rgba(28, 41, 35, 0.035);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(8px);
+  box-shadow: var(--glass-shadow);
 }
 
 .javis-agent {
@@ -1934,8 +2240,10 @@ textarea:focus-visible {
   grid-column: 2 / 4;
   display: grid;
   grid-template-rows: auto 1fr;
-  border-top: 1px solid var(--color-line);
-  background: rgba(240, 245, 241, 0.9);
+  border-top: 1px solid var(--glass-border);
+  background: var(--glass-bg-soft);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
 }
 
 .javis-activity-toggle {
@@ -1946,13 +2254,18 @@ textarea:focus-visible {
   gap: 8px;
   min-height: 30px;
   margin: 5px 14px;
-  border: 1px solid var(--color-line);
-  border-radius: 999px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-pill);
   padding: 5px 10px;
   color: #34413c;
-  background: #ffffff;
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(8px);
   font-size: 12px;
   font-weight: 650;
+  transition:
+    border-color var(--duration-normal) var(--ease-smooth),
+    background var(--duration-normal) var(--ease-smooth),
+    transform var(--duration-fast) var(--ease-spring);
 }
 
 .javis-activity-count {
@@ -1961,7 +2274,7 @@ textarea:focus-visible {
   height: 20px;
   align-items: center;
   justify-content: center;
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
   color: var(--color-accent-strong);
   background: var(--color-accent-soft);
   font-size: 11px;
@@ -1978,8 +2291,9 @@ textarea:focus-visible {
 }
 
 .javis-log-confirmation {
-  border-color: #e2c46f;
-  background: #fffaf0;
+  border-color: rgba(226, 196, 111, 0.34);
+  background: rgba(255, 250, 240, 0.72);
+  backdrop-filter: blur(12px);
 }
 
 .javis-log-kind {
@@ -2027,7 +2341,7 @@ textarea:focus-visible {
   min-width: 0;
   color: var(--color-ink);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(248, 251, 248, 0.9)),
+    linear-gradient(180deg, var(--glass-bg), var(--glass-bg-soft)),
     #f8faf7;
 }
 
@@ -2113,9 +2427,9 @@ textarea:focus-visible {
 
 .javis-resource-icon-button:hover,
 .javis-resource-segment button:hover {
-  border-color: #c5d4ce;
-  background: #ffffff;
-  box-shadow: 0 8px 18px rgba(28, 41, 35, 0.06);
+  border-color: var(--glass-border-accent);
+  background: var(--glass-bg-strong);
+  box-shadow: var(--glass-shadow);
 }
 
 .javis-resource-search {
@@ -2133,8 +2447,8 @@ textarea:focus-visible {
 }
 
 .javis-resource-search:focus-within {
-  border-color: #91bbb2;
-  background: #ffffff;
+  border-color: var(--glass-border-accent);
+  background: var(--glass-bg-strong);
   box-shadow: var(--shadow-focus);
 }
 
@@ -2277,9 +2591,9 @@ textarea:focus-visible {
 
 .javis-view-error button {
   padding: 6px 16px;
-  border: 1px solid var(--color-line);
-  border-radius: 8px;
-  background: #fff;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  background: var(--glass-bg-strong);
   font-size: 13px;
 }
 
@@ -2324,10 +2638,10 @@ textarea:focus-visible {
 .javis-view-search input {
   width: 100%;
   padding: 8px 12px;
-  border: 1px solid var(--color-line);
-  border-radius: 8px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
   font-size: 13px;
-  background: #fff;
+  background: var(--glass-bg-strong);
 }
 
 /* ── Filter chips ───────────────────────────────────────────────── */
@@ -2341,15 +2655,15 @@ textarea:focus-visible {
 
 .javis-chip {
   padding: 4px 12px;
-  border: 1px solid var(--color-line);
-  border-radius: 999px;
-  background: #fff;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-pill);
+  background: var(--glass-bg-strong);
   font-size: 12px;
   color: var(--color-muted);
 }
 
 .javis-chip.active {
-  border-color: #b9d7cf;
+  border-color: var(--glass-border-accent);
   background: var(--color-accent-soft);
   color: var(--color-accent-strong);
   font-weight: 600;
@@ -2361,19 +2675,6 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 10px;
-}
-
-.javis-task-card {
-  padding: 15px 16px;
-  border: 1px solid var(--color-line-soft);
-  border-radius: 8px;
-  background: #fff;
-  box-shadow: 0 8px 22px rgba(28, 41, 35, 0.04);
-}
-
-.javis-task-card:hover {
-  border-color: #c8d8d1;
-  box-shadow: var(--shadow-soft);
 }
 
 .javis-task-card.disabled {
@@ -2451,7 +2752,7 @@ textarea:focus-visible {
 }
 
 .javis-task-delete:hover {
-  background: #fff4f2;
+  background: rgba(255, 244, 242, 0.72);
   color: var(--color-danger);
 }
 
@@ -2478,20 +2779,6 @@ textarea:focus-visible {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: 10px;
-}
-
-.javis-skill-card {
-  padding: 14px;
-  border: 1px solid var(--color-line-soft);
-  border-radius: 8px;
-  background: #fff;
-  box-shadow: 0 8px 22px rgba(28, 41, 35, 0.04);
-}
-
-.javis-skill-card:hover {
-  border-color: #c8d8d1;
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-soft);
 }
 
 .javis-skill-card-header {
@@ -2531,11 +2818,11 @@ textarea:focus-visible {
 
 .javis-skill-owner-chip {
   padding: 1px 8px;
-  border: 1px solid var(--color-line);
-  border-radius: 999px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-pill);
   font-size: 10px;
   color: var(--color-muted);
-  background: #fbfcfa;
+  background: var(--glass-bg-soft);
 }
 
 .javis-skill-owner-chip.muted {
@@ -2555,26 +2842,6 @@ textarea:focus-visible {
   grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
   gap: 34px 24px;
   padding-top: 24px;
-}
-
-.javis-app-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  padding: 10px 8px;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  background: transparent;
-  text-align: center;
-}
-
-.javis-app-card:hover {
-  border-color: var(--color-line-soft);
-  background: rgba(255, 255, 255, 0.76);
-  transform: translateY(-2px);
-  box-shadow: 0 12px 24px rgba(28, 41, 35, 0.08);
 }
 
 .javis-app-icon {
@@ -2639,24 +2906,29 @@ textarea:focus-visible {
   padding: 10px 12px;
   border-bottom: 0;
   color: var(--color-muted);
-  background: rgba(255, 255, 255, 0.64);
-  border-top: 1px solid var(--color-line-soft);
-  border-bottom: 1px solid var(--color-line-soft);
+  background: var(--glass-bg);
+  border-top: 1px solid var(--glass-border);
+  border-bottom: 1px solid var(--glass-border);
 }
 
 .javis-doc-table tr:hover td {
-  background: #ffffff;
-  border-color: #c8d8d1;
+  background: var(--glass-bg-strong);
+  border-color: var(--glass-border-accent);
 }
 
 .javis-doc-table td:first-child {
-  border-radius: 7px 0 0 7px;
-  border-left: 1px solid var(--color-line-soft);
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
+  border-left: 1px solid var(--glass-border);
 }
 
 .javis-doc-table td:last-child {
-  border-radius: 0 7px 7px 0;
-  border-right: 1px solid var(--color-line-soft);
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  border-right: 1px solid var(--glass-border);
+}
+
+.javis-doc-table td:last-child {
+  border-radius: 0 var(--radius-md) var(--radius-md) 0;
+  border-right: 1px solid var(--glass-border);
 }
 
 .javis-doc-link {
@@ -2680,9 +2952,9 @@ textarea:focus-visible {
   justify-content: center;
   width: 18px;
   height: 22px;
-  border: 1px solid var(--color-line);
-  border-radius: 3px;
-  background: #ffffff;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  background: var(--glass-bg-strong);
   color: var(--color-muted);
   font-size: 7px;
   font-weight: 700;
@@ -2703,26 +2975,6 @@ textarea:focus-visible {
   gap: 18px 16px;
   width: 100%;
   padding-top: 18px;
-}
-
-.javis-gallery-thumb {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  padding: 8px;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  background: transparent;
-  text-align: center;
-}
-
-.javis-gallery-thumb:hover {
-  border-color: var(--color-line-soft);
-  background: rgba(255, 255, 255, 0.7);
-  transform: translateY(-2px);
-  box-shadow: 0 12px 24px rgba(28, 41, 35, 0.08);
 }
 
 .javis-gallery-thumb.skeleton {
@@ -2747,13 +2999,13 @@ textarea:focus-visible {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   background:
     linear-gradient(135deg, rgba(225, 241, 237, 0.9), rgba(242, 238, 222, 0.9));
   color: var(--color-accent-strong);
   font-size: 24px;
   font-weight: 700;
-  box-shadow: inset 0 0 0 1px rgba(220, 226, 220, 0.72);
+  box-shadow: inset 0 0 0 1px var(--glass-border);
 }
 
 .javis-gallery-name {
@@ -2805,26 +3057,6 @@ textarea:focus-visible {
   gap: 4px;
 }
 
-.javis-file-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 10px;
-  border: 1px solid transparent;
-  border-bottom: 0;
-  border-radius: 7px;
-  background: none;
-  text-align: left;
-  font-size: 14px;
-  width: 100%;
-}
-
-.javis-file-row:hover {
-  border-color: var(--color-line-soft);
-  background: #ffffff;
-  box-shadow: 0 8px 18px rgba(28, 41, 35, 0.05);
-}
-
 .javis-file-row.dir .javis-file-name {
   font-weight: 600;
   color: var(--color-ink);
@@ -2858,4 +3090,190 @@ textarea:focus-visible {
   color: var(--color-subtle);
   font-size: 11px;
   flex-shrink: 0;
+}
+
+/* ── Entrance animations ──────────────────────────────────────── */
+
+@keyframes javis-backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes javis-modal-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes javis-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes javis-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.javis-message,
+.javis-plan,
+.javis-documents,
+.javis-confirmation,
+.javis-recovery {
+  animation: javis-fade-in var(--duration-normal) var(--ease-smooth) both;
+}
+
+.javis-process-toggle {
+  animation: javis-fade-in var(--duration-fast) var(--ease-smooth) both;
+}
+
+.javis-settings-modal {
+  animation: javis-modal-in var(--duration-slow) var(--ease-smooth) both;
+}
+
+.javis-workspace-popover,
+.javis-context-window-panel {
+  animation: javis-scale-in var(--duration-normal) var(--ease-spring) both;
+}
+
+.javis-thread {
+  animation: javis-fade-in var(--duration-normal) var(--ease-smooth) both;
+}
+
+/* ── Glass hover lift on cards ──────────────────────────────────── */
+
+.javis-task-card.disabled {
+  opacity: 0.55;
+}
+
+.javis-task-card:hover {
+  border-color: var(--glass-border-accent);
+  box-shadow: var(--shadow-soft);
+  transform: translateY(-2px);
+}
+
+.javis-skill-card {
+  padding: 14px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(8px);
+  box-shadow: var(--glass-shadow);
+  transition:
+    border-color var(--duration-normal) var(--ease-smooth),
+    box-shadow var(--duration-normal) var(--ease-smooth),
+    transform var(--duration-fast) var(--ease-spring);
+}
+
+.javis-skill-card:hover {
+  border-color: var(--glass-border-accent);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-soft);
+}
+
+.javis-app-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 10px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  text-align: center;
+  transition:
+    border-color var(--duration-normal) var(--ease-smooth),
+    background var(--duration-normal) var(--ease-smooth),
+    transform var(--duration-fast) var(--ease-spring),
+    box-shadow var(--duration-normal) var(--ease-smooth);
+}
+
+.javis-app-card:hover {
+  border-color: var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(8px);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-soft);
+}
+
+.javis-gallery-thumb {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  text-align: center;
+  transition:
+    border-color var(--duration-normal) var(--ease-smooth),
+    background var(--duration-normal) var(--ease-smooth),
+    transform var(--duration-fast) var(--ease-spring),
+    box-shadow var(--duration-normal) var(--ease-smooth);
+}
+
+.javis-gallery-thumb:hover {
+  border-color: var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(8px);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-soft);
+}
+
+.javis-file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 10px;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  text-align: left;
+  font-size: 14px;
+  width: 100%;
+  transition:
+    border-color var(--duration-normal) var(--ease-smooth),
+    background var(--duration-normal) var(--ease-smooth),
+    box-shadow var(--duration-normal) var(--ease-smooth);
+}
+
+.javis-file-row:hover {
+  border-color: var(--glass-border);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(8px);
+  box-shadow: var(--glass-shadow);
+}
+
+/* ── Glass-style popovers ──────────────────────────────────────── */
+
+/* ── @Mention dropdown glass ────────────────────────────────────── */
+
+ul.javis-mention-dropdown {
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(var(--glass-blur-strong));
+  -webkit-backdrop-filter: blur(var(--glass-blur-strong));
+  box-shadow: var(--shadow-panel);
 }

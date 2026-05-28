@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import type {
   WorkbenchLocale,
   WorkbenchModelConfiguration,
@@ -127,10 +128,10 @@ export function ModelSettings({
         onClick={() => setOpen(true)}
         type="button"
       >
-        <span className="javis-nav-icon">⚙</span>
+        <span className="javis-nav-icon icon-settings">⚙</span>
         <span>{labels.settings}</span>
       </button>
-      {isOpen ? (
+      {isOpen && typeof document !== "undefined" ? createPortal((
         <div
           className="javis-settings-modal-backdrop"
           onClick={() => setOpen(false)}
@@ -338,7 +339,7 @@ export function ModelSettings({
             </main>
           </section>
         </div>
-      ) : null}
+      ), document.body) : null}
     </div>
   );
 }

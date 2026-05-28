@@ -588,6 +588,7 @@ describe("JavisWorkbench permission cards", () => {
 
     expect(html).toContain("项目");
     expect(html).toContain("Javis");
+    expect(html).toContain("aria-expanded=\"true\"");
     expect(html).toContain("F:/Other");
     expect(html).toContain("暂无对话");
     expect(html).toContain("未知");

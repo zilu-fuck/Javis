@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createInitialTaskSnapshot, injectDocumentContext, type TaskSnapshot } from "@javis/core";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openPath } from "@tauri-apps/plugin-opener";
 import type {
   ActiveView,
@@ -121,11 +122,16 @@ import {
 } from "./jsonl-log-persistence";
 import { initialToolDescriptors } from "@javis/tools";
 import { demoAgents } from "@javis/core";
+import appIconUrl from "./assets/app-icon.png";
 import "./App.css";
 
 export const DEFAULT_DRAFT_GOAL = "";
 const TASK_SNAPSHOT_REVEAL_DELAY_MS = 120;
 const STREAMING_SNAPSHOT_REVEAL_DELAY_MS = 16;
+const currentWindow =
+  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window
+    ? getCurrentWindow()
+    : null;
 
 const DOC_EXTENSIONS = [
   "docx", "doc", "txt", "pdf", "xlsx", "xls", "csv", "pptx", "ppt", "md", "rtf", "odt",
@@ -1036,126 +1042,180 @@ function App() {
   }
 
   return (
-    <JavisWorkbench
-      activeView={activeView}
-      appsError={appsError}
-      appsLoading={appsLoading}
-      computerEntries={computerEntries}
-      computerError={computerError}
-      computerLoading={computerLoading}
-      computerPath={computerPath}
-      docsError={docsError}
-      docsLoading={docsLoading}
-      draftGoal={draftGoal}
-      currentWorkspacePath={workspacePath}
-      historyEntries={history.map((entry) => ({
-        id: entry.id,
-        title: entry.title,
-        status: entry.status,
-        userGoal: entry.userGoal,
-        updatedAt: getTaskUpdatedAt(entry),
-        workspacePath:
-          entry.project?.workspacePath ??
-          entry.codeReviewPreview?.workspacePath ??
-          entry.codeProposedEdit?.workspacePath ??
-          entry.codeApplyResult?.workspacePath ??
-          "",
-        scheduledTaskId: (entry as any).scheduledTaskId,
-      }))}
-      imagesError={imagesError}
-      imagesLoading={imagesLoading}
-      initialIsActivityOpen={prefIsActivityOpen}
-      initialIsInspectorOpen={prefIsInspectorOpen}
-      initialSidebarWidth={prefSidebarWidth}
-      installedApps={installedApps}
-      isTaskActive={isTaskActive}
-      locale={effectiveLocale}
-      modelSettings={modelSettings}
-      onBrowseWorkspacePath={browseWorkspacePath}
-      onChangeActiveView={handleChangeActiveView}
-      onDeleteHistoryEntry={deleteHistoryEntry}
-      onDeleteRecentWorkspacePath={deleteRecentWorkspacePath}
-      onDeleteScheduledTask={deleteScheduledTask}
-      onDraftGoalChange={setDraftGoal}
-      onModelSettingsChange={async (settings) => {
-        await updateModelSettings(settings);
-        void modelSettingsRepoRef.current?.save(settings);
-      }}
-      modelConfiguration={modelConfiguration}
-      onModelConfigurationChange={async (config) => {
-        setModelConfiguration(config);
-        const repo = modelProfileRepoRef.current;
-        if (repo) {
-          const { profiles, agentOverrides } = config;
-          repo.save(
-            profiles.map(({ apiKey: _apiKey, ...rest }) => rest),
-            agentOverrides,
-          ).catch((error) => console.error("Failed to save model profiles", error));
-        }
-        // Save or delete API keys in OS credential store
-        for (const profile of config.profiles) {
-          try {
-            if (profile.apiKey?.trim()) {
-              await invoke("save_model_api_key_secret", {
-                request: {
-                  keyReference: profile.apiKeyReference,
-                  apiKey: profile.apiKey,
-                },
-              });
-            } else {
-              await invoke("delete_model_api_key_secret", {
-                keyReference: profile.apiKeyReference,
-              });
-            }
-          } catch (error) {
-            console.error(`Failed to manage API key for ${profile.id}`, error);
+    <div className="javis-desktop-frame">
+      <TitleBar />
+      <JavisWorkbench
+        activeView={activeView}
+        appsError={appsError}
+        appsLoading={appsLoading}
+        computerEntries={computerEntries}
+        computerError={computerError}
+        computerLoading={computerLoading}
+        computerPath={computerPath}
+        docsError={docsError}
+        docsLoading={docsLoading}
+        draftGoal={draftGoal}
+        currentWorkspacePath={workspacePath}
+        historyEntries={history.map((entry) => ({
+          id: entry.id,
+          title: entry.title,
+          status: entry.status,
+          userGoal: entry.userGoal,
+          updatedAt: getTaskUpdatedAt(entry),
+          workspacePath:
+            entry.project?.workspacePath ??
+            entry.codeReviewPreview?.workspacePath ??
+            entry.codeProposedEdit?.workspacePath ??
+            entry.codeApplyResult?.workspacePath ??
+            "",
+          scheduledTaskId: (entry as any).scheduledTaskId,
+        }))}
+        imagesError={imagesError}
+        imagesLoading={imagesLoading}
+        initialIsActivityOpen={prefIsActivityOpen}
+        initialIsInspectorOpen={prefIsInspectorOpen}
+        initialSidebarWidth={prefSidebarWidth}
+        installedApps={installedApps}
+        isTaskActive={isTaskActive}
+        locale={effectiveLocale}
+        modelSettings={modelSettings}
+        onBrowseWorkspacePath={browseWorkspacePath}
+        onChangeActiveView={handleChangeActiveView}
+        onDeleteHistoryEntry={deleteHistoryEntry}
+        onDeleteRecentWorkspacePath={deleteRecentWorkspacePath}
+        onDeleteScheduledTask={deleteScheduledTask}
+        onDraftGoalChange={setDraftGoal}
+        onModelSettingsChange={async (settings) => {
+          await updateModelSettings(settings);
+          void modelSettingsRepoRef.current?.save(settings);
+        }}
+        modelConfiguration={modelConfiguration}
+        onModelConfigurationChange={async (config) => {
+          setModelConfiguration(config);
+          const repo = modelProfileRepoRef.current;
+          if (repo) {
+            const { profiles, agentOverrides } = config;
+            repo.save(
+              profiles.map(({ apiKey: _apiKey, ...rest }) => rest),
+              agentOverrides,
+            ).catch((error) => console.error("Failed to save model profiles", error));
           }
+          // Save or delete API keys in OS credential store
+          for (const profile of config.profiles) {
+            try {
+              if (profile.apiKey?.trim()) {
+                await invoke("save_model_api_key_secret", {
+                  request: {
+                    keyReference: profile.apiKeyReference,
+                    apiKey: profile.apiKey,
+                  },
+                });
+              } else {
+                await invoke("delete_model_api_key_secret", {
+                  keyReference: profile.apiKeyReference,
+                });
+              }
+            } catch (error) {
+              console.error(`Failed to manage API key for ${profile.id}`, error);
+            }
+          }
+          // Clear cached providers so new config takes effect
+          runtime.clearProviderCache();
+        }}
+        onNavigateDirectory={handleNavigateDirectory}
+        onOpenFile={handleOpenFile}
+        onPermissionDecision={
+          task.id.startsWith("restored-approval-") ? resolveRestoredApproval : handlePermissionDecision
         }
-        // Clear cached providers so new config takes effect
-        runtime.clearProviderCache();
+        onRefreshApps={handleRefreshApps}
+        onRefreshDocuments={handleRefreshDocuments}
+        onRefreshImages={handleRefreshImages}
+        onRetryTask={retryCurrentTask}
+        onStopTask={handleStopTask}
+        onSelectHistoryEntry={selectHistoryEntry}
+        onSubmitGoal={submitGoal}
+        onToggleScheduledTask={toggleScheduledTask}
+        onUseWorkspacePath={useWorkspacePath}
+        onWorkspacePathChange={useWorkspacePath}
+        onSidebarWidthChange={(width) => {
+          setPrefSidebarWidth(width);
+          if (sidebarWidthTimerRef.current) clearTimeout(sidebarWidthTimerRef.current);
+          sidebarWidthTimerRef.current = setTimeout(() => {
+            persistPreference(PREF_KEYS.SIDEBAR_WIDTH, String(width));
+          }, 300);
+        }}
+        onActiveViewChange={(view) => {
+          persistPreference(PREF_KEYS.ACTIVE_VIEW, view);
+        }}
+        onActivityOpenChange={(open) => {
+          setPrefIsActivityOpen(open);
+          persistPreference(PREF_KEYS.IS_ACTIVITY_OPEN, String(open));
+        }}
+        onInspectorOpenChange={(open) => {
+          setPrefIsInspectorOpen(open);
+          persistPreference(PREF_KEYS.IS_INSPECTOR_OPEN, String(open));
+        }}
+        recentWorkspacePaths={recentWorkspacePaths}
+        scheduledTasks={scheduledTasks.map((t) =>
+          scheduledTaskToWorkbench(t, history, activeScheduledTaskId),
+        )}
+        skillEntries={skillEntries}
+        task={task}
+        userDocuments={userDocuments}
+        userImages={userImages}
+      />
+    </div>
+  );
+}
+
+function TitleBar() {
+  const isDesktop = currentWindow !== null;
+
+  function handleDragStart() {
+    currentWindow?.startDragging().catch(() => {});
+  }
+
+  async function handleMinimize() {
+    await currentWindow?.minimize();
+  }
+
+  async function handleToggleMaximize() {
+    await currentWindow?.toggleMaximize();
+  }
+
+  async function handleClose() {
+    await currentWindow?.close();
+  }
+
+  return (
+    <header
+      className="javis-titlebar"
+      data-tauri-drag-region={isDesktop ? true : undefined}
+      onDoubleClick={handleToggleMaximize}
+      onPointerDown={(event) => {
+        if (event.button === 0 && event.detail === 1) {
+          handleDragStart();
+        }
       }}
-      onNavigateDirectory={handleNavigateDirectory}
-      onOpenFile={handleOpenFile}
-      onPermissionDecision={
-        task.id.startsWith("restored-approval-") ? resolveRestoredApproval : handlePermissionDecision
-      }
-      onRefreshApps={handleRefreshApps}
-      onRefreshDocuments={handleRefreshDocuments}
-      onRefreshImages={handleRefreshImages}
-      onRetryTask={retryCurrentTask}
-      onStopTask={handleStopTask}
-      onSelectHistoryEntry={selectHistoryEntry}
-      onSubmitGoal={submitGoal}
-      onToggleScheduledTask={toggleScheduledTask}
-      onUseWorkspacePath={useWorkspacePath}
-      onWorkspacePathChange={useWorkspacePath}
-      onSidebarWidthChange={(width) => {
-        setPrefSidebarWidth(width);
-        if (sidebarWidthTimerRef.current) clearTimeout(sidebarWidthTimerRef.current);
-        sidebarWidthTimerRef.current = setTimeout(() => {
-          persistPreference(PREF_KEYS.SIDEBAR_WIDTH, String(width));
-        }, 300);
-      }}
-      onActiveViewChange={(view) => {
-        persistPreference(PREF_KEYS.ACTIVE_VIEW, view);
-      }}
-      onActivityOpenChange={(open) => {
-        setPrefIsActivityOpen(open);
-        persistPreference(PREF_KEYS.IS_ACTIVITY_OPEN, String(open));
-      }}
-      onInspectorOpenChange={(open) => {
-        setPrefIsInspectorOpen(open);
-        persistPreference(PREF_KEYS.IS_INSPECTOR_OPEN, String(open));
-      }}
-      recentWorkspacePaths={recentWorkspacePaths}
-      scheduledTasks={scheduledTasks.map((t) =>
-        scheduledTaskToWorkbench(t, history, activeScheduledTaskId),
-      )}
-      skillEntries={skillEntries}
-      task={task}
-      userDocuments={userDocuments}
-      userImages={userImages}
-    />
+    >
+      <div className="javis-titlebar-brand" data-tauri-drag-region={isDesktop ? true : undefined}>
+        <img className="javis-titlebar-icon" src={appIconUrl} alt="" aria-hidden="true" />
+        <span data-tauri-drag-region={isDesktop ? true : undefined}>Javis</span>
+      </div>
+      {isDesktop ? (
+        <div className="javis-titlebar-controls">
+          <button aria-label="Minimize" className="minimize" onClick={handleMinimize} type="button">
+            <span aria-hidden="true" />
+          </button>
+          <button aria-label="Maximize" className="maximize" onClick={handleToggleMaximize} type="button">
+            <span aria-hidden="true" />
+          </button>
+          <button aria-label="Close" className="close" onClick={handleClose} type="button">
+            <span aria-hidden="true" />
+          </button>
+        </div>
+      ) : null}
+    </header>
   );
 }
 
