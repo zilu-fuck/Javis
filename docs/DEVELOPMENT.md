@@ -127,3 +127,11 @@ After major UI or runtime changes:
    - Composer
 4. Check browser console for errors.
 5. Run `pnpm check` before final handoff.
+
+## Release
+
+- [Release Guide](RELEASE.md) — versioning, signed Windows build flow, QA evidence
+- [Build, Sign, and Release Runbook](BUILD_SIGN_RELEASE_RUNBOOK.md) — step-by-step operational checklist
+- [CHANGELOG.md](../CHANGELOG.md) — per-version feature inventory
+- `pnpm release:check-version -- -ExpectedVersion X.Y.Z` — verify version alignment across all 5 files
+- `scripts/release/build-windows-signed.ps1` — automated Authenticode-signed MSI + NSIS build

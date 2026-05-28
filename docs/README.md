@@ -19,6 +19,7 @@ MVP documents remain as baseline acceptance records.
   capture before release. See [QA Evidence](qa/README.md) for screenshot folder
   conventions.
 - [Release Guide](RELEASE.md): build, QA evidence, and release note checklist.
+- [Build/Sign/Release Runbook](BUILD_SIGN_RELEASE_RUNBOOK.md): step-by-step operational guide for producing a signed release.
 - [Roadmap](ROADMAP.md): milestones toward complete product usability.
 
 ## Design And Reference Documents
