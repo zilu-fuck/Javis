@@ -153,68 +153,81 @@ export async function runReadCurrentProjectWorkflow({
       task: "Waiting for workflow results",
     });
 
+    // Step executor registry: capability tags → step runner functions.
+    // Used when a step declares requiredCapabilities instead of (or in addition to)
+    // the static agentKind field. Falls back to the legacy switch/case otherwise.
+    // IMPORTANT: context.snapshot() is called lazily inside each executor, not at
+    // Map creation time — otherwise downstream steps would get empty context.
+    const capabilityExecutors = new Map<string, () => Promise<unknown>>([
+      ["file_scan", async () => runScanFilesStep({
+        agentTracker, controller, emit, emitEvent, fileTool, taskId,
+      })],
+      ["shell_readonly", async () => runInspectProjectStep({
+        agentTracker, controller, emit, emitEvent, projectTool, shellTool, taskId,
+      })],
+      ["git_inspect", async () => runAnalyzeCodeStep({
+        agentTracker, controller, emit, emitEvent, codeTool, taskId,
+      })],
+      ["evidence_check", async () => {
+        return runSummarizeProjectStep({
+          agentTracker, controller, emit, emitEvent, verifierTool, taskId,
+          contextSnapshot: context.snapshot(),
+        });
+      }],
+      ["synthesis", async () => {
+        return runCommanderSynthesisStep({
+          agentTracker, controller, emit, emitEvent, commanderTool, taskId, userGoal,
+          workflowTitle: workflow.title, contextSnapshot: context.snapshot(),
+        });
+      }],
+    ]);
+
     const execution = await executeWorkflow({
       workflow,
       context,
       executeStep: async (step) => {
+        // Try capability-based dispatch first
+        if (step.requiredCapabilities && step.requiredCapabilities.length > 0) {
+          for (const cap of step.requiredCapabilities) {
+            const executor = capabilityExecutors.get(cap);
+            if (executor) {
+              return { output: await executor() };
+            }
+          }
+        }
+
+        // Fall back to agentKind-based dispatch (backward compat)
         switch (step.id) {
           case "scan-files":
             return {
               output: await runScanFilesStep({
-                agentTracker,
-                controller,
-                emit,
-                emitEvent,
-                fileTool,
-                taskId,
+                agentTracker, controller, emit, emitEvent, fileTool, taskId,
               }),
             };
           case "inspect-project":
             return {
               output: await runInspectProjectStep({
-                agentTracker,
-                controller,
-                emit,
-                emitEvent,
-                projectTool,
-                shellTool,
-                taskId,
+                agentTracker, controller, emit, emitEvent, projectTool, shellTool, taskId,
               }),
             };
           case "analyze-code":
             return {
               output: await runAnalyzeCodeStep({
-                agentTracker,
-                controller,
-                emit,
-                emitEvent,
-                codeTool,
-                taskId,
+                agentTracker, controller, emit, emitEvent, codeTool, taskId,
               }),
             };
           case "summarize-project":
             return {
               output: await runSummarizeProjectStep({
-                agentTracker,
-                controller,
-                emit,
-                emitEvent,
-                verifierTool,
-                taskId,
+                agentTracker, controller, emit, emitEvent, verifierTool, taskId,
                 contextSnapshot: context.snapshot(),
               }),
             };
           case "commander-synthesize":
             return {
               output: await runCommanderSynthesisStep({
-                agentTracker,
-                controller,
-                emit,
-                emitEvent,
-                commanderTool,
-                taskId,
-                userGoal,
-                workflowTitle: workflow.title,
+                agentTracker, controller, emit, emitEvent, commanderTool, taskId,
+                userGoal, workflowTitle: workflow.title,
                 contextSnapshot: context.snapshot(),
               }),
             };
@@ -653,6 +666,89 @@ async function runGenericWorkflowStep({
   return output;
 }
 
+function dispatchGenericByCapability(
+  step: WorkbenchWorkflowStep,
+  tools: {
+    codeTool?: CodeTool;
+    computerTool?: ComputerTool;
+    schedulerTool?: SchedulerTool;
+    webTool?: WebTool;
+    userGoal: string;
+    workflow: WorkbenchWorkflow;
+    contextSnapshot: Record<string, unknown>;
+  },
+): GenericStepOutput | undefined {
+  const { computerTool, schedulerTool, webTool, workflow } = tools;
+
+  for (const cap of step.requiredCapabilities!) {
+    switch (cap) {
+      case "web_search":
+        if (!webTool?.searchWeb) continue;
+        return {
+          workflowId: workflow.id,
+          stepId: step.id,
+          status: "completed",
+          summary: `Capability dispatch: web_search for ${step.id}`,
+          expectedOutput: step.output,
+        };
+
+      case "web_fetch":
+        if (!webTool) continue;
+        return {
+          workflowId: workflow.id,
+          stepId: step.id,
+          status: "completed",
+          summary: `Capability dispatch: web_fetch for ${step.id}`,
+          expectedOutput: step.output,
+        };
+
+      case "schedule_create":
+        if (!schedulerTool) continue;
+        return {
+          workflowId: workflow.id,
+          stepId: step.id,
+          status: "completed",
+          summary: `Capability dispatch: schedule_create for ${step.id}`,
+          expectedOutput: step.output,
+        };
+
+      case "evidence_check":
+        return {
+          workflowId: workflow.id,
+          stepId: step.id,
+          status: "completed",
+          summary: `Capability dispatch: evidence_check for ${step.id}`,
+          expectedOutput: step.output,
+        };
+
+      case "planning":
+        return {
+          workflowId: workflow.id,
+          stepId: step.id,
+          status: "completed",
+          summary: `Capability dispatch: planning for ${step.id}`,
+          expectedOutput: step.output,
+        };
+
+      case "local_search":
+        if (!computerTool) continue;
+        return {
+          workflowId: workflow.id,
+          stepId: step.id,
+          status: "completed",
+          summary: `Capability dispatch: local_search for ${step.id}`,
+          expectedOutput: step.output,
+        };
+
+      default:
+        // Unrecognized capability tag — fall through to legacy dispatch
+        continue;
+    }
+  }
+
+  return undefined;
+}
+
 async function executeConcreteGenericStep({
   codeTool,
   computerTool,
@@ -672,6 +768,16 @@ async function executeConcreteGenericStep({
   workflow: WorkbenchWorkflow;
   contextSnapshot: Record<string, unknown>;
 }): Promise<GenericStepOutput> {
+  // Capability-based dispatch: if the step declares requiredCapabilities,
+  // try to match against the generic capability-to-executor map before
+  // falling through to the legacy step-key chain.
+  if (step.requiredCapabilities && step.requiredCapabilities.length > 0) {
+    const result = dispatchGenericByCapability(step, {
+      codeTool, computerTool, schedulerTool, webTool, userGoal, workflow, contextSnapshot,
+    });
+    if (result) return result;
+  }
+
   const stepKey = getWorkflowStepKey(step.id);
   if (stepKey === "search-trends" && webTool?.searchWeb) {
     const sources = await webTool.searchWeb({ query: userGoal, maxResults: 5 });

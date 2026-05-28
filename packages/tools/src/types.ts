@@ -171,6 +171,7 @@ export interface CommanderPlanResult {
     id: string;
     title: string;
     assignedAgentKind: string;
+    requiredCapabilities?: string[];
     successCriteria: string;
   }>;
 }

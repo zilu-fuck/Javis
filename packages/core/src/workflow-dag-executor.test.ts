@@ -165,3 +165,64 @@ function step(
     canRunInParallel,
   };
 }
+
+describe("capability-based dispatch", () => {
+  it("executes step with requiredCapabilities field", async () => {
+    const dispatched: string[] = [];
+    const workflow = createWorkflow([
+      {
+        ...step("scan", [], false),
+        requiredCapabilities: ["file_scan"] as any[],
+      },
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      executeStep: async (s) => {
+        dispatched.push(s.id);
+        expect(s.requiredCapabilities).toEqual(["file_scan"]);
+        return { output: s.id };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(dispatched).toEqual(["scan"]);
+  });
+
+  it("step without requiredCapabilities still executes (backward compat)", async () => {
+    const workflow = createWorkflow([
+      step("legacy-step", [], false),
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      executeStep: async (s) => {
+        expect(s.requiredCapabilities).toBeUndefined();
+        return { output: s.id };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.completedStepIds).toEqual(["legacy-step"]);
+  });
+
+  it("step with unrecognized requiredCapabilities still executes via fallback", async () => {
+    const workflow = createWorkflow([
+      {
+        ...step("unknown-cap", [], false),
+        requiredCapabilities: ["nonexistent_tag"] as any[],
+      },
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      executeStep: async (s) => {
+        // Callback receives the step regardless — fallback happens in caller
+        expect(s.requiredCapabilities).toEqual(["nonexistent_tag"]);
+        return { output: s.id };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+  });
+});

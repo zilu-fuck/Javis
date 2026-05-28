@@ -87,6 +87,11 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "List direct children of a directory for file explorer browsing.",
   },
   {
+    name: "file.classifyDocuments",
+    permissionLevel: "read",
+    summary: "Classify scanned local documents into predefined categories using AI.",
+  },
+  {
     name: "computer.openPath",
     permissionLevel: "read",
     summary: "Open a file or directory path in the native OS shell.",

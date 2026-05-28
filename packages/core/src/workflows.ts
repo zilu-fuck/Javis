@@ -1,4 +1,5 @@
 import type { AgentKind, PermissionLevel } from "./index";
+import type { AgentCapabilityTag } from "./agent-capability";
 
 export type WorkbenchWorkflowId =
   | "read-current-project"
@@ -11,6 +12,8 @@ export interface WorkbenchWorkflowStep {
   id: string;
   title: string;
   agentKind: AgentKind;
+  /** Capability-based dispatch: if set, executor is found by tag instead of agentKind */
+  requiredCapabilities?: AgentCapabilityTag[];
   input: string;
   output: string;
   permissionLevel: PermissionLevel;

@@ -64,7 +64,14 @@ export {
   isTerminalTaskStatus,
   transitionTask,
 } from "./state/task-state";
-export { demoAgents, getAgentSystemPrompt } from "./agents";
+export { demoAgents, getAgentSystemPrompt, createDefaultAgentRegistry } from "./agents";
+export type {
+  AgentCapabilityTag,
+  ModelRequirements,
+  AgentRegistration,
+  AgentRegistry,
+} from "./agent-capability";
+export { createAgentRegistry } from "./agent-capability";
 export {
   CHINESE_REVIEW_SCORE_SCHEMA,
   createChineseReviewPrompt,
@@ -205,6 +212,7 @@ export interface TaskStep {
   id: ID;
   title: string;
   assignedAgentKind: AgentKind;
+  requiredCapabilities?: string[];
   status: "pending" | "running" | "completed" | "failed" | "skipped";
   successCriteria?: string;
 }
@@ -215,7 +223,10 @@ export interface Agent {
   displayName: string;
   description: string;
   allowedToolNames: string[];
+  /** @deprecated Use modelRequirements instead */
   preferredModelTags?: string[];
+  /** Model capabilities this agent needs from its assigned model profile */
+  modelRequirements?: import("./agent-capability").ModelRequirements;
   systemPrompt: AgentPromptSet;
 }
 
