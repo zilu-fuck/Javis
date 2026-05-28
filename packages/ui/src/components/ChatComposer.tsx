@@ -6,6 +6,7 @@ import {
   type ChangeEvent,
   type FormEventHandler,
   type KeyboardEvent,
+  type ReactNode,
 } from "react";
 import type { WorkbenchFileEntry, WorkbenchLocale } from "../types";
 import { WorkspaceContext } from "./WorkspaceContext";
@@ -21,6 +22,7 @@ interface ChatComposerProps {
   recentWorkspacePaths: string[];
   sendButtonClassName?: string;
   userDocuments?: WorkbenchFileEntry[];
+  contextControl?: ReactNode;
   onBrowseWorkspacePath?: () => void;
   onDeleteRecentWorkspacePath?: (path: string) => void;
   onDraftGoalChange: (nextGoal: string) => void;
@@ -47,6 +49,7 @@ export function ChatComposer({
   recentWorkspacePaths,
   sendButtonClassName,
   userDocuments,
+  contextControl,
   onBrowseWorkspacePath,
   onDeleteRecentWorkspacePath,
   onDraftGoalChange,
@@ -318,6 +321,7 @@ export function ChatComposer({
           onWorkspacePathChange={onWorkspacePathChange}
           recentWorkspacePaths={recentWorkspacePaths}
         />
+        {contextControl}
         {isStreaming ? (
           <button
             className={sendButtonClassName}

@@ -6,6 +6,7 @@ interface ResourceShellProps {
   countLabel?: string;
   tabs?: string[];
   actions?: ReactNode;
+  onBack?: () => void;
   children: ReactNode;
 }
 
@@ -15,13 +16,20 @@ export function ResourceShell({
   countLabel,
   tabs,
   actions,
+  onBack,
   children,
 }: ResourceShellProps) {
   return (
     <section className="javis-resource-shell">
       <header className="javis-resource-header">
         <div className="javis-resource-pathbar">
-          <button className="javis-resource-back" type="button" aria-label="Back">
+          <button
+            className="javis-resource-back"
+            disabled={!onBack}
+            onClick={onBack}
+            type="button"
+            aria-label="Back"
+          >
             &lt;
           </button>
           <div className="javis-resource-pill">

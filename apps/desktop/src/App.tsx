@@ -269,6 +269,7 @@ function App() {
 
   // ── Sidebar view state ────────────────────────────────────────────
   const [activeView, setActiveView] = useState<ActiveView>("chat");
+  const [activeHistoryEntryId, setActiveHistoryEntryId] = useState<string | undefined>();
   const [localePreference, setLocalePreference] = useState<string>("zh-CN");
   const [prefSidebarWidth, setPrefSidebarWidth] = useState<number | undefined>();
   const [prefIsActivityOpen, setPrefIsActivityOpen] = useState<boolean | undefined>();
@@ -296,7 +297,7 @@ function App() {
   const [userDocuments, setUserDocuments] = useState<WorkbenchFileEntry[]>([]);
   const [userImages, setUserImages] = useState<WorkbenchFileEntry[]>([]);
   const [computerEntries, setComputerEntries] = useState<WorkbenchFileEntry[]>([]);
-  const [computerPath, setComputerPath] = useState("C:\\Users");
+  const [computerPath, setComputerPath] = useState("");
   const [appsLoading, setAppsLoading] = useState(false);
   const [docsLoading, setDocsLoading] = useState(false);
   const [imagesLoading, setImagesLoading] = useState(false);
@@ -306,6 +307,7 @@ function App() {
   const [imagesError, setImagesError] = useState<string>();
   const [computerError, setComputerError] = useState<string>();
   const scanGenerationRef = useRef(0);
+  const computerRequestIdRef = useRef(0);
 
   // ── Build skill entries from descriptors + agents + MCP ───────────
   useEffect(() => {
@@ -677,7 +679,7 @@ function App() {
         });
     }
 
-    if (activeView === "computer" && computerEntries.length === 0 && !computerLoading) {
+    if (activeView === "computer" && computerPath && computerEntries.length === 0 && !computerLoading) {
       setComputerLoading(true);
       setComputerError(undefined);
       listDirectory(computerPath)
@@ -755,6 +757,7 @@ function App() {
       return;
     }
     clearQueuedTaskSnapshots();
+    setActiveHistoryEntryId(undefined);
     if (workspacePathOverride) {
       workspaceRef.current = workspacePathOverride;
       useWorkspacePath(workspacePathOverride);
@@ -945,12 +948,16 @@ function App() {
     if (entry) {
       clearQueuedTaskSnapshots();
       setTask(entry);
+      setActiveHistoryEntryId(id);
       setDraftGoal("");
       setActiveView("chat");
     }
   }
 
   function deleteHistoryEntry(id: string) {
+    if (activeHistoryEntryId === id) {
+      setActiveHistoryEntryId(undefined);
+    }
     setHistory((current) => {
       const updated = current.filter((entry) => entry.id !== id);
       const repository = taskHistoryRepoRef.current;
@@ -986,6 +993,12 @@ function App() {
   }
 
   function handleChangeActiveView(view: ActiveView) {
+    if (view === "chat") {
+      clearQueuedTaskSnapshots();
+      setTask(createInitialTaskSnapshot());
+      setActiveHistoryEntryId(undefined);
+      setDraftGoal(DEFAULT_DRAFT_GOAL);
+    }
     setActiveView(view);
   }
 
@@ -1014,14 +1027,34 @@ function App() {
   }
 
   function handleNavigateDirectory(path: string) {
+    const requestId = computerRequestIdRef.current + 1;
+    computerRequestIdRef.current = requestId;
     setComputerPath(path);
     setComputerEntries([]);
     setComputerError(undefined);
-    setComputerLoading(false);
+    if (!path) {
+      setComputerLoading(false);
+      return;
+    }
+    setComputerLoading(true);
     listDirectory(path)
-      .then((result) => setComputerEntries(result.map(fileEntryToWorkbench)))
-      .catch((err) => setComputerError(String(err)))
-      .finally(() => setComputerLoading(false));
+      .then((result) => {
+        if (computerRequestIdRef.current !== requestId) return;
+        setComputerEntries(result.map(fileEntryToWorkbench));
+      })
+      .catch((err) => {
+        if (computerRequestIdRef.current !== requestId) return;
+        setComputerError(String(err));
+      })
+      .finally(() => {
+        if (computerRequestIdRef.current !== requestId) return;
+        setComputerLoading(false);
+      });
+  }
+
+  async function handleListDirectory(path: string): Promise<WorkbenchFileEntry[]> {
+    const result = await listDirectory(path);
+    return result.map(fileEntryToWorkbench);
   }
 
   function handleOpenFile(path: string) {
@@ -1045,6 +1078,7 @@ function App() {
     <div className="javis-desktop-frame">
       <TitleBar />
       <JavisWorkbench
+        activeHistoryEntryId={activeHistoryEntryId}
         activeView={activeView}
         appsError={appsError}
         appsLoading={appsLoading}
@@ -1123,6 +1157,7 @@ function App() {
           runtime.clearProviderCache();
         }}
         onNavigateDirectory={handleNavigateDirectory}
+        onListDirectory={handleListDirectory}
         onOpenFile={handleOpenFile}
         onPermissionDecision={
           task.id.startsWith("restored-approval-") ? resolveRestoredApproval : handlePermissionDecision
@@ -1187,6 +1222,10 @@ function TitleBar() {
     await currentWindow?.close();
   }
 
+  function handleNotifications() {
+    // Placeholder for future message and notification prompts.
+  }
+
   return (
     <header
       className="javis-titlebar"
@@ -1204,6 +1243,15 @@ function TitleBar() {
       </div>
       {isDesktop ? (
         <div className="javis-titlebar-controls">
+          <button
+            aria-label="消息提示"
+            className="notifications"
+            onClick={handleNotifications}
+            title="消息提示"
+            type="button"
+          >
+            <span aria-hidden="true" />
+          </button>
           <button aria-label="Minimize" className="minimize" onClick={handleMinimize} type="button">
             <span aria-hidden="true" />
           </button>

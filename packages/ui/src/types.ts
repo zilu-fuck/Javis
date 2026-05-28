@@ -276,6 +276,7 @@ export interface JavisWorkbenchProps {
   modelConfiguration?: WorkbenchModelConfiguration;
   recentWorkspacePaths?: string[];
   activeView?: ActiveView;
+  activeHistoryEntryId?: string;
   scheduledTasks?: WorkbenchScheduledTask[];
   skillEntries?: WorkbenchSkillEntry[];
   installedApps?: WorkbenchAppEntry[];
@@ -312,6 +313,7 @@ export interface JavisWorkbenchProps {
   onRefreshDocuments?: () => void;
   onRefreshImages?: () => void;
   onNavigateDirectory?: (path: string) => void;
+  onListDirectory?: (path: string) => Promise<WorkbenchFileEntry[]>;
   onOpenFile?: (path: string) => void;
   onSidebarWidthChange?: (width: number) => void;
   onActiveViewChange?: (view: ActiveView) => void;

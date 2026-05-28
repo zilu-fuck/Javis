@@ -37,6 +37,7 @@ export function JavisWorkbench({
   modelConfiguration,
   recentWorkspacePaths = [],
   activeView: activeViewProp,
+  activeHistoryEntryId,
   scheduledTasks = [],
   skillEntries = [],
   installedApps = [],
@@ -73,6 +74,7 @@ export function JavisWorkbench({
   onRefreshDocuments,
   onRefreshImages,
   onNavigateDirectory,
+  onListDirectory,
   onOpenFile,
   onSidebarWidthChange,
   onActiveViewChange,
@@ -311,6 +313,7 @@ export function JavisWorkbench({
             error={computerError}
             loading={computerLoading}
             locale={effectiveLocale}
+            onListDirectory={onListDirectory}
             onNavigate={onNavigateDirectory}
             onOpen={onOpenFile}
           />
@@ -342,6 +345,7 @@ export function JavisWorkbench({
     >
       <Sidebar
         activeView={activeView}
+        activeHistoryEntryId={activeHistoryEntryId}
         currentWorkspacePath={currentWorkspacePath}
         historyEntries={historyEntries}
         labels={labels}
@@ -355,6 +359,7 @@ export function JavisWorkbench({
         onModelConfigurationChange={onModelConfigurationChange}
         onResizeKeyDown={handleSidebarResizeKeyDown}
         onResizeStart={handleSidebarResizeStart}
+        onNavigateDirectory={onNavigateDirectory}
         sidebarResizeMax={SIDEBAR_MAX_WIDTH}
         sidebarResizeMin={SIDEBAR_MIN_WIDTH}
         sidebarResizeValue={sidebarResizeValue}
@@ -365,7 +370,7 @@ export function JavisWorkbench({
         skillCount={skillEntries.length}
       />
 
-      <main className={`javis-main ${isChatView ? "new-chat" : ""}`}>
+      <main className={`javis-main ${isChatView && !activeHistoryEntryId ? "new-chat" : ""}`}>
         {renderMainContent()}
       </main>
 

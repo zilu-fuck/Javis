@@ -98,6 +98,58 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).toContain("aria-valuenow=\"220\"");
   });
 
+  it("renders local knowledge subitems as category buttons", () => {
+    const html = renderToStaticMarkup(
+      <JavisWorkbench
+        activeView="documents"
+        draftGoal="Inspect project"
+        onChangeActiveView={vi.fn()}
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={{
+          title: "Ready",
+          userGoal: "Waiting for a task",
+          status: "created",
+          commanderMessage:
+            "Javis desktop is ready. Enter a goal to start the Core event stream.",
+          plan: [],
+          agents: [],
+          logs: [],
+        }}
+      />,
+    );
+
+    expect(html).toContain("<button class=\"javis-nav-subitem\" type=\"button\"");
+    expect(html).toContain("文档识别");
+  });
+
+  it("normalizes Windows namespace prefixes in computer breadcrumbs", () => {
+    const html = renderToStaticMarkup(
+      <JavisWorkbench
+        activeView="computer"
+        computerPath="\\\\?\\C:\\迅雷下载"
+        computerEntries={[]}
+        draftGoal="Inspect project"
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={{
+          title: "Ready",
+          userGoal: "Waiting for a task",
+          status: "created",
+          commanderMessage:
+            "Javis desktop is ready. Enter a goal to start the Core event stream.",
+          plan: [],
+          agents: [],
+          logs: [],
+        }}
+      />,
+    );
+
+    expect(html).not.toContain("\\\\?");
+    expect(html).toContain("C:");
+    expect(html).toContain("迅雷下载");
+  });
+
   it("labels active verifier streaming output as verifier", () => {
     const html = renderWorkbench({
       id: "task-streaming-verifier",
@@ -309,7 +361,7 @@ describe("JavisWorkbench permission cards", () => {
     expect(genericFailedHtml).not.toContain("Manual source fallback");
   });
 
-  it("renders a compact context window card with token breakdown", () => {
+  it("renders a compact context window ring next to the composer submit action", () => {
     const usedHtml = renderWorkbench({
       title: "Code Agent patch applied",
       userGoal: "Review code changes",
@@ -377,15 +429,15 @@ describe("JavisWorkbench permission cards", () => {
       },
     });
 
-    expect(usedHtml).toContain("Context window");
-    expect(usedHtml).toContain("397.1k / 1.0M (40%)");
-    expect(usedHtml).toContain("Free 602.9k");
     expect(usedHtml).toContain("javis-context-window-trigger");
+    expect(usedHtml).toContain("aria-label=\"Context window: 397.1k / 1.0M (40%)\"");
     expect(usedHtml).toContain("aria-expanded=\"false\"");
+    expect(usedHtml.indexOf("javis-context-window-trigger")).toBeLessThan(
+      usedHtml.indexOf(">Send</button>"),
+    );
+    expect(usedHtml).not.toContain("javis-context-window-copy");
     expect(usedHtml).not.toContain("javis-context-window-panel");
-    expect(unusedHtml).toContain("Context window");
-    expect(unusedHtml).toContain("0 / 128k (0%)");
-    expect(unusedHtml).toContain("No model calls");
+    expect(unusedHtml).toContain("aria-label=\"Context window: 0 / 128k (0%)\"");
   });
 
   it("renders Code Agent patch proposals and apply results", () => {

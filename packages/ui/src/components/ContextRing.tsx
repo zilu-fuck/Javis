@@ -45,6 +45,7 @@ function resolveMaxTokens(modelConfiguration?: WorkbenchModelConfiguration): num
 
 const R = 14;
 const C = 2 * Math.PI * R;
+type ContextPanelMode = "closed" | "basic" | "details";
 
 export function ContextRing({
   task,
@@ -53,7 +54,7 @@ export function ContextRing({
   modelConfiguration,
 }: ContextRingProps) {
   const panelId = useId();
-  const [isOpen, setIsOpen] = useState(false);
+  const [panelMode, setPanelMode] = useState<ContextPanelMode>("closed");
   const maxTokens = resolveMaxTokens(modelConfiguration);
   const usedTokens = task.tokenUsage?.totalTokens ?? 0;
   const inputTokens = task.tokenUsage?.inputTokens ?? 0;
@@ -76,6 +77,15 @@ export function ContextRing({
 
   const trackColor = "var(--color-line, #dce2dc)";
   const label = usedTokens > 0 ? `${pct}%` : "0%";
+  const isOpen = panelMode !== "closed";
+
+  function handleToggle() {
+    setPanelMode((current) => {
+      if (current === "closed") return "basic";
+      if (current === "basic") return "details";
+      return "closed";
+    });
+  }
 
   return (
     <div className="javis-context-window">
@@ -84,7 +94,8 @@ export function ContextRing({
         aria-expanded={isOpen}
         aria-label={`${labels.contextWindow}: ${summary}`}
         className="javis-context-window-trigger"
-        onClick={() => setIsOpen((current) => !current)}
+        onClick={handleToggle}
+        title={`${labels.contextWindow}: ${summary}`}
         type="button"
       >
         <span className="javis-context-window-ring" aria-hidden="true">
@@ -123,103 +134,101 @@ export function ContextRing({
             </text>
           </svg>
         </span>
-        <span className="javis-context-window-copy">
-          <span className="javis-context-window-title">{labels.contextWindow}</span>
-          <strong className="javis-context-window-summary">{summary}</strong>
-          <span className="javis-context-window-meta">{meta}</span>
-        </span>
-        <span
-          aria-hidden="true"
-          className={`javis-context-window-caret${isOpen ? " open" : ""}`}
-        >
-          v
-        </span>
       </button>
 
-      {isOpen ? (
+      {panelMode !== "closed" ? (
         <div
           aria-label={labels.contextBreakdown}
-          className="javis-context-window-panel"
+          className={`javis-context-window-panel ${panelMode}`}
           id={panelId}
         >
-          <div className="javis-context-window-meter">
-            <div className="javis-context-window-meter-row">
-              <span>{labels.contextUsed}</span>
-              <strong>{formatCompactTokenCount(usedTokens)}</strong>
-              <span>{labels.contextRemaining}</span>
-              <strong>{formatCompactTokenCount(remainingTokens)}</strong>
-            </div>
-            <div
-              className="javis-context-window-progress"
-              aria-hidden="true"
-            >
-              <span
-                style={{
-                  width: `${pct}%`,
-                  background: color,
-                }}
-              />
-            </div>
-          </div>
+          {panelMode === "basic" ? (
+            <>
+              <div className="javis-context-window-basic-head">
+                <span className="javis-context-window-title">{labels.contextWindow}</span>
+                <strong className="javis-context-window-summary">{summary}</strong>
+                <span className="javis-context-window-meta">{meta}</span>
+              </div>
+              <div className="javis-context-window-meter">
+                <div className="javis-context-window-meter-row">
+                  <span>{labels.contextUsed}</span>
+                  <strong>{formatCompactTokenCount(usedTokens)}</strong>
+                  <span>{labels.contextRemaining}</span>
+                  <strong>{formatCompactTokenCount(remainingTokens)}</strong>
+                </div>
+                <div
+                  className="javis-context-window-progress"
+                  aria-hidden="true"
+                >
+                  <span
+                    style={{
+                      width: `${pct}%`,
+                      background: color,
+                    }}
+                  />
+                </div>
+              </div>
 
-          <div className="javis-context-window-grid">
-            <div className="javis-context-window-stat">
-              <span>{labels.tokenInput}</span>
-              <strong>{formatCompactTokenCount(inputTokens)}</strong>
-            </div>
-            <div className="javis-context-window-stat">
-              <span>{labels.tokenOutput}</span>
-              <strong>{formatCompactTokenCount(outputTokens)}</strong>
-            </div>
-            <div className="javis-context-window-stat">
-              <span>{labels.tokenCalls}</span>
-              <strong>{modelCalls.toLocaleString()}</strong>
-            </div>
-          </div>
-
-          <div className="javis-context-window-breakdown">
-            <p className="javis-context-window-section-title">
-              {labels.contextBreakdown}
-            </p>
-            {breakdown.length > 0 ? (
-              breakdown.map((entry) => {
-                const share = totalShare(entry.totalTokens, usedTokens);
-                const agentLabel = formatAgentKindLabel(entry.agentKind, locale);
-                return (
-                  <div
-                    className="javis-context-window-agent"
-                    key={entry.agentKind}
-                  >
-                    <div className="javis-context-window-agent-head">
-                      <span>{agentLabel}</span>
-                      <strong>{formatCompactTokenCount(entry.totalTokens)}</strong>
-                    </div>
+              <div className="javis-context-window-grid">
+                <div className="javis-context-window-stat">
+                  <span>{labels.tokenInput}</span>
+                  <strong>{formatCompactTokenCount(inputTokens)}</strong>
+                </div>
+                <div className="javis-context-window-stat">
+                  <span>{labels.tokenOutput}</span>
+                  <strong>{formatCompactTokenCount(outputTokens)}</strong>
+                </div>
+                <div className="javis-context-window-stat">
+                  <span>{labels.tokenCalls}</span>
+                  <strong>{modelCalls.toLocaleString()}</strong>
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="javis-context-window-breakdown">
+              <p className="javis-context-window-section-title">
+                {labels.contextBreakdown}
+              </p>
+              {breakdown.length > 0 ? (
+                breakdown.map((entry) => {
+                  const share = totalShare(entry.totalTokens, usedTokens);
+                  const agentLabel = formatAgentKindLabel(entry.agentKind, locale);
+                  return (
                     <div
-                      className="javis-context-window-agent-bar"
-                      aria-hidden="true"
+                      className="javis-context-window-agent"
+                      key={entry.agentKind}
                     >
-                      <span
-                        style={{
-                          width: `${share}%`,
-                          background: agentBarColor(entry.agentKind, color),
-                        }}
-                      />
+                      <div className="javis-context-window-agent-head">
+                        <span>{agentLabel}</span>
+                        <strong>{formatCompactTokenCount(entry.totalTokens)}</strong>
+                      </div>
+                      <div
+                        className="javis-context-window-agent-bar"
+                        aria-hidden="true"
+                      >
+                        <span
+                          style={{
+                            width: `${share}%`,
+                            background: agentBarColor(entry.agentKind, color),
+                          }}
+                        />
+                      </div>
+                      <div className="javis-context-window-agent-meta">
+                        {entry.modelCalls > 0 ? (
+                          <span>
+                            {entry.modelCalls.toLocaleString()} {labels.tokenCalls}
+                          </span>
+                        ) : null}
+                        <span>{totalShareLabel(entry.totalTokens, usedTokens)}</span>
+                      </div>
                     </div>
-                    <div className="javis-context-window-agent-meta">
-                      {entry.modelCalls > 0 ? (
-                        <span>
-                          {entry.modelCalls.toLocaleString()} {labels.tokenCalls}
-                        </span>
-                      ) : null}
-                      <span>{totalShareLabel(entry.totalTokens, usedTokens)}</span>
-                    </div>
-                  </div>
-                );
-              })
-            ) : (
-              <p className="javis-context-window-empty">{labels.noModelCalls}</p>
-            )}
-          </div>
+                  );
+                })
+              ) : (
+                <p className="javis-context-window-empty">{labels.noModelCalls}</p>
+              )}
+            </div>
+          )}
         </div>
       ) : null}
     </div>

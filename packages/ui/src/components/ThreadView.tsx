@@ -142,16 +142,17 @@ export function ThreadView({
         <div aria-hidden="true" ref={scrollAnchorRef} />
       </section>
 
-      <ContextRing
-        labels={labels}
-        locale={locale}
-        task={task}
-        modelConfiguration={modelConfiguration}
-      />
-
       <ChatComposer
         actionsClassName="javis-composer-actions"
         className="javis-composer"
+        contextControl={
+          <ContextRing
+            labels={labels}
+            locale={locale}
+            task={task}
+            modelConfiguration={modelConfiguration}
+          />
+        }
         currentWorkspacePath={currentWorkspacePath}
         isStreaming={showStreaming}
         draftGoal={draftGoal}

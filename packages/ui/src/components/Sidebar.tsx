@@ -31,6 +31,7 @@ interface SidebarProps {
   recentWorkspacePaths?: string[];
   sidebarSearchQuery: string;
   activeView?: ActiveView;
+  activeHistoryEntryId?: string;
   scheduledTaskCount?: number;
   sidebarResizeMax?: number;
   sidebarResizeMin?: number;
@@ -44,6 +45,7 @@ interface SidebarProps {
   onSelectHistoryEntry?: (id: string) => void;
   onSidebarSearchQueryChange: (query: string) => void;
   onChangeActiveView?: (view: ActiveView) => void;
+  onNavigateDirectory?: (path: string) => void;
 }
 
 type CollapsibleView = "documents" | "gallery" | "computer";
@@ -60,6 +62,7 @@ export function Sidebar({
   recentWorkspacePaths = [],
   sidebarSearchQuery,
   activeView = "chat",
+  activeHistoryEntryId,
   scheduledTaskCount = 0,
   sidebarResizeMax,
   sidebarResizeMin,
@@ -73,6 +76,7 @@ export function Sidebar({
   onSelectHistoryEntry,
   onSidebarSearchQueryChange,
   onChangeActiveView,
+  onNavigateDirectory,
 }: SidebarProps) {
   const filteredHistoryEntries = filterWorkbenchHistoryEntries(
     historyEntries,
@@ -107,7 +111,7 @@ export function Sidebar({
   );
 
   function navItem(view: ActiveView, icon: string, label: string, badge?: number) {
-    const isActive = activeView === view;
+    const isActive = activeView === view && (view !== "chat" || !activeHistoryEntryId);
     return (
       <div
         className={`javis-nav-item ${isActive ? "active" : ""}`}
@@ -162,12 +166,23 @@ export function Sidebar({
     );
   }
 
-  function navSubitem(label: string) {
+  function navSubitem(view: CollapsibleView, label: string, path?: string) {
+    function handleClick() {
+      onChangeActiveView?.(view);
+      if (view === "computer" && path) {
+        onNavigateDirectory?.(path);
+      }
+    }
+
     return (
-      <div className="javis-nav-subitem">
+      <button
+        className="javis-nav-subitem"
+        onClick={handleClick}
+        type="button"
+      >
         <span />
         <span>{label}</span>
-      </div>
+      </button>
     );
   }
 
@@ -197,28 +212,28 @@ export function Sidebar({
           {navCollapsibleItem("documents", ">", labels.documents)}
           {!collapsedGroups.documents && (
             <>
-              {navSubitem("文档识别")}
-              {navSubitem("课件")}
-              {navSubitem("书籍")}
-              {navSubitem("论文")}
+              {navSubitem("documents", "文档识别")}
+              {navSubitem("documents", "课件")}
+              {navSubitem("documents", "书籍")}
+              {navSubitem("documents", "论文")}
             </>
           )}
           {navCollapsibleItem("gallery", ">", labels.gallery)}
           {!collapsedGroups.gallery && (
             <>
-              {navSubitem("图片识别")}
-              {navSubitem("人物印象")}
-              {navSubitem("足迹地点")}
-              {navSubitem("时光长廊")}
+              {navSubitem("gallery", "图片识别")}
+              {navSubitem("gallery", "人物印象")}
+              {navSubitem("gallery", "足迹地点")}
+              {navSubitem("gallery", "时光长廊")}
             </>
           )}
           {navCollapsibleItem("computer", ">", labels.thisComputer)}
           {!collapsedGroups.computer && (
             <>
-              {navSubitem("系统 (C:)")}
-              {navSubitem("固态硬盘 (E:)")}
-              {navSubitem("机械硬盘2 (F:)")}
-              {navSubitem("机械硬盘 (G:)")}
+              {navSubitem("computer", "系统 (C:)", "C:\\")}
+              {navSubitem("computer", "固态硬盘 (E:)", "E:\\")}
+              {navSubitem("computer", "机械硬盘2 (F:)", "F:\\")}
+              {navSubitem("computer", "机械硬盘 (G:)", "G:\\")}
             </>
           )}
         </div>
@@ -259,9 +274,17 @@ export function Sidebar({
                   {!isCollapsed ? (
                     <div className="javis-history-workspace-body">
                     {visibleEntries.length > 0 ? (
-                      visibleEntries.map((entry) => (
-                        <div className="javis-history-entry" key={entry.id}>
+                      visibleEntries.map((entry) => {
+                        const isActiveHistoryEntry =
+                          activeView === "chat" && activeHistoryEntryId === entry.id;
+
+                        return (
+                        <div
+                          className={`javis-history-entry ${isActiveHistoryEntry ? "active" : ""}`}
+                          key={entry.id}
+                        >
                           <button
+                            aria-current={isActiveHistoryEntry ? "page" : undefined}
                             className="javis-history-select"
                             onClick={() => onSelectHistoryEntry?.(entry.id)}
                             type="button"
@@ -285,7 +308,8 @@ export function Sidebar({
                             x
                           </button>
                         </div>
-                      ))
+                        );
+                      })
                     ) : (
                       <div className="javis-history-empty-group">{labels.historyEmptyGroup}</div>
                     )}

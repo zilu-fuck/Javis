@@ -107,7 +107,7 @@ body {
 
 .javis-titlebar-controls {
   display: inline-grid;
-  grid-template-columns: repeat(3, 46px);
+  grid-template-columns: repeat(4, 46px);
   height: 100%;
 }
 
@@ -137,6 +137,16 @@ body {
 .javis-titlebar-controls button.minimize span {
   mask-image: url("./assets/570icons/titlebar-minus.svg");
   -webkit-mask-image: url("./assets/570icons/titlebar-minus.svg");
+}
+
+.javis-titlebar-controls button.notifications span {
+  width: 14px;
+  height: 14px;
+  border: 1.7px solid currentColor;
+  border-radius: 50%;
+  background: transparent;
+  mask-image: none;
+  -webkit-mask-image: none;
 }
 
 .javis-titlebar-controls button.maximize span {
@@ -395,10 +405,26 @@ textarea:focus-visible {
   grid-template-columns: 18px 1fr;
   align-items: center;
   min-height: 34px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
   padding: 6px 9px 6px 32px;
   color: var(--color-subtle);
+  background: transparent;
   font-size: 13px;
   line-height: 18px;
+  text-align: left;
+  transition:
+    background-color var(--duration-normal) var(--ease-smooth),
+    border-color var(--duration-normal) var(--ease-smooth),
+    color var(--duration-normal) var(--ease-smooth),
+    transform var(--duration-fast) var(--ease-spring);
+}
+
+.javis-nav-subitem:hover {
+  border-color: var(--glass-border);
+  color: var(--color-accent-strong);
+  background: var(--color-surface-soft);
+  transform: translateX(2px);
 }
 
 .javis-nav-section {
@@ -477,6 +503,16 @@ textarea:focus-visible {
 .javis-history-entry:hover {
   border-color: var(--glass-border);
   background: var(--color-surface-soft);
+}
+
+.javis-history-entry.active {
+  border-color: var(--glass-border-accent);
+  background: linear-gradient(135deg, rgba(232, 244, 240, 0.8), rgba(246, 248, 244, 0.58));
+  box-shadow: inset 3px 0 0 var(--color-accent);
+}
+
+.javis-history-entry.active .javis-history-select {
+  color: var(--color-accent-strong);
 }
 
 .javis-workspace-context {
@@ -1623,26 +1659,25 @@ textarea:focus-visible {
 
 .javis-context-window {
   position: relative;
-  display: flex;
-  justify-content: flex-end;
-  margin: 0 18px 4px;
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  justify-self: end;
 }
 
 .javis-context-window-trigger {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-  width: min(420px, 100%);
-  min-height: 72px;
+  display: inline-grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
   border: 1px solid var(--glass-border);
-  border-radius: var(--radius-lg);
-  padding: 10px 12px;
+  border-radius: var(--radius-pill);
+  padding: 0;
   color: var(--color-ink);
   background: var(--glass-bg-strong);
   backdrop-filter: blur(12px);
   box-shadow: var(--glass-shadow);
-  text-align: left;
   transition:
     border-color var(--duration-normal) var(--ease-smooth),
     background var(--duration-normal) var(--ease-smooth),
@@ -1658,15 +1693,20 @@ textarea:focus-visible {
   border-color: var(--glass-border-accent);
   box-shadow:
     var(--glass-shadow),
-    var(--shadow-focus);
+    0 0 0 3px rgba(45, 111, 103, 0.12);
 }
 
 .javis-context-window-ring {
   display: inline-grid;
-  width: 40px;
-  height: 40px;
+  width: 36px;
+  height: 36px;
   place-items: center;
   flex-shrink: 0;
+}
+
+.javis-context-window-ring svg {
+  width: 36px;
+  height: 36px;
 }
 
 .javis-context-window-copy {
@@ -1717,11 +1757,11 @@ textarea:focus-visible {
 
 .javis-context-window-panel {
   position: absolute;
-  right: 0;
-  bottom: calc(100% + 10px);
+  right: -4px;
+  bottom: calc(100% + 12px);
   z-index: 50;
   display: grid;
-  width: min(420px, calc(100vw - 36px));
+  width: min(360px, calc(100vw - 36px));
   gap: 12px;
   padding: 12px;
   border: 1px solid var(--glass-border);
@@ -1731,6 +1771,16 @@ textarea:focus-visible {
   -webkit-backdrop-filter: blur(var(--glass-blur-strong));
   box-shadow: var(--shadow-panel);
   animation: javis-scale-in var(--duration-normal) var(--ease-spring) both;
+}
+
+.javis-context-window-panel.details {
+  width: min(420px, calc(100vw - 36px));
+}
+
+.javis-context-window-basic-head {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
 }
 
 .javis-context-window-meter {
@@ -2091,7 +2141,7 @@ textarea:focus-visible {
 
 .javis-composer-actions {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto auto 1fr auto auto;
   align-items: center;
   gap: 12px;
   min-height: 48px;
@@ -3049,6 +3099,229 @@ textarea:focus-visible {
 .javis-breadcrumb-sep {
   color: #bac4bd;
   margin: 0 2px;
+}
+
+.javis-computer-search {
+  grid-template-columns: 16px minmax(0, 140px);
+}
+
+.javis-computer-search-icon,
+.javis-computer-sort-icon,
+.javis-computer-view-toggle button span {
+  display: block;
+  width: 15px;
+  height: 15px;
+  background: currentColor;
+  mask-position: center;
+  mask-repeat: no-repeat;
+  mask-size: 15px 15px;
+  -webkit-mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-size: 15px 15px;
+}
+
+.javis-computer-search-icon {
+  mask-image: url("./assets/570icons/search.svg");
+  -webkit-mask-image: url("./assets/570icons/search.svg");
+}
+
+.javis-computer-sort-icon {
+  mask-image: url("./assets/570icons/adjustment.svg");
+  -webkit-mask-image: url("./assets/570icons/adjustment.svg");
+}
+
+.javis-computer-view-toggle button span.view-grid {
+  mask-image: url("./assets/570icons/apps.svg");
+  -webkit-mask-image: url("./assets/570icons/apps.svg");
+}
+
+.javis-computer-view-toggle button span.view-list {
+  mask-image: url("./assets/570icons/tasks.svg");
+  -webkit-mask-image: url("./assets/570icons/tasks.svg");
+}
+
+.javis-computer-view-toggle button span.view-columns {
+  mask-image: url("./assets/570icons/split.svg");
+  -webkit-mask-image: url("./assets/570icons/split.svg");
+}
+
+.javis-computer-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(128px, 148px));
+  align-items: start;
+  gap: 30px 34px;
+  padding: 18px 0 0;
+}
+
+.javis-computer-tile {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-lg);
+  padding: 16px 12px 14px;
+  color: #303833;
+  background: transparent;
+  text-align: center;
+}
+
+.javis-computer-tile:hover,
+.javis-computer-row:hover,
+.javis-computer-column-row:hover,
+.javis-computer-column-row.active {
+  border-color: var(--glass-border);
+  background: rgba(255, 255, 255, 0.64);
+}
+
+.javis-computer-tile span:last-child {
+  max-width: 100%;
+  overflow: hidden;
+  color: #303833;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-computer-icon {
+  position: relative;
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+}
+
+.javis-computer-icon.large {
+  width: 84px;
+  height: 64px;
+}
+
+.javis-computer-icon.small {
+  width: 22px;
+  height: 22px;
+}
+
+.javis-computer-icon.folder::before {
+  position: absolute;
+  width: 76%;
+  height: 58%;
+  border-radius: 4px;
+  background: linear-gradient(180deg, #ffd76d, #f2bd34);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  content: "";
+}
+
+.javis-computer-icon.folder::after {
+  position: absolute;
+  top: 19%;
+  left: 14%;
+  width: 28%;
+  height: 16%;
+  border-radius: 3px 3px 0 0;
+  background: #ffe28a;
+  content: "";
+}
+
+.javis-computer-icon.file {
+  border: 1px solid #d9ded9;
+  border-radius: 5px;
+  color: var(--color-muted);
+  background: linear-gradient(180deg, #ffffff, #eef3ef);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.javis-computer-icon.file.large {
+  width: 58px;
+  height: 64px;
+}
+
+.javis-computer-list {
+  display: grid;
+  gap: 6px;
+  padding-top: 12px;
+}
+
+.javis-computer-row {
+  display: grid;
+  grid-template-columns: 28px minmax(180px, 1fr) 110px 180px 96px;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  padding: 7px 12px;
+  color: #303833;
+  background: transparent;
+  text-align: left;
+}
+
+.javis-computer-name,
+.javis-computer-kind,
+.javis-computer-date,
+.javis-computer-size {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-computer-kind,
+.javis-computer-date,
+.javis-computer-size {
+  color: var(--color-subtle);
+  font-size: 12px;
+}
+
+.javis-computer-size {
+  text-align: right;
+}
+
+.javis-computer-columns {
+  display: grid;
+  grid-auto-columns: minmax(248px, 1fr);
+  grid-auto-flow: column;
+  min-height: calc(100vh - 236px);
+  overflow: auto;
+  border-left: 1px solid rgba(221, 226, 221, 0.72);
+}
+
+.javis-computer-column {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 248px;
+  border-right: 1px solid rgba(221, 226, 221, 0.72);
+  padding: 0 16px;
+}
+
+.javis-computer-column-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  padding: 7px 10px;
+  color: #303833;
+  background: transparent;
+  text-align: left;
+}
+
+.javis-computer-column-row span:nth-child(2) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-computer-chevron {
+  color: #c1c8c1;
+  font-size: 18px;
+}
+
+.javis-computer-column-loading {
+  padding: 10px;
+  color: var(--color-subtle);
+  font-size: 12px;
 }
 
 .javis-file-list {
