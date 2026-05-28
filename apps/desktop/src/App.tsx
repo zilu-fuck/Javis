@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { createInitialTaskSnapshot, type TaskSnapshot } from "@javis/core";
+import { createInitialTaskSnapshot, injectDocumentContext, type TaskSnapshot } from "@javis/core";
 import { invoke } from "@tauri-apps/api/core";
 import { openPath } from "@tauri-apps/plugin-opener";
 import type {
@@ -63,8 +63,13 @@ import {
   computeNextRun,
   type ScheduledTask,
 } from "./scheduled-tasks";
+import {
+  createScheduledTasksRepository,
+  SCHEDULED_TASKS_MIGRATIONS,
+} from "./scheduled-tasks-persistence";
 import { loadMcpConfig, type McpServerConfig } from "./mcp-config";
 import {
+  readFileChunk,
   scanInstalledApps,
   scanUserDocuments,
   scanUserImages,
@@ -178,6 +183,15 @@ function isStreamingTaskSnapshot(task: TaskSnapshot): boolean {
   return Boolean(task.isStreaming || task.streamingText);
 }
 
+function extractAtReferences(goal: string): Array<{ raw: string; path: string }> {
+  const matches = goal.match(/@([^\s,，。；;]+)/g);
+  if (!matches) return [];
+  return matches.map((raw) => {
+    const path = raw.slice(1); // strip leading @
+    return { raw, path };
+  });
+}
+
 function App() {
   const databaseRef = useRef<DesktopDatabase | null>(null);
   const taskHistoryRepoRef = useRef<ReturnType<typeof createTaskHistoryRepository> | null>(null);
@@ -185,6 +199,7 @@ function App() {
   const approvalRecordsRepoRef = useRef<ReturnType<typeof createApprovalRecordsRepository> | null>(null);
   const modelSettingsRepoRef = useRef<ModelSettingsRepository | null>(null);
   const modelProfileRepoRef = useRef<ModelProfileRepository | null>(null);
+  const scheduledTasksRepoRef = useRef<ReturnType<typeof createScheduledTasksRepository> | null>(null);
   const {
     browseWorkspacePath,
     deleteRecentWorkspacePath,
@@ -249,6 +264,9 @@ function App() {
   const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>(() =>
     clearStaleGuards(loadScheduledTasks(window.localStorage)),
   );
+  const scheduledTasksInitialRef = useRef(scheduledTasks);
+  const scheduledTasksCurrentRef = useRef(scheduledTasks);
+  scheduledTasksCurrentRef.current = scheduledTasks;
 
   // ── Skill entries state ───────────────────────────────────────────
   const [skillEntries, setSkillEntries] = useState<WorkbenchSkillEntry[]>([]);
@@ -328,6 +346,7 @@ function App() {
       await runDesktopDatabaseMigrations(database, MODEL_PROFILES_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, APPROVAL_RECORDS_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, TOOL_CALL_AUDIT_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, SCHEDULED_TASKS_MIGRATIONS);
 
       // One-time import from localStorage
       const taskHistoryRepo = createTaskHistoryRepository(database);
@@ -341,6 +360,9 @@ function App() {
       approvalRecordsRepoRef.current = approvalRecordsRepo;
       modelSettingsRepoRef.current = modelSettingsRepo;
       modelProfileRepoRef.current = modelProfileRepo;
+
+      const scheduledTasksRepo = createScheduledTasksRepository(database);
+      scheduledTasksRepoRef.current = scheduledTasksRepo;
 
       const importedHistory = await taskHistoryRepo.importFromLocalStorage(window.localStorage);
       const importedWorkspaceSession = await workspaceSessionRepo.importFromLocalStorage(
@@ -369,6 +391,10 @@ function App() {
       if (approvalRecordsCurrentRef.current === approvalRecordsInitialRef.current) {
         setApprovalRecords(importedApprovalRecords);
       }
+      const importedScheduledTasks = await scheduledTasksRepo.importFromLocalStorage(window.localStorage);
+      if (scheduledTasksCurrentRef.current === scheduledTasksInitialRef.current) {
+        setScheduledTasks(clearStaleGuards(importedScheduledTasks));
+      }
       setDurableApprovalRecordsReady(true);
     })().catch((error) => {
       console.error("Database initialization failed, using localStorage fallback", error);
@@ -381,7 +407,14 @@ function App() {
     // Clear stale guards on mount (crash recovery)
     setScheduledTasks((current) => {
       const cleared = clearStaleGuards(current);
-      saveScheduledTasks(window.localStorage, cleared);
+      const repository = scheduledTasksRepoRef.current;
+      if (repository) {
+        void repository.save(cleared).catch(() => {
+          saveScheduledTasks(window.localStorage, cleared);
+        });
+      } else {
+        saveScheduledTasks(window.localStorage, cleared);
+      }
       return cleared;
     });
 
@@ -403,7 +436,14 @@ function App() {
           };
           return updatedTask;
         });
-        saveScheduledTasks(window.localStorage, updated);
+        const repository = scheduledTasksRepoRef.current;
+        if (repository) {
+          void repository.save(updated).catch(() => {
+            saveScheduledTasks(window.localStorage, updated);
+          });
+        } else {
+          saveScheduledTasks(window.localStorage, updated);
+        }
         return updated;
       });
     };
@@ -479,7 +519,14 @@ function App() {
               ? { ...t, lastRunAt: now, lastRunStartedAt: undefined }
               : t,
           );
-          saveScheduledTasks(window.localStorage, updated);
+          const repository = scheduledTasksRepoRef.current;
+          if (repository) {
+            void repository.save(updated).catch(() => {
+              saveScheduledTasks(window.localStorage, updated);
+            });
+          } else {
+            saveScheduledTasks(window.localStorage, updated);
+          }
           return updated;
         });
       }
@@ -495,7 +542,14 @@ function App() {
               ? { ...t, lastRunAt: now, lastRunStartedAt: undefined }
               : t,
           );
-          saveScheduledTasks(window.localStorage, updated);
+          const repository = scheduledTasksRepoRef.current;
+          if (repository) {
+            void repository.save(updated).catch(() => {
+              saveScheduledTasks(window.localStorage, updated);
+            });
+          } else {
+            saveScheduledTasks(window.localStorage, updated);
+          }
           return updated;
         });
       }
@@ -678,9 +732,6 @@ function App() {
       return;
     }
     clearQueuedTaskSnapshots();
-    // Update workspace ref synchronously so the runtime reads the correct
-    // path for this run. The state setter (useWorkspacePath) updates the UI
-    // asynchronously and would arrive too late for the current run.
     if (workspacePathOverride) {
       workspaceRef.current = workspacePathOverride;
       useWorkspacePath(workspacePathOverride);
@@ -695,6 +746,25 @@ function App() {
       setDraftGoal("");
     }
     auditRecordIdsRef.current.clear();
+
+    // Resolve @document references — read file content and inject into prompt
+    const atRefs = extractAtReferences(goal);
+    if (atRefs.length > 0) {
+      void (async () => {
+        let resolvedGoal = goal;
+        for (const ref of atRefs) {
+          try {
+            const content = await readFileChunk(ref.path);
+            resolvedGoal = injectDocumentContext(resolvedGoal, ref.path, content);
+          } catch {
+            // File not readable — leave the @reference as-is in the goal
+          }
+        }
+        runtime.start(resolvedGoal);
+      })();
+      return;
+    }
+
     runtime.start(goal);
   }
 
@@ -889,7 +959,14 @@ function App() {
       const updated = current.map((t) =>
         t.id === id ? { ...t, enabled: !t.enabled } : t,
       );
-      saveScheduledTasks(window.localStorage, updated);
+      const repository = scheduledTasksRepoRef.current;
+      if (repository) {
+        void repository.save(updated).catch(() => {
+          saveScheduledTasks(window.localStorage, updated);
+        });
+      } else {
+        saveScheduledTasks(window.localStorage, updated);
+      }
       return updated;
     });
   }
@@ -897,7 +974,14 @@ function App() {
   function deleteScheduledTask(id: string) {
     setScheduledTasks((current) => {
       const updated = current.filter((t) => t.id !== id);
-      saveScheduledTasks(window.localStorage, updated);
+      const repository = scheduledTasksRepoRef.current;
+      if (repository) {
+        void repository.save(updated).catch(() => {
+          saveScheduledTasks(window.localStorage, updated);
+        });
+      } else {
+        saveScheduledTasks(window.localStorage, updated);
+      }
       return updated;
     });
   }

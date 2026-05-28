@@ -73,6 +73,7 @@ export interface FileTool {
     extensions?: string[];
     maxResults?: number;
   }): Promise<MarkdownDocument[]>;
+  classifyDocuments?(files: { name: string; path: string; extension?: string }[]): Promise<Array<{ name: string; path: string; extension?: string; tags: string[]; category: string; confidence: number }>>;
 }
 
 export interface ShellCommandRequest {

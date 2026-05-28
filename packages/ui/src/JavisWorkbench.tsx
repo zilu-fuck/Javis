@@ -238,6 +238,7 @@ export function JavisWorkbench({
             onWorkspacePathChange={onWorkspacePathChange}
             recentWorkspacePaths={recentWorkspacePaths}
             task={task}
+            userDocuments={userDocuments}
           />
         );
       case "automated":

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEventHandler } from "react";
 import type {
+  WorkbenchFileEntry,
   WorkbenchLocale,
   WorkbenchModelConfiguration,
   WorkbenchStreamingAgentKind,
@@ -22,6 +23,7 @@ interface ThreadViewProps {
   modelConfiguration?: WorkbenchModelConfiguration;
   recentWorkspacePaths: string[];
   task: WorkbenchTask;
+  userDocuments?: WorkbenchFileEntry[];
   onBrowseWorkspacePath?: () => void;
   onDeleteRecentWorkspacePath?: (path: string) => void;
   onDraftGoalChange: (nextGoal: string) => void;
@@ -41,6 +43,7 @@ export function ThreadView({
   modelConfiguration,
   recentWorkspacePaths,
   task,
+  userDocuments,
   onBrowseWorkspacePath,
   onDeleteRecentWorkspacePath,
   onDraftGoalChange,
@@ -139,7 +142,12 @@ export function ThreadView({
         <div aria-hidden="true" ref={scrollAnchorRef} />
       </section>
 
-      <ContextRing task={task} modelConfiguration={modelConfiguration} />
+      <ContextRing
+        labels={labels}
+        locale={locale}
+        task={task}
+        modelConfiguration={modelConfiguration}
+      />
 
       <ChatComposer
         actionsClassName="javis-composer-actions"
@@ -156,6 +164,7 @@ export function ThreadView({
         onUseWorkspacePath={onUseWorkspacePath}
         onWorkspacePathChange={onWorkspacePathChange}
         recentWorkspacePaths={recentWorkspacePaths}
+        userDocuments={userDocuments}
       />
     </>
   );

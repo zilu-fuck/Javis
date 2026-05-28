@@ -1,5 +1,5 @@
 import type { FormEventHandler } from "react";
-import type { WorkbenchLocale } from "../types";
+import type { WorkbenchFileEntry, WorkbenchLocale } from "../types";
 import { ChatComposer } from "./ChatComposer";
 
 interface NewChatProps {
@@ -7,6 +7,7 @@ interface NewChatProps {
   draftGoal: string;
   labels: WorkbenchLocale["labels"];
   recentWorkspacePaths: string[];
+  userDocuments?: WorkbenchFileEntry[];
   onBrowseWorkspacePath?: () => void;
   onDeleteRecentWorkspacePath?: (path: string) => void;
   onDraftGoalChange: (nextGoal: string) => void;
@@ -20,6 +21,7 @@ export function NewChat({
   draftGoal,
   labels,
   recentWorkspacePaths,
+  userDocuments,
   onBrowseWorkspacePath,
   onDeleteRecentWorkspacePath,
   onDraftGoalChange,
@@ -44,6 +46,7 @@ export function NewChat({
         onWorkspacePathChange={onWorkspacePathChange}
         recentWorkspacePaths={recentWorkspacePaths}
         sendButtonClassName="javis-send-button"
+        userDocuments={userDocuments}
       />
     </section>
   );

@@ -7,7 +7,7 @@ import {
   type FormEventHandler,
   type KeyboardEvent,
 } from "react";
-import type { WorkbenchLocale } from "../types";
+import type { WorkbenchFileEntry, WorkbenchLocale } from "../types";
 import { WorkspaceContext } from "./WorkspaceContext";
 
 interface ChatComposerProps {
@@ -20,6 +20,7 @@ interface ChatComposerProps {
   labels: WorkbenchLocale["labels"];
   recentWorkspacePaths: string[];
   sendButtonClassName?: string;
+  userDocuments?: WorkbenchFileEntry[];
   onBrowseWorkspacePath?: () => void;
   onDeleteRecentWorkspacePath?: (path: string) => void;
   onDraftGoalChange: (nextGoal: string) => void;
@@ -45,6 +46,7 @@ export function ChatComposer({
   labels,
   recentWorkspacePaths,
   sendButtonClassName,
+  userDocuments,
   onBrowseWorkspacePath,
   onDeleteRecentWorkspacePath,
   onDraftGoalChange,
@@ -55,6 +57,8 @@ export function ChatComposer({
 }: ChatComposerProps) {
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [isPlanMode, setPlanMode] = useState(false);
+  const [mentionQuery, setMentionQuery] = useState<string | null>(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
   const attachmentsRef = useRef<ComposerAttachment[]>([]);
   const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -117,7 +121,79 @@ export function ChatComposer({
     event.currentTarget.value = "";
   }
 
+  // ── @mention detection ───────────────────────────────────────────
+  const mentionMatches = mentionQuery !== null && userDocuments
+    ? userDocuments
+        .filter((doc) =>
+          doc.name.toLowerCase().includes(mentionQuery.toLowerCase()) ||
+          doc.path.toLowerCase().includes(mentionQuery.toLowerCase()),
+        )
+        .slice(0, 8)
+    : [];
+
+  function resolveMentionQuery(value: string, cursorPos: number): string | null {
+    const beforeCursor = value.slice(0, cursorPos);
+    const atIndex = beforeCursor.lastIndexOf("@");
+    if (atIndex === -1) return null;
+    const query = beforeCursor.slice(atIndex + 1);
+    // Only trigger if @ is followed by 0+ word chars (no spaces)
+    if (/\s/.test(query)) return null;
+    return query;
+  }
+
+  function insertMention(doc: WorkbenchFileEntry) {
+    const textarea = textAreaRef.current;
+    if (!textarea) return;
+    const value = draftGoal;
+    const cursorPos = textarea.selectionStart;
+    const beforeCursor = value.slice(0, cursorPos);
+    const atIndex = beforeCursor.lastIndexOf("@");
+    if (atIndex === -1) return;
+    const before = value.slice(0, atIndex);
+    const after = value.slice(cursorPos);
+    const mention = `@${doc.path} `;
+    const next = before + mention + after;
+    onDraftGoalChange(next);
+    setMentionQuery(null);
+    setMentionIndex(0);
+    // Set cursor after the inserted mention
+    requestAnimationFrame(() => {
+      textarea.selectionStart = textarea.selectionEnd = (before + mention).length;
+      textarea.focus();
+    });
+  }
+
+  function handleChangeWithMention(event: ChangeEvent<HTMLTextAreaElement>) {
+    const value = event.currentTarget.value;
+    onDraftGoalChange(value);
+    const query = resolveMentionQuery(value, event.currentTarget.selectionStart);
+    setMentionQuery(query);
+    setMentionIndex(0);
+  }
+
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (mentionMatches.length > 0) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setMentionIndex((i) => Math.min(i + 1, mentionMatches.length - 1));
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setMentionIndex((i) => Math.max(i - 1, 0));
+        return;
+      }
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        insertMention(mentionMatches[mentionIndex]);
+        return;
+      }
+      if (event.key === "Escape") {
+        setMentionQuery(null);
+        setMentionIndex(0);
+        return;
+      }
+    }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       const form = textAreaRef.current?.form;
@@ -128,6 +204,8 @@ export function ChatComposer({
   }
 
   const handleSubmit: FormEventHandler<HTMLFormElement> = (event) => {
+    setMentionQuery(null);
+    setMentionIndex(0);
     onSubmit(event);
   };
 
@@ -155,10 +233,29 @@ export function ChatComposer({
           ))}
         </div>
       ) : null}
+      {mentionMatches.length > 0 ? (
+        <ul className="javis-mention-dropdown" role="listbox">
+          {mentionMatches.map((doc, index) => (
+            <li
+              key={doc.path}
+              className={index === mentionIndex ? "javis-mention-active" : ""}
+              role="option"
+              aria-selected={index === mentionIndex}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                insertMention(doc);
+              }}
+            >
+              <span className="javis-mention-name">{doc.name}</span>
+              <span className="javis-mention-path">{doc.path}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <textarea
         aria-label={labels.taskInput}
         disabled={disabled}
-        onChange={(event) => onDraftGoalChange(event.currentTarget.value)}
+        onChange={handleChangeWithMention}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
         placeholder={labels.taskInputPlaceholder}
