@@ -309,7 +309,7 @@ describe("JavisWorkbench permission cards", () => {
     expect(genericFailedHtml).not.toContain("Manual source fallback");
   });
 
-  it("renders token usage totals only after model calls", () => {
+  it("renders a compact context window card with token breakdown", () => {
     const usedHtml = renderWorkbench({
       title: "Code Agent patch applied",
       userGoal: "Review code changes",
@@ -319,20 +319,46 @@ describe("JavisWorkbench permission cards", () => {
       agents: [],
       logs: [],
       tokenUsage: {
-        inputTokens: 1200,
-        outputTokens: 340,
-        totalTokens: 1540,
-        modelCalls: 1,
+        inputTokens: 257000,
+        outputTokens: 140100,
+        totalTokens: 397100,
+        modelCalls: 3,
         byAgentKind: [
           {
-            agentKind: "code",
-            inputTokens: 1200,
-            outputTokens: 340,
-            totalTokens: 1540,
+            agentKind: "commander",
+            inputTokens: 128000,
+            outputTokens: 64000,
+            totalTokens: 192000,
             modelCalls: 1,
+          },
+          {
+            agentKind: "code",
+            inputTokens: 129000,
+            outputTokens: 76100,
+            totalTokens: 205100,
+            modelCalls: 2,
           },
         ],
       },
+    }, {
+      profiles: [
+        {
+          id: "primary-model",
+          slot: "primary",
+          displayName: "Primary",
+          provider: "openai",
+          model: "gpt-4.1",
+          apiKeyReference: "default",
+          baseUrl: "",
+          apiKey: "",
+          capabilities: {
+            vision: false,
+            code: true,
+            longContext: true,
+          },
+        },
+      ],
+      agentOverrides: {},
     });
     const unusedHtml = renderWorkbench({
       title: "Project environment inspected",
@@ -351,12 +377,15 @@ describe("JavisWorkbench permission cards", () => {
       },
     });
 
-    expect(usedHtml).toContain("Token usage");
-    expect(usedHtml).toContain("1,540");
-    expect(usedHtml).toContain("Input 1,200");
-    expect(usedHtml).toContain("Output 340");
-    expect(unusedHtml).not.toContain("Token usage");
-    expect(unusedHtml).not.toContain("No model calls");
+    expect(usedHtml).toContain("Context window");
+    expect(usedHtml).toContain("397.1k / 1.0M (40%)");
+    expect(usedHtml).toContain("Free 602.9k");
+    expect(usedHtml).toContain("javis-context-window-trigger");
+    expect(usedHtml).toContain("aria-expanded=\"false\"");
+    expect(usedHtml).not.toContain("javis-context-window-panel");
+    expect(unusedHtml).toContain("Context window");
+    expect(unusedHtml).toContain("0 / 128k (0%)");
+    expect(unusedHtml).toContain("No model calls");
   });
 
   it("renders Code Agent patch proposals and apply results", () => {
@@ -731,13 +760,17 @@ describe("JavisWorkbench permission cards", () => {
   });
 });
 
-function renderWorkbench(task: WorkbenchTask): string {
+function renderWorkbench(
+  task: WorkbenchTask,
+  modelConfiguration?: Parameters<typeof JavisWorkbench>[0]["modelConfiguration"],
+): string {
   return renderToStaticMarkup(
     <JavisWorkbench
       draftGoal="Organize PDFs in Downloads"
       onDraftGoalChange={vi.fn()}
       onPermissionDecision={vi.fn()}
       onSubmitGoal={vi.fn()}
+      modelConfiguration={modelConfiguration}
       task={task}
     />,
   );

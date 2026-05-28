@@ -1345,34 +1345,227 @@ textarea:focus-visible {
   line-height: 18px;
 }
 
-.javis-context-tokens {
-  color: var(--color-muted);
+.javis-context-window {
+  position: relative;
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 18px 4px;
 }
 
-.javis-context-ring {
-  display: flex;
+.javis-context-window-trigger {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
-  margin: 0 18px 4px;
-  padding: 0;
+  width: min(420px, 100%);
+  min-height: 72px;
+  border: 1px solid #d9e1db;
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--color-ink);
+  background: #ffffff;
+  box-shadow: 0 8px 22px rgba(28, 41, 35, 0.04);
+  text-align: left;
 }
 
-.javis-context-ring-detail {
+.javis-context-window-trigger:hover {
+  border-color: #b9cac3;
+  background: #f7fbf8;
+}
+
+.javis-context-window-trigger[aria-expanded="true"] {
+  border-color: #b9d7cf;
+  box-shadow:
+    0 8px 22px rgba(28, 41, 35, 0.04),
+    var(--shadow-focus);
+}
+
+.javis-context-window-ring {
+  display: inline-grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.javis-context-window-copy {
   display: grid;
   gap: 1px;
+  min-width: 0;
 }
 
-.javis-context-ring-tokens {
+.javis-context-window-title {
   color: var(--color-muted);
   font-size: 12px;
+  font-weight: 650;
   line-height: 16px;
-  font-weight: 550;
 }
 
-.javis-context-ring-calls {
+.javis-context-window-summary {
+  overflow: hidden;
+  color: var(--color-ink);
+  font-size: 14px;
+  font-weight: 720;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-context-window-meta {
+  overflow: hidden;
   color: var(--color-subtle);
   font-size: 11px;
   line-height: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-context-window-caret {
+  color: var(--color-subtle);
+  font-size: 12px;
+  line-height: 1;
+  transition:
+    color 140ms ease,
+    transform 140ms ease;
+}
+
+.javis-context-window-caret.open {
+  color: var(--color-accent-strong);
+  transform: rotate(180deg);
+}
+
+.javis-context-window-panel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  z-index: 50;
+  display: grid;
+  width: min(420px, calc(100vw - 36px));
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: var(--shadow-panel);
+}
+
+.javis-context-window-meter {
+  display: grid;
+  gap: 8px;
+}
+
+.javis-context-window-meter-row {
+  display: grid;
+  grid-template-columns: auto auto auto auto;
+  align-items: center;
+  gap: 6px 12px;
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.javis-context-window-meter-row strong {
+  color: var(--color-ink);
+  font-weight: 700;
+}
+
+.javis-context-window-progress,
+.javis-context-window-agent-bar {
+  overflow: hidden;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-line-soft);
+}
+
+.javis-context-window-progress span,
+.javis-context-window-agent-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+}
+
+.javis-context-window-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.javis-context-window-stat {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px 11px;
+  border: 1px solid var(--color-line-soft);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+
+.javis-context-window-stat span {
+  color: var(--color-subtle);
+  font-size: 11px;
+  line-height: 14px;
+}
+
+.javis-context-window-stat strong {
+  color: var(--color-ink);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 18px;
+}
+
+.javis-context-window-breakdown {
+  display: grid;
+  gap: 8px;
+}
+
+.javis-context-window-section-title {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 14px;
+  text-transform: uppercase;
+}
+
+.javis-context-window-agent {
+  display: grid;
+  gap: 6px;
+  padding: 10px 11px;
+  border: 1px solid var(--color-line-soft);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.javis-context-window-agent-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  color: var(--color-ink);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 18px;
+}
+
+.javis-context-window-agent-head strong {
+  color: var(--color-muted);
+  font-weight: 700;
+}
+
+.javis-context-window-agent-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--color-subtle);
+  font-size: 11px;
+  line-height: 14px;
+}
+
+.javis-context-window-empty {
+  margin: 0;
+  color: var(--color-subtle);
+  font-size: 12px;
+  line-height: 18px;
 }
 
 .javis-task-status,

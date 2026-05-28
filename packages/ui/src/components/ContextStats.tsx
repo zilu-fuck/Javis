@@ -1,5 +1,4 @@
 import type { WorkbenchLocale, WorkbenchTask } from "../types";
-import { formatTokenCount } from "../utils";
 
 interface ContextStatsProps {
   task: WorkbenchTask;
@@ -37,23 +36,7 @@ export function ContextStats({ task, labels }: ContextStatsProps) {
     if (pkg) items.push(pkg);
   }
 
-  const hasStats = items.length > 0;
-  const hasTokens = task.tokenUsage && task.tokenUsage.modelCalls > 0;
+  if (items.length === 0) return null;
 
-  if (!hasStats && !hasTokens) return null;
-
-  return (
-    <p className="javis-context-stats">
-      {hasStats ? items.join("  ·  ") : null}
-      {hasStats && hasTokens ? "  ·  " : null}
-      {hasTokens ? (
-        <span className="javis-context-tokens">
-          {labels.tokenUsage}: {formatTokenCount(task.tokenUsage!.totalTokens)}
-          {" "}({labels.tokenInput} {formatTokenCount(task.tokenUsage!.inputTokens)}
-          {" / "}{labels.tokenOutput} {formatTokenCount(task.tokenUsage!.outputTokens)}
-          {" / "}{labels.tokenCalls} {task.tokenUsage!.modelCalls})
-        </span>
-      ) : null}
-    </p>
-  );
+  return <p className="javis-context-stats">{items.join("  路  ")}</p>;
 }

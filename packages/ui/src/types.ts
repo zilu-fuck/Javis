@@ -400,6 +400,10 @@ export interface WorkbenchLocale {
     tokenInput: string;
     tokenOutput: string;
     tokenCalls: string;
+    contextWindow: string;
+    contextUsed: string;
+    contextRemaining: string;
+    contextBreakdown: string;
     noModelCalls: string;
     unknown: string;
     unknownManager: string;

@@ -41,6 +41,18 @@ export function formatTokenCount(value: number) {
   return new Intl.NumberFormat().format(value);
 }
 
+export function formatCompactTokenCount(value: number) {
+  if (value < 1_000) {
+    return `${value}`;
+  }
+  if (value < 999_500) {
+    const scaled = Math.round((value / 1_000) * 10) / 10;
+    return `${Number.isInteger(scaled) ? scaled.toFixed(0) : scaled.toFixed(1)}k`;
+  }
+  const scaled = Math.round((value / 1_000_000) * 10) / 10;
+  return `${scaled.toFixed(1)}M`;
+}
+
 export function isResearchFallbackTask(task: WorkbenchTask): boolean {
   if (task.status !== "failed") {
     return false;
