@@ -46,6 +46,7 @@ describe("model provider", () => {
         temperature: 0,
         stopSequences: undefined,
         locale: undefined,
+        protocol: "openai-compatible",
       },
     });
   });

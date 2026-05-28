@@ -119,6 +119,33 @@ export type {
   WorkbenchWorkflowStep,
 } from "./workflows";
 
+export {
+  getAdapter,
+  registerAdapter,
+  listAdapters,
+} from "./adapters/adapter-registry";
+export { OpenAIAdapter } from "./adapters/openai-adapter";
+export { DeepSeekAdapter } from "./adapters/deepseek-adapter";
+export { AnthropicAdapter } from "./adapters/anthropic-adapter";
+export type {
+  ProviderProtocol,
+  ProviderCapabilities,
+  AdapterCompletionInput,
+  AdapterRequestPayload,
+  AdapterCompletionResponse,
+  ProviderAdapter,
+} from "./provider-adapter";
+
+export {
+  PREDEFINED_CATEGORIES,
+  createClassificationPrompt,
+  injectDocumentContext,
+} from "./file-classifier";
+export type {
+  ClassifiableFile,
+  ClassifiedFile,
+} from "./file-classifier";
+
 export type ID = string;
 export type ISODateTime = string;
 

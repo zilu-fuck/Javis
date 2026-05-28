@@ -13,6 +13,7 @@ use tauri::{AppHandle, Manager};
 
 mod streaming;
 mod database;
+mod anthropic;
 
 const OPENCODE_PROPOSAL_TIMEOUT: Duration = Duration::from_secs(90);
 const MODEL_API_KEY_SECRET_REFERENCE: &str = "default";
@@ -246,6 +247,8 @@ pub(crate) struct ModelCompletionRequest {
     stop_sequences: Option<Vec<String>>,
     #[serde(default)]
     locale: Option<String>,
+    #[serde(default)]
+    protocol: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -719,7 +722,11 @@ fn complete_model_prompt(
     mut request: ModelCompletionRequest,
 ) -> Result<ModelCompletionResponse, String> {
     hydrate_model_completion_api_key_secret(&app, &mut request)?;
-    run_openai_compatible_completion_request(&request)
+    let protocol = request.protocol.as_deref().unwrap_or("openai-compatible");
+    match protocol {
+        "anthropic" => anthropic::run_anthropic_completion_request(&request),
+        _ => run_openai_compatible_completion_request(&request),
+    }
 }
 
 fn is_allowed_read_only_command(program: &str, args: &[String]) -> bool {
@@ -4557,6 +4564,7 @@ mod tests {
             temperature: Some(0.1),
             stop_sequences: Some(vec!["\n\n".to_string(), " ".to_string()]),
             locale: None,
+            protocol: None,
         };
 
         let body = create_openai_compatible_stream_body("gpt-test", &request);
@@ -5706,6 +5714,31 @@ fn list_directory(path: String) -> Result<Vec<FileEntry>, String> {
 }
 
 #[tauri::command]
+fn read_file_chunk(path: String, max_lines: Option<usize>) -> Result<String, String> {
+    let file_path = PathBuf::from(&path);
+    if !file_path.exists() {
+        return Err(format!("File not found: {}", path));
+    }
+    if !file_path.is_file() {
+        return Err(format!("Path is not a file: {}", path));
+    }
+
+    // Read at most 64 KB to stay within safe context injection limits.
+    // Large files are truncated to avoid memory pressure.
+    let file = fs::File::open(&file_path)
+        .map_err(|e| format!("Cannot open file: {}", e))?;
+    let mut buffer = Vec::with_capacity(65536);
+    file.take(65536)
+        .read_to_end(&mut buffer)
+        .map_err(|e| format!("Cannot read file: {}", e))?;
+    let content = String::from_utf8_lossy(&buffer);
+
+    let max = max_lines.unwrap_or(200);
+    let lines: Vec<&str> = content.lines().take(max).collect();
+    Ok(lines.join("\n"))
+}
+
+#[tauri::command]
 fn read_mcp_config() -> Result<Option<String>, String> {
     let config_dir =
         dirs::config_dir().ok_or_else(|| "Cannot determine config directory".to_string())?;
@@ -5824,6 +5857,7 @@ pub fn run() {
             scan_user_documents,
             scan_user_images,
             list_directory,
+            read_file_chunk,
             read_mcp_config,
             write_mcp_config,
             append_task_audit_jsonl_line,

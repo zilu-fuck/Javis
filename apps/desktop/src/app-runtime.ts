@@ -6,9 +6,10 @@ import {
   createFileScanTaskRuntime,
   createSharedTaskContext,
   createTaskEventBus,
+  getAdapter,
   parseChineseReviewResult,
 } from "@javis/core";
-import type { AgentKind } from "@javis/core";
+import type { AgentKind, ProviderCapabilities } from "@javis/core";
 import type {
   CodeApplyResult,
   CodeProposedEdit,
@@ -45,7 +46,7 @@ import {
   type ModelProfile,
   type ModelSettings,
 } from "./model-settings";
-import { scanUserDocuments } from "./local-knowledge";
+import { scanUserDocuments, classifyDocuments } from "./local-knowledge";
 import { preprocessChineseInput } from "./input-preprocessor";
 import {
   createScheduledTask,
@@ -99,6 +100,15 @@ function getOrCreateProvider(
     cache.set(profile.id, provider);
   }
   return provider;
+}
+
+/**
+ * Return the capabilities for a given provider adapter.
+ * Callers can use this to check `vision`, `code`, `longContext` before
+ * selecting a provider for a specific agent kind.
+ */
+export function getProviderCapabilities(providerId: string): ProviderCapabilities {
+  return getAdapter(providerId).capabilities;
 }
 
 export function createJavisRuntime({
@@ -234,6 +244,8 @@ export function createJavisRuntime({
           request: { approvalId, operations, taskId },
         });
       },
+      classifyDocuments: (files) =>
+        classifyDocuments(files, providerFor("file")),
     },
     computerTool: {
       searchLocalDocuments: async ({ query, maxResults = 20 }) => {

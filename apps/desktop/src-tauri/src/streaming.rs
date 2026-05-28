@@ -152,6 +152,11 @@ fn execute_streaming_request(
     stream_id: &str,
     cancelled: &AtomicBool,
 ) -> Result<StreamingRequestResult, String> {
+    let protocol = request.protocol.as_deref().unwrap_or("openai-compatible");
+    if protocol == "anthropic" {
+        return crate::anthropic::execute_anthropic_streaming_request(request, app, stream_id, cancelled);
+    }
+
     let api_key = normalize_optional_config_value(request.api_key.as_deref())
         .ok_or_else(|| "Model stream requires an API key.".to_string())?;
     let model = normalize_model_completion_model_name(request)
@@ -224,9 +229,9 @@ fn execute_streaming_request(
     })
 }
 
-struct StreamingRequestResult {
-    total_chunks: u32,
-    token_usage: Option<ModelUsage>,
+pub(crate) struct StreamingRequestResult {
+    pub total_chunks: u32,
+    pub token_usage: Option<ModelUsage>,
 }
 
 /// Cancel all active streams — called during app shutdown or task disposal.

@@ -2,7 +2,8 @@ import type { ModelSettings } from "./model-settings";
 import { localeDefaultModelSettings } from "./model-settings";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { injectTerminologyPrompt } from "@javis/core";
+import { injectTerminologyPrompt, getAdapter } from "@javis/core";
+import type { ProviderAdapter } from "@javis/core";
 
 export interface CompletionOptions {
   model?: string;
@@ -67,6 +68,7 @@ export interface ModelProviderSettings {
 
 export function createConfiguredModelProvider(settings: ModelSettings): ModelProvider {
   const providerSettings = toModelProviderSettings(settings);
+  const adapter = getAdapter(providerSettings.provider);
   return {
     id: providerSettings.provider,
     settings: providerSettings,
@@ -74,14 +76,14 @@ export function createConfiguredModelProvider(settings: ModelSettings): ModelPro
     async complete(prompt, options) {
       try {
         return await invoke<CompletionResult>("complete_model_prompt", {
-          request: createModelRequest(prompt, providerSettings, options),
+          request: createModelRequest(prompt, providerSettings, options, adapter),
         });
       } catch (error) {
         throw normalizeModelProviderError(error, providerSettings.provider);
       }
     },
     stream(prompt, options) {
-      return streamModelPrompt(prompt, providerSettings, options);
+      return streamModelPrompt(prompt, providerSettings, options, adapter);
     },
   };
 }
@@ -95,6 +97,7 @@ export function createModelProviderFromProfile(
     apiKeyReference: profile.apiKeyReference,
     baseUrl: profile.baseUrl,
   };
+  const adapter = getAdapter(profile.provider);
   return {
     id: profile.id ?? profile.provider,
     settings: providerSettings,
@@ -102,14 +105,14 @@ export function createModelProviderFromProfile(
     async complete(prompt, options) {
       try {
         return await invoke<CompletionResult>("complete_model_prompt", {
-          request: createModelRequest(prompt, providerSettings, options),
+          request: createModelRequest(prompt, providerSettings, options, adapter),
         });
       } catch (error) {
         throw normalizeModelProviderError(error, providerSettings.provider);
       }
     },
     stream(prompt, options) {
-      return streamModelPrompt(prompt, providerSettings, options);
+      return streamModelPrompt(prompt, providerSettings, options, adapter);
     },
   };
 }
@@ -152,6 +155,7 @@ async function* streamModelPrompt(
   prompt: string,
   providerSettings: ModelProviderSettings,
   options?: StreamOptions,
+  adapter?: ProviderAdapter,
 ): AsyncGenerator<CompletionChunk> {
   // Generate stream ID on the JS side so we can register listeners
   // BEFORE invoking the Rust command — prevents a race where the Rust
@@ -226,7 +230,7 @@ async function* streamModelPrompt(
     // Start streaming — listeners are already registered
     try {
       await invoke("stream_model_prompt_start", {
-        request: createModelRequest(prompt, providerSettings, options),
+        request: createModelRequest(prompt, providerSettings, options, adapter),
         streamId,
       });
     } catch (error) {
@@ -269,12 +273,29 @@ function createModelRequest(
   prompt: string,
   providerSettings: ModelProviderSettings,
   options?: CompletionOptions,
+  adapter?: ProviderAdapter,
 ) {
+  const providerId = providerSettings.provider || (
+    options?.locale ? localeDefaultModelSettings(options.locale).provider : undefined
+  ) || "";
+
+  if (adapter) {
+    return adapter.buildCompletionRequest({
+      prompt: injectTerminologyPrompt(prompt, options?.locale),
+      model: options?.model ?? providerSettings.model,
+      providerId,
+      baseUrl: providerSettings.baseUrl,
+      apiKeyReference: providerSettings.apiKeyReference,
+      maxTokens: options?.maxTokens,
+      temperature: options?.temperature,
+      stopSequences: options?.stopSequences,
+      locale: options?.locale,
+    });
+  }
+
   return {
     prompt: injectTerminologyPrompt(prompt, options?.locale),
-    providerId: providerSettings.provider || (
-      options?.locale ? localeDefaultModelSettings(options.locale).provider : undefined
-    ),
+    providerId,
     model: options?.model ?? providerSettings.model,
     apiKeyReference: providerSettings.apiKeyReference,
     baseUrl: providerSettings.baseUrl,
