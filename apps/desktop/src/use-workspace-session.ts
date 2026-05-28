@@ -1,10 +1,8 @@
 import { useCallback, useState, type RefObject } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  deletePersistedWorkspacePath,
   getPersistedWorkspacePaths,
   loadWorkspaceSession,
-  persistWorkspaceForTaskStatus,
   type WorkspaceSession,
   type WorkspaceSessionRepository,
 } from "./workspace-session";
@@ -32,29 +30,14 @@ export function useWorkspaceSessionControls(
       const repository = repositoryRef?.current;
       if (repository) {
         void repository
-          .persistCompletedWorkspace(current.recentWorkspacePaths, completedWorkspacePath, status)
-          .catch(() => {
-            persistWorkspaceForTaskStatus(
-              storage,
-              current.recentWorkspacePaths,
-              completedWorkspacePath,
-              status,
-            );
-          });
-      } else {
-        persistWorkspaceForTaskStatus(
-          storage,
-          current.recentWorkspacePaths,
-          completedWorkspacePath,
-          status,
-        );
+          .persistCompletedWorkspace(current.recentWorkspacePaths, completedWorkspacePath, status);
       }
       return {
         ...current,
         recentWorkspacePaths,
       };
     });
-  }, [repositoryRef, storage]);
+  }, [repositoryRef]);
 
   const useWorkspacePath = useCallback((path: string) => {
     setWorkspaceSession((current) => ({
@@ -78,15 +61,10 @@ export function useWorkspaceSessionControls(
     setWorkspaceSession((current) => {
       const repository = repositoryRef?.current;
       const normalizedPath = normalizeWorkspacePath(path);
-      const recentWorkspacePaths = repository
-        ? removeRecentWorkspacePath(current.recentWorkspacePaths, normalizedPath)
-        : deletePersistedWorkspacePath(storage, current.recentWorkspacePaths, normalizedPath);
+      const recentWorkspacePaths = removeRecentWorkspacePath(current.recentWorkspacePaths, normalizedPath);
       if (repository) {
         void repository
-          .deleteWorkspacePath(current.recentWorkspacePaths, normalizedPath)
-          .catch(() => {
-            deletePersistedWorkspacePath(storage, current.recentWorkspacePaths, normalizedPath);
-          });
+          .deleteWorkspacePath(current.recentWorkspacePaths, normalizedPath);
       }
       return {
         workspacePath:
@@ -96,7 +74,7 @@ export function useWorkspaceSessionControls(
         recentWorkspacePaths,
       };
     });
-  }, [repositoryRef, storage]);
+  }, [repositoryRef]);
 
   const replaceWorkspaceSession = useCallback((session: WorkspaceSession) => {
     setWorkspaceSession(session);

@@ -313,6 +313,13 @@ export interface JavisWorkbenchProps {
   onRefreshImages?: () => void;
   onNavigateDirectory?: (path: string) => void;
   onOpenFile?: (path: string) => void;
+  onSidebarWidthChange?: (width: number) => void;
+  onActiveViewChange?: (view: ActiveView) => void;
+  onActivityOpenChange?: (open: boolean) => void;
+  onInspectorOpenChange?: (open: boolean) => void;
+  initialSidebarWidth?: number;
+  initialIsActivityOpen?: boolean;
+  initialIsInspectorOpen?: boolean;
 }
 
 export interface WorkbenchLocale {

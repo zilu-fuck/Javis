@@ -74,6 +74,13 @@ export function JavisWorkbench({
   onRefreshImages,
   onNavigateDirectory,
   onOpenFile,
+  onSidebarWidthChange,
+  onActiveViewChange,
+  onActivityOpenChange,
+  onInspectorOpenChange,
+  initialSidebarWidth,
+  initialIsActivityOpen,
+  initialIsInspectorOpen,
 }: JavisWorkbenchProps) {
   const effectiveLocale = {
     ...locale,
@@ -83,10 +90,10 @@ export function JavisWorkbench({
     },
   };
   const labels = effectiveLocale.labels;
-  const [isActivityOpen, setIsActivityOpen] = useState(false);
-  const [isInspectorOpen, setIsInspectorOpen] = useState(false);
+  const [isActivityOpen, setIsActivityOpen] = useState(initialIsActivityOpen ?? false);
+  const [isInspectorOpen, setIsInspectorOpen] = useState(initialIsInspectorOpen ?? false);
   const [sidebarSearchQuery, setSidebarSearchQuery] = useState("");
-  const [sidebarWidth, setSidebarWidth] = useState<number | undefined>();
+  const [sidebarWidth, setSidebarWidth] = useState<number | undefined>(initialSidebarWidth);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const [internalActiveView, setInternalActiveView] =
     useState<ActiveView>("chat");
@@ -120,6 +127,9 @@ export function JavisWorkbench({
         }
         const maxWidth = getSidebarMaxWidth(shellElement);
         const nextWidth = clampSidebarWidth(current, maxWidth);
+        if (nextWidth !== current) {
+          onSidebarWidthChange?.(nextWidth);
+        }
         return nextWidth === current ? current : nextWidth;
       });
     }
@@ -136,6 +146,7 @@ export function JavisWorkbench({
   function handleChangeActiveView(view: ActiveView) {
     setInternalActiveView(view);
     onChangeActiveView?.(view);
+    onActiveViewChange?.(view);
     setSidebarSearchQuery("");
   }
 
@@ -161,7 +172,9 @@ export function JavisWorkbench({
     document.body.style.userSelect = "none";
 
     function updateWidth(clientX: number) {
-      setSidebarWidth(clampSidebarWidth(startWidth + clientX - startX, maxWidth));
+      const newWidth = clampSidebarWidth(startWidth + clientX - startX, maxWidth);
+      setSidebarWidth(newWidth);
+      onSidebarWidthChange?.(newWidth);
     }
 
     function stopListening() {
@@ -204,18 +217,20 @@ export function JavisWorkbench({
 
     if (event.key === "Home") {
       setSidebarWidth(SIDEBAR_MIN_WIDTH);
+      onSidebarWidthChange?.(SIDEBAR_MIN_WIDTH);
       return;
     }
 
     if (event.key === "End") {
       setSidebarWidth(maxWidth);
+      onSidebarWidthChange?.(maxWidth);
       return;
     }
 
     const direction = event.key === "ArrowRight" ? 1 : -1;
-    setSidebarWidth(
-      clampSidebarWidth(currentWidth + direction * SIDEBAR_KEYBOARD_STEP, maxWidth),
-    );
+    const newWidth = clampSidebarWidth(currentWidth + direction * SIDEBAR_KEYBOARD_STEP, maxWidth);
+    setSidebarWidth(newWidth);
+    onSidebarWidthChange?.(newWidth);
   }
 
   function renderMainContent() {
@@ -360,7 +375,11 @@ export function JavisWorkbench({
             isInspectorOpen={isInspectorOpen}
             labels={labels}
             locale={effectiveLocale}
-            onToggle={() => setIsInspectorOpen((current) => !current)}
+            onToggle={() => setIsInspectorOpen((current) => {
+              const next = !current;
+              onInspectorOpenChange?.(next);
+              return next;
+            })}
             task={task}
           />
           <ActivityLog
@@ -369,7 +388,11 @@ export function JavisWorkbench({
             labels={labels}
             locale={effectiveLocale}
             onPermissionDecision={onPermissionDecision}
-            onToggle={() => setIsActivityOpen((current) => !current)}
+            onToggle={() => setIsActivityOpen((current) => {
+              const next = !current;
+              onActivityOpenChange?.(next);
+              return next;
+            })}
             task={task}
           />
         </>

@@ -10,12 +10,11 @@ import type {
   WorkbenchScheduledTask,
   WorkbenchSkillEntry,
 } from "@javis/ui";
-import { JavisWorkbench, zhCNWorkbenchLocale } from "@javis/ui";
+import { JavisWorkbench, zhCNWorkbenchLocale, defaultWorkbenchLocale } from "@javis/ui";
 import {
   getTaskUpdatedAt,
   isArchivableTask,
   loadTaskHistory,
-  saveTaskHistory,
   upsertTaskHistory,
 } from "./task-history";
 import { getCompletedTaskWorkspacePath } from "./workspace-session";
@@ -25,7 +24,6 @@ import {
   isApprovalRecordExpired,
   loadApprovalRecords,
   resolveApprovalRecord,
-  saveApprovalRecords,
   upsertApprovalRecord,
   type DurableApprovalRecord,
 } from "./approval-records";
@@ -57,7 +55,6 @@ import { useModelSettingsControls } from "./use-model-settings";
 import { useWorkspaceSessionControls } from "./use-workspace-session";
 import {
   loadScheduledTasks,
-  saveScheduledTasks,
   clearStaleGuards,
   isDue,
   computeNextRun,
@@ -103,8 +100,6 @@ import {
 } from "./model-profile-persistence";
 import {
   TOOL_CALL_AUDIT_MIGRATIONS,
-} from "./tool-call-audit";
-import {
   appendTaskSnapshotAuditJsonLines,
   createFileBackedTaskAuditJsonLineWriter,
 } from "./tool-call-audit";
@@ -112,6 +107,18 @@ import {
   appendTaskSessionSnapshotJsonLine,
   createFileBackedTaskSessionJsonLineWriter,
 } from "./task-session-log";
+import {
+  createUserPreferencesRepository,
+  PREF_KEYS,
+  USER_PREFERENCES_MIGRATIONS,
+  type UserPreferencesRepository,
+} from "./user-preferences-persistence";
+import {
+  createSqliteTaskSessionWriter,
+  importTaskSessionJsonlFromLocalStorage,
+  importToolCallAuditJsonlFromLocalStorage,
+  JSONL_LOG_MIGRATIONS,
+} from "./jsonl-log-persistence";
 import { initialToolDescriptors } from "@javis/tools";
 import { demoAgents } from "@javis/core";
 import "./App.css";
@@ -200,6 +207,7 @@ function App() {
   const modelSettingsRepoRef = useRef<ModelSettingsRepository | null>(null);
   const modelProfileRepoRef = useRef<ModelProfileRepository | null>(null);
   const scheduledTasksRepoRef = useRef<ReturnType<typeof createScheduledTasksRepository> | null>(null);
+  const preferencesRepoRef = useRef<UserPreferencesRepository | null>(null);
   const {
     browseWorkspacePath,
     deleteRecentWorkspacePath,
@@ -225,6 +233,7 @@ function App() {
       modelSettings,
       getModelConfiguration: () => modelConfigRef.current,
       getWorkspacePath: () => workspaceRef.current,
+      getScheduledTasksRepository: () => scheduledTasksRepoRef.current,
     }),
     [modelSettings],
   );
@@ -254,6 +263,10 @@ function App() {
 
   // ── Sidebar view state ────────────────────────────────────────────
   const [activeView, setActiveView] = useState<ActiveView>("chat");
+  const [localePreference, setLocalePreference] = useState<string>("zh-CN");
+  const [prefSidebarWidth, setPrefSidebarWidth] = useState<number | undefined>();
+  const [prefIsActivityOpen, setPrefIsActivityOpen] = useState<boolean | undefined>();
+  const [prefIsInspectorOpen, setPrefIsInspectorOpen] = useState<boolean | undefined>();
   const [isTaskActive, setIsTaskActive] = useState(false);
   // Ref mirrors isTaskActive for synchronous reads inside setInterval callbacks
   // where React state would be stale. Both must be updated together.
@@ -347,6 +360,8 @@ function App() {
       await runDesktopDatabaseMigrations(database, APPROVAL_RECORDS_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, TOOL_CALL_AUDIT_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, SCHEDULED_TASKS_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, USER_PREFERENCES_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, JSONL_LOG_MIGRATIONS);
 
       // One-time import from localStorage
       const taskHistoryRepo = createTaskHistoryRepository(database);
@@ -363,6 +378,9 @@ function App() {
 
       const scheduledTasksRepo = createScheduledTasksRepository(database);
       scheduledTasksRepoRef.current = scheduledTasksRepo;
+
+      const preferencesRepo = createUserPreferencesRepository(database);
+      preferencesRepoRef.current = preferencesRepo;
 
       const importedHistory = await taskHistoryRepo.importFromLocalStorage(window.localStorage);
       const importedWorkspaceSession = await workspaceSessionRepo.importFromLocalStorage(
@@ -395,6 +413,24 @@ function App() {
       if (scheduledTasksCurrentRef.current === scheduledTasksInitialRef.current) {
         setScheduledTasks(clearStaleGuards(importedScheduledTasks));
       }
+
+      // Import user preferences from localStorage
+      const importedPrefs = await preferencesRepo.importFromLocalStorage(window.localStorage);
+      if (importedPrefs[PREF_KEYS.LOCALE]) setLocalePreference(importedPrefs[PREF_KEYS.LOCALE]);
+      if (importedPrefs[PREF_KEYS.SIDEBAR_WIDTH]) setPrefSidebarWidth(Number(importedPrefs[PREF_KEYS.SIDEBAR_WIDTH]));
+      if (importedPrefs[PREF_KEYS.IS_ACTIVITY_OPEN]) setPrefIsActivityOpen(importedPrefs[PREF_KEYS.IS_ACTIVITY_OPEN] === "true");
+      if (importedPrefs[PREF_KEYS.IS_INSPECTOR_OPEN]) setPrefIsInspectorOpen(importedPrefs[PREF_KEYS.IS_INSPECTOR_OPEN] === "true");
+      if (importedPrefs[PREF_KEYS.ACTIVE_VIEW]) {
+        const validViews: ActiveView[] = ["chat", "automated", "skills", "apps", "documents", "gallery", "computer"];
+        if (validViews.includes(importedPrefs[PREF_KEYS.ACTIVE_VIEW] as ActiveView)) {
+          setActiveView(importedPrefs[PREF_KEYS.ACTIVE_VIEW] as ActiveView);
+        }
+      }
+
+      // Import JSONL logs from localStorage into SQLite
+      await importTaskSessionJsonlFromLocalStorage(database, window.localStorage);
+      await importToolCallAuditJsonlFromLocalStorage(database, window.localStorage);
+
       setDurableApprovalRecordsReady(true);
     })().catch((error) => {
       console.error("Database initialization failed, using localStorage fallback", error);
@@ -409,11 +445,7 @@ function App() {
       const cleared = clearStaleGuards(current);
       const repository = scheduledTasksRepoRef.current;
       if (repository) {
-        void repository.save(cleared).catch(() => {
-          saveScheduledTasks(window.localStorage, cleared);
-        });
-      } else {
-        saveScheduledTasks(window.localStorage, cleared);
+        void repository.save(cleared);
       }
       return cleared;
     });
@@ -438,11 +470,7 @@ function App() {
         });
         const repository = scheduledTasksRepoRef.current;
         if (repository) {
-          void repository.save(updated).catch(() => {
-            saveScheduledTasks(window.localStorage, updated);
-          });
-        } else {
-          saveScheduledTasks(window.localStorage, updated);
+          void repository.save(updated);
         }
         return updated;
       });
@@ -471,21 +499,22 @@ function App() {
         pendingScheduledTaskIdRef.current = undefined;
       }
       enqueueTaskSnapshot(nextTask);
+      const db = databaseRef.current;
       void appendTaskSnapshotAuditJsonLines(
         createFileBackedTaskAuditJsonLineWriter(
-          (line) =>
-            invoke("append_task_audit_jsonl_line", { request: { line } }).then(() => undefined),
+          (line) => invoke("append_task_audit_jsonl_line", { request: { line } }).then(() => undefined),
           window.localStorage,
         ),
         nextTask,
         auditRecordIdsRef.current,
       );
       void appendTaskSessionSnapshotJsonLine(
-        createFileBackedTaskSessionJsonLineWriter(
-          (line) =>
-            invoke("append_task_session_jsonl_line", { request: { line } }).then(() => undefined),
-          window.localStorage,
-        ),
+        db
+          ? createSqliteTaskSessionWriter(db)
+          : createFileBackedTaskSessionJsonLineWriter(
+              (line) => invoke("append_task_session_jsonl_line", { request: { line } }).then(() => undefined),
+              window.localStorage,
+            ),
         nextTask,
       );
       if (isArchivableTask(nextTask)) {
@@ -493,11 +522,7 @@ function App() {
           const updated = upsertTaskHistory(current, nextTask);
           const repository = taskHistoryRepoRef.current;
           if (repository) {
-            void repository.upsert(nextTask).catch(() => {
-              saveTaskHistory(window.localStorage, updated);
-            });
-          } else {
-            saveTaskHistory(window.localStorage, updated);
+            void repository.upsert(nextTask);
           }
           return updated;
         });
@@ -521,11 +546,7 @@ function App() {
           );
           const repository = scheduledTasksRepoRef.current;
           if (repository) {
-            void repository.save(updated).catch(() => {
-              saveScheduledTasks(window.localStorage, updated);
-            });
-          } else {
-            saveScheduledTasks(window.localStorage, updated);
+            void repository.save(updated);
           }
           return updated;
         });
@@ -544,11 +565,7 @@ function App() {
           );
           const repository = scheduledTasksRepoRef.current;
           if (repository) {
-            void repository.save(updated).catch(() => {
-              saveScheduledTasks(window.localStorage, updated);
-            });
-          } else {
-            saveScheduledTasks(window.localStorage, updated);
+            void repository.save(updated);
           }
           return updated;
         });
@@ -819,11 +836,7 @@ function App() {
       const updated = upsertApprovalRecord(current, record);
       const repository = approvalRecordsRepoRef.current;
       if (repository) {
-        void repository.upsert(record).catch(() => {
-          saveApprovalRecords(window.localStorage, updated);
-        });
-      } else {
-        saveApprovalRecords(window.localStorage, updated);
+        void repository.upsert(record);
       }
       return updated;
     });
@@ -834,11 +847,7 @@ function App() {
       const updated = upsertApprovalRecord(current, record);
       const repository = approvalRecordsRepoRef.current;
       if (repository) {
-        void repository.upsert(record).catch(() => {
-          saveApprovalRecords(window.localStorage, updated);
-        });
-      } else {
-        saveApprovalRecords(window.localStorage, updated);
+        void repository.upsert(record);
       }
       return updated;
     });
@@ -904,11 +913,7 @@ function App() {
       const updated = upsertTaskHistory(current, restoredTask);
       const repository = taskHistoryRepoRef.current;
       if (repository) {
-        void repository.upsert(restoredTask).catch(() => {
-          saveTaskHistory(window.localStorage, updated);
-        });
-      } else {
-        saveTaskHistory(window.localStorage, updated);
+        void repository.upsert(restoredTask);
       }
       return updated;
     });
@@ -944,11 +949,7 @@ function App() {
       const updated = current.filter((entry) => entry.id !== id);
       const repository = taskHistoryRepoRef.current;
       if (repository) {
-        void repository.save(updated).catch(() => {
-          saveTaskHistory(window.localStorage, updated);
-        });
-      } else {
-        saveTaskHistory(window.localStorage, updated);
+        void repository.save(updated);
       }
       return updated;
     });
@@ -961,11 +962,7 @@ function App() {
       );
       const repository = scheduledTasksRepoRef.current;
       if (repository) {
-        void repository.save(updated).catch(() => {
-          saveScheduledTasks(window.localStorage, updated);
-        });
-      } else {
-        saveScheduledTasks(window.localStorage, updated);
+        void repository.save(updated);
       }
       return updated;
     });
@@ -976,11 +973,7 @@ function App() {
       const updated = current.filter((t) => t.id !== id);
       const repository = scheduledTasksRepoRef.current;
       if (repository) {
-        void repository.save(updated).catch(() => {
-          saveScheduledTasks(window.localStorage, updated);
-        });
-      } else {
-        saveScheduledTasks(window.localStorage, updated);
+        void repository.save(updated);
       }
       return updated;
     });
@@ -1029,6 +1022,19 @@ function App() {
     openPath(path).catch(() => {});
   }
 
+  const effectiveLocale = localePreference === "en" ? defaultWorkbenchLocale : zhCNWorkbenchLocale;
+
+  const sidebarWidthTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function persistPreference(key: string, value: string) {
+    const repo = preferencesRepoRef.current;
+    if (repo) {
+      void repo.set(key, value).catch((error) =>
+        console.warn(`Failed to persist preference "${key}"`, error),
+      );
+    }
+  }
+
   return (
     <JavisWorkbench
       activeView={activeView}
@@ -1058,9 +1064,12 @@ function App() {
       }))}
       imagesError={imagesError}
       imagesLoading={imagesLoading}
+      initialIsActivityOpen={prefIsActivityOpen}
+      initialIsInspectorOpen={prefIsInspectorOpen}
+      initialSidebarWidth={prefSidebarWidth}
       installedApps={installedApps}
       isTaskActive={isTaskActive}
-      locale={zhCNWorkbenchLocale}
+      locale={effectiveLocale}
       modelSettings={modelSettings}
       onBrowseWorkspacePath={browseWorkspacePath}
       onChangeActiveView={handleChangeActiveView}
@@ -1120,6 +1129,24 @@ function App() {
       onToggleScheduledTask={toggleScheduledTask}
       onUseWorkspacePath={useWorkspacePath}
       onWorkspacePathChange={useWorkspacePath}
+      onSidebarWidthChange={(width) => {
+        setPrefSidebarWidth(width);
+        if (sidebarWidthTimerRef.current) clearTimeout(sidebarWidthTimerRef.current);
+        sidebarWidthTimerRef.current = setTimeout(() => {
+          persistPreference(PREF_KEYS.SIDEBAR_WIDTH, String(width));
+        }, 300);
+      }}
+      onActiveViewChange={(view) => {
+        persistPreference(PREF_KEYS.ACTIVE_VIEW, view);
+      }}
+      onActivityOpenChange={(open) => {
+        setPrefIsActivityOpen(open);
+        persistPreference(PREF_KEYS.IS_ACTIVITY_OPEN, String(open));
+      }}
+      onInspectorOpenChange={(open) => {
+        setPrefIsInspectorOpen(open);
+        persistPreference(PREF_KEYS.IS_INSPECTOR_OPEN, String(open));
+      }}
       recentWorkspacePaths={recentWorkspacePaths}
       scheduledTasks={scheduledTasks.map((t) =>
         scheduledTaskToWorkbench(t, history, activeScheduledTaskId),
