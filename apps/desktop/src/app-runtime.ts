@@ -9,7 +9,8 @@ import {
   getAdapter,
   parseChineseReviewResult,
 } from "@javis/core";
-import type { AgentKind, ProviderCapabilities } from "@javis/core";
+import { createDefaultAgentRegistry } from "@javis/core";
+import type { AgentKind, ModelRequirements, ProviderCapabilities } from "@javis/core";
 import type {
   CodeApplyResult,
   CodeProposedEdit,
@@ -50,19 +51,25 @@ import { scanUserDocuments, classifyDocuments } from "./local-knowledge";
 import { preprocessChineseInput } from "./input-preprocessor";
 import {
   createScheduledTask,
-  loadScheduledTasks,
-  saveScheduledTasks,
 } from "./scheduled-tasks";
+import type { ScheduledTasksRepository } from "./scheduled-tasks-persistence";
 
 interface CreateJavisRuntimeOptions {
   getWorkspacePath: () => string;
   modelSettings: ModelSettings;
   getModelConfiguration?: () => ModelConfiguration | undefined;
+  getScheduledTasksRepository?: () => ScheduledTasksRepository | null;
 }
 
 /**
  * Resolve the ModelProvider for a given agentKind based on ModelConfiguration.
- * Falls back to the primary profile if no override or match is found.
+ *
+ * Resolution order:
+ * 1. Explicit agent override (unchanged — user intent always wins)
+ * 2. Capability-aware scoring: cross-references Agent.modelRequirements,
+ *    ModelProfile.capabilities, and ProviderAdapter.capabilities
+ * 3. DEFAULT_AGENT_SLOT static mapping (backward compat)
+ * 4. Fallback to primary / first profile
  */
 function resolveModelForAgent(
   agentKind: string,
@@ -78,7 +85,40 @@ function resolveModelForAgent(
     }
   }
 
-  // Check DEFAULT_AGENT_SLOT mapping
+  // Capability-aware scoring: only when multiple profiles exist
+  const requirements = getDefaultAgentModelRequirements(agentKind);
+  if (requirements && config.profiles.length > 1) {
+    const scored = config.profiles
+      .filter((p) => p.slot !== null)
+      .map((profile) => ({
+        profile,
+        score: scoreProfileForAgent(profile, requirements, agentKind),
+      }))
+      .filter(({ score }) => score.penalties === 0)
+      .sort((a, b) => b.score.total - a.score.total);
+
+    if (scored.length > 0) {
+      const best = scored[0];
+      if (best.score.warnings.length > 0) {
+        console.warn(
+          `[resolveModelForAgent] ${agentKind}: using ${best.profile.slot} slot ` +
+          `(${best.profile.provider}/${best.profile.model}) — ` +
+          best.score.warnings.join("; "),
+        );
+      }
+      return getOrCreateProvider(best.profile, providerCache);
+    }
+
+    // No profile satisfies requirements — warn and fall through to defaults
+    if (requirements) {
+      console.warn(
+        `[resolveModelForAgent] ${agentKind}: no profile satisfies ` +
+        `prefersVision=${requirements.prefersVision} prefersCode=${requirements.prefersCode}`,
+      );
+    }
+  }
+
+  // DEFAULT_AGENT_SLOT mapping (backward compat)
   const defaultSlot = DEFAULT_AGENT_SLOT[agentKind] ?? "primary";
   const slotProfile = config.profiles.find((p) => p.slot === defaultSlot);
   if (slotProfile) {
@@ -111,10 +151,97 @@ export function getProviderCapabilities(providerId: string): ProviderCapabilitie
   return getAdapter(providerId).capabilities;
 }
 
+// ── Capability-aware profile scoring ────────────────────────────────────────
+
+interface ProfileScore {
+  total: number;
+  penalties: number;
+  warnings: string[];
+}
+
+function scoreProfileForAgent(
+  profile: ModelProfile,
+  requirements: ModelRequirements,
+  agentKind: string,
+): ProfileScore {
+  const warnings: string[] = [];
+  let total = 0;
+  let penalties = 0;
+
+  // Check vision capability
+  if (requirements.prefersVision) {
+    if (profile.capabilities.vision) {
+      total += 2;
+    } else {
+      warnings.push(
+        `profile ${profile.slot} lacks vision but agent ${agentKind} prefers it`,
+      );
+    }
+  }
+
+  // Check code capability
+  if (requirements.prefersCode) {
+    if (profile.capabilities.code) {
+      total += 2;
+    } else {
+      penalties += 1;
+      warnings.push(
+        `profile ${profile.slot} lacks code capability but agent ${agentKind} requires it`,
+      );
+    }
+  }
+
+  // Check long context
+  if (requirements.minContextTokens > 0) {
+    if (profile.capabilities.longContext) {
+      total += 1;
+    } else if (requirements.minContextTokens > 32000) {
+      warnings.push(
+        `profile ${profile.slot} may have limited context for agent ${agentKind}`,
+      );
+    }
+  }
+
+  // Cross-reference with ProviderAdapter capabilities
+  if (profile.provider) {
+    const providerCaps = getProviderCapabilities(profile.provider);
+    if (requirements.prefersVision && !providerCaps.vision) {
+      penalties += 1;
+      warnings.push(
+        `provider ${profile.provider} does not support vision for agent ${agentKind}`,
+      );
+    }
+    if (requirements.prefersCode && !providerCaps.code) {
+      penalties += 1;
+      warnings.push(
+        `provider ${profile.provider} does not support code for agent ${agentKind}`,
+      );
+    }
+  }
+
+  // Inertia bonus: prefer the DEFAULT_AGENT_SLOT mapping
+  const defaultSlot = DEFAULT_AGENT_SLOT[agentKind];
+  if (profile.slot === defaultSlot) {
+    total += 0.5;
+  }
+
+  return { total, penalties, warnings };
+}
+
+let _agentRegistryCache: ReturnType<typeof createDefaultAgentRegistry> | undefined;
+
+function getDefaultAgentModelRequirements(kind: string): ModelRequirements | undefined {
+  if (!_agentRegistryCache) {
+    _agentRegistryCache = createDefaultAgentRegistry();
+  }
+  return _agentRegistryCache.getModelRequirements(kind);
+}
+
 export function createJavisRuntime({
   getWorkspacePath,
   modelSettings,
   getModelConfiguration,
+  getScheduledTasksRepository,
 }: CreateJavisRuntimeOptions) {
   const fallbackProvider = createConfiguredModelProvider(modelSettings);
   const providerCache = new Map<string, ModelProvider>();
@@ -332,10 +459,10 @@ export function createJavisRuntime({
           },
           "agent",
         );
-        saveScheduledTasks(window.localStorage, [
-          ...loadScheduledTasks(window.localStorage).filter((item) => item.id !== task.id),
-          task,
-        ]);
+        const repo = getScheduledTasksRepository?.();
+        if (repo) {
+          await repo.upsert(task);
+        }
         return {
           id: task.id,
           name: task.name,
@@ -498,14 +625,28 @@ async function planWithModelProviderStreaming(
   modelProvider: ModelProvider,
   onChunk: (chunk: { text: string }) => void,
 ): Promise<CommanderPlanResult> {
+  // Enrich available agents with capability tags so the Commander can
+  // plan by capability rather than hardcoded agent kind.
+  const registry = createDefaultAgentRegistry();
+  const agentsWithCapabilities = request.availableAgents.map((a) => {
+    const reg = registry.findByKind(a.kind);
+    return {
+      kind: a.kind,
+      allowedToolNames: a.allowedToolNames,
+      capabilities: reg?.capabilityTags ?? [],
+    };
+  });
+
   return streamOrCompleteWithReview(
     [
       "You are Javis Commander Agent. Return JSON only.",
       "Plan the selected workflow using the available agents and tools.",
-      "Schema: {\"title\":\"string\",\"reasoning\":\"string\",\"steps\":[{\"id\":\"string\",\"title\":\"string\",\"assignedAgentKind\":\"string\",\"successCriteria\":\"string\"}]}",
+      "Prefer matching steps to agents by their capability tags rather than agent kind.",
+      "When setting requiredCapabilities, use tags from the agent's capabilities list.",
+      "Schema: {\"title\":\"string\",\"reasoning\":\"string\",\"steps\":[{\"id\":\"string\",\"title\":\"string\",\"assignedAgentKind\":\"string\",\"requiredCapabilities\":[\"string\"],\"successCriteria\":\"string\"}]}",
       `User goal: ${request.userGoal}`,
       `Workflow id: ${request.workflowId ?? "unknown"}`,
-      `Available agents: ${JSON.stringify(request.availableAgents)}`,
+      `Available agents: ${JSON.stringify(agentsWithCapabilities)}`,
     ].join("\n"),
     { maxTokens: 1200, temperature: 0 },
     modelProvider,
@@ -597,6 +738,9 @@ function normalizeCommanderPlan(value: unknown): CommanderPlanResult {
         id: stringValue(step.id, `step-${index + 1}`),
         title: stringValue(step.title, `Step ${index + 1}`),
         assignedAgentKind: stringValue(step.assignedAgentKind, "commander"),
+        requiredCapabilities: Array.isArray(step.requiredCapabilities)
+          ? step.requiredCapabilities.filter((c): c is string => typeof c === "string")
+          : undefined,
         successCriteria: stringValue(step.successCriteria, "Step completed with evidence."),
       }))
     : [];
