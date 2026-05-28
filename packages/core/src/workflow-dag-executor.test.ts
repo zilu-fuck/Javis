@@ -53,6 +53,48 @@ describe("executeWorkflow", () => {
     expect(started[2]).toBe("summarize");
   });
 
+  it("runs the read-current-project DAG: 3 parallel → barrier → final", async () => {
+    const started: string[] = [];
+    const completedOrder: string[] = [];
+    const workflow = createWorkflow([
+      step("scan-files", [], true),
+      step("inspect-project", [], true),
+      step("analyze-code", [], true),
+      step("summarize-project", ["scan-files", "inspect-project", "analyze-code"], false),
+      step("commander-synthesize", ["summarize-project"], false),
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      onStepStarted: (workflowStep) => started.push(workflowStep.id),
+      executeStep: async (workflowStep, context) => {
+        if (workflowStep.id === "summarize-project") {
+          // Verify all three parallel outputs are in context
+          const scan = context.get("step:scan-files");
+          const inspect = context.get("step:inspect-project");
+          const code = context.get("step:analyze-code");
+          expect(scan).toBeDefined();
+          expect(inspect).toBeDefined();
+          expect(code).toBeDefined();
+        }
+        completedOrder.push(workflowStep.id);
+        return { output: { stepId: workflowStep.id } };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    // The three parallel steps must all start before summarize-project
+    expect(started.slice(0, 3).sort()).toEqual(["analyze-code", "inspect-project", "scan-files"]);
+    expect(started[3]).toBe("summarize-project");
+    expect(started[4]).toBe("commander-synthesize");
+    // All five steps completed
+    expect(result.completedStepIds).toHaveLength(5);
+    // Context stores outputs for all steps
+    expect(result.contextSnapshot["step:scan-files"]).toEqual({ stepId: "scan-files" });
+    expect(result.contextSnapshot["step:summarize-project"]).toEqual({ stepId: "summarize-project" });
+    expect(result.contextSnapshot["step:commander-synthesize"]).toEqual({ stepId: "commander-synthesize" });
+  });
+
   it("fails before execution when a step depends on a missing step", async () => {
     const workflow = createWorkflow([
       step("summarize", ["missing"], false),

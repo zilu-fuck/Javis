@@ -135,6 +135,24 @@ export async function runReadCurrentProjectWorkflow({
       });
     }
 
+    // Pre-set parallel agents to queued so the UI shows all three before they start
+    agentTracker.setState("agent-file", {
+      status: "queued",
+      task: "Scanning Markdown project documents",
+    });
+    agentTracker.setState("agent-shell", {
+      status: "queued",
+      task: "Inspecting project scripts and environment",
+    });
+    agentTracker.setState("agent-code", {
+      status: "queued",
+      task: "Analyzing project structure",
+    });
+    agentTracker.setState("agent-verifier", {
+      status: "queued",
+      task: "Waiting for workflow results",
+    });
+
     const execution = await executeWorkflow({
       workflow,
       context,
@@ -161,7 +179,6 @@ export async function runReadCurrentProjectWorkflow({
                 projectTool,
                 shellTool,
                 taskId,
-                contextSnapshot: context.snapshot(),
               }),
             };
           case "analyze-code":
@@ -173,7 +190,6 @@ export async function runReadCurrentProjectWorkflow({
                 emitEvent,
                 codeTool,
                 taskId,
-                contextSnapshot: context.snapshot(),
               }),
             };
           case "summarize-project":
@@ -1032,23 +1048,12 @@ async function runScanFilesStep({
     task: "Scanning Markdown project documents",
     currentStepId: "scan-files",
   });
-  agentTracker.setState("agent-shell", {
-    status: "queued",
-    task: "Waiting for file evidence",
-  });
-  agentTracker.setState("agent-code", {
-    status: "queued",
-    task: "Waiting for project evidence",
-  });
-  agentTracker.setState("agent-verifier", {
-    status: "queued",
-    task: "Waiting for workflow results",
-  });
 
   emit({
     ...controller.getSnapshot(),
     status: "running",
-    commanderMessage: "File Agent is scanning Markdown documents for project context.",
+    commanderMessage:
+      "File Agent is scanning Markdown documents. Shell and Code Agents are working in parallel.",
     plan: markStep(controller.getSnapshot().plan, "scan-files", "running"),
     agents: agentTracker.getSnapshots(),
     logs: appendLog(controller.getSnapshot(), emitEvent({
@@ -1065,17 +1070,11 @@ async function runScanFilesStep({
     status: "completed",
     task: `Found ${documents.length} Markdown documents`,
   });
-  agentTracker.setState("agent-shell", {
-    status: "running",
-    task: "Inspecting project scripts and environment",
-    currentStepId: "inspect-project",
-  });
 
   emit({
     ...controller.getSnapshot(),
-    commanderMessage:
-      "File Agent completed the document scan. Shell Agent is inspecting project scripts and environment.",
-    plan: markStep(controller.getSnapshot().plan, "scan-files", "completed", "inspect-project", "running"),
+    commanderMessage: `File Agent found ${documents.length} Markdown document(s).`,
+    plan: markStep(controller.getSnapshot().plan, "scan-files", "completed"),
     agents: agentTracker.getSnapshots(),
     documents,
     logs: appendLog(controller.getSnapshot(), emitEvent({
@@ -1105,8 +1104,27 @@ async function runInspectProjectStep({
   projectTool: ProjectTool;
   shellTool: ShellTool;
   taskId: ID;
-  contextSnapshot: Record<string, unknown>;
 }): Promise<ProjectInspectionStepOutput> {
+  agentTracker.setState("agent-shell", {
+    status: "running",
+    task: "Inspecting project scripts and environment",
+    currentStepId: "inspect-project",
+  });
+
+  emit({
+    ...controller.getSnapshot(),
+    status: "running",
+    commanderMessage: "Shell Agent is inspecting project scripts and environment.",
+    plan: markStep(controller.getSnapshot().plan, "inspect-project", "running"),
+    agents: agentTracker.getSnapshots(),
+    logs: appendLog(controller.getSnapshot(), emitEvent({
+      kind: "tool.planned",
+      taskId,
+      toolName: "project.inspect",
+      detail: "project.inspect + shell.runReadOnlyCommand for project environment evidence.",
+    })),
+  });
+
   const project = await projectTool.inspectProject();
   const commands = await runProjectReadOnlyCommands(shellTool);
 
@@ -1114,17 +1132,11 @@ async function runInspectProjectStep({
     status: "completed",
     task: "Read-only project checks completed",
   });
-  agentTracker.setState("agent-code", {
-    status: "running",
-    task: "Analyzing project structure",
-    currentStepId: "analyze-code",
-  });
 
   emit({
     ...controller.getSnapshot(),
-    commanderMessage:
-      "Project inspection evidence is ready. Code Agent is producing a rule-based architecture summary.",
-    plan: markStep(controller.getSnapshot().plan, "inspect-project", "completed", "analyze-code", "running"),
+    commanderMessage: `Shell Agent completed project inspection: ${project.scripts.length} script(s), ${commands.length} command(s).`,
+    plan: markStep(controller.getSnapshot().plan, "inspect-project", "completed"),
     agents: agentTracker.getSnapshots(),
     project,
     commands,
@@ -1154,7 +1166,6 @@ async function runAnalyzeCodeStep({
   emitEvent,
   codeTool,
   taskId,
-  contextSnapshot,
 }: {
   agentTracker: ReadCurrentProjectAgentTracker;
   controller: FlowController;
@@ -1162,35 +1173,41 @@ async function runAnalyzeCodeStep({
   emitEvent: RuntimeEventEmitter;
   codeTool?: CodeTool;
   taskId: ID;
-  contextSnapshot: Record<string, unknown>;
 }): Promise<AnalyzeCodeStepOutput> {
-  const project = contextSnapshot.projectInspection as ProjectInspection | undefined;
-  const fileScan = contextSnapshot.fileScan as { count?: number } | undefined;
-  const commands = Array.isArray(contextSnapshot.shellCommands)
-    ? contextSnapshot.shellCommands as ShellCommandOutput[]
-    : [];
-  if (!project) {
-    throw new Error("Project inspection context is missing.");
-  }
+  agentTracker.setState("agent-code", {
+    status: "running",
+    task: "Analyzing project structure",
+    currentStepId: "analyze-code",
+  });
+
+  emit({
+    ...controller.getSnapshot(),
+    status: "running",
+    commanderMessage: "Code Agent is analyzing the repository structure.",
+    plan: markStep(controller.getSnapshot().plan, "analyze-code", "running"),
+    agents: agentTracker.getSnapshots(),
+    logs: appendLog(controller.getSnapshot(), emitEvent({
+      kind: "tool.planned",
+      taskId,
+      toolName: "code.inspectRepository",
+      detail: "code.inspectRepository identifies architecture, stack, and key modules.",
+    })),
+  });
 
   const codeReviewPreview = codeTool ? await safeInspectRepository(codeTool) : undefined;
-  const analysisSummary = createRuleBasedProjectSummary(project, fileScan?.count ?? 0, commands);
+  const analysisSummary = codeReviewPreview
+    ? `Code Agent produced a repository inspection with ${codeReviewPreview.changedFiles?.length ?? 0} changed file(s).`
+    : "Code Agent produced a rule-based architecture summary (no code tool available).";
 
   agentTracker.setState("agent-code", {
     status: "completed",
     task: "Project structure summarized",
   });
-  agentTracker.setState("agent-verifier", {
-    status: "verifying",
-    task: "Checking workflow evidence",
-    currentStepId: "summarize-project",
-  });
 
   emit({
     ...controller.getSnapshot(),
-    status: "verifying",
     commanderMessage: analysisSummary,
-    plan: markStep(controller.getSnapshot().plan, "analyze-code", "completed", "summarize-project", "running"),
+    plan: markStep(controller.getSnapshot().plan, "analyze-code", "completed"),
     agents: agentTracker.getSnapshots(),
     codeReviewPreview,
     logs: appendLog(controller.getSnapshot(), emitEvent({
@@ -1228,36 +1245,40 @@ async function runSummarizeProjectStep({
   const commands = Array.isArray(contextSnapshot.shellCommands)
     ? contextSnapshot.shellCommands as ShellCommandOutput[]
     : [];
-  if (!project) {
-    throw new Error("Project inspection context is missing.");
-  }
 
   const passingCommands = commands.filter((command) => command.exitCode === 0).length;
-  const hasProjectEvidence = Boolean(project.workspacePath);
+  const hasProjectEvidence = Boolean(project?.workspacePath);
   const evidenceStatus =
     hasProjectEvidence && passingCommands === commands.length ? "completed" : "failed";
+
+  agentTracker.setState("agent-verifier", {
+    status: "verifying",
+    task: "Checking all parallel workflow evidence",
+    currentStepId: "summarize-project",
+  });
+
+  emit({
+    ...controller.getSnapshot(),
+    status: "verifying",
+    commanderMessage: "Verifier is checking evidence from all three parallel agents.",
+    plan: markStep(controller.getSnapshot().plan, "summarize-project", "running"),
+    agents: agentTracker.getSnapshots(),
+    logs: appendLog(controller.getSnapshot(), emitEvent({
+      kind: "tool.planned",
+      taskId,
+      toolName: "verifier.check",
+      detail: "Verifier checks project evidence from file scan, project inspection, and code analysis.",
+    })),
+  });
+
+  await controller.wait();
+
   const verifierCheck = await safeVerifyWorkflow(verifierTool, contextSnapshot);
   const verificationStatus = verifierCheck?.status === "fail" ? "failed" : evidenceStatus;
   const verificationSummary = verifierCheck
     ? `${verifierCheck.status}: ${verifierCheck.summary}`
-    : `${verificationStatus === "completed" ? "verified" : "failed"}: read-current-project scanned ${fileScan?.count ?? 0} Markdown document(s), inspected ${project.scripts.length} script(s), and checked ${passingCommands}/${commands.length} read-only command(s).`;
+    : `${verificationStatus === "completed" ? "verified" : "failed"}: read-current-project scanned ${fileScan?.count ?? 0} Markdown document(s), inspected ${project?.scripts.length ?? 0} script(s), and checked ${passingCommands}/${commands.length} read-only command(s).`;
 
-  agentTracker.setState("agent-commander", {
-    status: "completed",
-    task: verificationStatus === "completed" ? "Task finished" : "Workflow completed with missing evidence",
-  });
-  agentTracker.setState("agent-file", {
-    status: "completed",
-    task: `${fileScan?.count ?? 0} document(s) scanned`,
-  });
-  agentTracker.setState("agent-shell", {
-    status: "completed",
-    task: `${passingCommands}/${commands.length} commands passed`,
-  });
-  agentTracker.setState("agent-code", {
-    status: "completed",
-    task: "Rule-based project summary produced",
-  });
   agentTracker.setState("agent-verifier", {
     status: verificationStatus === "completed" ? "completed" : "failed",
     task: `${passingCommands}/${commands.length} commands passed`,
@@ -1296,7 +1317,7 @@ async function runSummarizeProjectStep({
           id: `${taskId}-verification-done`,
           kind: "event",
           title: "verification.completed",
-          detail: `Verifier checked project evidence for workspace ${project.workspacePath || "(unknown)"}.`,
+          detail: `Verifier checked project evidence for workspace ${project?.workspacePath || "(unknown)"}.`,
         }),
   });
 
@@ -1528,16 +1549,6 @@ async function safeInspectRepository(codeTool: CodeTool) {
   } catch {
     return undefined;
   }
-}
-
-function createRuleBasedProjectSummary(
-  project: ProjectInspection,
-  documentCount: number,
-  commands: ShellCommandOutput[],
-): string {
-  const packageManager = project.packageManager ?? "unknown package manager";
-  const scriptNames = project.scripts.map((script) => script.name).join(", ") || "no scripts";
-  return `Code Agent identified ${packageManager}, ${project.scripts.length} script(s) (${scriptNames}), ${documentCount} Markdown document(s), and ${commands.length} read-only command result(s).`;
 }
 
 function markCurrentStepFailed(plan: TaskStep[]): TaskStep[] {

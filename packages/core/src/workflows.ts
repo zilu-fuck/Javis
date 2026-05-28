@@ -65,7 +65,7 @@ export const WORKBENCH_WORKFLOWS: WorkbenchWorkflow[] = [
         "Workspace manifests and allowlisted commands",
         "Package manager, scripts, start/test commands, and command outputs",
         "read",
-        ["scan-files"],
+        [],
         true,
       ),
       createStep(
@@ -75,8 +75,8 @@ export const WORKBENCH_WORKFLOWS: WorkbenchWorkflow[] = [
         "File tree, manifests, and repository metadata",
         "Stack, entry points, module map, and notable dependencies",
         "read",
-        ["scan-files", "inspect-project"],
-        false,
+        [],
+        true,
       ),
       createStep(
         "summarize-project",
@@ -85,7 +85,7 @@ export const WORKBENCH_WORKFLOWS: WorkbenchWorkflow[] = [
         "Scan, command, and code analysis outputs",
         "Human-readable summary with evidence and unknowns",
         "read",
-        ["analyze-code"],
+        ["scan-files", "inspect-project", "analyze-code"],
         false,
       ),
       createStep(

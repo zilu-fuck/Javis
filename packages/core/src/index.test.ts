@@ -271,7 +271,7 @@ describe("createFileScanTaskRuntime", () => {
             fileScan: expect.objectContaining({ count: 1 }),
             projectInspection: project,
             shellCommands: expect.any(Array),
-            analysisSummary: expect.stringContaining("Code Agent identified pnpm"),
+            analysisSummary: expect.stringContaining("Code Agent"),
           }),
         }),
       ]),
