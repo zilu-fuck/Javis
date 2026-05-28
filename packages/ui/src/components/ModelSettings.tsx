@@ -65,6 +65,7 @@ export function ModelSettings({
   // Local editing state for multi-model configuration
   const [slotProfiles, setSlotProfiles] = useState<WorkbenchModelProfile[]>([]);
   const [agentOverrides, setAgentOverrides] = useState<Record<string, string>>({});
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saved" | "error">("idle");
 
   // Sync from props when configuration changes or modal opens
   useEffect(() => {
@@ -101,10 +102,16 @@ export function ModelSettings({
 
   function handleSaveConfiguration() {
     if (!onModelConfigurationChange) return;
-    onModelConfigurationChange({
-      profiles: slotProfiles.map((p) => ({ ...p })),
-      agentOverrides: { ...agentOverrides },
-    });
+    try {
+      onModelConfigurationChange({
+        profiles: slotProfiles.map((p) => ({ ...p })),
+        agentOverrides: { ...agentOverrides },
+      });
+      setSaveStatus("saved");
+    } catch {
+      setSaveStatus("error");
+    }
+    setTimeout(() => setSaveStatus("idle"), 2500);
   }
 
   function getProfileForSlot(slot: WorkbenchModelSlot): WorkbenchModelProfile {
@@ -303,6 +310,22 @@ export function ModelSettings({
                       >
                         {isZh ? "保存模型配置" : "Save Model Configuration"}
                       </button>
+                      {saveStatus !== "idle" ? (
+                        <span
+                          className="javis-settings-save-toast"
+                          role="status"
+                          style={{
+                            display: "inline-block",
+                            marginLeft: "0.75rem",
+                            fontSize: "0.8125rem",
+                            color: saveStatus === "saved" ? "#22c55e" : "#ef4444",
+                          }}
+                        >
+                          {saveStatus === "saved"
+                            ? (isZh ? "已保存" : "Saved")
+                            : (isZh ? "保存失败" : "Save failed")}
+                        </span>
+                      ) : null}
                     </>
                   )}
                 </section>
