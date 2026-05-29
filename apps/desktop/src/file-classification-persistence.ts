@@ -177,13 +177,21 @@ export function createFileClassificationRepository(
 
     async upsertClassificationsBatch(classified: ClassifiedFile[]) {
       const now = new Date().toISOString();
-      for (const c of classified) {
-        await exec(
-          `INSERT OR REPLACE INTO file_classifications
-             (file_path, category, tags_json, confidence, classified_at, model_id)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          [c.path, c.category, JSON.stringify(c.tags), c.confidence, now, null],
-        );
+
+      await exec("BEGIN TRANSACTION");
+      try {
+        for (const c of classified) {
+          await exec(
+            `INSERT OR REPLACE INTO file_classifications
+               (file_path, category, tags_json, confidence, classified_at, model_id)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+            [c.path, c.category, JSON.stringify(c.tags), c.confidence, now, null],
+          );
+        }
+        await exec("COMMIT");
+      } catch (error) {
+        await exec("ROLLBACK");
+        throw error;
       }
     },
 
