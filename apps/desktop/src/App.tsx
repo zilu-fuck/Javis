@@ -365,6 +365,7 @@ function App() {
   const [scanProgress, setScanProgress] = useState<{ current: number; total: number } | undefined>();
   const [classifying, setClassifying] = useState(false);
   const [classifyProgress, setClassifyProgress] = useState<{ completed: number; total: number } | undefined>();
+  const [mountRoots, setMountRoots] = useState<{ name: string; path: string }[]>([]);
   const [categoryStats, setCategoryStats] = useState<{ category: string; count: number }[]>([]);
   const fileClassificationRepoRef = useRef<FileClassificationRepository | null>(null);
   const classifyAbortRef = useRef<AbortController | null>(null);
@@ -1414,6 +1415,7 @@ function App() {
         scanProgress={scanProgress}
         classifying={classifying}
         classifyProgress={classifyProgress}
+        mountRoots={mountRoots}
         categoryStats={categoryStats}
         onRefreshScan={handleRefreshScan}
         onClassifyDocuments={handleClassifyDocuments}
