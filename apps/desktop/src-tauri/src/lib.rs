@@ -9,7 +9,7 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 mod streaming;
 mod database;
@@ -5459,6 +5459,141 @@ mod tests {
             "DeepSeek without API key should not use direct HTTP API"
         );
     }
+
+    // ── SKIP_DIRS + depth + mount roots ───────────────────────────────
+
+    #[test]
+    fn skip_dirs_case_insensitive() {
+        // node_modules, Node_Modules, NODE_MODULES should all be skipped
+        let node_lower = SKIP_DIRS.iter().any(|d| d.to_lowercase() == "node_modules");
+        assert!(node_lower, "SKIP_DIRS contains node_modules");
+
+        let temp_lower = SKIP_DIRS.iter().any(|d| d.to_lowercase() == "temp");
+        assert!(temp_lower, "SKIP_DIRS contains Temp");
+
+        // Verify case-insensitive comparison would match
+        let lower_skips: Vec<String> = SKIP_DIRS.iter().map(|d| d.to_lowercase()).collect();
+        assert!(lower_skips.contains(&"node_modules".to_string()));
+        assert!(lower_skips.contains(&"NODE_MODULES".to_string().to_lowercase()));
+    }
+
+    #[test]
+    fn skip_dirs_includes_windows_system() {
+        let lower_skips: Vec<String> = SKIP_DIRS.iter().map(|d| d.to_lowercase()).collect();
+        assert!(lower_skips.contains(&"windows".to_string()));
+        assert!(lower_skips.contains(&"program files".to_string()));
+        assert!(lower_skips.contains(&"program files (x86)".to_string()));
+    }
+
+    #[test]
+    fn skip_dirs_includes_package_cache_dirs() {
+        let lower_skips: Vec<String> = SKIP_DIRS.iter().map(|d| d.to_lowercase()).collect();
+        assert!(lower_skips.contains(&".npm".to_string()));
+        assert!(lower_skips.contains(&".yarn".to_string()));
+        assert!(lower_skips.contains(&".docker".to_string()) || lower_skips.contains(&".vscode".to_string()));
+    }
+
+    #[test]
+    fn root_level_vendor_skip_only_at_drive_root() {
+        // C:\Intel, D:\NVIDIA → parent is root, should skip
+        assert!(is_root_level_vendor_skip("Intel", Path::new("C:\\")));
+        assert!(is_root_level_vendor_skip("NVIDIA", Path::new("D:\\")));
+
+        // C:\Projects\Intel → parent is C:\Projects, should NOT skip
+        assert!(!is_root_level_vendor_skip("Intel", Path::new("C:\\Projects")));
+
+        // Non-vendor name at root → should NOT skip
+        assert!(!is_root_level_vendor_skip("Projects", Path::new("C:\\")));
+
+        // Filesystem root itself: root.parent() is None
+        // root_level check uses dir_name from entry, not the root itself
+        // So this is testing the helper, not the actual scan behavior
+    }
+
+    #[test]
+    fn collect_files_respects_max_depth() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // Create: tmp/deep/deeper/file.txt
+        let deep = tmp.path().join("deep").join("deeper");
+        fs::create_dir_all(&deep).unwrap();
+        let file_path = deep.join("file.txt");
+        fs::File::create(&file_path).unwrap().write_all(b"x").unwrap();
+
+        // Default (unlimited depth) finds the file
+        let result1 = collect_files(&[tmp.path().to_path_buf()], &["txt"], 10, true).unwrap();
+        assert_eq!(result1.len(), 1);
+
+        // max_depth=2 should NOT reach "deeper/file.txt" (depth 2 from root)
+        let result2 = collect_files_with_depth(
+            &[tmp.path().to_path_buf()], &["txt"], 10, true, 2,
+        ).unwrap();
+        assert_eq!(result2.len(), 0);
+
+        // max_depth=3 should reach "deeper/file.txt"
+        let result3 = collect_files_with_depth(
+            &[tmp.path().to_path_buf()], &["txt"], 10, true, 3,
+        ).unwrap();
+        assert_eq!(result3.len(), 1);
+    }
+
+    #[test]
+    fn collect_files_default_depth_unlimited() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let deep = tmp.path().join("a").join("b").join("c").join("d");
+        fs::create_dir_all(&deep).unwrap();
+        let file_path = deep.join("file.txt");
+        fs::File::create(&file_path).unwrap().write_all(b"x").unwrap();
+
+        // Default collect_files (unlimited depth) should find the file
+        let result = collect_files(&[tmp.path().to_path_buf()], &["txt"], 10, true).unwrap();
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn mount_roots_non_empty() {
+        let roots = mount_roots().expect("mount_roots");
+        assert!(!roots.is_empty(), "Should return at least one mount root");
+    }
+
+    #[test]
+    fn scan_all_user_files_respects_max_results() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for i in 0..15 {
+            let file_path = tmp.path().join(format!("{}.txt", i));
+            fs::File::create(&file_path).unwrap().write_all(b"x").unwrap();
+        }
+
+        // We can test collect_files_with_depth respects max_results via the inner function
+        let result = collect_files_with_depth(
+            &[tmp.path().to_path_buf()], &["txt"], 5, true, usize::MAX,
+        ).unwrap();
+        assert_eq!(result.len(), 5);
+    }
+
+    #[test]
+    fn collect_files_skips_skip_dirs() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let node_modules = tmp.path().join("node_modules");
+        fs::create_dir_all(&node_modules).unwrap();
+        let hidden_file = node_modules.join("package.json");
+        fs::File::create(&hidden_file).unwrap().write_all(b"{}").unwrap();
+
+        let visible_file = tmp.path().join("readme.md");
+        fs::File::create(&visible_file).unwrap().write_all(b"# Readme").unwrap();
+
+        let result = collect_files(&[tmp.path().to_path_buf()], &["md", "json"], 20, true).unwrap();
+        // Should only find readme.md, NOT package.json inside node_modules
+        assert_eq!(result.len(), 1);
+        assert!(result[0].path.ends_with("readme.md"));
+    }
 }
 
 // ── Sidebar scanning infrastructure ──────────────────────────────────
@@ -5499,7 +5634,47 @@ const SKIP_DIRS: &[&str] = &[
     "Code",
     "scoop",
     "choco",
+    // Windows system directories
+    "Windows",
+    "Program Files",
+    "Program Files (x86)",
+    "ProgramData",
+    "Recovery",
+    "Boot",
+    "EFI",
+    "PerfLogs",
+    // Package manager / tool caches
+    ".npm",
+    ".yarn",
+    ".pnpm-store",
+    ".nuget",
+    ".gradle",
+    ".m2",
+    // Editor / IDE state
+    ".vscode",
+    ".idea",
+    ".ssh",
+    ".conda",
+    // Vendor noise at root
+    "Intel",
+    "AMD",
+    "NVIDIA",
+    "MSOCache",
+    "Temp",
+    "tmp",
 ];
+
+// Only Intel/AMD/NVIDIA directories directly under a drive root (e.g. C:\Intel)
+// are vendor driver noise. A project folder named "Intel" at a deeper path is
+// kept.
+fn is_root_level_vendor_skip(dir_name: &str, parent: &Path) -> bool {
+    let vendor_dirs = ["Intel", "AMD", "NVIDIA"];
+    if !vendor_dirs.contains(&dir_name) {
+        return false;
+    }
+    // A filesystem root has no parent, or its parent equals itself.
+    parent.parent().is_none() || parent.parent() == Some(parent)
+}
 
 fn chrono_datetime_from_secs(secs: u64) -> String {
     // Simple ISO-like timestamp without external crate dependency
@@ -5561,6 +5736,16 @@ fn collect_files(
     max_results: usize,
     recursive: bool,
 ) -> Result<Vec<FileEntry>, String> {
+    collect_files_with_depth(roots, extensions, max_results, recursive, usize::MAX)
+}
+
+fn collect_files_with_depth(
+    roots: &[PathBuf],
+    extensions: &[&str],
+    max_results: usize,
+    recursive: bool,
+    max_depth: usize,
+) -> Result<Vec<FileEntry>, String> {
     let mut entries = Vec::new();
     let ext_lower: Vec<String> = extensions.iter().map(|e| e.to_lowercase()).collect();
 
@@ -5568,7 +5753,7 @@ fn collect_files(
         if !root.exists() || !root.is_dir() {
             continue;
         }
-        collect_files_inner(root, &ext_lower, max_results, recursive, &mut entries);
+        collect_files_inner(root, &ext_lower, max_results, recursive, max_depth, 0, &mut entries);
         if entries.len() >= max_results {
             break;
         }
@@ -5589,9 +5774,14 @@ fn collect_files_inner(
     extensions: &[String],
     max_results: usize,
     recursive: bool,
+    max_depth: usize,
+    depth: usize,
     entries: &mut Vec<FileEntry>,
 ) {
     if entries.len() >= max_results {
+        return;
+    }
+    if depth >= max_depth {
         return;
     }
     let read_dir = match fs::read_dir(dir) {
@@ -5610,8 +5800,15 @@ fn collect_files_inner(
         let file_name = entry.file_name().to_string_lossy().to_string();
 
         if path.is_dir() {
-            if recursive && !SKIP_DIRS.contains(&file_name.as_str()) {
-                collect_files_inner(&path, extensions, max_results, recursive, entries);
+            let name_lower = file_name.to_lowercase();
+            let skip_lower: Vec<String> = SKIP_DIRS.iter().map(|d| d.to_lowercase()).collect();
+            if recursive && !skip_lower.contains(&name_lower) {
+                if !is_root_level_vendor_skip(&file_name, dir) {
+                    collect_files_inner(
+                        &path, extensions, max_results, recursive,
+                        max_depth, depth + 1, entries,
+                    );
+                }
             }
             continue;
         }
@@ -5646,6 +5843,249 @@ fn collect_files_inner(
 
 fn user_home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("C:\\Users\\Default"))
+}
+
+// ── Mount roots ──────────────────────────────────────────────────────────────
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MountRoot {
+    name: String,
+    path: String,
+}
+
+#[tauri::command]
+fn list_mount_roots() -> Result<Vec<MountRoot>, String> {
+    mount_roots()
+}
+
+fn mount_roots() -> Result<Vec<MountRoot>, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetLogicalDriveStringsW};
+
+        const DRIVE_REMOVABLE: u32 = 2;
+        const DRIVE_NO_ROOT_DIR: u32 = 1;
+        const DRIVE_REMOTE: u32 = 4;
+
+        let mut roots = Vec::new();
+        let mut buf: Vec<u16> = vec![0u16; 256];
+        let len = unsafe { GetLogicalDriveStringsW(buf.len() as u32, buf.as_mut_ptr()) };
+        if len == 0 || len as usize > buf.len() {
+            return Ok(roots);
+        }
+
+        let mut i = 0;
+        while i < len as usize && buf[i] != 0 {
+            let drive_slice: Vec<u16> = buf[i..].iter().copied().take_while(|&c| c != 0).collect();
+            let drive_wide: Vec<u16> = drive_slice;
+            if drive_wide.is_empty() {
+                i += 1;
+                continue;
+            }
+            let drive_str = String::from_utf16_lossy(&drive_wide).trim_end_matches('\\').to_string();
+            i += drive_wide.len() + 1;
+
+            let drive_type = unsafe { GetDriveTypeW(drive_wide.as_ptr()) };
+            if drive_type == DRIVE_REMOVABLE
+                || drive_type == DRIVE_NO_ROOT_DIR
+                || drive_type == DRIVE_REMOTE
+            {
+                continue;
+            }
+
+            let name = if drive_str.len() == 2 {
+                format!("{}", drive_str)
+            } else {
+                drive_str.clone()
+            };
+            let path = format!("{}\\", drive_str);
+            roots.push(MountRoot { name, path });
+        }
+
+        Ok(roots)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(vec![MountRoot {
+            name: "/".to_string(),
+            path: "/".to_string(),
+        }])
+    }
+}
+
+// ── All-user-file scan ───────────────────────────────────────────────────────
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+static SCAN_CANCELLED: std::sync::Mutex<Option<Arc<AtomicBool>>> = std::sync::Mutex::new(None);
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanProgressPayload {
+    current: usize,
+    total: usize,
+}
+
+#[tauri::command]
+fn scan_all_user_files(
+    app_handle: AppHandle,
+    extensions: Option<Vec<String>>,
+    max_results: Option<usize>,
+) -> Result<Vec<FileEntry>, String> {
+    let cancelled = Arc::new(AtomicBool::new(false));
+    {
+        let mut guard = SCAN_CANCELLED.lock().unwrap();
+        *guard = Some(cancelled.clone());
+    }
+
+    let roots = mount_roots()?
+        .into_iter()
+        .map(|r| PathBuf::from(r.path))
+        .collect::<Vec<_>>();
+    let ext_vec: Vec<String> = extensions.unwrap_or_default();
+    let ext_refs: Vec<&str> = ext_vec.iter().map(|s| s.as_str()).collect();
+    let max = max_results.unwrap_or(5000);
+    let max_depth = 8;
+
+    let mut entries = Vec::new();
+    let ext_lower: Vec<String> = ext_refs.iter().map(|e| e.to_lowercase()).collect();
+    let filter_by_ext = !ext_lower.is_empty();
+
+    // First pass: count total dirs that will be scanned for progress reporting
+    // We approximate "total" as the number of non-skipped roots
+    let total = roots.len();
+
+    for (index, root) in roots.iter().enumerate() {
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+        if !root.exists() || !root.is_dir() {
+            continue;
+        }
+        let _ = app_handle.emit(
+            "scan-all-files-progress",
+            ScanProgressPayload {
+                current: index + 1,
+                total,
+            },
+        );
+        collect_files_inner_for_scan(
+            root,
+            &ext_lower,
+            filter_by_ext,
+            max,
+            max_depth,
+            0,
+            &mut entries,
+            &cancelled,
+        );
+        if entries.len() >= max {
+            break;
+        }
+    }
+
+    entries.sort_by(|a, b| {
+        b.modified_at
+            .as_deref()
+            .unwrap_or("")
+            .cmp(a.modified_at.as_deref().unwrap_or(""))
+    });
+    entries.truncate(max);
+
+    {
+        let mut guard = SCAN_CANCELLED.lock().unwrap();
+        *guard = None;
+    }
+
+    Ok(entries)
+}
+
+fn collect_files_inner_for_scan(
+    dir: &Path,
+    extensions: &[String],
+    filter_by_ext: bool,
+    max_results: usize,
+    max_depth: usize,
+    depth: usize,
+    entries: &mut Vec<FileEntry>,
+    cancelled: &AtomicBool,
+) {
+    if entries.len() >= max_results || depth >= max_depth {
+        return;
+    }
+    if cancelled.load(Ordering::Relaxed) {
+        return;
+    }
+    let read_dir = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+    for entry in read_dir {
+        if entries.len() >= max_results {
+            return;
+        }
+        if cancelled.load(Ordering::Relaxed) {
+            return;
+        }
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        let file_name = entry.file_name().to_string_lossy().to_string();
+
+        if path.is_dir() {
+            let name_lower = file_name.to_lowercase();
+            let skip_lower: Vec<String> = SKIP_DIRS.iter().map(|d| d.to_lowercase()).collect();
+            if !skip_lower.contains(&name_lower)
+                && !is_root_level_vendor_skip(&file_name, dir)
+            {
+                collect_files_inner_for_scan(
+                    &path, extensions, filter_by_ext, max_results,
+                    max_depth, depth + 1, entries, cancelled,
+                );
+            }
+            continue;
+        }
+
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+
+        if filter_by_ext && !extensions.contains(&ext) {
+            continue;
+        }
+
+        let metadata = fs::metadata(&path).ok();
+        let size_bytes = metadata.as_ref().map(|m| m.len());
+        let modified_at = metadata
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| chrono_datetime_from_secs(d.as_secs()));
+
+        entries.push(FileEntry {
+            name: file_name,
+            path: path.to_string_lossy().to_string(),
+            is_dir: false,
+            size_bytes,
+            modified_at,
+            extension: Some(ext),
+        });
+    }
+}
+
+#[tauri::command]
+fn cancel_scan_all_files() -> Result<(), String> {
+    let mut guard = SCAN_CANCELLED.lock().unwrap();
+    if let Some(cancelled) = guard.as_ref() {
+        cancelled.store(true, Ordering::Relaxed);
+    }
+    *guard = None;
+    Ok(())
 }
 
 #[tauri::command]
@@ -6107,7 +6547,10 @@ pub fn run() {
             database::db_close,
             load_workspace_definitions,
             save_workspace_definition,
-            delete_workspace_definition
+            delete_workspace_definition,
+            scan_all_user_files,
+            list_mount_roots,
+            cancel_scan_all_files
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
