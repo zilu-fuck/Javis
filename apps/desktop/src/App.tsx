@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createInitialTaskSnapshot,
   injectDocumentContext,
@@ -73,13 +73,20 @@ import {
 import { loadMcpConfig, type McpServerConfig } from "./mcp-config";
 import {
   readFileChunk,
+  scanAllUserFiles,
   scanInstalledApps,
   scanUserDocuments,
   scanUserImages,
   listDirectory,
+  listMountRoots,
   type AppEntry,
   type FileEntry,
 } from "./local-knowledge";
+import {
+  FILE_CLASSIFICATION_MIGRATIONS,
+  createFileClassificationRepository,
+  type FileClassificationRepository,
+} from "./file-classification-persistence";
 import {
   invokeDesktopDatabase,
   runDesktopDatabaseMigrations,
@@ -308,6 +315,7 @@ function App() {
   const taskQueueRef = useRef<TaskSnapshot[]>([]);
   const taskFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [draftGoal, setDraftGoal] = useState(DEFAULT_DRAFT_GOAL);
+  const [composeMode, setComposeMode] = useState<"chat" | "project">("chat");
 
   // ── Sidebar view state ────────────────────────────────────────────
   const [activeView, setActiveView] = useState<ActiveView>("chat");
@@ -350,6 +358,16 @@ function App() {
   const [computerError, setComputerError] = useState<string>();
   const scanGenerationRef = useRef(0);
   const computerRequestIdRef = useRef(0);
+
+  // ── File classification state ────────────────────────────────────
+  const scanningRef = useRef(false);
+  const [scanning, setScanning] = useState(false);
+  const [scanProgress, setScanProgress] = useState<{ current: number; total: number } | undefined>();
+  const [classifying, setClassifying] = useState(false);
+  const [classifyProgress, setClassifyProgress] = useState<{ completed: number; total: number } | undefined>();
+  const [categoryStats, setCategoryStats] = useState<{ category: string; count: number }[]>([]);
+  const fileClassificationRepoRef = useRef<FileClassificationRepository | null>(null);
+  const classifyAbortRef = useRef<AbortController | null>(null);
 
   // ── Build skill entries from descriptors + agents + MCP ───────────
   useEffect(() => {
@@ -426,6 +444,7 @@ function App() {
       await runDesktopDatabaseMigrations(database, SCHEDULED_TASKS_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, USER_PREFERENCES_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, JSONL_LOG_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, FILE_CLASSIFICATION_MIGRATIONS);
 
       // One-time import from localStorage
       const taskHistoryRepo = createTaskHistoryRepository(database);
@@ -445,6 +464,12 @@ function App() {
 
       const preferencesRepo = createUserPreferencesRepository(database);
       preferencesRepoRef.current = preferencesRepo;
+
+      const fileClassificationRepo = createFileClassificationRepository(database);
+      fileClassificationRepoRef.current = fileClassificationRepo;
+
+      // Populate mount roots for sidebar drive listing (best-effort)
+      listMountRoots().then(setMountRoots).catch(() => {});
 
       const importedHistory = await taskHistoryRepo.importFromLocalStorage(window.localStorage);
       const importedWorkspaceSession = await workspaceSessionRepo.importFromLocalStorage(
@@ -512,6 +537,93 @@ function App() {
       setDurableApprovalRecordsReady(true);
     });
   }, [replaceWorkspaceSession]);
+
+  // ── Silent background file scan on mount ─────────────────────────
+  useEffect(() => {
+    const timer = setTimeout(async () => {
+      const repo = fileClassificationRepoRef.current;
+      if (!repo || scanningRef.current) return;
+      scanningRef.current = true;
+      setScanning(true);
+      setScanProgress(undefined);
+      try {
+        const files = await scanAllUserFiles(undefined, undefined, (p) => setScanProgress(p));
+        await repo.replaceScanCache(files);
+        const stats = await repo.getCategoryStats();
+        setCategoryStats(stats);
+      } catch {
+        // Silent scan failure is non-fatal
+      } finally {
+        scanningRef.current = false;
+        setScanning(false);
+        setScanProgress(undefined);
+      }
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, []);
+
+  // ── Manual scan refresh (with scanning lock) ─────────────────────
+  const handleRefreshScan = useCallback(async () => {
+    const repo = fileClassificationRepoRef.current;
+    if (!repo || scanningRef.current) return;
+    scanningRef.current = true;
+    setScanning(true);
+    setScanProgress(undefined);
+    try {
+      const files = await scanAllUserFiles(undefined, undefined, (p) => setScanProgress(p));
+      await repo.replaceScanCache(files);
+      const stats = await repo.getCategoryStats();
+      setCategoryStats(stats);
+    } catch {
+      // Refresh failure is non-fatal
+    } finally {
+      scanningRef.current = false;
+      setScanning(false);
+      setScanProgress(undefined);
+    }
+  }, []);
+
+  // ── Classify documents handler ───────────────────────────────────
+  const handleClassifyDocuments = useCallback(async () => {
+    const repo = fileClassificationRepoRef.current;
+    if (!repo || classifying) return;
+
+    const unclassified = await repo.getUnclassifiedFiles();
+    if (unclassified.length === 0) return;
+
+    const totalFiles = unclassified.length;
+    setClassifying(true);
+    setClassifyProgress({ completed: 0, total: totalFiles });
+    const abortController = new AbortController();
+    classifyAbortRef.current = abortController;
+
+    try {
+      const classified = await runtime.classifyWithFileAgent(unclassified, {
+        signal: abortController.signal,
+        onBatchProgress: (completed) =>
+          setClassifyProgress({
+            completed: Math.min(completed * 50, totalFiles),
+            total: totalFiles,
+          }),
+      });
+      if (classified.length > 0) {
+        await repo.upsertClassificationsBatch(classified);
+        const stats = await repo.getCategoryStats();
+        setCategoryStats(stats);
+      }
+    } catch {
+      // Classification failure — already-upserted batches are preserved
+    } finally {
+      setClassifying(false);
+      setClassifyProgress(undefined);
+      classifyAbortRef.current = null;
+    }
+  }, [classifying, runtime]);
+
+  // ── Cancel classification ────────────────────────────────────────
+  const handleCancelClassify = useCallback(() => {
+    classifyAbortRef.current?.abort();
+  }, []);
 
   // ── Scheduled task trigger mechanism ──────────────────────────────
   useEffect(() => {
@@ -824,8 +936,12 @@ function App() {
       return;
     }
     const continuationTask =
-      !goalOverride && !workspacePathOverride && !scheduledTaskId && activeHistoryEntryId
-        ? historyCurrentRef.current.find((entry) => entry.id === activeHistoryEntryId)
+      !goalOverride && !workspacePathOverride && !scheduledTaskId
+        ? activeHistoryEntryId
+          ? historyCurrentRef.current.find((entry) => entry.id === activeHistoryEntryId)
+          : isArchivableTask(task)
+            ? task
+            : undefined
         : undefined;
     const startOptions = continuationTask
       ? {
@@ -833,8 +949,14 @@ function App() {
           priorMessages: getConversationMessages(continuationTask),
         }
       : undefined;
+    const startMode =
+      !goalOverride && !workspacePathOverride && !scheduledTaskId
+        ? composeMode
+        : undefined;
     clearQueuedTaskSnapshots();
-    if (!continuationTask) {
+    if (continuationTask) {
+      setActiveHistoryEntryId(continuationTask.id);
+    } else {
       setActiveHistoryEntryId(undefined);
     }
     if (workspacePathOverride) {
@@ -865,12 +987,18 @@ function App() {
             // File not readable — leave the @reference as-is in the goal
           }
         }
-        runtime.start(resolvedGoal, startOptions);
+        runtime.start(resolvedGoal, {
+          ...startOptions,
+          mode: startMode,
+        });
       })();
       return;
     }
 
-    runtime.start(goal, startOptions);
+    runtime.start(goal, {
+      ...startOptions,
+      mode: startMode,
+    });
   }
 
   function handleStopTask() {
@@ -1072,7 +1200,8 @@ function App() {
   }
 
   function handleChangeActiveView(view: ActiveView) {
-    const shouldStartFreshChat = view === "chat" && (activeView !== "chat" || activeHistoryEntryId);
+    const shouldStartFreshChat =
+      view === "chat" && (activeView !== "chat" || activeHistoryEntryId || task.id !== "task-idle");
     if (shouldStartFreshChat) {
       clearQueuedTaskSnapshots();
       setTask(createInitialTaskSnapshot());
@@ -1195,6 +1324,8 @@ function App() {
         modelSettings={modelSettings}
         onBrowseWorkspacePath={browseWorkspacePath}
         onChangeActiveView={handleChangeActiveView}
+        onSelectComposeMode={setComposeMode}
+        activeComposeMode={composeMode}
         onDeleteHistoryEntry={deleteHistoryEntry}
         onDeleteRecentWorkspacePath={deleteRecentWorkspacePath}
         onDeleteScheduledTask={deleteScheduledTask}
@@ -1279,6 +1410,14 @@ function App() {
         task={task}
         userDocuments={userDocuments}
         userImages={userImages}
+        scanning={scanning}
+        scanProgress={scanProgress}
+        classifying={classifying}
+        classifyProgress={classifyProgress}
+        categoryStats={categoryStats}
+        onRefreshScan={handleRefreshScan}
+        onClassifyDocuments={handleClassifyDocuments}
+        onCancelClassify={handleCancelClassify}
       />
     </div>
   );

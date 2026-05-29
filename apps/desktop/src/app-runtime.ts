@@ -657,6 +657,12 @@ export function createJavisRuntime({
 
   return {
     ...runtime,
+    classifyWithFileAgent(
+      files: { name: string; path: string; extension?: string; sizeBytes?: number }[],
+      options?: { onBatchProgress?: (completed: number, total: number, failed: number) => void; signal?: AbortSignal },
+    ) {
+      return classifyDocuments(files, providerFor("file"), options);
+    },
     clearProviderCache() {
       providerCache.clear();
       providerCache.set("fallback", fallbackProvider);
