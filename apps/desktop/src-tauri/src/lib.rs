@@ -5,7 +5,10 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -5788,6 +5791,7 @@ fn collect_files_inner(
         Ok(rd) => rd,
         Err(_) => return,
     };
+    let skip_lower: Vec<String> = SKIP_DIRS.iter().map(|d| d.to_lowercase()).collect();
     for entry in read_dir {
         if entries.len() >= max_results {
             return;
@@ -5801,7 +5805,6 @@ fn collect_files_inner(
 
         if path.is_dir() {
             let name_lower = file_name.to_lowercase();
-            let skip_lower: Vec<String> = SKIP_DIRS.iter().map(|d| d.to_lowercase()).collect();
             if recursive && !skip_lower.contains(&name_lower) {
                 if !is_root_level_vendor_skip(&file_name, dir) {
                     collect_files_inner(
@@ -5877,8 +5880,7 @@ fn mount_roots() -> Result<Vec<MountRoot>, String> {
 
         let mut i = 0;
         while i < len as usize && buf[i] != 0 {
-            let drive_slice: Vec<u16> = buf[i..].iter().copied().take_while(|&c| c != 0).collect();
-            let drive_wide: Vec<u16> = drive_slice;
+            let drive_wide: Vec<u16> = buf[i..].iter().copied().take_while(|&c| c != 0).collect();
             if drive_wide.is_empty() {
                 i += 1;
                 continue;
@@ -5894,12 +5896,8 @@ fn mount_roots() -> Result<Vec<MountRoot>, String> {
                 continue;
             }
 
-            let name = if drive_str.len() == 2 {
-                format!("{}", drive_str)
-            } else {
-                drive_str.clone()
-            };
             let path = format!("{}\\", drive_str);
+            let name = drive_str.clone();
             roots.push(MountRoot { name, path });
         }
 
@@ -5916,10 +5914,7 @@ fn mount_roots() -> Result<Vec<MountRoot>, String> {
 
 // ── All-user-file scan ───────────────────────────────────────────────────────
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-
-static SCAN_CANCELLED: std::sync::Mutex<Option<Arc<AtomicBool>>> = std::sync::Mutex::new(None);
+static SCAN_CANCELLED: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -6022,6 +6017,7 @@ fn collect_files_inner_for_scan(
         Ok(rd) => rd,
         Err(_) => return,
     };
+    let skip_lower: Vec<String> = SKIP_DIRS.iter().map(|d| d.to_lowercase()).collect();
     for entry in read_dir {
         if entries.len() >= max_results {
             return;
@@ -6038,7 +6034,6 @@ fn collect_files_inner_for_scan(
 
         if path.is_dir() {
             let name_lower = file_name.to_lowercase();
-            let skip_lower: Vec<String> = SKIP_DIRS.iter().map(|d| d.to_lowercase()).collect();
             if !skip_lower.contains(&name_lower)
                 && !is_root_level_vendor_skip(&file_name, dir)
             {
