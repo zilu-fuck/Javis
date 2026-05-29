@@ -5827,6 +5827,90 @@ fn append_jsonl_line_to_path(path: &Path, line: &str, label: &str) -> Result<(),
         .map_err(|error| format!("Could not append {label} JSONL line: {error}"))
 }
 
+// ── Workspace Definition CRUD ────────────────────────────────────────────────
+
+fn get_workspaces_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data dir: {e}"))?;
+    Ok(dir.join("workspaces"))
+}
+
+#[tauri::command]
+fn load_workspace_definitions(app_handle: tauri::AppHandle) -> Result<Vec<serde_json::Value>, String> {
+    let workspaces_dir = get_workspaces_dir(&app_handle)?;
+    if !workspaces_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut defs = Vec::new();
+    let entries = std::fs::read_dir(&workspaces_dir)
+        .map_err(|e| format!("Failed to read workspaces dir: {e}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read workspace entry: {e}"))?;
+        let path = entry.path();
+        let is_workspace_file = path.extension().and_then(|s| s.to_str()) == Some("json")
+            && path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map_or(false, |s| s.ends_with(".workspace"));
+        if !is_workspace_file {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read workspace file {:?}: {e}", path))?;
+        let def: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| format!("Invalid workspace JSON in {:?}: {e}", path))?;
+        defs.push(def);
+    }
+    Ok(defs)
+}
+
+fn validate_workspace_id(id: &str) -> Result<(), String> {
+    if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
+        return Err("Invalid workspace id: path traversal not allowed".into());
+    }
+    // Only allow lowercase alphanumeric and hyphens
+    if !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        return Err("Invalid workspace id: only [a-z0-9-] allowed".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn save_workspace_definition(
+    app_handle: tauri::AppHandle,
+    definition: serde_json::Value,
+) -> Result<(), String> {
+    let workspaces_dir = get_workspaces_dir(&app_handle)?;
+    std::fs::create_dir_all(&workspaces_dir)
+        .map_err(|e| format!("Failed to create workspaces dir: {e}"))?;
+    let id = definition["id"]
+        .as_str()
+        .ok_or("Missing 'id' field in workspace definition")?;
+    validate_workspace_id(id)?;
+    let path = workspaces_dir.join(format!("{id}.workspace.json"));
+    let content = serde_json::to_string_pretty(&definition)
+        .map_err(|e| format!("Failed to serialize workspace: {e}"))?;
+    std::fs::write(&path, content)
+        .map_err(|e| format!("Failed to write workspace file: {e}"))
+}
+
+#[tauri::command]
+fn delete_workspace_definition(
+    app_handle: tauri::AppHandle,
+    workspace_id: String,
+) -> Result<(), String> {
+    validate_workspace_id(&workspace_id)?;
+    let workspaces_dir = get_workspaces_dir(&app_handle)?;
+    let path = workspaces_dir.join(format!("{workspace_id}.workspace.json"));
+    if path.exists() {
+        std::fs::remove_file(&path)
+            .map_err(|e| format!("Failed to delete workspace file: {e}"))?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -5865,7 +5949,10 @@ pub fn run() {
             database::db_execute,
             database::db_select,
             database::db_debug_path,
-            database::db_close
+            database::db_close,
+            load_workspace_definitions,
+            save_workspace_definition,
+            delete_workspace_definition
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

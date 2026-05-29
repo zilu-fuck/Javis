@@ -1,5 +1,7 @@
 import {
+  useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -83,14 +85,18 @@ export function JavisWorkbench({
   initialSidebarWidth,
   initialIsActivityOpen,
   initialIsInspectorOpen,
+  sidebarNavItems,
 }: JavisWorkbenchProps) {
-  const effectiveLocale = {
-    ...locale,
-    labels: {
-      ...defaultWorkbenchLocale.labels,
-      ...locale.labels,
-    },
-  };
+  const effectiveLocale = useMemo(
+    () => ({
+      ...locale,
+      labels: {
+        ...defaultWorkbenchLocale.labels,
+        ...locale.labels,
+      },
+    }),
+    [locale],
+  );
   const labels = effectiveLocale.labels;
   const [isActivityOpen, setIsActivityOpen] = useState(initialIsActivityOpen ?? false);
   const [isInspectorOpen, setIsInspectorOpen] = useState(initialIsInspectorOpen ?? false);
@@ -235,92 +241,136 @@ export function JavisWorkbench({
     onSidebarWidthChange?.(newWidth);
   }
 
+  const renderChatView = useCallback(
+    () => (
+      <ChatView
+        currentWorkspacePath={currentWorkspacePath}
+        draftGoal={draftGoal}
+        locale={effectiveLocale}
+        onBrowseWorkspacePath={onBrowseWorkspacePath}
+        onDeleteRecentWorkspacePath={onDeleteRecentWorkspacePath}
+        onDraftGoalChange={onDraftGoalChange}
+        onPermissionDecision={onPermissionDecision}
+        modelConfiguration={modelConfiguration}
+        onRetryTask={onRetryTask}
+        onStopTask={onStopTask}
+        onSubmitGoal={onSubmitGoal}
+        onUseWorkspacePath={onUseWorkspacePath}
+        onWorkspacePathChange={onWorkspacePathChange}
+        recentWorkspacePaths={recentWorkspacePaths}
+        task={task}
+        userDocuments={userDocuments}
+      />
+    ),
+    [
+      currentWorkspacePath, draftGoal, effectiveLocale, onBrowseWorkspacePath,
+      onDeleteRecentWorkspacePath, onDraftGoalChange, onPermissionDecision,
+      modelConfiguration, onRetryTask, onStopTask, onSubmitGoal,
+      onUseWorkspacePath, onWorkspacePathChange, recentWorkspacePaths,
+      task, userDocuments,
+    ],
+  );
+  const renderAutomatedView = useCallback(
+    () => (
+      <ScheduledTasksView
+        isTaskActive={isTaskActive}
+        locale={effectiveLocale}
+        onDelete={onDeleteScheduledTask}
+        onToggle={onToggleScheduledTask}
+        tasks={scheduledTasks}
+      />
+    ),
+    [isTaskActive, effectiveLocale, onDeleteScheduledTask, onToggleScheduledTask, scheduledTasks],
+  );
+  const renderSkillsView = useCallback(
+    () => <SkillMarketView locale={effectiveLocale} skills={skillEntries} />,
+    [effectiveLocale, skillEntries],
+  );
+  const renderAppsView = useCallback(
+    () => (
+      <AppsView
+        apps={installedApps}
+        error={appsError}
+        loading={appsLoading}
+        locale={effectiveLocale}
+        onOpen={onOpenFile}
+        onRefresh={onRefreshApps}
+      />
+    ),
+    [installedApps, appsError, appsLoading, effectiveLocale, onOpenFile, onRefreshApps],
+  );
+  const renderDocumentsView = useCallback(
+    () => (
+      <DocumentsView
+        documents={userDocuments}
+        error={docsError}
+        loading={docsLoading}
+        locale={effectiveLocale}
+        onOpen={onOpenFile}
+        onRefresh={onRefreshDocuments}
+      />
+    ),
+    [userDocuments, docsError, docsLoading, effectiveLocale, onOpenFile, onRefreshDocuments],
+  );
+  const renderGalleryView = useCallback(
+    () => (
+      <GalleryView
+        error={imagesError}
+        images={userImages}
+        loading={imagesLoading}
+        locale={effectiveLocale}
+        onOpen={onOpenFile}
+        onRefresh={onRefreshImages}
+      />
+    ),
+    [imagesError, userImages, imagesLoading, effectiveLocale, onOpenFile, onRefreshImages],
+  );
+  const renderComputerView = useCallback(
+    () => (
+      <ComputerView
+        currentPath={computerPath}
+        entries={computerEntries}
+        error={computerError}
+        loading={computerLoading}
+        locale={effectiveLocale}
+        onListDirectory={onListDirectory}
+        onNavigate={onNavigateDirectory}
+        onOpen={onOpenFile}
+      />
+    ),
+    [
+      computerPath, computerEntries, computerError, computerLoading,
+      effectiveLocale, onListDirectory, onNavigateDirectory, onOpenFile,
+    ],
+  );
+
+  const renderUnknownView = useCallback(
+    () => (
+      <div className="javis-view-panel">
+        <p>{labels.unknownView ?? "Unknown view"}: {activeView}</p>
+      </div>
+    ),
+    [labels.unknownView, activeView],
+  );
+
+  const viewMap = useMemo(() => {
+    const map = new Map<string, () => ReturnType<typeof renderChatView>>();
+    map.set("chat", renderChatView);
+    map.set("automated", renderAutomatedView);
+    map.set("skills", renderSkillsView);
+    map.set("apps", renderAppsView);
+    map.set("documents", renderDocumentsView);
+    map.set("gallery", renderGalleryView);
+    map.set("computer", renderComputerView);
+    return map;
+  }, [
+    renderChatView, renderAutomatedView, renderSkillsView, renderAppsView,
+    renderDocumentsView, renderGalleryView, renderComputerView,
+  ]);
+
   function renderMainContent() {
-    switch (activeView) {
-      case "chat":
-        return (
-          <ChatView
-            currentWorkspacePath={currentWorkspacePath}
-            draftGoal={draftGoal}
-            locale={effectiveLocale}
-            onBrowseWorkspacePath={onBrowseWorkspacePath}
-            onDeleteRecentWorkspacePath={onDeleteRecentWorkspacePath}
-            onDraftGoalChange={onDraftGoalChange}
-            onPermissionDecision={onPermissionDecision}
-            modelConfiguration={modelConfiguration}
-            onRetryTask={onRetryTask}
-            onStopTask={onStopTask}
-            onSubmitGoal={onSubmitGoal}
-            onUseWorkspacePath={onUseWorkspacePath}
-            onWorkspacePathChange={onWorkspacePathChange}
-            recentWorkspacePaths={recentWorkspacePaths}
-            task={task}
-            userDocuments={userDocuments}
-          />
-        );
-      case "automated":
-        return (
-          <ScheduledTasksView
-            isTaskActive={isTaskActive}
-            locale={effectiveLocale}
-            onDelete={onDeleteScheduledTask}
-            onToggle={onToggleScheduledTask}
-            tasks={scheduledTasks}
-          />
-        );
-      case "skills":
-        return (
-          <SkillMarketView locale={effectiveLocale} skills={skillEntries} />
-        );
-      case "apps":
-        return (
-          <AppsView
-            apps={installedApps}
-            error={appsError}
-            loading={appsLoading}
-            locale={effectiveLocale}
-            onOpen={onOpenFile}
-            onRefresh={onRefreshApps}
-          />
-        );
-      case "documents":
-        return (
-          <DocumentsView
-            documents={userDocuments}
-            error={docsError}
-            loading={docsLoading}
-            locale={effectiveLocale}
-            onOpen={onOpenFile}
-            onRefresh={onRefreshDocuments}
-          />
-        );
-      case "gallery":
-        return (
-          <GalleryView
-            error={imagesError}
-            images={userImages}
-            loading={imagesLoading}
-            locale={effectiveLocale}
-            onOpen={onOpenFile}
-            onRefresh={onRefreshImages}
-          />
-        );
-      case "computer":
-        return (
-          <ComputerView
-            currentPath={computerPath}
-            entries={computerEntries}
-            error={computerError}
-            loading={computerLoading}
-            locale={effectiveLocale}
-            onListDirectory={onListDirectory}
-            onNavigate={onNavigateDirectory}
-            onOpen={onOpenFile}
-          />
-        );
-      default:
-        return null;
-    }
+    const renderer = viewMap.get(activeView) ?? renderUnknownView;
+    return renderer();
   }
 
   const shellStyle =
@@ -368,6 +418,7 @@ export function JavisWorkbench({
         scheduledTaskCount={scheduledTasks.filter((t) => t.enabled).length}
         sidebarSearchQuery={sidebarSearchQuery}
         skillCount={skillEntries.length}
+        sidebarNavItems={sidebarNavItems}
       />
 
       <main className={`javis-main ${isChatView && !activeHistoryEntryId ? "new-chat" : ""}`}>

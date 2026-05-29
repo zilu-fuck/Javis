@@ -557,6 +557,41 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).not.toContain("No history yet");
   });
 
+  it("does not mark new chat active while a history entry is selected", () => {
+    const html = renderToStaticMarkup(
+      <JavisWorkbench
+        activeHistoryEntryId="history-1"
+        activeView="chat"
+        draftGoal=""
+        historyEntries={[
+          {
+            id: "history-1",
+            title: "Answered",
+            status: "completed",
+            userGoal: "Hello",
+            updatedAt: "2026-05-23T00:00:00.000Z",
+            workspacePath: "E:/Javis",
+          },
+        ]}
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={{
+          id: "history-1",
+          title: "Answered",
+          userGoal: "Hello",
+          status: "completed",
+          commanderMessage: "Hi",
+          plan: [],
+          agents: [],
+          logs: [],
+        }}
+      />,
+    );
+
+    expect(html).toContain("javis-history-entry active");
+    expect(html).not.toContain("javis-nav-item active\"><span class=\"javis-nav-icon icon-chat\">+</span>");
+  });
+
   it("groups task history by workspace path", () => {
     const html = renderToStaticMarkup(
       <JavisWorkbench

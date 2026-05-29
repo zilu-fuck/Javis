@@ -1170,6 +1170,43 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
+  it("continues general chat with the existing task id and prior messages", async () => {
+    const scanMarkdownDocuments = vi.fn(async () => []);
+    const complete = vi.fn(async () => ({ text: "Second answer" }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments },
+      chatTool: { complete },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("second question", {
+      taskId: "task-existing",
+      priorMessages: [
+        { role: "user", content: "first question" },
+        { role: "assistant", content: "First answer" },
+      ],
+    });
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(finalSnapshot.id).toBe("task-existing");
+    expect(complete).toHaveBeenCalledWith(expect.stringContaining("first question"), {
+      maxTokens: 1200,
+      temperature: 0.7,
+      locale: "en",
+    });
+    expect(finalSnapshot.conversationMessages).toEqual([
+      { role: "user", content: "first question" },
+      { role: "assistant", content: "First answer" },
+      { role: "user", content: "second question" },
+      { role: "assistant", content: "Second answer" },
+    ]);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
   it("marks general chat failed when the configured model is unavailable", async () => {
     const scanMarkdownDocuments = vi.fn(async () => []);
     const complete = vi.fn(async () => {

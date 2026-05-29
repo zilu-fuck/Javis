@@ -20,6 +20,7 @@ import type {
   VerifierTool,
   WebSource,
   WebTool,
+  WorkspaceTool,
   TokenUsageSummary,
 } from "@javis/tools";
 import type { PendingPermissionHandler } from "./confirmed-write";
@@ -125,6 +126,24 @@ export type {
   WorkbenchWorkflowId,
   WorkbenchWorkflowStep,
 } from "./workflows";
+export type {
+  WorkspaceDefinition,
+  WorkspaceAgentDefinition,
+  WorkspaceWorkflowDefinition,
+  WorkspaceWorkflowStepDefinition,
+  WorkspaceToolDefinition,
+  WorkspaceRouteDefinition,
+} from "./workspace-definition";
+export { createWorkflowRegistry } from "./workflow-registry";
+export type { WorkflowRegistry } from "./workflow-registry";
+export { createRouteRegistry } from "./route-registry";
+export type {
+  RouteRegistry,
+  RouteScoringFn,
+  RouteScore,
+  RouteScoringContext,
+} from "./route-registry";
+export type { RouteKind } from "./routing";
 
 export {
   getAdapter,
@@ -362,6 +381,11 @@ export interface TaskLogEntry {
   detail: string;
 }
 
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export interface TaskSnapshot {
   id: ID;
   title: string;
@@ -385,6 +409,7 @@ export interface TaskSnapshot {
   sources?: WebSource[];
   tokenUsage?: TokenUsageSummary;
   verificationSummary?: string;
+  conversationMessages?: ChatMessage[];
   /** Accumulated partial text during streaming. Non-empty + isStreaming → UI renders StreamingMessage. */
   streamingText?: string;
   /** Agent currently producing streaming output. */
@@ -399,7 +424,7 @@ export { addModelUsage, createEmptyTokenUsageSummary };
 export interface TaskRuntime {
   getSnapshot(): TaskSnapshot;
   subscribe(listener: (snapshot: TaskSnapshot) => void): () => void;
-  start(userGoal: string): void;
+  start(userGoal: string, options?: { taskId?: ID; priorMessages?: ChatMessage[] }): void;
   resolvePermission(decision: "approved" | "denied", requestId?: string): void;
   dispose(): void;
 }
@@ -415,6 +440,7 @@ export interface FileScanRuntimeOptions {
   schedulerTool?: SchedulerTool;
   verifierTool?: VerifierTool;
   webTool?: WebTool;
+  workspaceTool?: WorkspaceTool;
   delayMs?: number;
   eventBus?: TaskEventBus;
   onTaskStarted?: (taskId: string) => void;
@@ -527,12 +553,12 @@ export function createFileScanTaskRuntime({
     subscribe(listener) {
       return runtimeState.subscribe(listener);
     },
-    start(userGoal) {
+    start(userGoal, options = {}) {
       runtimeState.clearTimers();
       permissionHandlers.clear();
       queuedPermissionDecisions.clear();
       queuedLegacyPermissionDecision = undefined;
-      const taskId = `task-${Date.now()}`;
+      const taskId = options.taskId ?? `task-${Date.now()}`;
       onTaskStarted?.(taskId);
       if (webTool && extractUrls(userGoal).length > 0) {
         void runResearchSourceTask({ controller, taskId, userGoal, webTool, commanderTool });
@@ -624,7 +650,7 @@ export function createFileScanTaskRuntime({
       }
 
       if (chatTool) {
-        void runChatTask(taskId, userGoal, chatTool);
+        void runChatTask(taskId, userGoal, chatTool, options.priorMessages ?? []);
         return;
       }
 
@@ -656,13 +682,23 @@ export function createFileScanTaskRuntime({
     },
   };
 
-  async function runChatTask(taskId: ID, userGoal: string, activeChatTool: ChatTool) {
+  async function runChatTask(
+    taskId: ID,
+    userGoal: string,
+    activeChatTool: ChatTool,
+    priorMessages: ChatMessage[] = [],
+  ) {
     const isChinese = /[\u3400-\u9fff]/u.test(userGoal);
+    const startedMessages: ChatMessage[] = [
+      ...priorMessages,
+      { role: "user", content: userGoal },
+    ];
     emit({
       id: taskId,
       title: isChinese ? "\u6b63\u5728\u56de\u7b54" : "Answering",
       userGoal,
       status: "running",
+      updatedAt: new Date().toISOString(),
       commanderMessage: isChinese
         ? "\u6211\u6b63\u5728\u4f5c\u4e3a\u666e\u901a\u52a9\u624b\u56de\u7b54\uff0c\u6ca1\u6709\u542f\u52a8\u5de5\u4f5c\u6d41\u6216\u672c\u5730\u5de5\u5177\u3002"
         : "I'm answering as a general assistant without starting a workflow or local tool.",
@@ -682,6 +718,7 @@ export function createFileScanTaskRuntime({
               : "No workflow task assigned",
       })),
       tokenUsage: createEmptyTokenUsageSummary(),
+      conversationMessages: startedMessages,
       logs: [
         {
           id: `${taskId}-created`,
@@ -695,7 +732,7 @@ export function createFileScanTaskRuntime({
     try {
       const result = await completeGeneralChat(
         taskId,
-        createGeneralChatPrompt(userGoal, isChinese),
+        createGeneralChatPrompt(userGoal, isChinese, priorMessages),
         activeChatTool,
         {
           maxTokens: 1200,
@@ -714,7 +751,12 @@ export function createFileScanTaskRuntime({
         ...currentSnapshot,
         title: isChinese ? "\u5df2\u56de\u7b54" : "Answered",
         status: "completed",
+        updatedAt: new Date().toISOString(),
         commanderMessage: result.text,
+        conversationMessages: [
+          ...startedMessages,
+          { role: "assistant", content: result.text },
+        ],
         agents: demoAgents.map((agent) => ({
           id: agent.id,
           name: agent.displayName,
@@ -793,7 +835,15 @@ export function createFileScanTaskRuntime({
     }
   }
 
-  function createGeneralChatPrompt(userGoal: string, isChinese: boolean): string {
+  function createGeneralChatPrompt(
+    userGoal: string,
+    isChinese: boolean,
+    priorMessages: ChatMessage[] = [],
+  ): string {
+    const transcript = priorMessages.map((message) => {
+      const speaker = message.role === "user" ? (isChinese ? "用户" : "User") : "Javis";
+      return `${speaker}: ${message.content}`;
+    });
     return [
       isChinese
         ? "\u4f60\u662f Javis\uff0c\u4e00\u4e2a\u53ef\u4ee5\u666e\u901a\u804a\u5929\u3001\u4e5f\u53ef\u4ee5\u5728\u7528\u6237\u660e\u786e\u8981\u6c42\u65f6\u6267\u884c\u5de5\u4f5c\u6d41\u7684\u684c\u9762\u52a9\u624b\u3002"
@@ -801,8 +851,12 @@ export function createFileScanTaskRuntime({
       isChinese
         ? "\u8fd9\u4e00\u8f6e\u6ca1\u6709\u5339\u914d\u5230\u5de5\u4f5c\u6d41\u3002\u8bf7\u76f4\u63a5\u56de\u7b54\u7528\u6237\uff0c\u4fdd\u6301\u81ea\u7136\u3001\u7b80\u6d01\uff0c\u4e0d\u8981\u58f0\u79f0\u5df2\u7ecf\u6267\u884c\u672c\u5730\u5de5\u5177\u3002"
         : "This turn did not match a workflow. Answer the user directly, naturally, and concisely. Do not claim that you ran local tools.",
+      transcript.length > 0
+        ? isChinese ? "\u5bf9\u8bdd\u5386\u53f2\uff1a" : "Conversation history:"
+        : "",
+      ...transcript,
       `User: ${userGoal}`,
-    ].join("\n");
+    ].filter(Boolean).join("\n");
   }
 
   function runClarificationTask(taskId: ID, userGoal: string, error?: unknown) {

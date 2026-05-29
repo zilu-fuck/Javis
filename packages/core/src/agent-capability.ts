@@ -67,6 +67,10 @@ export interface AgentRegistry {
   findByKind(kind: string): AgentRegistration | undefined;
   /** Get model requirements for an agent kind */
   getModelRequirements(kind: string): ModelRequirements | undefined;
+  /** Register a new agent or replace an existing one with the same id. */
+  register(agent: Agent): void;
+  /** Remove an agent by id. No-op if not found. */
+  unregister(agentId: string): void;
 }
 
 // ── Registry Implementation ─────────────────────────────────────────────────
@@ -81,8 +85,10 @@ export function createAgentRegistry(agents: ReadonlyArray<Agent>): AgentRegistry
   }));
 
   const byKind = new Map<string, AgentRegistration>();
+  const byId = new Map<string, AgentRegistration>();
   for (const reg of registrations) {
     byKind.set(reg.agent.kind, reg);
+    byId.set(reg.agent.id, reg);
   }
 
   return {
@@ -103,6 +109,34 @@ export function createAgentRegistry(agents: ReadonlyArray<Agent>): AgentRegistry
 
     getModelRequirements(kind) {
       return byKind.get(kind)?.modelRequirements;
+    },
+
+    register(agent) {
+      // Remove existing registration with same id if present
+      const existingIdx = registrations.findIndex((r) => r.agent.id === agent.id);
+      if (existingIdx >= 0) {
+        const removed = registrations[existingIdx];
+        byKind.delete(removed.agent.kind);
+        byId.delete(removed.agent.id);
+        registrations.splice(existingIdx, 1);
+      }
+      const reg: AgentRegistration = {
+        agent,
+        capabilityTags: inferCapabilityTags(agent),
+        modelRequirements: agent.modelRequirements ?? DEFAULT_MODEL_REQUIREMENTS,
+      };
+      registrations.push(reg);
+      byKind.set(agent.kind, reg);
+      byId.set(agent.id, reg);
+    },
+
+    unregister(agentId) {
+      const idx = registrations.findIndex((r) => r.agent.id === agentId);
+      if (idx < 0) return;
+      const removed = registrations[idx];
+      byKind.delete(removed.agent.kind);
+      byId.delete(removed.agent.id);
+      registrations.splice(idx, 1);
     },
   };
 }

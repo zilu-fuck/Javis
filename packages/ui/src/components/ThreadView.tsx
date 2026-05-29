@@ -64,6 +64,8 @@ export function ThreadView({
   const isProcessExpanded = expandedProcessKey === processKey;
   const shouldShowProcessDetails =
     hasProcessDetails && (!isConclusionReady || isProcessExpanded);
+  const conversationMessages = task.conversationMessages ?? [];
+  const hasConversationMessages = conversationMessages.length > 0;
 
   useEffect(() => {
     scrollAnchorRef.current?.scrollIntoView({
@@ -94,10 +96,30 @@ export function ThreadView({
       </header>
 
       <section className="javis-thread" aria-label={labels.activeTask}>
-        <article className="javis-message user">
-          <p className="javis-message-title">{labels.user}</p>
-          <Markdown className="javis-message-body" text={translateWorkbenchText(task.userGoal, locale)} />
-        </article>
+        {hasConversationMessages ? (
+          conversationMessages.map((message, index) => (
+            <article
+              className={`javis-message ${message.role === "user" ? "user" : ""}`}
+              key={`${message.role}-${index}`}
+            >
+              <p className="javis-message-title">
+                {message.role === "user" ? labels.user : labels.commander}
+              </p>
+              <Markdown
+                className="javis-message-body"
+                text={translateWorkbenchText(message.content, locale)}
+              />
+              {message.role === "assistant" && index === conversationMessages.length - 1 ? (
+                <ContextStats task={task} labels={labels} />
+              ) : null}
+            </article>
+          ))
+        ) : (
+          <article className="javis-message user">
+            <p className="javis-message-title">{labels.user}</p>
+            <Markdown className="javis-message-body" text={translateWorkbenchText(task.userGoal, locale)} />
+          </article>
+        )}
 
         {showStreaming ? (
           <StreamingMessage
@@ -105,13 +127,13 @@ export function ThreadView({
             isStreaming={streaming.showCursor}
             agentLabel={getStreamingAgentLabel(streaming.agentKind, labels)}
           />
-        ) : (
+        ) : !hasConversationMessages ? (
           <article className="javis-message">
             <p className="javis-message-title">{labels.commander}</p>
             <Markdown className="javis-message-body" text={translateWorkbenchText(task.commanderMessage, locale)} />
             <ContextStats task={task} labels={labels} />
           </article>
-        )}
+        ) : null}
 
         {isConclusionReady && hasProcessDetails ? (
           <button

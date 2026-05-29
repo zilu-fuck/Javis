@@ -1,4 +1,4 @@
-import {
+import React, {
   useEffect,
   useMemo,
   useState,
@@ -7,6 +7,7 @@ import {
 } from "react";
 import type {
   ActiveView,
+  SidebarNavItem,
   WorkbenchHistoryEntry,
   WorkbenchLocale,
   WorkbenchModelConfiguration,
@@ -20,6 +21,7 @@ import {
 } from "../utils";
 import { ModelSettings } from "./ModelSettings";
 import { normalizeWorkspacePath } from "../utils";
+import { getBuiltinSidebarNavItems, mergeSidebarNavItems } from "../builtin-nav";
 
 interface SidebarProps {
   labels: WorkbenchLocale["labels"];
@@ -37,6 +39,8 @@ interface SidebarProps {
   sidebarResizeMin?: number;
   sidebarResizeValue?: number;
   skillCount?: number;
+  /** Custom sidebar nav items. Falls back to built-in defaults when omitted. */
+  sidebarNavItems?: SidebarNavItem[];
   onDeleteHistoryEntry?: (id: string) => void;
   onModelSettingsChange?: (settings: WorkbenchModelSettings) => void;
   onModelConfigurationChange?: (config: WorkbenchModelConfiguration) => void;
@@ -47,8 +51,6 @@ interface SidebarProps {
   onChangeActiveView?: (view: ActiveView) => void;
   onNavigateDirectory?: (path: string) => void;
 }
-
-type CollapsibleView = "documents" | "gallery" | "computer";
 
 const HISTORY_PREVIEW_COUNT = 4;
 
@@ -68,6 +70,7 @@ export function Sidebar({
   sidebarResizeMin,
   sidebarResizeValue,
   skillCount = 0,
+  sidebarNavItems,
   onDeleteHistoryEntry,
   onModelSettingsChange,
   onModelConfigurationChange,
@@ -83,10 +86,30 @@ export function Sidebar({
     sidebarSearchQuery,
   );
   const hasHistorySearch = sidebarSearchQuery.trim().length > 0;
-  const [collapsedGroups, setCollapsedGroups] = useState<Record<CollapsibleView, boolean>>({
-    documents: activeView !== "documents",
-    gallery: activeView !== "gallery",
-    computer: activeView !== "computer",
+
+  const effectiveNavItems = useMemo(
+    () =>
+      sidebarNavItems
+        ? mergeSidebarNavItems(
+            getBuiltinSidebarNavItems(labels, scheduledTaskCount, skillCount),
+            sidebarNavItems,
+          )
+        : getBuiltinSidebarNavItems(labels, scheduledTaskCount, skillCount),
+    [labels, scheduledTaskCount, skillCount, sidebarNavItems],
+  );
+
+  // Derive collapsible view IDs from nav items
+  const collapsibleViewIds = useMemo(
+    () => effectiveNavItems.filter((ni) => ni.collapsible).map((ni) => ni.viewId),
+    [effectiveNavItems],
+  );
+
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>(() => {
+    const initial: Record<string, boolean> = {};
+    for (const vid of collapsibleViewIds) {
+      initial[vid] = activeView !== vid;
+    }
+    return initial;
   });
   const [expandedHistoryGroups, setExpandedHistoryGroups] = useState<Record<string, boolean>>({});
   const [collapsedWorkspaceGroups, setCollapsedWorkspaceGroups] = useState<Record<string, boolean>>(
@@ -94,10 +117,25 @@ export function Sidebar({
   );
 
   useEffect(() => {
-    if (activeView === "documents" || activeView === "gallery" || activeView === "computer") {
+    if (collapsibleViewIds.includes(activeView)) {
       setCollapsedGroups((current) => ({ ...current, [activeView]: false }));
     }
-  }, [activeView]);
+  }, [activeView, collapsibleViewIds]);
+
+  // Seed newly loaded collapsible items into collapsedGroups (handles async workspace loading)
+  useEffect(() => {
+    setCollapsedGroups((current) => {
+      const next = { ...current };
+      let changed = false;
+      for (const vid of collapsibleViewIds) {
+        if (!(vid in next)) {
+          next[vid] = activeView !== vid;
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [collapsibleViewIds, activeView]);
 
   const workspaceGroups = useMemo(
     () =>
@@ -111,7 +149,10 @@ export function Sidebar({
   );
 
   function navItem(view: ActiveView, icon: string, label: string, badge?: number) {
-    const isActive = activeView === view && (view !== "chat" || !activeHistoryEntryId);
+    const isActive =
+      view === "chat"
+        ? activeView === view && !activeHistoryEntryId
+        : activeView === view;
     return (
       <div
         className={`javis-nav-item ${isActive ? "active" : ""}`}
@@ -132,17 +173,17 @@ export function Sidebar({
     );
   }
 
-  function navCollapsibleItem(view: CollapsibleView, icon: string, label: string) {
-    const isActive = activeView === view;
-    const isCollapsed = collapsedGroups[view];
+  function navCollapsibleItem(viewId: string, icon: string, label: string) {
+    const isActive = activeView === viewId;
+    const isCollapsed = collapsedGroups[viewId] ?? true;
 
     function handleClick() {
       if (isActive) {
-        setCollapsedGroups((current) => ({ ...current, [view]: !current[view] }));
+        setCollapsedGroups((current) => ({ ...current, [viewId]: !current[viewId] }));
         return;
       }
-      setCollapsedGroups((current) => ({ ...current, [view]: false }));
-      onChangeActiveView?.(view);
+      setCollapsedGroups((current) => ({ ...current, [viewId]: false }));
+      onChangeActiveView?.(viewId);
     }
 
     return (
@@ -159,17 +200,17 @@ export function Sidebar({
           }
         }}
       >
-        <span className={`javis-nav-icon icon-${view}`}>{icon}</span>
+        <span className={`javis-nav-icon icon-${viewId}`}>{icon}</span>
         <span>{label}</span>
         <span className="javis-nav-caret">{isCollapsed ? "v" : "^"}</span>
       </div>
     );
   }
 
-  function navSubitem(view: CollapsibleView, label: string, path?: string) {
+  function navSubitem(viewId: string, label: string, path?: string) {
     function handleClick() {
-      onChangeActiveView?.(view);
-      if (view === "computer" && path) {
+      onChangeActiveView?.(viewId);
+      if (path) {
         onNavigateDirectory?.(path);
       }
     }
@@ -184,6 +225,51 @@ export function Sidebar({
         <span>{label}</span>
       </button>
     );
+  }
+
+  function renderNavGroups() {
+    const groups = new Map<string, SidebarNavItem[]>();
+    for (const item of effectiveNavItems) {
+      const existing = groups.get(item.group);
+      if (existing) {
+        existing.push(item);
+      } else {
+        groups.set(item.group, [item]);
+      }
+    }
+
+    const groupLabels: Record<string, string | undefined> = {
+      primary: undefined, // no section header for primary
+      knowledge: labels.localKnowledgeBase,
+      custom: labels.plugins,
+    };
+
+    return [...groups.entries()].map(([groupType, items]) => (
+      <div className={`javis-nav-group ${groupType}`} key={groupType}>
+        {groupLabels[groupType] && (
+          <p className="javis-nav-section">{groupLabels[groupType]}</p>
+        )}
+        {items.map((item) => {
+          if (item.collapsible) {
+            const isCollapsed = collapsedGroups[item.viewId] ?? true;
+            return (
+              <React.Fragment key={item.viewId}>
+                {navCollapsibleItem(item.viewId, item.icon, item.label)}
+                {!isCollapsed &&
+                  item.subitems?.map((sub) => (
+                    navSubitem(item.viewId, sub.label, sub.path)
+                  ))}
+              </React.Fragment>
+            );
+          }
+          return (
+            <React.Fragment key={item.viewId}>
+              {navItem(item.viewId, item.icon, item.label, item.badge)}
+            </React.Fragment>
+          );
+        })}
+      </div>
+    ));
   }
 
   return (
@@ -201,42 +287,7 @@ export function Sidebar({
         />
       </label>
       <nav className="javis-nav" aria-label={labels.workspaceNavigation}>
-        <div className="javis-nav-group primary">
-          {navItem("chat", "+", labels.newChat)}
-          {navItem("automated", "o", labels.automatedTasks, scheduledTaskCount)}
-          {navItem("skills", "#", labels.skillMarket, skillCount)}
-        </div>
-        <div className="javis-nav-group">
-          <p className="javis-nav-section">{labels.localKnowledgeBase}</p>
-          {navItem("apps", "#", labels.apps)}
-          {navCollapsibleItem("documents", ">", labels.documents)}
-          {!collapsedGroups.documents && (
-            <>
-              {navSubitem("documents", "文档识别")}
-              {navSubitem("documents", "课件")}
-              {navSubitem("documents", "书籍")}
-              {navSubitem("documents", "论文")}
-            </>
-          )}
-          {navCollapsibleItem("gallery", ">", labels.gallery)}
-          {!collapsedGroups.gallery && (
-            <>
-              {navSubitem("gallery", "图片识别")}
-              {navSubitem("gallery", "人物印象")}
-              {navSubitem("gallery", "足迹地点")}
-              {navSubitem("gallery", "时光长廊")}
-            </>
-          )}
-          {navCollapsibleItem("computer", ">", labels.thisComputer)}
-          {!collapsedGroups.computer && (
-            <>
-              {navSubitem("computer", "系统 (C:)", "C:\\")}
-              {navSubitem("computer", "固态硬盘 (E:)", "E:\\")}
-              {navSubitem("computer", "机械硬盘2 (F:)", "F:\\")}
-              {navSubitem("computer", "机械硬盘 (G:)", "G:\\")}
-            </>
-          )}
-        </div>
+        {renderNavGroups()}
         <div className="javis-nav-group">
           <p className="javis-nav-section">{labels.projects}</p>
           {workspaceGroups.length > 0 ? (

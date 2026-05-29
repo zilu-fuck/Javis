@@ -92,6 +92,9 @@ export function upsertTaskHistory(
 }
 
 export function getTaskUpdatedAt(task: TaskSnapshot): string {
+  if (task.updatedAt) {
+    return task.updatedAt;
+  }
   const timestamp = Number(task.id.replace("task-", ""));
   return Number.isFinite(timestamp)
     ? new Date(timestamp).toISOString()
@@ -290,6 +293,9 @@ export function sanitizeTaskSnapshot(value: unknown): TaskSnapshot | null {
     logs: value.logs,
   };
 
+  if (isString(value.updatedAt)) {
+    snapshot.updatedAt = value.updatedAt;
+  }
   if (isMarkdownDocumentArray(value.documents)) {
     snapshot.documents = value.documents;
   }
@@ -332,6 +338,9 @@ export function sanitizeTaskSnapshot(value: unknown): TaskSnapshot | null {
   }
   if (isString(value.verificationSummary)) {
     snapshot.verificationSummary = value.verificationSummary;
+  }
+  if (isChatMessageArray(value.conversationMessages)) {
+    snapshot.conversationMessages = value.conversationMessages;
   }
 
   return snapshot;
@@ -480,6 +489,18 @@ function isTaskLogArray(value: unknown): value is TaskSnapshot["logs"] {
         isTaskLogKind(log.kind) &&
         isString(log.title) &&
         isString(log.detail),
+    )
+  );
+}
+
+function isChatMessageArray(value: unknown): value is NonNullable<TaskSnapshot["conversationMessages"]> {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (message) =>
+        isRecord(message) &&
+        (message.role === "user" || message.role === "assistant") &&
+        isString(message.content),
     )
   );
 }

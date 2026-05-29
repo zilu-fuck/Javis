@@ -32,6 +32,7 @@ import type {
   VerifierCheckRequest,
   VerifierCheckResult,
   ScheduledTaskDraft,
+  WorkspaceTool,
 } from "@javis/tools";
 import { parseGitStatusFiles } from "./git-status";
 import {
@@ -53,6 +54,69 @@ import {
   createScheduledTask,
 } from "./scheduled-tasks";
 import type { ScheduledTasksRepository } from "./scheduled-tasks-persistence";
+import {
+  loadWorkspaceDefinitions,
+  saveWorkspaceDefinition,
+  deleteWorkspaceDefinition,
+} from "./workspace-loader";
+import type { WorkspaceDefinition } from "@javis/core";
+
+const WORKSPACE_SCAFFOLD_SCHEMA_JSON = JSON.stringify({
+  id: "kebab-case-id",
+  title: "Display Title",
+  icon: "single-emoji",
+  description: "One-line description",
+  viewType: "chat",
+  sidebarGroup: "custom",
+  sidebarOrder: 99,
+  version: "0.1.0",
+  enabled: true,
+  agents: [
+    {
+      id: "agent-example",
+      kind: "commander",
+      displayName: "Example Agent",
+      description: "What this agent does",
+      allowedToolNames: ["commander.plan"],
+      modelRequirements: { prefersVision: false, prefersCode: false, minContextTokens: 8000 },
+      systemPrompt: { en: "You are...", zhCN: "你是..." },
+    },
+  ],
+  workflows: [
+    {
+      id: "custom-workflow",
+      title: "Custom Workflow",
+      triggerExamples: ["do something"],
+      goal: "Achieve the goal",
+      coordinatorAgentKind: "commander",
+      participatingAgentKinds: ["commander"],
+      steps: [
+        {
+          id: "step-1",
+          title: "First step",
+          agentKind: "commander",
+          input: "User goal",
+          output: "Result",
+          permissionLevel: "read",
+          dependsOn: [],
+          canRunInParallel: false,
+        },
+      ],
+      currentSupport: "partial",
+      safetyNotes: ["Safety note"],
+    },
+  ],
+  routes: [
+    {
+      routeKind: "custom-route",
+      workflowId: "custom-workflow",
+      scoring: {
+        keywordPatterns: [{ pattern: "keyword", weight: 2, signalName: "match" }],
+        threshold: 2,
+      },
+    },
+  ],
+}, null, 2);
 
 interface CreateJavisRuntimeOptions {
   getWorkspacePath: () => string;
@@ -473,6 +537,55 @@ export function createJavisRuntime({
         };
       },
     },
+    workspaceTool: {
+      list: async () => {
+        const defs = await loadWorkspaceDefinitions();
+        return defs.map((d) => ({
+          id: d.id,
+          title: d.title,
+          icon: d.icon,
+          description: d.description,
+          enabled: d.enabled,
+          version: d.version,
+        }));
+      },
+      scaffold: async (description: string) => {
+        const commander = providerFor("commander");
+        const prompt = [
+          "You are creating a Javis workspace definition. Output valid JSON matching this schema:",
+          WORKSPACE_SCAFFOLD_SCHEMA_JSON,
+          "",
+          "Available agent kinds: commander, file, shell, browser, computer, scheduler, research, code, verifier, chinese-reviewer",
+          "Available built-in view types: chat, automated, skills, apps, documents, gallery, computer",
+          "Sidebar groups: primary (top), knowledge (local data), custom (below)",
+          "",
+          "Rules:",
+          "- Generate a single complete workspace definition JSON object",
+          "- id must be kebab-case",
+          "- icon should be a single emoji",
+          "- agents, workflows, routes are optional arrays",
+          "- All tool names follow {category}.{action} pattern",
+          "- Output ONLY the JSON, no markdown fences or explanation",
+          "",
+          `User request: ${description}`,
+        ].join("\n");
+        const result = await commander.complete(prompt, { maxTokens: 2000, temperature: 0.3 });
+        // Extract outermost JSON object (handles LLM text before/after)
+        const startIdx = result.text.indexOf("{");
+        const endIdx = result.text.lastIndexOf("}");
+        if (startIdx === -1 || endIdx === -1 || startIdx >= endIdx) {
+          throw new Error("Scaffolded output does not contain valid JSON");
+        }
+        const jsonStr = result.text.slice(startIdx, endIdx + 1);
+        return JSON.parse(jsonStr) as Record<string, unknown>;
+      },
+      create: async (definition: Record<string, unknown>) => {
+        await saveWorkspaceDefinition(definition as unknown as WorkspaceDefinition);
+      },
+      delete: async (workspaceId: string) => {
+        await deleteWorkspaceDefinition(workspaceId);
+      },
+    } satisfies WorkspaceTool,
     webTool: {
       fetchWebSource: (request: WebSourceRequest) =>
         invoke<WebSource>("fetch_web_source", { request }),
@@ -527,7 +640,7 @@ export function createJavisRuntime({
       providerCache.clear();
       providerCache.set("fallback", fallbackProvider);
     },
-    start(userGoal: string) {
+    start(userGoal: string, options?: Parameters<typeof runtime.start>[1]) {
       void (async () => {
         sharedContext.clear();
         sharedContext.set(sharedContext.resolveKey(CONTEXT_KEYS.USER_GOAL, "zh-CN"), userGoal);
@@ -538,7 +651,7 @@ export function createJavisRuntime({
             result,
           );
         }
-        runtime.start(userGoal);
+        runtime.start(userGoal, options);
       })();
     },
     stopTask() {

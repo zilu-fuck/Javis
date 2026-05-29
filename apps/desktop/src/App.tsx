@@ -1,5 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { createInitialTaskSnapshot, injectDocumentContext, type TaskSnapshot } from "@javis/core";
+import {
+  createInitialTaskSnapshot,
+  injectDocumentContext,
+  type ChatMessage,
+  type TaskSnapshot,
+} from "@javis/core";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openPath } from "@tauri-apps/plugin-opener";
@@ -121,7 +126,27 @@ import {
   JSONL_LOG_MIGRATIONS,
 } from "./jsonl-log-persistence";
 import { initialToolDescriptors } from "@javis/tools";
-import { demoAgents } from "@javis/core";
+import {
+  createDefaultAgentRegistry,
+  createWorkflowRegistry,
+  createRouteRegistry,
+  demoAgents,
+  WORKBENCH_WORKFLOWS,
+} from "@javis/core";
+import type {
+  AgentRegistry,
+  WorkflowRegistry,
+  RouteRegistry,
+  WorkspaceDefinition,
+} from "@javis/core";
+import {
+  buildWorkspaceNavItems,
+  loadWorkspaceDefinitions,
+  registerWorkspaceAgents,
+  registerWorkspaceWorkflows,
+  registerWorkspaceRoutes,
+} from "./workspace-loader";
+import { getBuiltinSidebarNavItems, mergeSidebarNavItems } from "@javis/ui";
 import appIconUrl from "./assets/app-icon.png";
 import "./App.css";
 
@@ -205,6 +230,19 @@ function extractAtReferences(goal: string): Array<{ raw: string; path: string }>
   });
 }
 
+function getConversationMessages(task: TaskSnapshot): ChatMessage[] {
+  if (task.conversationMessages?.length) {
+    return task.conversationMessages;
+  }
+  if (!task.userGoal.trim() || !task.commanderMessage.trim()) {
+    return [];
+  }
+  return [
+    { role: "user", content: task.userGoal },
+    { role: "assistant", content: task.commanderMessage },
+  ];
+}
+
 function App() {
   const databaseRef = useRef<DesktopDatabase | null>(null);
   const taskHistoryRepoRef = useRef<ReturnType<typeof createTaskHistoryRepository> | null>(null);
@@ -214,6 +252,10 @@ function App() {
   const modelProfileRepoRef = useRef<ModelProfileRepository | null>(null);
   const scheduledTasksRepoRef = useRef<ReturnType<typeof createScheduledTasksRepository> | null>(null);
   const preferencesRepoRef = useRef<UserPreferencesRepository | null>(null);
+  const agentRegistryRef = useRef<AgentRegistry>(createDefaultAgentRegistry());
+  const workflowRegistryRef = useRef<WorkflowRegistry>(createWorkflowRegistry(WORKBENCH_WORKFLOWS));
+  const routeRegistryRef = useRef<RouteRegistry>(createRouteRegistry());
+  const [workspaceDefs, setWorkspaceDefs] = useState<WorkspaceDefinition[]>([]);
   const {
     browseWorkspacePath,
     deleteRecentWorkspacePath,
@@ -344,6 +386,20 @@ function App() {
     setSkillEntries([...tools, ...agents, ...mcps]);
   }, [mcpConfig]);
 
+  // ── Build sidebar nav items from built-in defaults + workspace defs ─
+  const sidebarNavItems = useMemo(() => {
+    const labels =
+      localePreference === "en" ? defaultWorkbenchLocale.labels : zhCNWorkbenchLocale.labels;
+    return mergeSidebarNavItems(
+      getBuiltinSidebarNavItems(
+        labels,
+        scheduledTasks.filter((t) => t.enabled).length,
+        skillEntries.length,
+      ),
+      buildWorkspaceNavItems(workspaceDefs),
+    );
+  }, [workspaceDefs, scheduledTasks, skillEntries, localePreference]);
+
   // ── Load MCP config on mount ──────────────────────────────────────
   useEffect(() => {
     loadMcpConfig().then(setMcpConfig).catch(() => {});
@@ -438,6 +494,17 @@ function App() {
       // Import JSONL logs from localStorage into SQLite
       await importTaskSessionJsonlFromLocalStorage(database, window.localStorage);
       await importToolCallAuditJsonlFromLocalStorage(database, window.localStorage);
+
+      // Load workspace definitions from disk
+      try {
+        const defs = await loadWorkspaceDefinitions();
+        setWorkspaceDefs(defs);
+        registerWorkspaceAgents(defs, agentRegistryRef.current);
+        registerWorkspaceWorkflows(defs, workflowRegistryRef.current);
+        registerWorkspaceRoutes(defs, routeRegistryRef.current);
+      } catch {
+        // Workspace loading is best-effort; app works without custom workspaces
+      }
 
       setDurableApprovalRecordsReady(true);
     })().catch((error) => {
@@ -756,8 +823,20 @@ function App() {
     if (!goal) {
       return;
     }
+    const continuationTask =
+      !goalOverride && !workspacePathOverride && !scheduledTaskId && activeHistoryEntryId
+        ? historyCurrentRef.current.find((entry) => entry.id === activeHistoryEntryId)
+        : undefined;
+    const startOptions = continuationTask
+      ? {
+          taskId: continuationTask.id,
+          priorMessages: getConversationMessages(continuationTask),
+        }
+      : undefined;
     clearQueuedTaskSnapshots();
-    setActiveHistoryEntryId(undefined);
+    if (!continuationTask) {
+      setActiveHistoryEntryId(undefined);
+    }
     if (workspacePathOverride) {
       workspaceRef.current = workspacePathOverride;
       useWorkspacePath(workspacePathOverride);
@@ -786,12 +865,12 @@ function App() {
             // File not readable — leave the @reference as-is in the goal
           }
         }
-        runtime.start(resolvedGoal);
+        runtime.start(resolvedGoal, startOptions);
       })();
       return;
     }
 
-    runtime.start(goal);
+    runtime.start(goal, startOptions);
   }
 
   function handleStopTask() {
@@ -993,7 +1072,8 @@ function App() {
   }
 
   function handleChangeActiveView(view: ActiveView) {
-    if (view === "chat") {
+    const shouldStartFreshChat = view === "chat" && (activeView !== "chat" || activeHistoryEntryId);
+    if (shouldStartFreshChat) {
       clearQueuedTaskSnapshots();
       setTask(createInitialTaskSnapshot());
       setActiveHistoryEntryId(undefined);
@@ -1195,6 +1275,7 @@ function App() {
           scheduledTaskToWorkbench(t, history, activeScheduledTaskId),
         )}
         skillEntries={skillEntries}
+        sidebarNavItems={sidebarNavItems}
         task={task}
         userDocuments={userDocuments}
         userImages={userImages}

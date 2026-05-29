@@ -192,6 +192,11 @@ export interface WorkbenchHistoryEntry {
   scheduledTaskId?: string;
 }
 
+export interface WorkbenchChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export interface WorkbenchTask {
   id?: string;
   title: string;
@@ -213,19 +218,32 @@ export interface WorkbenchTask {
   sources?: WorkbenchSource[];
   tokenUsage?: WorkbenchTokenUsageSummary;
   verificationSummary?: string;
+  conversationMessages?: WorkbenchChatMessage[];
   streamingText?: string;
   streamingAgentKind?: WorkbenchStreamingAgentKind;
   isStreaming?: boolean;
 }
 
-export type ActiveView =
-  | "chat"
-  | "automated"
-  | "skills"
-  | "apps"
-  | "documents"
-  | "gallery"
-  | "computer";
+/** View identifier. Built-in values: "chat" | "automated" | "skills" | "apps" | "documents" | "gallery" | "computer". Workspace definitions may register additional view IDs. */
+export type ActiveView = string;
+
+export interface SidebarNavSubItem {
+  label: string;
+  path?: string;
+}
+
+export interface SidebarNavItem {
+  viewId: string;
+  icon: string;
+  label: string;
+  group: "primary" | "knowledge" | "custom";
+  groupLabel?: string;
+  order: number;
+  badge?: number;
+  /** If true, renders as a collapsible nav item with subitems. */
+  collapsible?: boolean;
+  subitems?: SidebarNavSubItem[];
+}
 
 export interface WorkbenchScheduledTask {
   id: string;
@@ -279,6 +297,8 @@ export interface JavisWorkbenchProps {
   activeHistoryEntryId?: string;
   scheduledTasks?: WorkbenchScheduledTask[];
   skillEntries?: WorkbenchSkillEntry[];
+  /** Custom sidebar navigation items. Merged with built-in defaults. */
+  sidebarNavItems?: SidebarNavItem[];
   installedApps?: WorkbenchAppEntry[];
   userDocuments?: WorkbenchFileEntry[];
   userImages?: WorkbenchFileEntry[];
@@ -456,6 +476,19 @@ export interface WorkbenchLocale {
     noScheduledTasks: string;
     scanFailed: string;
     retry: string;
+    unknownView: string;
+    kbDocRecognition: string;
+    kbCourseware: string;
+    kbBooks: string;
+    kbPapers: string;
+    kbImageRecognition: string;
+    kbPeopleImpressions: string;
+    kbFootprintLocations: string;
+    kbTimelineGallery: string;
+    kbSystemDrive: string;
+    kbDriveE: string;
+    kbDriveF: string;
+    kbDriveG: string;
   };
   phrases?: Record<string, string>;
 }

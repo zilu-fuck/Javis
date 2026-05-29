@@ -9,5 +9,6 @@ export { AppsView } from "./components/AppsView";
 export { DocumentsView } from "./components/DocumentsView";
 export { GalleryView } from "./components/GalleryView";
 export { ComputerView } from "./components/ComputerView";
+export { getBuiltinSidebarNavItems, mergeSidebarNavItems } from "./builtin-nav";
 export { useStreamingSnapshot } from "./use-streaming-snapshot";
 export { useSmoothStream } from "./use-smooth-stream";

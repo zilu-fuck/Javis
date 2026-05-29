@@ -301,6 +301,26 @@ export interface SchedulerTool {
   createTask(request: ScheduledTaskDraft): Promise<ScheduledTaskDraft & { id: string; enabled: boolean }>;
 }
 
+export interface WorkspaceDefinitionSummary {
+  id: string;
+  title: string;
+  icon: string;
+  description: string;
+  enabled: boolean;
+  version: string;
+}
+
+export interface WorkspaceTool {
+  /** List all installed workspace definitions. */
+  list(): Promise<WorkspaceDefinitionSummary[]>;
+  /** Generate a workspace definition JSON from a natural language description (dry run). */
+  scaffold?(description: string): Promise<Record<string, unknown>>;
+  /** Save a workspace definition to disk. */
+  create(definition: Record<string, unknown>): Promise<void>;
+  /** Remove a workspace definition by id. */
+  delete(workspaceId: string): Promise<void>;
+}
+
 export interface ToolDescriptor {
   name: string;
   permissionLevel: PermissionLevel;

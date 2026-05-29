@@ -111,4 +111,24 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     permissionLevel: "confirmed_write",
     summary: "Delete a previously created local scheduled task.",
   },
+  {
+    name: "workspace.list",
+    permissionLevel: "read",
+    summary: "List installed custom workspace definitions.",
+  },
+  {
+    name: "workspace.scaffold",
+    permissionLevel: "preview",
+    summary: "Generate a workspace definition JSON from a natural language description.",
+  },
+  {
+    name: "workspace.create",
+    permissionLevel: "confirmed_write",
+    summary: "Save a new workspace definition to disk.",
+  },
+  {
+    name: "workspace.delete",
+    permissionLevel: "confirmed_write",
+    summary: "Remove a workspace definition from disk.",
+  },
 ];
