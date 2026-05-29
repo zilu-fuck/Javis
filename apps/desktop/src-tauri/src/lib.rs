@@ -5940,16 +5940,13 @@ fn scan_all_user_files(
         .map(|r| PathBuf::from(r.path))
         .collect::<Vec<_>>();
     let ext_vec: Vec<String> = extensions.unwrap_or_default();
-    let ext_refs: Vec<&str> = ext_vec.iter().map(|s| s.as_str()).collect();
+    let ext_lower: Vec<String> = ext_vec.iter().map(|e| e.to_lowercase()).collect();
+    let filter_by_ext = !ext_lower.is_empty();
     let max = max_results.unwrap_or(5000);
     let max_depth = 8;
 
     let mut entries = Vec::new();
-    let ext_lower: Vec<String> = ext_refs.iter().map(|e| e.to_lowercase()).collect();
-    let filter_by_ext = !ext_lower.is_empty();
-
-    // First pass: count total dirs that will be scanned for progress reporting
-    // We approximate "total" as the number of non-skipped roots
+    // Progress is reported per mount root scanned (not per file).
     let total = roots.len();
 
     for (index, root) in roots.iter().enumerate() {
