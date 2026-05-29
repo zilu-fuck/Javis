@@ -614,33 +614,18 @@ export function createFileScanTaskRuntime({
         return;
       }
       if (startMode === "project") {
-        if (shellTool && projectTool) {
-          // Fall back to chat when the goal is clearly casual conversation,
-          // not project work. Avoids running a full multi-agent workflow
-          // for inputs like "hello" in project mode.
-          if (!isReadCurrentProjectGoal(userGoal) && chatTool) {
-            void runChatTask(taskId, userGoal, chatTool, options.priorMessages ?? []);
-            return;
-          }
-          void runReadCurrentProjectWorkflow({
-            controller,
-            fileTool,
-            commanderTool,
-            projectTool,
-            shellTool,
-            codeTool,
-            verifierTool,
-            taskId,
-            userGoal,
-          });
-          return;
-        }
-        if (chatTool) {
+        // Only short-circuit for clearly casual inputs (greetings, small talk).
+        // Everything else falls through to the auto-routing path below, which
+        // already handles URLs, research, project inspection, code review,
+        // document scan, and a final chat fallback.
+        const isCasual = /^(hi|hello|hey|sup|yo|test|你好|嗨|喂|在吗|测试)$/i.test(
+          userGoal.trim(),
+        );
+        if (isCasual && chatTool) {
           void runChatTask(taskId, userGoal, chatTool, options.priorMessages ?? []);
           return;
         }
-        runClarificationTask(taskId, userGoal);
-        return;
+        // Fall through to auto routing
       }
       if (webTool && extractUrls(userGoal).length > 0) {
         void runResearchSourceTask({ controller, taskId, userGoal, webTool, commanderTool });

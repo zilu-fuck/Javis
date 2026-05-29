@@ -282,6 +282,82 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
+  it("routes project-mode goals through auto routing to project workflow", async () => {
+    const project: ProjectInspection = {
+      workspacePath: "E:/Javis",
+      packageManager: "pnpm",
+      scripts: [{ name: "test", command: "pnpm test" }],
+      recommendedStartCommand: "pnpm dev",
+      recommendedTestCommand: "pnpm test",
+    };
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => []),
+      },
+      projectTool: {
+        inspectProject: vi.fn(async () => project),
+      },
+      shellTool: {
+        runReadOnlyCommand: vi.fn(async () => ({
+          command: "pnpm --version",
+          cwd: "E:/Javis",
+          exitCode: 0,
+          stdout: "ok",
+          stderr: "",
+        })),
+      },
+      codeTool: {
+        inspectRepository: vi.fn(async () => ({
+          workspacePath: "E:/Javis",
+          changedFiles: [],
+          diffStat: "0 files changed",
+          diff: "",
+        })),
+      },
+      verifierTool: {
+        check: vi.fn(async () => ({
+          status: "pass" as const,
+          summary: "ok",
+          detail: "ok",
+        })),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    // "inspect this project" matches isReadCurrentProjectGoal, goes through
+    // auto routing → project workflow (not forced, not short-circuited).
+    runtime.start("inspect this project", { mode: "project" });
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(finalSnapshot.title).toBe("Read current project");
+    expect(finalSnapshot.project).toEqual(project);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("short-circuits casual greetings to chat in project mode", async () => {
+    const complete = vi.fn(async () => ({ text: "Hello! How can I help?" }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      chatTool: { complete },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("hello", { mode: "project" });
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(complete).toHaveBeenCalled();
+    expect(finalSnapshot.title).toBe("Answered");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
   it("routes supported workflow blueprints through concrete generic workflow tools", async () => {
     const commanderPlan = vi.fn(async () => ({
       title: "Model planned reminder",
@@ -1170,6 +1246,43 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
+  it("forces general chat mode even when the goal looks like project work", async () => {
+    const scanMarkdownDocuments = vi.fn(async () => []);
+    const complete = vi.fn(async () => ({ text: "Answering as chat" }));
+    const inspectProject = vi.fn(async () => ({
+      workspacePath: "E:/Javis",
+      packageManager: "pnpm",
+      scripts: [],
+    }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments },
+      chatTool: { complete },
+      projectTool: { inspectProject },
+      shellTool: {
+        runReadOnlyCommand: vi.fn(async () => ({
+          command: "pnpm --version",
+          cwd: "E:/Javis",
+          exitCode: 0,
+          stdout: "ok",
+          stderr: "",
+        })),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("inspect this project", { mode: "chat" });
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(complete).toHaveBeenCalled();
+    expect(inspectProject).not.toHaveBeenCalled();
+    expect(finalSnapshot.title).toBe("Answered");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
   it("continues general chat with the existing task id and prior messages", async () => {
     const scanMarkdownDocuments = vi.fn(async () => []);
     const complete = vi.fn(async () => ({ text: "Second answer" }));
@@ -1201,6 +1314,48 @@ describe("createFileScanTaskRuntime", () => {
       { role: "assistant", content: "First answer" },
       { role: "user", content: "second question" },
       { role: "assistant", content: "Second answer" },
+    ]);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("continues workflow tasks with the existing task id and prior messages", async () => {
+    const documents: MarkdownDocument[] = [
+      {
+        path: "E:/Javis/README.md",
+        modifiedAt: "2026-05-25T00:00:00.000Z",
+        sizeBytes: 100,
+        heading: "Javis",
+        excerpt: "README",
+      },
+    ];
+    const scanMarkdownDocuments = vi.fn(async () => documents);
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("Find Markdown documents", {
+      taskId: "task-existing",
+      priorMessages: [
+        { role: "user", content: "first request" },
+        { role: "assistant", content: "First result" },
+      ],
+    });
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(finalSnapshot.id).toBe("task-existing");
+    expect(finalSnapshot.conversationMessages).toEqual([
+      { role: "user", content: "first request" },
+      { role: "assistant", content: "First result" },
+      { role: "user", content: "Find Markdown documents" },
+      {
+        role: "assistant",
+        content: "Document scan completed with read-only filesystem evidence.",
+      },
     ]);
 
     unsubscribe();
