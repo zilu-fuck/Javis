@@ -5,6 +5,8 @@ interface ResourceShellProps {
   icon: string;
   countLabel?: string;
   tabs?: string[];
+  activeTabIndex?: number;
+  onTabChange?: (index: number) => void;
   actions?: ReactNode;
   onBack?: () => void;
   children: ReactNode;
@@ -15,6 +17,8 @@ export function ResourceShell({
   icon,
   countLabel,
   tabs,
+  activeTabIndex = 0,
+  onTabChange,
   actions,
   onBack,
   children,
@@ -51,8 +55,9 @@ export function ResourceShell({
             <nav className="javis-resource-tabs" aria-label={title}>
               {tabs.map((tab, index) => (
                 <button
-                  className={index === 0 ? "active" : ""}
+                  className={index === activeTabIndex ? "active" : ""}
                   key={tab}
+                  onClick={() => onTabChange?.(index)}
                   type="button"
                 >
                   {tab}

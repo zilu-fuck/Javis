@@ -392,6 +392,7 @@ export interface TaskSnapshot {
   userGoal: string;
   status: TaskStatus;
   updatedAt?: ISODateTime;
+  scheduledTaskId?: ID;
   commanderMessage: string;
   plan: TaskStep[];
   agents: AgentSnapshot[];

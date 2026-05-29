@@ -1,4 +1,4 @@
-import type { TaskSnapshot } from "@javis/core";
+import { isTerminalTaskStatus, type TaskSnapshot } from "@javis/core";
 import type { DatabaseValue, DesktopDatabase, DesktopDatabaseMigration } from "./desktop-database";
 
 export const TASK_HISTORY_STORAGE_KEY = "javis.taskHistory.v1";
@@ -296,6 +296,9 @@ export function sanitizeTaskSnapshot(value: unknown): TaskSnapshot | null {
   if (isString(value.updatedAt)) {
     snapshot.updatedAt = value.updatedAt;
   }
+  if (isString(value.scheduledTaskId)) {
+    snapshot.scheduledTaskId = value.scheduledTaskId;
+  }
   if (isMarkdownDocumentArray(value.documents)) {
     snapshot.documents = value.documents;
   }
@@ -341,6 +344,12 @@ export function sanitizeTaskSnapshot(value: unknown): TaskSnapshot | null {
   }
   if (isChatMessageArray(value.conversationMessages)) {
     snapshot.conversationMessages = value.conversationMessages;
+  }
+  if (!snapshot.conversationMessages?.length && isTerminalTaskStatus(snapshot.status)) {
+    snapshot.conversationMessages = [
+      { role: "user", content: snapshot.userGoal },
+      { role: "assistant", content: snapshot.commanderMessage },
+    ];
   }
 
   return snapshot;

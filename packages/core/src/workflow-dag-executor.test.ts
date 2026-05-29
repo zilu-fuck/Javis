@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createSharedTaskContext } from "./shared-context";
 import { executeWorkflow } from "./workflow-dag-executor";
+import type { AgentCapabilityTag } from "./agent-capability";
 import type { WorkbenchWorkflow } from "./workflows";
 
 describe("executeWorkflow", () => {
@@ -169,10 +170,11 @@ function step(
 describe("capability-based dispatch", () => {
   it("executes step with requiredCapabilities field", async () => {
     const dispatched: string[] = [];
+    const requiredCapabilities: AgentCapabilityTag[] = ["file_scan"];
     const workflow = createWorkflow([
       {
         ...step("scan", [], false),
-        requiredCapabilities: ["file_scan"] as any[],
+        requiredCapabilities,
       },
     ]);
 
@@ -207,10 +209,11 @@ describe("capability-based dispatch", () => {
   });
 
   it("step with unrecognized requiredCapabilities still executes via fallback", async () => {
+    const requiredCapabilities = ["nonexistent_tag"] as unknown as AgentCapabilityTag[];
     const workflow = createWorkflow([
       {
         ...step("unknown-cap", [], false),
-        requiredCapabilities: ["nonexistent_tag"] as any[],
+        requiredCapabilities,
       },
     ]);
 

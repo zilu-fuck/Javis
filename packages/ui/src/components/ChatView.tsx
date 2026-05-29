@@ -10,6 +10,7 @@ interface ChatViewProps {
   locale: WorkbenchLocale;
   modelConfiguration?: WorkbenchModelConfiguration;
   recentWorkspacePaths: string[];
+  activeComposeMode?: "chat" | "project";
   userDocuments?: WorkbenchFileEntry[];
   onDraftGoalChange: (goal: string) => void;
   onBrowseWorkspacePath?: () => void;
@@ -29,6 +30,7 @@ export function ChatView({
   locale,
   modelConfiguration,
   recentWorkspacePaths,
+  activeComposeMode,
   userDocuments,
   onDraftGoalChange,
   onBrowseWorkspacePath,
@@ -42,6 +44,8 @@ export function ChatView({
 }: ChatViewProps) {
   const labels = locale.labels;
   const isNewChat = task.id === "task-idle";
+  const showWorkspaceContext =
+    activeComposeMode === "project" || Boolean(task.project || task.codeReviewPreview || task.codeProposedEdit || task.codeApplyResult);
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -51,6 +55,7 @@ export function ChatView({
   if (isNewChat) {
     return (
       <NewChat
+        composeMode={activeComposeMode ?? "chat"}
         currentWorkspacePath={currentWorkspacePath}
         draftGoal={draftGoal}
         labels={labels}
@@ -61,6 +66,7 @@ export function ChatView({
         onUseWorkspacePath={onUseWorkspacePath}
         onWorkspacePathChange={onWorkspacePathChange}
         recentWorkspacePaths={recentWorkspacePaths}
+        showWorkspaceContext={showWorkspaceContext}
         userDocuments={userDocuments}
       />
     );
@@ -83,6 +89,7 @@ export function ChatView({
       onUseWorkspacePath={onUseWorkspacePath}
       onWorkspacePathChange={onWorkspacePathChange}
       recentWorkspacePaths={recentWorkspacePaths}
+      showWorkspaceContext={showWorkspaceContext}
       task={task}
       userDocuments={userDocuments}
     />

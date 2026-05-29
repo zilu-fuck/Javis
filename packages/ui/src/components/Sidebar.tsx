@@ -8,6 +8,7 @@ import React, {
 import type {
   ActiveView,
   SidebarNavItem,
+  SidebarNavSubItem,
   WorkbenchHistoryEntry,
   WorkbenchLocale,
   WorkbenchModelConfiguration,
@@ -39,6 +40,8 @@ interface SidebarProps {
   sidebarResizeMin?: number;
   sidebarResizeValue?: number;
   skillCount?: number;
+  categoryStats?: { category: string; count: number }[];
+  mountRoots?: { name: string; path: string }[];
   /** Custom sidebar nav items. Falls back to built-in defaults when omitted. */
   sidebarNavItems?: SidebarNavItem[];
   onDeleteHistoryEntry?: (id: string) => void;
@@ -49,7 +52,9 @@ interface SidebarProps {
   onSelectHistoryEntry?: (id: string) => void;
   onSidebarSearchQueryChange: (query: string) => void;
   onChangeActiveView?: (view: ActiveView) => void;
+  onSelectComposeMode?: (mode: "chat" | "project") => void;
   onNavigateDirectory?: (path: string) => void;
+  activeComposeMode?: "chat" | "project";
 }
 
 const HISTORY_PREVIEW_COUNT = 4;
@@ -70,6 +75,8 @@ export function Sidebar({
   sidebarResizeMin,
   sidebarResizeValue,
   skillCount = 0,
+  categoryStats,
+  mountRoots,
   sidebarNavItems,
   onDeleteHistoryEntry,
   onModelSettingsChange,
@@ -79,7 +86,9 @@ export function Sidebar({
   onSelectHistoryEntry,
   onSidebarSearchQueryChange,
   onChangeActiveView,
+  onSelectComposeMode,
   onNavigateDirectory,
+  activeComposeMode,
 }: SidebarProps) {
   const filteredHistoryEntries = filterWorkbenchHistoryEntries(
     historyEntries,
@@ -88,14 +97,20 @@ export function Sidebar({
   const hasHistorySearch = sidebarSearchQuery.trim().length > 0;
 
   const effectiveNavItems = useMemo(
-    () =>
-      sidebarNavItems
+    () => {
+      const builtinOptions = {
+        categoryStats,
+        mountRoots,
+        categoryLabels: locale.categoryLabels,
+      };
+      return sidebarNavItems
         ? mergeSidebarNavItems(
-            getBuiltinSidebarNavItems(labels, scheduledTaskCount, skillCount),
+            getBuiltinSidebarNavItems(labels, scheduledTaskCount, skillCount, builtinOptions),
             sidebarNavItems,
           )
-        : getBuiltinSidebarNavItems(labels, scheduledTaskCount, skillCount),
-    [labels, scheduledTaskCount, skillCount, sidebarNavItems],
+        : getBuiltinSidebarNavItems(labels, scheduledTaskCount, skillCount, builtinOptions);
+    },
+    [labels, scheduledTaskCount, skillCount, sidebarNavItems, categoryStats, mountRoots, locale.categoryLabels],
   );
 
   // Derive collapsible view IDs from nav items
@@ -174,13 +189,19 @@ export function Sidebar({
   }
 
   function navCollapsibleItem(viewId: string, icon: string, label: string) {
-    const isActive = activeView === viewId;
+    const isActive =
+      viewId === "chat"
+        ? activeView === viewId && !activeHistoryEntryId
+        : activeView === viewId;
     const isCollapsed = collapsedGroups[viewId] ?? true;
 
     function handleClick() {
       if (isActive) {
         setCollapsedGroups((current) => ({ ...current, [viewId]: !current[viewId] }));
         return;
+      }
+      if (viewId === "chat") {
+        onSelectComposeMode?.("chat");
       }
       setCollapsedGroups((current) => ({ ...current, [viewId]: false }));
       onChangeActiveView?.(viewId);
@@ -207,22 +228,32 @@ export function Sidebar({
     );
   }
 
-  function navSubitem(viewId: string, label: string, path?: string) {
+  function navSubitem(parentViewId: string, subitem: SidebarNavSubItem) {
+    const targetViewId = subitem.viewId ?? parentViewId;
+    const isActive =
+      parentViewId === "chat" &&
+      activeView === "chat" &&
+      !activeHistoryEntryId &&
+      subitem.mode === activeComposeMode;
+
     function handleClick() {
-      onChangeActiveView?.(viewId);
-      if (path) {
-        onNavigateDirectory?.(path);
+      if (subitem.mode) {
+        onSelectComposeMode?.(subitem.mode);
+      }
+      onChangeActiveView?.(targetViewId);
+      if (subitem.path) {
+        onNavigateDirectory?.(subitem.path);
       }
     }
 
     return (
       <button
-        className="javis-nav-subitem"
+        className={`javis-nav-subitem ${isActive ? "active" : ""}`}
         onClick={handleClick}
         type="button"
       >
         <span />
-        <span>{label}</span>
+        <span>{subitem.label}</span>
       </button>
     );
   }
@@ -257,7 +288,9 @@ export function Sidebar({
                 {navCollapsibleItem(item.viewId, item.icon, item.label)}
                 {!isCollapsed &&
                   item.subitems?.map((sub) => (
-                    navSubitem(item.viewId, sub.label, sub.path)
+                    <React.Fragment key={`${item.viewId}-${sub.viewId ?? item.viewId}-${sub.path ?? sub.label}`}>
+                      {navSubitem(item.viewId, sub)}
+                    </React.Fragment>
                   ))}
               </React.Fragment>
             );

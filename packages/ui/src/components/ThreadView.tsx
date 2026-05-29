@@ -22,6 +22,7 @@ interface ThreadViewProps {
   locale: WorkbenchLocale;
   modelConfiguration?: WorkbenchModelConfiguration;
   recentWorkspacePaths: string[];
+  showWorkspaceContext?: boolean;
   task: WorkbenchTask;
   userDocuments?: WorkbenchFileEntry[];
   onBrowseWorkspacePath?: () => void;
@@ -42,6 +43,7 @@ export function ThreadView({
   locale,
   modelConfiguration,
   recentWorkspacePaths,
+  showWorkspaceContext = false,
   task,
   userDocuments,
   onBrowseWorkspacePath,
@@ -187,6 +189,7 @@ export function ThreadView({
         onUseWorkspacePath={onUseWorkspacePath}
         onWorkspacePathChange={onWorkspacePathChange}
         recentWorkspacePaths={recentWorkspacePaths}
+        showWorkspaceContext={showWorkspaceContext}
         userDocuments={userDocuments}
       />
     </>

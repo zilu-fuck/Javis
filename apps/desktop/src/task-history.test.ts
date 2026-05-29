@@ -248,6 +248,20 @@ describe("task history persistence", () => {
     expect(loaded[0]?.codeReviewPreview?.diff).toContain("diff --git");
   });
 
+  it("keeps scheduled task ids in completed task history", () => {
+    const storage = createMemoryStorage();
+    const task = {
+      ...createTask("task-1000"),
+      scheduledTaskId: "st-1000",
+    } satisfies TaskSnapshot;
+
+    saveTaskHistory(storage, [task]);
+    const loaded = loadTaskHistory(storage);
+
+    expect(loaded[0]?.scheduledTaskId).toBe("st-1000");
+    expect(storage.getItem(TASK_HISTORY_STORAGE_KEY)).toContain("st-1000");
+  });
+
   it("keeps Code Agent proposal and apply results in completed task history", () => {
     const storage = createMemoryStorage();
     const task = {
@@ -429,13 +443,14 @@ describe("task history persistence", () => {
         throw new Error("unavailable");
       },
     };
+    const expectedTask = sanitizeTaskSnapshot(createTask("task-1000"));
 
     await expect(
       loadTaskHistoryWithStorageFallback(failingRepository, storage),
-    ).resolves.toEqual([createTask("task-1000")]);
+    ).resolves.toEqual(expectedTask ? [expectedTask] : []);
     await expect(
       loadTaskHistoryWithStorageFallback(null, storage),
-    ).resolves.toEqual([createTask("task-1000")]);
+    ).resolves.toEqual(expectedTask ? [expectedTask] : []);
   });
 });
 

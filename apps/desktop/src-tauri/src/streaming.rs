@@ -12,7 +12,6 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use crate::{
-    create_chat_completions_endpoint,
     create_openai_compatible_stream_body,
     extract_openai_compatible_usage,
     default_openai_compatible_base_url_for_provider,
@@ -20,10 +19,10 @@ use crate::{
     hydrate_model_completion_api_key_secret,
     infer_model_completion_provider_id,
     normalize_model_completion_model_name,
-    normalize_optional_config_value,
     ModelCompletionRequest,
     ModelUsage,
 };
+use crate::code::{create_chat_completions_endpoint, normalize_optional_config_value};
 
 const STREAMING_READ_TIMEOUT: Duration = Duration::from_secs(120);
 

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { Event } from "@tauri-apps/api/event";
 import {
   scanAllUserFiles,
   cancelScanAllFiles,
@@ -22,24 +23,36 @@ describe("local knowledge bridge", () => {
   });
 
   describe("scanAllUserFiles", () => {
+    function setupListenMock() {
+      const handlers: Record<string, ((event: Event<unknown>) => void)[]> = {};
+      listenMock.mockImplementation((eventName: string, cb: (event: Event<unknown>) => void) => {
+        (handlers[eventName] ??= []).push(cb);
+        return Promise.resolve(() => {});
+      });
+      return handlers;
+    }
+
     it("invokes scan_all_user_files with extensions and maxResults", async () => {
-      // The scan runs in a background thread; verify the invoke call is correct.
-      // The returned Promise would resolve when scan-all-files-done fires.
+      const handlers = setupListenMock();
       invokeMock.mockResolvedValueOnce("scan-1");
 
-      // Fire the promise (it will hang waiting for events — we test invoke args only)
       const promise = scanAllUserFiles([".txt", ".pdf"], 200);
-
-      // Let the microtask queue flush so invoke is called
       await new Promise((r) => setTimeout(r, 10));
 
       expect(invokeMock).toHaveBeenCalledWith("scan_all_user_files", {
         extensions: [".txt", ".pdf"],
         maxResults: 200,
       });
+
+      // Simulate scan completion event
+      for (const cb of handlers["scan-all-files-done"] ?? []) {
+        cb({ event: "scan-all-files-done", id: 1, payload: { scanId: "scan-1", entries: [] } });
+      }
+      await expect(promise).resolves.toEqual([]);
     });
 
     it("passes null for omitted optional parameters", async () => {
+      const handlers = setupListenMock();
       invokeMock.mockResolvedValueOnce("scan-2");
 
       const promise = scanAllUserFiles();
@@ -49,6 +62,24 @@ describe("local knowledge bridge", () => {
         extensions: null,
         maxResults: null,
       });
+
+      for (const cb of handlers["scan-all-files-done"] ?? []) {
+        cb({ event: "scan-all-files-done", id: 1, payload: { scanId: "scan-2", entries: [] } });
+      }
+      await expect(promise).resolves.toEqual([]);
+    });
+
+    it("rejects when scan-all-files-error fires", async () => {
+      const handlers = setupListenMock();
+      invokeMock.mockResolvedValueOnce("scan-3");
+
+      const promise = scanAllUserFiles();
+      await new Promise((r) => setTimeout(r, 10));
+
+      for (const cb of handlers["scan-all-files-error"] ?? []) {
+        cb({ event: "scan-all-files-error", id: 1, payload: { scanId: "scan-3", error: "disk full" } });
+      }
+      await expect(promise).rejects.toThrow("disk full");
     });
   });
 

@@ -1217,6 +1217,15 @@ textarea:focus-visible {
   justify-self: start;
 }
 
+.javis-new-chat-actions > .javis-send-button {
+  grid-column: 3;
+  justify-self: end;
+  min-width: 58px;
+  height: 30px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
 .javis-attach-menu {
   position: relative;
   width: 34px;
@@ -3549,4 +3558,123 @@ ul.javis-mention-dropdown {
   backdrop-filter: blur(var(--glass-blur-strong));
   -webkit-backdrop-filter: blur(var(--glass-blur-strong));
   box-shadow: var(--shadow-panel);
+}
+
+/* ── Classification UI ──────────────────────────────────────────── */
+
+.javis-spinner--small {
+  width: 14px;
+  height: 14px;
+  border-width: 1.5px;
+}
+
+.javis-classify-status {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  border-radius: var(--radius-md);
+  background: var(--color-accent-soft);
+  border: 1px solid var(--glass-border-accent);
+  font-size: 13px;
+}
+
+.javis-classify-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--color-accent-strong);
+}
+
+.javis-classify-count {
+  color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.javis-classify-pending {
+  color: var(--color-subtle);
+  font-size: 12px;
+}
+
+.javis-classify-progress-bar {
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-line);
+  overflow: hidden;
+}
+
+.javis-classify-progress-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--color-accent);
+  transition: width var(--duration-normal) var(--ease-smooth);
+}
+
+/* ── Category badge ─────────────────────────────────────────────── */
+
+.javis-category-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.javis-category-badge--unclassified {
+  background: var(--color-line-soft);
+  color: var(--color-subtle);
+}
+
+/* ── Tags ───────────────────────────────────────────────────────── */
+
+.javis-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--glass-border);
+  color: var(--color-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.javis-doc-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.javis-gallery-category-badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--glass-border);
+  color: var(--color-accent-strong);
+  font-size: 10px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.javis-gallery-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  justify-content: center;
+  max-width: 100%;
+}
+
+.javis-gallery-thumb {
+  position: relative;
 }

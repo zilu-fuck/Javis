@@ -1,5 +1,8 @@
 import { useState } from "react";
-import type { WorkbenchFileEntry, WorkbenchLocale } from "../types";
+import type {
+  WorkbenchFileEntry,
+  WorkbenchLocale,
+} from "../types";
 import { formatModifiedTime, formatSize } from "../utils";
 import { createCountLabel, ResourceIconButton, ResourceShell } from "./ResourceShell";
 
@@ -8,7 +11,15 @@ interface GalleryViewProps {
   locale: WorkbenchLocale;
   loading?: boolean;
   error?: string;
+  scanning?: boolean;
+  scanProgress?: { current: number; total: number };
+  classifying?: boolean;
+  classifyProgress?: { completed: number; total: number };
+  categoryStats?: { category: string; count: number }[];
   onRefresh?: () => void;
+  onRefreshScan?: () => void;
+  onClassifyDocuments?: () => void;
+  onCancelClassify?: () => void;
   onOpen?: (path: string) => void;
 }
 
@@ -17,14 +28,47 @@ export function GalleryView({
   locale,
   loading,
   error,
+  scanning,
+  scanProgress,
+  classifying,
+  classifyProgress,
+  categoryStats = [],
   onRefresh,
+  onRefreshScan,
+  onClassifyDocuments,
+  onCancelClassify,
   onOpen,
 }: GalleryViewProps) {
   const labels = locale.labels;
+  const categoryLabels = locale.categoryLabels ?? {};
   const [query, setQuery] = useState("");
-  const filtered = images.filter((image) =>
-    image.name.toLowerCase().includes(query.toLowerCase()),
-  );
+  const [activeCategory, setActiveCategory] = useState<string | null>(null);
+
+  const filtered = images.filter((image) => {
+    const matchesQuery = image.name.toLowerCase().includes(query.toLowerCase());
+    const matchesCategory = activeCategory == null || image.category === activeCategory;
+    return matchesQuery && matchesCategory;
+  });
+
+  const categoryTabs = [
+    { key: null, label: labels.allCategories, count: images.length },
+    ...categoryStats.map((s) => ({
+      key: s.category,
+      label: categoryLabels[s.category] ?? s.category,
+      count: s.count,
+    })),
+  ];
+
+  const activeTabIndex = activeCategory == null
+    ? 0
+    : categoryTabs.findIndex((t) => t.key === activeCategory);
+
+  function handleTabChange(index: number) {
+    setActiveCategory(categoryTabs[index]?.key ?? null);
+  }
+
+  const unclassifiedCount = images.filter((d) => d.category == null).length;
+
   const actions = (
     <>
       <label className="javis-resource-search">
@@ -36,7 +80,21 @@ export function GalleryView({
         />
       </label>
       <ResourceIconButton label={labels.retry} onClick={onRefresh}>⟳</ResourceIconButton>
-      <ResourceIconButton label="Filter">▽</ResourceIconButton>
+      <ResourceIconButton
+        label={scanning ? labels.scanInProgress : labels.retry}
+        onClick={onRefreshScan}
+      >
+        {scanning ? <span className="javis-spinner javis-spinner--small" /> : "⟳"}
+      </ResourceIconButton>
+      {classifying ? (
+        <ResourceIconButton label={labels.cancelClassify} onClick={onCancelClassify}>
+          ■
+        </ResourceIconButton>
+      ) : (
+        <ResourceIconButton label={labels.classifyButton} onClick={onClassifyDocuments}>
+          ✦
+        </ResourceIconButton>
+      )}
       <div className="javis-resource-slider" aria-hidden="true">
         <span>-</span>
         <span />
@@ -88,11 +146,51 @@ export function GalleryView({
   return (
     <ResourceShell
       actions={actions}
+      activeTabIndex={activeTabIndex}
       countLabel={createCountLabel(labels.gallery, filtered.length)}
       icon="▣"
-      tabs={["全部图片", "图片识别", "人物印象", "足迹地点", "时光长廊"]}
+      onTabChange={handleTabChange}
+      tabs={categoryTabs.map((t) => `${t.label}(${t.count})`)}
       title={labels.gallery}
     >
+      {(scanning || classifying || classifyProgress) && (
+        <div className="javis-classify-status">
+          {scanning && (
+            <div className="javis-classify-status-row">
+              <span className="javis-spinner javis-spinner--small" />
+              <span>{labels.scanInProgress}</span>
+              {scanProgress && (
+                <span className="javis-classify-count">
+                  {scanProgress.current.toLocaleString()} / {scanProgress.total.toLocaleString()}
+                </span>
+              )}
+            </div>
+          )}
+          {classifying && classifyProgress && (
+            <div className="javis-classify-status-row">
+              <span className="javis-spinner javis-spinner--small" />
+              <span>{labels.classifyButton}</span>
+              <span className="javis-classify-count">
+                {classifyProgress.completed} / {classifyProgress.total}
+              </span>
+              {unclassifiedCount > 0 && (
+                <span className="javis-classify-pending">
+                  ({unclassifiedCount.toLocaleString()} pending)
+                </span>
+              )}
+            </div>
+          )}
+          {classifyProgress && !classifying && (
+            <div className="javis-classify-progress-bar">
+              <div
+                className="javis-classify-progress-fill"
+                style={{ width: `${(classifyProgress.completed / classifyProgress.total) * 100}%` }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
       {filtered.length === 0 ? (
         <div className="javis-view-empty">
           <p>{labels.noImagesFound}</p>
@@ -100,7 +198,12 @@ export function GalleryView({
       ) : (
         <div className="javis-gallery-grid">
           {filtered.map((image) => (
-            <GalleryItem image={image} key={image.path} onOpen={onOpen} />
+            <GalleryItem
+              categoryLabels={categoryLabels}
+              image={image}
+              key={image.path}
+              onOpen={onOpen}
+            />
           ))}
         </div>
       )}
@@ -110,9 +213,11 @@ export function GalleryView({
 
 function GalleryItem({
   image,
+  categoryLabels,
   onOpen,
 }: {
   image: WorkbenchFileEntry;
+  categoryLabels: Record<string, string>;
   onOpen?: (path: string) => void;
 }) {
   return (
@@ -125,7 +230,19 @@ function GalleryItem({
       <span className="javis-gallery-icon">
         {image.name.charAt(0).toUpperCase()}
       </span>
+      {image.category && (
+        <span className="javis-gallery-category-badge">
+          {categoryLabels[image.category] ?? image.category}
+        </span>
+      )}
       <span className="javis-gallery-name">{image.name}</span>
+      {image.tags && image.tags.length > 0 && (
+        <span className="javis-gallery-tags">
+          {image.tags.slice(0, 2).map((tag) => (
+            <span className="javis-tag" key={tag}>{tag}</span>
+          ))}
+        </span>
+      )}
     </button>
   );
 }

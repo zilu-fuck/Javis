@@ -1,10 +1,61 @@
 import type { SidebarNavItem, WorkbenchLocale } from "./types";
 
+export interface BuiltinNavOptions {
+  categoryStats?: { category: string; count: number }[];
+  mountRoots?: { name: string; path: string }[];
+  categoryLabels?: Record<string, string>;
+}
+
 export function getBuiltinSidebarNavItems(
   labels: WorkbenchLocale["labels"],
   scheduledTaskCount = 0,
   skillCount = 0,
+  options?: BuiltinNavOptions,
 ): SidebarNavItem[] {
+  const categoryLabels = options?.categoryLabels ?? {};
+  const categoryStats = options?.categoryStats ?? [];
+  const mountRoots = options?.mountRoots;
+
+  const docCategories = categoryStats.filter(
+    (s) => s.category !== "图片",
+  );
+  const imageCategories = categoryStats.filter(
+    (s) => s.category === "图片",
+  );
+
+  const docSubitems = docCategories.length > 0
+    ? docCategories.map((s) => ({
+        label: `${categoryLabels[s.category] ?? s.category}(${s.count})`,
+        viewId: "documents" as const,
+      }))
+    : [
+        { label: labels.kbDocRecognition },
+        { label: labels.kbCourseware },
+        { label: labels.kbBooks },
+        { label: labels.kbPapers },
+      ];
+
+  const gallerySubitems = imageCategories.length > 0
+    ? imageCategories.map((s) => ({
+        label: `${categoryLabels[s.category] ?? s.category}(${s.count})`,
+        viewId: "gallery" as const,
+      }))
+    : [
+        { label: labels.kbImageRecognition },
+        { label: labels.kbPeopleImpressions },
+        { label: labels.kbFootprintLocations },
+        { label: labels.kbTimelineGallery },
+      ];
+
+  const computerSubitems = mountRoots && mountRoots.length > 0
+    ? mountRoots.map((r) => ({ label: r.name, path: r.path }))
+    : [
+        { label: labels.kbSystemDrive, path: "C:\\" },
+        { label: labels.kbDriveE, path: "E:\\" },
+        { label: labels.kbDriveF, path: "F:\\" },
+        { label: labels.kbDriveG, path: "G:\\" },
+      ];
+
   return [
     {
       viewId: "chat",
@@ -12,6 +63,11 @@ export function getBuiltinSidebarNavItems(
       label: labels.newChat,
       group: "primary",
       order: 0,
+      collapsible: true,
+      subitems: [
+        { label: labels.chat, mode: "chat" },
+        { label: labels.project, mode: "project" },
+      ],
     },
     {
       viewId: "automated",
@@ -43,12 +99,7 @@ export function getBuiltinSidebarNavItems(
       group: "knowledge",
       order: 1,
       collapsible: true,
-      subitems: [
-        { label: labels.kbDocRecognition },
-        { label: labels.kbCourseware },
-        { label: labels.kbBooks },
-        { label: labels.kbPapers },
-      ],
+      subitems: docSubitems,
     },
     {
       viewId: "gallery",
@@ -57,12 +108,7 @@ export function getBuiltinSidebarNavItems(
       group: "knowledge",
       order: 2,
       collapsible: true,
-      subitems: [
-        { label: labels.kbImageRecognition },
-        { label: labels.kbPeopleImpressions },
-        { label: labels.kbFootprintLocations },
-        { label: labels.kbTimelineGallery },
-      ],
+      subitems: gallerySubitems,
     },
     {
       viewId: "computer",
@@ -71,12 +117,7 @@ export function getBuiltinSidebarNavItems(
       group: "knowledge",
       order: 3,
       collapsible: true,
-      subitems: [
-        { label: labels.kbSystemDrive, path: "C:\\" },
-        { label: labels.kbDriveE, path: "E:\\" },
-        { label: labels.kbDriveF, path: "F:\\" },
-        { label: labels.kbDriveG, path: "G:\\" },
-      ],
+      subitems: computerSubitems,
     },
   ];
 }

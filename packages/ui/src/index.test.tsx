@@ -13,6 +13,7 @@ describe("JavisWorkbench permission cards", () => {
     const html = renderToStaticMarkup(
       <JavisWorkbench
         draftGoal="检查当前项目"
+        activeComposeMode="chat"
         locale={zhCNWorkbenchLocale}
         onDraftGoalChange={vi.fn()}
         onDeleteRecentWorkspacePath={vi.fn()}
@@ -32,10 +33,11 @@ describe("JavisWorkbench permission cards", () => {
     );
 
     expect(html).toContain("新建对话");
-    expect(html).toContain("今天想让 Javis 做什么？");
+    expect(html).toContain("今天想跟 Javis 聊点什么？");
     expect(html).toContain("javis-main new-chat");
     expect(html).not.toContain("主线程");
     expect(html).not.toContain("等待任务");
+    expect(html).toContain("想聊点什么...");
     expect(html).toContain("发送");
   });
 
@@ -119,8 +121,8 @@ describe("JavisWorkbench permission cards", () => {
       />,
     );
 
-    expect(html).toContain("<button class=\"javis-nav-subitem\" type=\"button\"");
-    expect(html).toContain("文档识别");
+    expect(html).toContain("javis-nav-subitem");
+    expect(html).toContain("Doc Recognition");
   });
 
   it("normalizes Windows namespace prefixes in computer breadcrumbs", () => {
@@ -756,6 +758,7 @@ describe("JavisWorkbench permission cards", () => {
       <JavisWorkbench
         currentWorkspacePath="E:/Javis"
         draftGoal="Inspect project"
+        activeComposeMode="project"
         onBrowseWorkspacePath={vi.fn()}
         onDraftGoalChange={vi.fn()}
         onSubmitGoal={vi.fn()}
@@ -763,6 +766,7 @@ describe("JavisWorkbench permission cards", () => {
         onWorkspacePathChange={vi.fn()}
         recentWorkspacePaths={["E:/Javis", "F:/Other"]}
         task={{
+          id: "task-idle",
           title: "Ready",
           userGoal: "Waiting for a task",
           status: "created",
@@ -781,6 +785,37 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).toContain("Recent workspaces");
     expect(html).toContain("F:/Other");
     expect(html).toContain("aria-label=\"Remove: E:/Javis\"");
+    expect(html).toContain("What should Javis work on?");
+    expect(html).toContain("Ask Javis to do something...");
+  });
+
+  it("hides workspace controls in new chat mode", () => {
+    const html = renderToStaticMarkup(
+      <JavisWorkbench
+        currentWorkspacePath="E:/Javis"
+        draftGoal="Inspect project"
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={{
+          id: "task-idle",
+          title: "Ready",
+          userGoal: "Waiting for a task",
+          status: "created",
+          commanderMessage:
+            "Javis desktop is ready. Enter a goal to start the Core event stream.",
+          plan: [],
+          agents: [],
+          logs: [],
+        }}
+        recentWorkspacePaths={["E:/Javis", "F:/Other"]}
+      />,
+    );
+
+    expect(html).not.toContain("Current workspace");
+    expect(html).not.toContain("Recent workspaces");
+    expect(html).toContain("javis-main new-chat");
+    expect(html).toContain("What do you want to chat about today?");
+    expect(html).toContain("What do you want to talk about?");
   });
 
   it("renders settings entry instead of the profile footer", () => {
@@ -821,6 +856,7 @@ describe("JavisWorkbench permission cards", () => {
       <JavisWorkbench
         currentWorkspacePath="E:/Javis"
         draftGoal="Inspect project"
+        activeComposeMode="project"
         locale={zhCNWorkbenchLocale}
         onBrowseWorkspacePath={vi.fn()}
         onDraftGoalChange={vi.fn()}
@@ -829,6 +865,7 @@ describe("JavisWorkbench permission cards", () => {
         onWorkspacePathChange={vi.fn()}
         recentWorkspacePaths={["E:/Javis"]}
         task={{
+          id: "task-idle",
           title: "Ready",
           userGoal: "Waiting for a task",
           status: "created",
@@ -845,6 +882,8 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).toContain("aria-label=\"移除: E:/Javis\"");
     expect(html).not.toContain(">Browse<");
     expect(html).not.toContain("Remove: E:/Javis");
+    expect(html).toContain("今天想让 Javis 做什么？");
+    expect(html).toContain("让 Javis 做点什么...");
   });
 });
 

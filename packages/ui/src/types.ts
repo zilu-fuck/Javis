@@ -230,6 +230,8 @@ export type ActiveView = string;
 export interface SidebarNavSubItem {
   label: string;
   path?: string;
+  viewId?: ActiveView;
+  mode?: "chat" | "project";
 }
 
 export interface SidebarNavItem {
@@ -274,6 +276,9 @@ export interface WorkbenchFileEntry {
   sizeBytes?: number;
   modifiedAt?: string;
   extension?: string;
+  category?: string;
+  tags?: string[];
+  confidence?: number;
 }
 
 export interface WorkbenchAppEntry {
@@ -304,6 +309,7 @@ export interface JavisWorkbenchProps {
   userImages?: WorkbenchFileEntry[];
   computerEntries?: WorkbenchFileEntry[];
   computerPath?: string;
+  mountRoots?: { name: string; path: string }[];
   isTaskActive?: boolean;
   appsLoading?: boolean;
   docsLoading?: boolean;
@@ -313,6 +319,15 @@ export interface JavisWorkbenchProps {
   docsError?: string;
   imagesError?: string;
   computerError?: string;
+  // ── File classification ─────────────────────────────────────────
+  scanning?: boolean;
+  scanProgress?: { current: number; total: number };
+  classifying?: boolean;
+  classifyProgress?: { completed: number; total: number };
+  categoryStats?: { category: string; count: number }[];
+  onRefreshScan?: () => void;
+  onClassifyDocuments?: () => void;
+  onCancelClassify?: () => void;
   onDraftGoalChange: (nextGoal: string) => void;
   onDeleteHistoryEntry?: (id: string) => void;
   onDeleteRecentWorkspacePath?: (path: string) => void;
@@ -327,6 +342,8 @@ export interface JavisWorkbenchProps {
   onStopTask?: () => void;
   onSubmitGoal: (goal?: string, workspacePath?: string, scheduledTaskId?: string) => void;
   onChangeActiveView?: (view: ActiveView) => void;
+  onSelectComposeMode?: (mode: "chat" | "project") => void;
+  activeComposeMode?: "chat" | "project";
   onToggleScheduledTask?: (id: string) => void;
   onDeleteScheduledTask?: (id: string) => void;
   onRefreshApps?: () => void;
@@ -345,6 +362,7 @@ export interface JavisWorkbenchProps {
 }
 
 export interface WorkbenchLocale {
+  categoryLabels?: Record<string, string>;
   labels: {
     activeTask: string;
     activityLog: string;
@@ -400,12 +418,15 @@ export interface WorkbenchLocale {
     moreInputOptions: string;
     newChat: string;
     newChatTitle: string;
+    chatNewChatTitle: string;
+    chat: string;
     office: string;
     packageScript: string;
     plan: string;
     planMode: string;
     plugins: string;
     projectInspection: string;
+    project: string;
     processDetails: string;
     projects: string;
     profileName: string;
@@ -423,6 +444,7 @@ export interface WorkbenchLocale {
     status: string;
     taskInput: string;
     taskInputPlaceholder: string;
+    chatTaskInputPlaceholder: string;
     testCheck: string;
     thisComputer: string;
     tokenUsage: string;
@@ -489,6 +511,13 @@ export interface WorkbenchLocale {
     kbDriveE: string;
     kbDriveF: string;
     kbDriveG: string;
+    classifyButton: string;
+    cancelClassify: string;
+    classifyProgress: string;
+    classifyFailed: string;
+    allCategories: string;
+    categoryBadge: string;
+    confidenceLabel: string;
   };
   phrases?: Record<string, string>;
 }

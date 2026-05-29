@@ -47,6 +47,7 @@ export function JavisWorkbench({
   userImages = [],
   computerEntries = [],
   computerPath = "",
+  mountRoots = [],
   isTaskActive = false,
   appsLoading = false,
   docsLoading = false,
@@ -56,6 +57,14 @@ export function JavisWorkbench({
   docsError,
   imagesError,
   computerError,
+  scanning = false,
+  scanProgress,
+  classifying = false,
+  classifyProgress,
+  categoryStats = [],
+  onRefreshScan,
+  onClassifyDocuments,
+  onCancelClassify,
   onDraftGoalChange,
   onDeleteHistoryEntry,
   onDeleteRecentWorkspacePath,
@@ -70,6 +79,8 @@ export function JavisWorkbench({
   onStopTask,
   onSubmitGoal,
   onChangeActiveView,
+  onSelectComposeMode,
+  activeComposeMode,
   onToggleScheduledTask,
   onDeleteScheduledTask,
   onRefreshApps,
@@ -252,6 +263,7 @@ export function JavisWorkbench({
         onDraftGoalChange={onDraftGoalChange}
         onPermissionDecision={onPermissionDecision}
         modelConfiguration={modelConfiguration}
+        activeComposeMode={activeComposeMode}
         onRetryTask={onRetryTask}
         onStopTask={onStopTask}
         onSubmitGoal={onSubmitGoal}
@@ -263,11 +275,11 @@ export function JavisWorkbench({
       />
     ),
     [
-      currentWorkspacePath, draftGoal, effectiveLocale, onBrowseWorkspacePath,
-      onDeleteRecentWorkspacePath, onDraftGoalChange, onPermissionDecision,
-      modelConfiguration, onRetryTask, onStopTask, onSubmitGoal,
-      onUseWorkspacePath, onWorkspacePathChange, recentWorkspacePaths,
-      task, userDocuments,
+      activeComposeMode, currentWorkspacePath, draftGoal, effectiveLocale,
+      onBrowseWorkspacePath, onDeleteRecentWorkspacePath, onDraftGoalChange,
+      onPermissionDecision, modelConfiguration, onRetryTask, onStopTask,
+      onSubmitGoal, onUseWorkspacePath, onWorkspacePathChange,
+      recentWorkspacePaths, task, userDocuments,
     ],
   );
   const renderAutomatedView = useCallback(
@@ -302,28 +314,52 @@ export function JavisWorkbench({
   const renderDocumentsView = useCallback(
     () => (
       <DocumentsView
+        categoryStats={categoryStats}
+        classifying={classifying}
+        classifyProgress={classifyProgress}
         documents={userDocuments}
         error={docsError}
         loading={docsLoading}
         locale={effectiveLocale}
+        onCancelClassify={onCancelClassify}
+        onClassifyDocuments={onClassifyDocuments}
         onOpen={onOpenFile}
         onRefresh={onRefreshDocuments}
+        onRefreshScan={onRefreshScan}
+        scanProgress={scanProgress}
+        scanning={scanning}
       />
     ),
-    [userDocuments, docsError, docsLoading, effectiveLocale, onOpenFile, onRefreshDocuments],
+    [
+      categoryStats, classifying, classifyProgress, userDocuments, docsError,
+      docsLoading, effectiveLocale, onCancelClassify, onClassifyDocuments,
+      onOpenFile, onRefreshDocuments, onRefreshScan, scanProgress, scanning,
+    ],
   );
   const renderGalleryView = useCallback(
     () => (
       <GalleryView
+        categoryStats={categoryStats}
+        classifying={classifying}
+        classifyProgress={classifyProgress}
         error={imagesError}
         images={userImages}
         loading={imagesLoading}
         locale={effectiveLocale}
+        onCancelClassify={onCancelClassify}
+        onClassifyDocuments={onClassifyDocuments}
         onOpen={onOpenFile}
         onRefresh={onRefreshImages}
+        onRefreshScan={onRefreshScan}
+        scanProgress={scanProgress}
+        scanning={scanning}
       />
     ),
-    [imagesError, userImages, imagesLoading, effectiveLocale, onOpenFile, onRefreshImages],
+    [
+      categoryStats, classifying, classifyProgress, imagesError, userImages,
+      imagesLoading, effectiveLocale, onCancelClassify, onClassifyDocuments,
+      onOpenFile, onRefreshImages, onRefreshScan, scanProgress, scanning,
+    ],
   );
   const renderComputerView = useCallback(
     () => (
@@ -396,12 +432,14 @@ export function JavisWorkbench({
       <Sidebar
         activeView={activeView}
         activeHistoryEntryId={activeHistoryEntryId}
+        categoryStats={categoryStats}
         currentWorkspacePath={currentWorkspacePath}
         historyEntries={historyEntries}
         labels={labels}
         locale={effectiveLocale}
         modelSettings={effectiveModelSettings}
         modelConfiguration={modelConfiguration}
+        mountRoots={mountRoots}
         recentWorkspacePaths={recentWorkspacePaths}
         onChangeActiveView={handleChangeActiveView}
         onDeleteHistoryEntry={onDeleteHistoryEntry}
@@ -410,6 +448,7 @@ export function JavisWorkbench({
         onResizeKeyDown={handleSidebarResizeKeyDown}
         onResizeStart={handleSidebarResizeStart}
         onNavigateDirectory={onNavigateDirectory}
+        onSelectComposeMode={onSelectComposeMode}
         sidebarResizeMax={SIDEBAR_MAX_WIDTH}
         sidebarResizeMin={SIDEBAR_MIN_WIDTH}
         sidebarResizeValue={sidebarResizeValue}
@@ -419,9 +458,10 @@ export function JavisWorkbench({
         sidebarSearchQuery={sidebarSearchQuery}
         skillCount={skillEntries.length}
         sidebarNavItems={sidebarNavItems}
+        activeComposeMode={activeComposeMode}
       />
 
-      <main className={`javis-main ${isChatView && !activeHistoryEntryId ? "new-chat" : ""}`}>
+      <main className={`javis-main ${isChatView && task.id === "task-idle" ? "new-chat" : ""}`}>
         {renderMainContent()}
       </main>
 

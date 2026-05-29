@@ -1,4 +1,4 @@
-export interface DesktopDatabase {
+﻿export interface DesktopDatabase {
   execute(sql: string, bindValues?: DatabaseValue[]): Promise<void>;
   select<T extends Record<string, unknown>>(
     sql: string,
@@ -13,15 +13,19 @@ export interface DesktopDatabaseMigration {
   sql: string;
 }
 
+interface TauriInternals {
+  invoke?: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+}
+
 function directInvoke(
   command: string,
   args?: Record<string, unknown>,
 ): Promise<unknown> {
-  const internals = (window as any).__TAURI_INTERNALS__;
-  if (!internals?.invoke) {
-    throw new Error("Tauri IPC not ready — __TAURI_INTERNALS__ missing");
+  const internals = window as unknown as { __TAURI_INTERNALS__?: TauriInternals };
+  if (!internals.__TAURI_INTERNALS__?.invoke) {
+    throw new Error("Tauri IPC not ready - __TAURI_INTERNALS__ missing");
   }
-  return internals.invoke(command, args ?? {});
+  return internals.__TAURI_INTERNALS__.invoke(command, args ?? {});
 }
 
 async function retryInvoke(

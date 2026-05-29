@@ -36,7 +36,8 @@ describe("AgentRegistry", () => {
   });
 
   it("returns undefined for unknown capability tag", () => {
-    const reg = registry.findByCapabilities(["nonexistent_tag" as any]);
+    const unknownCapability = "nonexistent_tag" as never;
+    const reg = registry.findByCapabilities([unknownCapability]);
     expect(reg).toBeUndefined();
   });
 

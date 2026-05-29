@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createInitialTaskSnapshot,
   injectDocumentContext,
@@ -10,8 +10,6 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openPath } from "@tauri-apps/plugin-opener";
 import type {
   ActiveView,
-  WorkbenchAppEntry,
-  WorkbenchFileEntry,
   WorkbenchModelConfiguration,
   WorkbenchScheduledTask,
   WorkbenchSkillEntry,
@@ -23,7 +21,7 @@ import {
   loadTaskHistory,
   upsertTaskHistory,
 } from "./task-history";
-import { getCompletedTaskWorkspacePath } from "./workspace-session";
+import { useTaskRuntime, type ScheduledTasksRepositoryLike, type TaskHistoryRepositoryLike } from "./use-task-runtime";
 import {
   createApprovalRecordFromPermissionRequest,
   expireApprovalRecord,
@@ -58,12 +56,13 @@ import {
   runRestoredPdfOrganization,
 } from "./restored-approval";
 import { useModelSettingsControls } from "./use-model-settings";
+import { useModelProfiles, type ModelProfileRepositoryLike } from "./use-model-profiles";
+import { useScannedData } from "./use-scanned-data";
+import { useScheduledTasks } from "./use-scheduled-tasks";
 import { useWorkspaceSessionControls } from "./use-workspace-session";
 import {
   loadScheduledTasks,
   clearStaleGuards,
-  isDue,
-  computeNextRun,
   type ScheduledTask,
 } from "./scheduled-tasks";
 import {
@@ -73,14 +72,6 @@ import {
 import { loadMcpConfig, type McpServerConfig } from "./mcp-config";
 import {
   readFileChunk,
-  scanAllUserFiles,
-  scanInstalledApps,
-  scanUserDocuments,
-  scanUserImages,
-  listDirectory,
-  listMountRoots,
-  type AppEntry,
-  type FileEntry,
 } from "./local-knowledge";
 import {
   FILE_CLASSIFICATION_MIGRATIONS,
@@ -109,7 +100,6 @@ import {
 import {
   createModelProfileRepository,
   MODEL_PROFILES_MIGRATIONS,
-  type ModelProfileRepository,
 } from "./model-profile-persistence";
 import {
   TOOL_CALL_AUDIT_MIGRATIONS,
@@ -158,37 +148,10 @@ import appIconUrl from "./assets/app-icon.png";
 import "./App.css";
 
 export const DEFAULT_DRAFT_GOAL = "";
-const TASK_SNAPSHOT_REVEAL_DELAY_MS = 120;
-const STREAMING_SNAPSHOT_REVEAL_DELAY_MS = 16;
 const currentWindow =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window
     ? getCurrentWindow()
     : null;
-
-const DOC_EXTENSIONS = [
-  "docx", "doc", "txt", "pdf", "xlsx", "xls", "csv", "pptx", "ppt", "md", "rtf", "odt",
-];
-
-function fileEntryToWorkbench(entry: FileEntry): WorkbenchFileEntry {
-  return {
-    name: entry.name,
-    path: entry.path,
-    isDir: entry.isDir,
-    sizeBytes: entry.sizeBytes,
-    modifiedAt: entry.modifiedAt,
-    extension: entry.extension,
-  };
-}
-
-function appEntryToWorkbench(entry: AppEntry): WorkbenchAppEntry {
-  return {
-    name: entry.name,
-    path: entry.path,
-    iconPath: entry.iconPath,
-    publisher: entry.publisher,
-    installLocation: entry.installLocation,
-  };
-}
 
 function scheduledTaskToWorkbench(
   task: ScheduledTask,
@@ -201,7 +164,7 @@ function scheduledTaskToWorkbench(
   } else {
     const matchingEntry = [...history]
       .reverse()
-      .find((h) => (h as any).scheduledTaskId === task.id);
+      .find((h) => h.scheduledTaskId === task.id);
     if (matchingEntry) {
       lastRunStatus =
         matchingEntry.status === "completed"
@@ -222,10 +185,6 @@ function scheduledTaskToWorkbench(
     lastRunStatus,
     createdAt: task.createdAt,
   };
-}
-
-function isStreamingTaskSnapshot(task: TaskSnapshot): boolean {
-  return Boolean(task.isStreaming || task.streamingText);
 }
 
 function extractAtReferences(goal: string): Array<{ raw: string; path: string }> {
@@ -250,19 +209,32 @@ function getConversationMessages(task: TaskSnapshot): ChatMessage[] {
   ];
 }
 
+function logNonFatalError(context: string, error: unknown) {
+  console.warn(context, error);
+}
+
+type SubmitGoalHandler = (goalOverride?: string, workspacePathOverride?: string, scheduledTaskId?: string) => void;
+
 function App() {
   const databaseRef = useRef<DesktopDatabase | null>(null);
-  const taskHistoryRepoRef = useRef<ReturnType<typeof createTaskHistoryRepository> | null>(null);
+  const taskHistoryRepoRef = useRef<TaskHistoryRepositoryLike>(null);
   const workspaceSessionRepoRef = useRef<WorkspaceSessionRepository | null>(null);
   const approvalRecordsRepoRef = useRef<ReturnType<typeof createApprovalRecordsRepository> | null>(null);
   const modelSettingsRepoRef = useRef<ModelSettingsRepository | null>(null);
-  const modelProfileRepoRef = useRef<ModelProfileRepository | null>(null);
-  const scheduledTasksRepoRef = useRef<ReturnType<typeof createScheduledTasksRepository> | null>(null);
+  const scheduledTasksRepoRef = useRef<ScheduledTasksRepositoryLike>(null);
   const preferencesRepoRef = useRef<UserPreferencesRepository | null>(null);
   const agentRegistryRef = useRef<AgentRegistry>(createDefaultAgentRegistry());
   const workflowRegistryRef = useRef<WorkflowRegistry>(createWorkflowRegistry(WORKBENCH_WORKFLOWS));
   const routeRegistryRef = useRef<RouteRegistry>(createRouteRegistry());
   const [workspaceDefs, setWorkspaceDefs] = useState<WorkspaceDefinition[]>([]);
+  const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>(() =>
+    clearStaleGuards(loadScheduledTasks(window.localStorage)),
+  );
+  const scheduledTasksInitialRef = useRef(scheduledTasks);
+  const scheduledTasksCurrentRef = useRef(scheduledTasks);
+  scheduledTasksCurrentRef.current = scheduledTasks;
+  const submitGoalRef = useRef<SubmitGoalHandler>(() => {});
+  const modelConfigRef = useRef<WorkbenchModelConfiguration | undefined>(undefined);
   const {
     browseWorkspacePath,
     deleteRecentWorkspacePath,
@@ -273,9 +245,6 @@ function App() {
   } = useWorkspaceSessionControls(window.localStorage, workspaceSessionRepoRef);
   const { recentWorkspacePaths, workspacePath } = workspaceSession;
   const { modelSettings, updateModelSettings } = useModelSettingsControls(window.localStorage);
-  const [modelConfiguration, setModelConfiguration] = useState<WorkbenchModelConfiguration | undefined>();
-  const modelConfigRef = useRef(modelConfiguration);
-  modelConfigRef.current = modelConfiguration;
   // Ref always holds the effective workspace for the current/next run.
   // When a scheduled task fires with its own workspace, the ref is updated
   // synchronously so the runtime reads the correct path even before React
@@ -292,7 +261,6 @@ function App() {
     }),
     [modelSettings],
   );
-  const [task, setTask] = useState(createInitialTaskSnapshot);
   const [history, setHistory] = useState<TaskSnapshot[]>(() =>
     loadTaskHistory(window.localStorage),
   );
@@ -312,65 +280,100 @@ function App() {
   const didCheckRestoredApproval = useRef(false);
   const didInitDatabaseRef = useRef(false);
   const auditRecordIdsRef = useRef(new Set<string>());
-  const taskQueueRef = useRef<TaskSnapshot[]>([]);
-  const taskFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [draftGoal, setDraftGoal] = useState(DEFAULT_DRAFT_GOAL);
   const [composeMode, setComposeMode] = useState<"chat" | "project">("chat");
 
-  // ── Sidebar view state ────────────────────────────────────────────
+  // ── Sidebar view state ───────────────────────────────────────────
   const [activeView, setActiveView] = useState<ActiveView>("chat");
   const [activeHistoryEntryId, setActiveHistoryEntryId] = useState<string | undefined>();
   const [localePreference, setLocalePreference] = useState<string>("zh-CN");
   const [prefSidebarWidth, setPrefSidebarWidth] = useState<number | undefined>();
   const [prefIsActivityOpen, setPrefIsActivityOpen] = useState<boolean | undefined>();
   const [prefIsInspectorOpen, setPrefIsInspectorOpen] = useState<boolean | undefined>();
-  const [isTaskActive, setIsTaskActive] = useState(false);
-  // Ref mirrors isTaskActive for synchronous reads inside setInterval callbacks
-  // where React state would be stale. Both must be updated together.
-  const isTaskActiveRef = useRef(false);
-  const [activeScheduledTaskId, setActiveScheduledTaskId] = useState<string | undefined>();
-
   // ── Scheduled tasks state ─────────────────────────────────────────
-  const [scheduledTasks, setScheduledTasks] = useState<ScheduledTask[]>(() =>
-    clearStaleGuards(loadScheduledTasks(window.localStorage)),
-  );
-  const scheduledTasksInitialRef = useRef(scheduledTasks);
-  const scheduledTasksCurrentRef = useRef(scheduledTasks);
-  scheduledTasksCurrentRef.current = scheduledTasks;
+  const {
+    task,
+    setTask,
+    isTaskActive,
+    setIsTaskActive,
+    isTaskActiveRef,
+    activeScheduledTaskId,
+    setActiveScheduledTaskId,
+    pendingScheduledTaskIdRef,
+    clearQueuedTaskSnapshots,
+  } = useTaskRuntime({
+    runtime,
+    setHistory,
+    setScheduledTasks,
+    persistWorkspaceForTask,
+    persistDurableApprovalRecord,
+    onTaskSnapshot: appendRuntimeJsonlLogs,
+    taskHistoryRepoRef,
+    scheduledTasksRepoRef,
+    workspacePathRef: workspaceRef,
+  });
 
-  // ── Skill entries state ───────────────────────────────────────────
+  // ── Local knowledge base state ────────────────────────────────────
   const [skillEntries, setSkillEntries] = useState<WorkbenchSkillEntry[]>([]);
   const [mcpConfig, setMcpConfig] = useState<McpServerConfig[]>([]);
 
-  // ── Local knowledge base state ────────────────────────────────────
-  const [installedApps, setInstalledApps] = useState<WorkbenchAppEntry[]>([]);
-  const [userDocuments, setUserDocuments] = useState<WorkbenchFileEntry[]>([]);
-  const [userImages, setUserImages] = useState<WorkbenchFileEntry[]>([]);
-  const [computerEntries, setComputerEntries] = useState<WorkbenchFileEntry[]>([]);
-  const [computerPath, setComputerPath] = useState("");
-  const [appsLoading, setAppsLoading] = useState(false);
-  const [docsLoading, setDocsLoading] = useState(false);
-  const [imagesLoading, setImagesLoading] = useState(false);
-  const [computerLoading, setComputerLoading] = useState(false);
-  const [appsError, setAppsError] = useState<string>();
-  const [docsError, setDocsError] = useState<string>();
-  const [imagesError, setImagesError] = useState<string>();
-  const [computerError, setComputerError] = useState<string>();
-  const scanGenerationRef = useRef(0);
-  const computerRequestIdRef = useRef(0);
-
-  // ── File classification state ────────────────────────────────────
-  const scanningRef = useRef(false);
-  const [scanning, setScanning] = useState(false);
-  const [scanProgress, setScanProgress] = useState<{ current: number; total: number } | undefined>();
-  const [classifying, setClassifying] = useState(false);
-  const [classifyProgress, setClassifyProgress] = useState<{ completed: number; total: number } | undefined>();
-  const [mountRoots, setMountRoots] = useState<{ name: string; path: string }[]>([]);
-  const [categoryStats, setCategoryStats] = useState<{ category: string; count: number }[]>([]);
   const fileClassificationRepoRef = useRef<FileClassificationRepository | null>(null);
-  const classifyAbortRef = useRef<AbortController | null>(null);
+  const modelProfileRepoRef = useRef<ModelProfileRepositoryLike>(null);
+  const {
+    modelConfiguration,
+    setModelConfiguration,
+    handleModelConfigurationChange,
+  } = useModelProfiles({
+    modelProfileRepoRef,
+    onSaved: () => runtime.clearProviderCache(),
+  });
+  modelConfigRef.current = modelConfiguration;
 
-  // ── Build skill entries from descriptors + agents + MCP ───────────
+  const {
+    installedApps,
+    userDocuments,
+    userImages,
+    computerEntries,
+    computerPath,
+    appsLoading,
+    docsLoading,
+    imagesLoading,
+    computerLoading,
+    appsError,
+    docsError,
+    imagesError,
+    computerError,
+    scanProgress,
+    classifying,
+    classifyProgress,
+    mountRoots,
+    categoryStats,
+    handleRefreshApps,
+    handleRefreshDocuments,
+    handleRefreshImages,
+    handleNavigateDirectory,
+    handleListDirectory,
+    handleRefreshScan,
+    handleClassifyDocuments,
+    handleCancelClassify,
+    scanning,
+  } = useScannedData({
+    activeView,
+    runtime,
+    fileClassificationRepoRef,
+  });
+
+  const {
+    toggleScheduledTask,
+    deleteScheduledTask,
+  } = useScheduledTasks({
+    scheduledTasks,
+    setScheduledTasks,
+    submitGoalRef,
+    isTaskActiveRef,
+    scheduledTasksRepoRef,
+  });
+  submitGoalRef.current = submitGoal;
   useEffect(() => {
     const tools: WorkbenchSkillEntry[] = initialToolDescriptors.map((d) => {
       const owners = demoAgents
@@ -421,7 +424,7 @@ function App() {
 
   // ── Load MCP config on mount ──────────────────────────────────────
   useEffect(() => {
-    loadMcpConfig().then(setMcpConfig).catch(() => {});
+    loadMcpConfig().then(setMcpConfig).catch((error) => logNonFatalError("Failed to load MCP config", error));
   }, []);
 
   // ── Initialize SQLite database ────────────────────────────────────
@@ -468,9 +471,6 @@ function App() {
 
       const fileClassificationRepo = createFileClassificationRepository(database);
       fileClassificationRepoRef.current = fileClassificationRepo;
-
-      // Populate mount roots for sidebar drive listing (best-effort)
-      listMountRoots().then(setMountRoots).catch(() => {});
 
       const importedHistory = await taskHistoryRepo.importFromLocalStorage(window.localStorage);
       const importedWorkspaceSession = await workspaceSessionRepo.importFromLocalStorage(
@@ -528,8 +528,8 @@ function App() {
         registerWorkspaceAgents(defs, agentRegistryRef.current);
         registerWorkspaceWorkflows(defs, workflowRegistryRef.current);
         registerWorkspaceRoutes(defs, routeRegistryRef.current);
-      } catch {
-        // Workspace loading is best-effort; app works without custom workspaces
+      } catch (error) {
+        logNonFatalError("Failed to load workspace definitions", error);
       }
 
       setDurableApprovalRecordsReady(true);
@@ -538,233 +538,6 @@ function App() {
       setDurableApprovalRecordsReady(true);
     });
   }, [replaceWorkspaceSession]);
-
-  // ── Silent background file scan on mount ─────────────────────────
-  useEffect(() => {
-    const timer = setTimeout(async () => {
-      const repo = fileClassificationRepoRef.current;
-      if (!repo || scanningRef.current) return;
-      scanningRef.current = true;
-      setScanning(true);
-      setScanProgress(undefined);
-      try {
-        const files = await scanAllUserFiles(undefined, undefined, (p) => setScanProgress(p));
-        await repo.replaceScanCache(files);
-        const stats = await repo.getCategoryStats();
-        setCategoryStats(stats);
-      } catch {
-        // Silent scan failure is non-fatal
-      } finally {
-        scanningRef.current = false;
-        setScanning(false);
-        setScanProgress(undefined);
-      }
-    }, 2000);
-    return () => clearTimeout(timer);
-  }, []);
-
-  // ── Manual scan refresh (with scanning lock) ─────────────────────
-  const handleRefreshScan = useCallback(async () => {
-    const repo = fileClassificationRepoRef.current;
-    if (!repo || scanningRef.current) return;
-    scanningRef.current = true;
-    setScanning(true);
-    setScanProgress(undefined);
-    try {
-      const files = await scanAllUserFiles(undefined, undefined, (p) => setScanProgress(p));
-      await repo.replaceScanCache(files);
-      const stats = await repo.getCategoryStats();
-      setCategoryStats(stats);
-    } catch {
-      // Refresh failure is non-fatal
-    } finally {
-      scanningRef.current = false;
-      setScanning(false);
-      setScanProgress(undefined);
-    }
-  }, []);
-
-  // ── Classify documents handler ───────────────────────────────────
-  const handleClassifyDocuments = useCallback(async () => {
-    const repo = fileClassificationRepoRef.current;
-    if (!repo || classifying) return;
-
-    const unclassified = await repo.getUnclassifiedFiles();
-    if (unclassified.length === 0) return;
-
-    const totalFiles = unclassified.length;
-    setClassifying(true);
-    setClassifyProgress({ completed: 0, total: totalFiles });
-    const abortController = new AbortController();
-    classifyAbortRef.current = abortController;
-
-    try {
-      const classified = await runtime.classifyWithFileAgent(unclassified, {
-        signal: abortController.signal,
-        onBatchProgress: (completed) =>
-          setClassifyProgress({
-            completed: Math.min(completed * 50, totalFiles),
-            total: totalFiles,
-          }),
-      });
-      if (classified.length > 0) {
-        await repo.upsertClassificationsBatch(classified);
-        const stats = await repo.getCategoryStats();
-        setCategoryStats(stats);
-      }
-    } catch {
-      // Classification failure — already-upserted batches are preserved
-    } finally {
-      setClassifying(false);
-      setClassifyProgress(undefined);
-      classifyAbortRef.current = null;
-    }
-  }, [classifying, runtime]);
-
-  // ── Cancel classification ────────────────────────────────────────
-  const handleCancelClassify = useCallback(() => {
-    classifyAbortRef.current?.abort();
-  }, []);
-
-  // ── Scheduled task trigger mechanism ──────────────────────────────
-  useEffect(() => {
-    // Clear stale guards on mount (crash recovery)
-    setScheduledTasks((current) => {
-      const cleared = clearStaleGuards(current);
-      const repository = scheduledTasksRepoRef.current;
-      if (repository) {
-        void repository.save(cleared);
-      }
-      return cleared;
-    });
-
-    const checkDue = () => {
-      setScheduledTasks((current) => {
-        const now = new Date();
-        const updated = current.map((t) => {
-          if (!isDue(t, now)) return t;
-          if (isTaskActiveRef.current) return t; // defer if another task is running
-          // Fire the task
-          submitGoal(t.goal, t.workspacePath, t.id);
-          // Compute next run
-          const nextRun = computeNextRun(t.schedule, now.toISOString());
-          const updatedTask: ScheduledTask = {
-            ...t,
-            lastRunStartedAt: now.toISOString(),
-            nextRunAt: nextRun ?? t.nextRunAt,
-            enabled: t.schedule.type === "once" && !nextRun ? false : t.enabled,
-          };
-          return updatedTask;
-        });
-        const repository = scheduledTasksRepoRef.current;
-        if (repository) {
-          void repository.save(updated);
-        }
-        return updated;
-      });
-    };
-
-    const interval = setInterval(checkDue, 60_000);
-    const handleFocus = () => checkDue();
-    window.addEventListener("focus", handleFocus);
-    // Initial check on mount
-    checkDue();
-
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener("focus", handleFocus);
-    };
-  }, [runtime]);
-
-  // ── Track task active state ───────────────────────────────────────
-  useEffect(() => {
-    const unsubscribe = runtime.subscribe((nextTask) => {
-      // Attach scheduledTaskId from pending ref so that history entries
-      // carry the source scheduled task ID for last-run status derivation.
-      const sid = pendingScheduledTaskIdRef.current;
-      if (sid) {
-        (nextTask as any).scheduledTaskId = sid;
-        pendingScheduledTaskIdRef.current = undefined;
-      }
-      enqueueTaskSnapshot(nextTask);
-      const db = databaseRef.current;
-      void appendTaskSnapshotAuditJsonLines(
-        createFileBackedTaskAuditJsonLineWriter(
-          (line) => invoke("append_task_audit_jsonl_line", { request: { line } }).then(() => undefined),
-          window.localStorage,
-        ),
-        nextTask,
-        auditRecordIdsRef.current,
-      );
-      void appendTaskSessionSnapshotJsonLine(
-        db
-          ? createSqliteTaskSessionWriter(db)
-          : createFileBackedTaskSessionJsonLineWriter(
-              (line) => invoke("append_task_session_jsonl_line", { request: { line } }).then(() => undefined),
-              window.localStorage,
-            ),
-        nextTask,
-      );
-      if (isArchivableTask(nextTask)) {
-        setHistory((current) => {
-          const updated = upsertTaskHistory(current, nextTask);
-          const repository = taskHistoryRepoRef.current;
-          if (repository) {
-            void repository.upsert(nextTask);
-          }
-          return updated;
-        });
-      }
-      persistDurableApprovalRecord(nextTask);
-      if (nextTask.status === "completed") {
-        persistWorkspaceForTask(
-          nextTask.status,
-          getCompletedTaskWorkspacePath(nextTask) || workspaceRef.current,
-        );
-        setIsTaskActive(false);
-        isTaskActiveRef.current = false;
-        setActiveScheduledTaskId(undefined);
-        // Record completion: set lastRunAt, clear lastRunStartedAt
-        setScheduledTasks((current) => {
-          const now = new Date().toISOString();
-          const updated = current.map((t) =>
-            t.lastRunStartedAt
-              ? { ...t, lastRunAt: now, lastRunStartedAt: undefined }
-              : t,
-          );
-          const repository = scheduledTasksRepoRef.current;
-          if (repository) {
-            void repository.save(updated);
-          }
-          return updated;
-        });
-      }
-      if (nextTask.status === "failed" || nextTask.status === "cancelled") {
-        setIsTaskActive(false);
-        isTaskActiveRef.current = false;
-        setActiveScheduledTaskId(undefined);
-        // Record failure: set lastRunAt, clear lastRunStartedAt
-        setScheduledTasks((current) => {
-          const now = new Date().toISOString();
-          const updated = current.map((t) =>
-            t.lastRunStartedAt
-              ? { ...t, lastRunAt: now, lastRunStartedAt: undefined }
-              : t,
-          );
-          const repository = scheduledTasksRepoRef.current;
-          if (repository) {
-            void repository.save(updated);
-          }
-          return updated;
-        });
-      }
-    });
-    return () => {
-      clearQueuedTaskSnapshots();
-      unsubscribe();
-      runtime.dispose();
-    };
-  }, [persistWorkspaceForTask, runtime]);
 
   useEffect(() => {
     if (!areDurableApprovalRecordsReady) {
@@ -794,142 +567,6 @@ function App() {
     clearQueuedTaskSnapshots();
     setTask(createRestoredPdfApprovalTask(pendingRecord));
   }, [approvalRecords, areDurableApprovalRecordsReady]);
-
-  // Incremented by refresh handlers to force re-scan even when activeView
-  // hasn't changed. Without this, clicking refresh while already on a view
-  // would show an empty list because the effect depends on [activeView].
-  const [scanVersion, setScanVersion] = useState(0);
-
-  // ── Scan lifecycle: abort-and-discard on view change ──────────────
-  useEffect(() => {
-    scanGenerationRef.current += 1;
-    const gen = scanGenerationRef.current;
-
-    if (activeView === "apps" && installedApps.length === 0 && !appsLoading) {
-      setAppsLoading(true);
-      setAppsError(undefined);
-      scanInstalledApps()
-        .then((result) => {
-          if (scanGenerationRef.current !== gen) return;
-          setInstalledApps(result.map(appEntryToWorkbench));
-        })
-        .catch((err) => {
-          if (scanGenerationRef.current !== gen) return;
-          setAppsError(String(err));
-        })
-        .finally(() => {
-          if (scanGenerationRef.current !== gen) return;
-          setAppsLoading(false);
-        });
-    }
-
-    if (activeView === "documents" && userDocuments.length === 0 && !docsLoading) {
-      setDocsLoading(true);
-      setDocsError(undefined);
-      scanUserDocuments(DOC_EXTENSIONS, 200)
-        .then((result) => {
-          if (scanGenerationRef.current !== gen) return;
-          setUserDocuments(result.map(fileEntryToWorkbench));
-        })
-        .catch((err) => {
-          if (scanGenerationRef.current !== gen) return;
-          setDocsError(String(err));
-        })
-        .finally(() => {
-          if (scanGenerationRef.current !== gen) return;
-          setDocsLoading(false);
-        });
-    }
-
-    if (activeView === "gallery" && userImages.length === 0 && !imagesLoading) {
-      setImagesLoading(true);
-      setImagesError(undefined);
-      scanUserImages(200)
-        .then((result) => {
-          if (scanGenerationRef.current !== gen) return;
-          setUserImages(result.map(fileEntryToWorkbench));
-        })
-        .catch((err) => {
-          if (scanGenerationRef.current !== gen) return;
-          setImagesError(String(err));
-        })
-        .finally(() => {
-          if (scanGenerationRef.current !== gen) return;
-          setImagesLoading(false);
-        });
-    }
-
-    if (activeView === "computer" && computerPath && computerEntries.length === 0 && !computerLoading) {
-      setComputerLoading(true);
-      setComputerError(undefined);
-      listDirectory(computerPath)
-        .then((result) => {
-          if (scanGenerationRef.current !== gen) return;
-          setComputerEntries(result.map(fileEntryToWorkbench));
-        })
-        .catch((err) => {
-          if (scanGenerationRef.current !== gen) return;
-          setComputerError(String(err));
-        })
-        .finally(() => {
-          if (scanGenerationRef.current !== gen) return;
-          setComputerLoading(false);
-        });
-    }
-  }, [activeView, scanVersion]);
-
-  function clearQueuedTaskSnapshots() {
-    if (taskFlushTimerRef.current) {
-      clearTimeout(taskFlushTimerRef.current);
-      taskFlushTimerRef.current = null;
-    }
-    taskQueueRef.current = [];
-  }
-
-  function scheduleQueuedTaskSnapshot(delayMs = 0) {
-    if (taskFlushTimerRef.current) {
-      return;
-    }
-
-    taskFlushTimerRef.current = setTimeout(() => {
-      taskFlushTimerRef.current = null;
-      const nextTask = taskQueueRef.current.shift();
-      if (!nextTask) {
-        return;
-      }
-
-      setTask(nextTask);
-
-      if (taskQueueRef.current.length > 0) {
-        scheduleQueuedTaskSnapshot(
-          isStreamingTaskSnapshot(nextTask)
-            ? STREAMING_SNAPSHOT_REVEAL_DELAY_MS
-            : TASK_SNAPSHOT_REVEAL_DELAY_MS,
-        );
-      }
-    }, delayMs);
-  }
-
-  function enqueueTaskSnapshot(nextTask: TaskSnapshot) {
-    const queue = taskQueueRef.current;
-    const lastQueuedTask = queue[queue.length - 1];
-    if (
-      lastQueuedTask &&
-      isStreamingTaskSnapshot(lastQueuedTask) &&
-      isStreamingTaskSnapshot(nextTask) &&
-      lastQueuedTask.id === nextTask.id
-    ) {
-      queue[queue.length - 1] = nextTask;
-    } else {
-      queue.push(nextTask);
-    }
-    scheduleQueuedTaskSnapshot();
-  }
-
-  // Holds the scheduledTaskId for the currently-starting task so that
-  // the subscription callback can attach it to the TaskSnapshot before
-  // it's saved to history. Cleared after being consumed.
-  const pendingScheduledTaskIdRef = useRef<string | undefined>(undefined);
 
   function submitGoal(goalOverride?: string, workspacePathOverride?: string, scheduledTaskId?: string) {
     const goal = (goalOverride ?? draftGoal).trim();
@@ -984,7 +621,8 @@ function App() {
           try {
             const content = await readFileChunk(ref.path);
             resolvedGoal = injectDocumentContext(resolvedGoal, ref.path, content);
-          } catch {
+          } catch (error) {
+            logNonFatalError(`Failed to read referenced file ${ref.path}`, error);
             // File not readable — leave the @reference as-is in the goal
           }
         }
@@ -1057,6 +695,27 @@ function App() {
       }
       return updated;
     });
+  }
+
+  function appendRuntimeJsonlLogs(nextTask: TaskSnapshot) {
+    const database = databaseRef.current;
+    void appendTaskSnapshotAuditJsonLines(
+      createFileBackedTaskAuditJsonLineWriter(
+        (line) => invoke("append_task_audit_jsonl_line", { request: { line } }).then(() => undefined),
+        window.localStorage,
+      ),
+      nextTask,
+      auditRecordIdsRef.current,
+    );
+    void appendTaskSessionSnapshotJsonLine(
+      database
+        ? createSqliteTaskSessionWriter(database)
+        : createFileBackedTaskSessionJsonLineWriter(
+            (line) => invoke("append_task_session_jsonl_line", { request: { line } }).then(() => undefined),
+            window.localStorage,
+          ),
+      nextTask,
+    );
   }
 
   function updateApprovalRecord(record: DurableApprovalRecord) {
@@ -1176,30 +835,6 @@ function App() {
     });
   }
 
-  function toggleScheduledTask(id: string) {
-    setScheduledTasks((current) => {
-      const updated = current.map((t) =>
-        t.id === id ? { ...t, enabled: !t.enabled } : t,
-      );
-      const repository = scheduledTasksRepoRef.current;
-      if (repository) {
-        void repository.save(updated);
-      }
-      return updated;
-    });
-  }
-
-  function deleteScheduledTask(id: string) {
-    setScheduledTasks((current) => {
-      const updated = current.filter((t) => t.id !== id);
-      const repository = scheduledTasksRepoRef.current;
-      if (repository) {
-        void repository.save(updated);
-      }
-      return updated;
-    });
-  }
-
   function handleChangeActiveView(view: ActiveView) {
     const shouldStartFreshChat =
       view === "chat" && (activeView !== "chat" || activeHistoryEntryId || task.id !== "task-idle");
@@ -1212,63 +847,8 @@ function App() {
     setActiveView(view);
   }
 
-  function handleRefreshApps() {
-    setInstalledApps([]);
-    setAppsError(undefined);
-    setAppsLoading(false);
-    setScanVersion((v) => v + 1);
-    setActiveView("apps");
-  }
-
-  function handleRefreshDocuments() {
-    setUserDocuments([]);
-    setDocsError(undefined);
-    setDocsLoading(false);
-    setScanVersion((v) => v + 1);
-    setActiveView("documents");
-  }
-
-  function handleRefreshImages() {
-    setUserImages([]);
-    setImagesError(undefined);
-    setImagesLoading(false);
-    setScanVersion((v) => v + 1);
-    setActiveView("gallery");
-  }
-
-  function handleNavigateDirectory(path: string) {
-    const requestId = computerRequestIdRef.current + 1;
-    computerRequestIdRef.current = requestId;
-    setComputerPath(path);
-    setComputerEntries([]);
-    setComputerError(undefined);
-    if (!path) {
-      setComputerLoading(false);
-      return;
-    }
-    setComputerLoading(true);
-    listDirectory(path)
-      .then((result) => {
-        if (computerRequestIdRef.current !== requestId) return;
-        setComputerEntries(result.map(fileEntryToWorkbench));
-      })
-      .catch((err) => {
-        if (computerRequestIdRef.current !== requestId) return;
-        setComputerError(String(err));
-      })
-      .finally(() => {
-        if (computerRequestIdRef.current !== requestId) return;
-        setComputerLoading(false);
-      });
-  }
-
-  async function handleListDirectory(path: string): Promise<WorkbenchFileEntry[]> {
-    const result = await listDirectory(path);
-    return result.map(fileEntryToWorkbench);
-  }
-
   function handleOpenFile(path: string) {
-    openPath(path).catch(() => {});
+    openPath(path).catch((error) => logNonFatalError(`Failed to open path ${path}`, error));
   }
 
   const effectiveLocale = localePreference === "en" ? defaultWorkbenchLocale : zhCNWorkbenchLocale;
@@ -1312,7 +892,7 @@ function App() {
             entry.codeProposedEdit?.workspacePath ??
             entry.codeApplyResult?.workspacePath ??
             "",
-          scheduledTaskId: (entry as any).scheduledTaskId,
+          scheduledTaskId: entry.scheduledTaskId,
         }))}
         imagesError={imagesError}
         imagesLoading={imagesLoading}
@@ -1336,38 +916,7 @@ function App() {
           void modelSettingsRepoRef.current?.save(settings);
         }}
         modelConfiguration={modelConfiguration}
-        onModelConfigurationChange={async (config) => {
-          setModelConfiguration(config);
-          const repo = modelProfileRepoRef.current;
-          if (repo) {
-            const { profiles, agentOverrides } = config;
-            repo.save(
-              profiles.map(({ apiKey: _apiKey, ...rest }) => rest),
-              agentOverrides,
-            ).catch((error) => console.error("Failed to save model profiles", error));
-          }
-          // Save or delete API keys in OS credential store
-          for (const profile of config.profiles) {
-            try {
-              if (profile.apiKey?.trim()) {
-                await invoke("save_model_api_key_secret", {
-                  request: {
-                    keyReference: profile.apiKeyReference,
-                    apiKey: profile.apiKey,
-                  },
-                });
-              } else {
-                await invoke("delete_model_api_key_secret", {
-                  keyReference: profile.apiKeyReference,
-                });
-              }
-            } catch (error) {
-              console.error(`Failed to manage API key for ${profile.id}`, error);
-            }
-          }
-          // Clear cached providers so new config takes effect
-          runtime.clearProviderCache();
-        }}
+        onModelConfigurationChange={handleModelConfigurationChange}
         onNavigateDirectory={handleNavigateDirectory}
         onListDirectory={handleListDirectory}
         onOpenFile={handleOpenFile}
@@ -1429,7 +978,7 @@ function TitleBar() {
   const isDesktop = currentWindow !== null;
 
   function handleDragStart() {
-    currentWindow?.startDragging().catch(() => {});
+    currentWindow?.startDragging().catch((error) => logNonFatalError("Window drag failed", error));
   }
 
   async function handleMinimize() {

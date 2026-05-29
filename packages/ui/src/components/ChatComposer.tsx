@@ -21,6 +21,8 @@ interface ChatComposerProps {
   labels: WorkbenchLocale["labels"];
   recentWorkspacePaths: string[];
   sendButtonClassName?: string;
+  taskInputPlaceholder?: string;
+  showWorkspaceContext?: boolean;
   userDocuments?: WorkbenchFileEntry[];
   contextControl?: ReactNode;
   onBrowseWorkspacePath?: () => void;
@@ -48,6 +50,8 @@ export function ChatComposer({
   labels,
   recentWorkspacePaths,
   sendButtonClassName,
+  taskInputPlaceholder,
+  showWorkspaceContext = true,
   userDocuments,
   contextControl,
   onBrowseWorkspacePath,
@@ -261,7 +265,7 @@ export function ChatComposer({
         onChange={handleChangeWithMention}
         onKeyDown={handleKeyDown}
         onPaste={handlePaste}
-        placeholder={labels.taskInputPlaceholder}
+        placeholder={taskInputPlaceholder ?? labels.taskInputPlaceholder}
         ref={textAreaRef}
         rows={1}
         value={draftGoal}
@@ -312,15 +316,17 @@ export function ChatComposer({
           ref={fileInputRef}
           type="file"
         />
-        <WorkspaceContext
-          currentWorkspacePath={currentWorkspacePath}
-          labels={labels}
-          onBrowseWorkspacePath={onBrowseWorkspacePath}
-          onDeleteRecentWorkspacePath={onDeleteRecentWorkspacePath}
-          onUseWorkspacePath={onUseWorkspacePath}
-          onWorkspacePathChange={onWorkspacePathChange}
-          recentWorkspacePaths={recentWorkspacePaths}
-        />
+        {showWorkspaceContext ? (
+          <WorkspaceContext
+            currentWorkspacePath={currentWorkspacePath}
+            labels={labels}
+            onBrowseWorkspacePath={onBrowseWorkspacePath}
+            onDeleteRecentWorkspacePath={onDeleteRecentWorkspacePath}
+            onUseWorkspacePath={onUseWorkspacePath}
+            onWorkspacePathChange={onWorkspacePathChange}
+            recentWorkspacePaths={recentWorkspacePaths}
+          />
+        ) : null}
         {contextControl}
         {isStreaming ? (
           <button

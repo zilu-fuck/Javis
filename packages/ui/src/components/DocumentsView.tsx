@@ -1,5 +1,8 @@
 import { useState } from "react";
-import type { WorkbenchFileEntry, WorkbenchLocale } from "../types";
+import type {
+  WorkbenchFileEntry,
+  WorkbenchLocale,
+} from "../types";
 import { formatModifiedTime, formatSize } from "../utils";
 import { createCountLabel, ResourceIconButton, ResourceShell } from "./ResourceShell";
 
@@ -8,32 +11,65 @@ interface DocumentsViewProps {
   locale: WorkbenchLocale;
   loading?: boolean;
   error?: string;
+  scanning?: boolean;
+  scanProgress?: { current: number; total: number };
+  classifying?: boolean;
+  classifyProgress?: { completed: number; total: number };
+  categoryStats?: { category: string; count: number }[];
   onRefresh?: () => void;
+  onRefreshScan?: () => void;
+  onClassifyDocuments?: () => void;
+  onCancelClassify?: () => void;
   onOpen?: (path: string) => void;
 }
-
-const FILTER_CHIPS = [
-  { label: "全部文档", exts: ["docx", "doc", "pdf", "rtf", "odt"] },
-  { label: "文档识别", exts: ["docx", "doc", "txt", "md", "rtf", "odt"] },
-  { label: "课件", exts: ["pptx", "ppt", "pdf"] },
-  { label: "书籍", exts: ["pdf", "epub"] },
-  { label: "论文", exts: ["pdf", "docx"] },
-];
 
 export function DocumentsView({
   documents,
   locale,
   loading,
   error,
+  scanning,
+  scanProgress,
+  classifying,
+  classifyProgress,
+  categoryStats = [],
   onRefresh,
+  onRefreshScan,
+  onClassifyDocuments,
+  onCancelClassify,
   onOpen,
 }: DocumentsViewProps) {
   const labels = locale.labels;
+  const categoryLabels = locale.categoryLabels ?? {};
   const [query, setQuery] = useState("");
+  const [activeCategory, setActiveCategory] = useState<string | null>(null);
 
-  const filtered = documents.filter((doc) =>
-    doc.name.toLowerCase().includes(query.toLowerCase()),
-  );
+  const filtered = documents.filter((doc) => {
+    const matchesQuery = doc.name.toLowerCase().includes(query.toLowerCase());
+    const matchesCategory = activeCategory == null || doc.category === activeCategory;
+    return matchesQuery && matchesCategory;
+  });
+
+  const categoryTabs = [
+    { key: null, label: labels.allCategories, count: documents.length },
+    ...categoryStats.map((s) => ({
+      key: s.category,
+      label: categoryLabels[s.category] ?? s.category,
+      count: s.count,
+    })),
+  ];
+
+  const activeTabIndex = activeCategory == null
+    ? 0
+    : categoryTabs.findIndex((t) => t.key === activeCategory);
+
+  function handleTabChange(index: number) {
+    setActiveCategory(categoryTabs[index]?.key ?? null);
+  }
+
+  const classifiedCount = documents.filter((d) => d.category != null).length;
+  const unclassifiedCount = documents.length - classifiedCount;
+
   const actions = (
     <>
       <label className="javis-resource-search">
@@ -45,6 +81,21 @@ export function DocumentsView({
         />
       </label>
       <ResourceIconButton label={labels.retry} onClick={onRefresh}>⟳</ResourceIconButton>
+      <ResourceIconButton
+        label={scanning ? labels.scanInProgress : labels.retry}
+        onClick={onRefreshScan}
+      >
+        {scanning ? <span className="javis-spinner javis-spinner--small" /> : "⟳"}
+      </ResourceIconButton>
+      {classifying ? (
+        <ResourceIconButton label={labels.cancelClassify} onClick={onCancelClassify}>
+          ■
+        </ResourceIconButton>
+      ) : (
+        <ResourceIconButton label={labels.classifyButton} onClick={onClassifyDocuments}>
+          ✦
+        </ResourceIconButton>
+      )}
       <div className="javis-resource-segment">
         <button type="button">▦</button>
         <button className="active" type="button">☷</button>
@@ -89,11 +140,51 @@ export function DocumentsView({
   return (
     <ResourceShell
       actions={actions}
+      activeTabIndex={activeTabIndex}
       countLabel={createCountLabel(labels.documents, filtered.length)}
       icon="▣"
-      tabs={FILTER_CHIPS.map((chip) => chip.label)}
+      onTabChange={handleTabChange}
+      tabs={categoryTabs.map((t) => `${t.label}(${t.count})`)}
       title={labels.documents}
     >
+      {(scanning || classifying || classifyProgress) && (
+        <div className="javis-classify-status">
+          {scanning && (
+            <div className="javis-classify-status-row">
+              <span className="javis-spinner javis-spinner--small" />
+              <span>{labels.scanInProgress}</span>
+              {scanProgress && (
+                <span className="javis-classify-count">
+                  {scanProgress.current.toLocaleString()} / {scanProgress.total.toLocaleString()}
+                </span>
+              )}
+            </div>
+          )}
+          {classifying && classifyProgress && (
+            <div className="javis-classify-status-row">
+              <span className="javis-spinner javis-spinner--small" />
+              <span>{labels.classifyButton}</span>
+              <span className="javis-classify-count">
+                {classifyProgress.completed} / {classifyProgress.total}
+              </span>
+              {unclassifiedCount > 0 && (
+                <span className="javis-classify-pending">
+                  ({unclassifiedCount.toLocaleString()} {labels.noDocumentsFound})
+                </span>
+              )}
+            </div>
+          )}
+          {classifyProgress && !classifying && (
+            <div className="javis-classify-progress-bar">
+              <div
+                className="javis-classify-progress-fill"
+                style={{ width: `${(classifyProgress.completed / classifyProgress.total) * 100}%` }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+
       {filtered.length === 0 ? (
         <div className="javis-view-empty">
           <p>{labels.noDocumentsFound}</p>
@@ -103,6 +194,7 @@ export function DocumentsView({
           <thead>
             <tr>
               <th>{labels.documents}</th>
+              <th>{labels.categoryBadge}</th>
               <th>{labels.modified}</th>
               <th>{labels.status}</th>
             </tr>
@@ -121,6 +213,24 @@ export function DocumentsView({
                     </span>
                     {doc.name}
                   </button>
+                  {doc.tags && doc.tags.length > 0 && (
+                    <div className="javis-doc-tags">
+                      {doc.tags.map((tag) => (
+                        <span className="javis-tag" key={tag}>{tag}</span>
+                      ))}
+                    </div>
+                  )}
+                </td>
+                <td>
+                  {doc.category ? (
+                    <span className="javis-category-badge">
+                      {categoryLabels[doc.category] ?? doc.category}
+                    </span>
+                  ) : (
+                    <span className="javis-category-badge javis-category-badge--unclassified">
+                      —
+                    </span>
+                  )}
                 </td>
                 <td>
                   {doc.modifiedAt

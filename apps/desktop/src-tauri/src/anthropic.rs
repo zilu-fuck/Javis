@@ -9,12 +9,12 @@ use tauri::{AppHandle, Emitter};
 use crate::{
     infer_model_completion_provider_id,
     normalize_model_completion_model_name,
-    normalize_optional_config_value,
     ModelCompletionRequest,
     ModelCompletionResponse,
     ModelUsage,
     streaming::{StreamChunkPayload, StreamingRequestResult},
 };
+use crate::code::normalize_optional_config_value;
 
 const ANTHROPIC_TIMEOUT: Duration = Duration::from_secs(90);
 const ANTHROPIC_STREAMING_TIMEOUT: Duration = Duration::from_secs(120);
