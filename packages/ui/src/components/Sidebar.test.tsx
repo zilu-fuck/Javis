@@ -1,3 +1,4 @@
+import { fireEvent, render } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { Sidebar } from "./Sidebar";
@@ -169,5 +170,53 @@ describe("Sidebar", () => {
     );
 
     expect(html).toContain("暂无历史");
+  });
+
+  it("switches the compose mode from the new chat submenu", () => {
+    const onChangeActiveView = vi.fn();
+    const onSelectComposeMode = vi.fn();
+    const { container } = render(
+      <Sidebar
+        labels={labels}
+        locale={zhCNWorkbenchLocale}
+        modelSettings={{ provider: "", model: "", apiKey: "", apiKeyReference: "default", baseUrl: "" }}
+        historyEntries={[]}
+        sidebarSearchQuery=""
+        onChangeActiveView={onChangeActiveView}
+        onSelectComposeMode={onSelectComposeMode}
+        onSidebarSearchQueryChange={vi.fn()}
+      />,
+    );
+
+    const projectBtn = Array.from(container.querySelectorAll(".javis-nav-subitem"))
+      .find((el) => el.textContent === labels.project);
+    fireEvent.click(projectBtn!);
+
+    expect(onChangeActiveView).toHaveBeenCalledWith("chat");
+    expect(onSelectComposeMode).toHaveBeenCalledWith("project");
+  });
+
+  it("resets the compose mode to chat when opening new chat from another view", () => {
+    const onChangeActiveView = vi.fn();
+    const onSelectComposeMode = vi.fn();
+    const { container } = render(
+      <Sidebar
+        activeView="skills"
+        activeComposeMode="project"
+        labels={labels}
+        locale={zhCNWorkbenchLocale}
+        modelSettings={{ provider: "", model: "", apiKey: "", apiKeyReference: "default", baseUrl: "" }}
+        historyEntries={[]}
+        sidebarSearchQuery=""
+        onChangeActiveView={onChangeActiveView}
+        onSelectComposeMode={onSelectComposeMode}
+        onSidebarSearchQueryChange={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(container.querySelector(".javis-nav-item.collapsible")!);
+
+    expect(onSelectComposeMode).toHaveBeenCalledWith("chat");
+    expect(onChangeActiveView).toHaveBeenCalledWith("chat");
   });
 });

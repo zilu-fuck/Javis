@@ -424,7 +424,14 @@ export { addModelUsage, createEmptyTokenUsageSummary };
 export interface TaskRuntime {
   getSnapshot(): TaskSnapshot;
   subscribe(listener: (snapshot: TaskSnapshot) => void): () => void;
-  start(userGoal: string, options?: { taskId?: ID; priorMessages?: ChatMessage[] }): void;
+  start(
+    userGoal: string,
+    options?: {
+      taskId?: ID;
+      priorMessages?: ChatMessage[];
+      mode?: "auto" | "chat" | "project";
+    },
+  ): void;
   resolvePermission(decision: "approved" | "denied", requestId?: string): void;
   dispose(): void;
 }
@@ -499,6 +506,10 @@ export function createInitialTaskSnapshot(): TaskSnapshot {
   };
 }
 
+function isConversationAnswerStatus(status: TaskSnapshot["status"]): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
 export function createFileScanTaskRuntime({
   fileTool,
   chatTool,
@@ -521,8 +532,34 @@ export function createFileScanTaskRuntime({
   const permissionHandlers = new Map<string, PendingPermissionHandler>();
   const queuedPermissionDecisions = new Map<string, "approved" | "denied">();
   let queuedLegacyPermissionDecision: "approved" | "denied" | undefined;
+  let activeConversation:
+    | { taskId: ID; startedMessages: ChatMessage[] }
+    | undefined;
   function emit(nextSnapshot: TaskSnapshot) {
-    runtimeState.emit(nextSnapshot);
+    runtimeState.emit(attachConversationMessages(nextSnapshot));
+  }
+  function attachConversationMessages(nextSnapshot: TaskSnapshot): TaskSnapshot {
+    if (!activeConversation || activeConversation.taskId !== nextSnapshot.id) {
+      return nextSnapshot;
+    }
+    const conversationMessages = nextSnapshot.conversationMessages?.length
+      ? [...nextSnapshot.conversationMessages]
+      : [...activeConversation.startedMessages];
+    if (
+      isConversationAnswerStatus(nextSnapshot.status) &&
+      nextSnapshot.commanderMessage.trim() &&
+      conversationMessages[conversationMessages.length - 1]?.role !== "assistant"
+    ) {
+      conversationMessages.push({
+        role: "assistant",
+        content: nextSnapshot.commanderMessage,
+      });
+    }
+
+    return {
+      ...nextSnapshot,
+      conversationMessages,
+    };
   }
   function setPendingPermissionHandler(
     requestId: string,
@@ -558,8 +595,53 @@ export function createFileScanTaskRuntime({
       permissionHandlers.clear();
       queuedPermissionDecisions.clear();
       queuedLegacyPermissionDecision = undefined;
+      const startMode = options.mode ?? "auto";
       const taskId = options.taskId ?? `task-${Date.now()}`;
+      activeConversation = {
+        taskId,
+        startedMessages: [
+          ...(options.priorMessages ?? []),
+          { role: "user", content: userGoal },
+        ],
+      };
       onTaskStarted?.(taskId);
+      if (startMode === "chat") {
+        if (chatTool) {
+          void runChatTask(taskId, userGoal, chatTool, options.priorMessages ?? []);
+          return;
+        }
+        runClarificationTask(taskId, userGoal);
+        return;
+      }
+      if (startMode === "project") {
+        if (shellTool && projectTool) {
+          // Fall back to chat when the goal is clearly casual conversation,
+          // not project work. Avoids running a full multi-agent workflow
+          // for inputs like "hello" in project mode.
+          if (!isReadCurrentProjectGoal(userGoal) && chatTool) {
+            void runChatTask(taskId, userGoal, chatTool, options.priorMessages ?? []);
+            return;
+          }
+          void runReadCurrentProjectWorkflow({
+            controller,
+            fileTool,
+            commanderTool,
+            projectTool,
+            shellTool,
+            codeTool,
+            verifierTool,
+            taskId,
+            userGoal,
+          });
+          return;
+        }
+        if (chatTool) {
+          void runChatTask(taskId, userGoal, chatTool, options.priorMessages ?? []);
+          return;
+        }
+        runClarificationTask(taskId, userGoal);
+        return;
+      }
       if (webTool && extractUrls(userGoal).length > 0) {
         void runResearchSourceTask({ controller, taskId, userGoal, webTool, commanderTool });
         return;
