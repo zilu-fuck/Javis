@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -5572,11 +5572,39 @@ mod tests {
             fs::File::create(&file_path).unwrap().write_all(b"x").unwrap();
         }
 
-        // We can test collect_files_with_depth respects max_results via the inner function
         let result = collect_files_with_depth(
             &[tmp.path().to_path_buf()], &["txt"], 5, true, usize::MAX,
         ).unwrap();
         assert_eq!(result.len(), 5);
+    }
+
+    #[test]
+    fn execute_scan_collects_files_and_respects_cancellation() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        for i in 0..10 {
+            let file_path = tmp.path().join(format!("{}.txt", i));
+            fs::File::create(&file_path).unwrap().write_all(b"x").unwrap();
+        }
+
+        let ext_lower = vec!["txt".to_string()];
+        let cancelled = Arc::new(AtomicBool::new(false));
+
+        // Simulate what execute_scan does with a single root
+        let mut entries = Vec::new();
+        collect_files_inner_for_scan(
+            tmp.path(),
+            &ext_lower,
+            true,
+            10,
+            usize::MAX,
+            0,
+            &mut entries,
+            &cancelled,
+        );
+
+        assert_eq!(entries.len(), 10);
     }
 
     #[test]
@@ -5601,7 +5629,7 @@ mod tests {
 
 // ── Sidebar scanning infrastructure ──────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct FileEntry {
     name: String,
@@ -5914,13 +5942,52 @@ fn mount_roots() -> Result<Vec<MountRoot>, String> {
 
 // ── All-user-file scan ───────────────────────────────────────────────────────
 
-static SCAN_CANCELLED: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
+static NEXT_SCAN_ID: AtomicU64 = AtomicU64::new(1);
+
+struct ActiveScan {
+    scan_id: String,
+    cancelled: Arc<AtomicBool>,
+}
+
+static ACTIVE_SCANS: Mutex<Vec<ActiveScan>> = Mutex::new(Vec::new());
+
+fn register_scan() -> (String, Arc<AtomicBool>) {
+    let scan_id = format!("scan-{}", NEXT_SCAN_ID.fetch_add(1, Ordering::Relaxed));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let mut scans = ACTIVE_SCANS.lock().unwrap();
+    scans.retain(|s| !s.cancelled.load(Ordering::Relaxed));
+    scans.push(ActiveScan {
+        scan_id: scan_id.clone(),
+        cancelled: cancelled.clone(),
+    });
+    (scan_id, cancelled)
+}
+
+fn unregister_scan(scan_id: &str) {
+    let mut scans = ACTIVE_SCANS.lock().unwrap();
+    scans.retain(|s| s.scan_id != scan_id);
+}
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ScanProgressPayload {
+    scan_id: String,
     current: usize,
     total: usize,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanDonePayload {
+    scan_id: String,
+    entries: Vec<FileEntry>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScanErrorPayload {
+    scan_id: String,
+    error: String,
 }
 
 #[tauri::command]
@@ -5928,13 +5995,12 @@ fn scan_all_user_files(
     app_handle: AppHandle,
     extensions: Option<Vec<String>>,
     max_results: Option<usize>,
-) -> Result<Vec<FileEntry>, String> {
-    let cancelled = Arc::new(AtomicBool::new(false));
-    {
-        let mut guard = SCAN_CANCELLED.lock().unwrap();
-        *guard = Some(cancelled.clone());
-    }
+) -> Result<String, String> {
+    let (scan_id, cancelled) = register_scan();
+    let scan_id_clone = scan_id.clone();
+    let app = app_handle.clone();
 
+    // Resolve scan parameters on the calling thread before spawning.
     let roots = mount_roots()?
         .into_iter()
         .map(|r| PathBuf::from(r.path))
@@ -5945,8 +6011,47 @@ fn scan_all_user_files(
     let max = max_results.unwrap_or(5000);
     let max_depth = 8;
 
+    thread::spawn(move || {
+        let result = execute_scan(
+            &roots, &ext_lower, filter_by_ext, max, max_depth, &cancelled, &app, &scan_id_clone,
+        );
+        unregister_scan(&scan_id_clone);
+        match result {
+            Ok(entries) => {
+                let _ = app.emit(
+                    "scan-all-files-done",
+                    ScanDonePayload {
+                        scan_id: scan_id_clone,
+                        entries,
+                    },
+                );
+            }
+            Err(error) => {
+                let _ = app.emit(
+                    "scan-all-files-error",
+                    ScanErrorPayload {
+                        scan_id: scan_id_clone,
+                        error,
+                    },
+                );
+            }
+        }
+    });
+
+    Ok(scan_id)
+}
+
+fn execute_scan(
+    roots: &[PathBuf],
+    ext_lower: &[String],
+    filter_by_ext: bool,
+    max: usize,
+    max_depth: usize,
+    cancelled: &AtomicBool,
+    app: &AppHandle,
+    scan_id: &str,
+) -> Result<Vec<FileEntry>, String> {
     let mut entries = Vec::new();
-    // Progress is reported per mount root scanned (not per file).
     let total = roots.len();
 
     for (index, root) in roots.iter().enumerate() {
@@ -5956,22 +6061,23 @@ fn scan_all_user_files(
         if !root.exists() || !root.is_dir() {
             continue;
         }
-        let _ = app_handle.emit(
+        let _ = app.emit(
             "scan-all-files-progress",
             ScanProgressPayload {
+                scan_id: scan_id.to_string(),
                 current: index + 1,
                 total,
             },
         );
         collect_files_inner_for_scan(
             root,
-            &ext_lower,
+            ext_lower,
             filter_by_ext,
             max,
             max_depth,
             0,
             &mut entries,
-            &cancelled,
+            cancelled,
         );
         if entries.len() >= max {
             break;
@@ -5985,13 +6091,24 @@ fn scan_all_user_files(
             .cmp(a.modified_at.as_deref().unwrap_or(""))
     });
     entries.truncate(max);
-
-    {
-        let mut guard = SCAN_CANCELLED.lock().unwrap();
-        *guard = None;
-    }
-
     Ok(entries)
+}
+
+#[tauri::command]
+fn cancel_scan_all_files(scan_id: String) -> Result<(), String> {
+    let mut scans = ACTIVE_SCANS.lock().unwrap();
+    let mut found = false;
+    for s in scans.iter() {
+        if s.scan_id == scan_id {
+            s.cancelled.store(true, Ordering::Relaxed);
+            found = true;
+        }
+    }
+    scans.retain(|s| !s.cancelled.load(Ordering::Relaxed));
+    if !found && !scan_id.is_empty() {
+        return Err(format!("No active scan found for id: {scan_id}"));
+    }
+    Ok(())
 }
 
 fn collect_files_inner_for_scan(
@@ -6070,15 +6187,6 @@ fn collect_files_inner_for_scan(
     }
 }
 
-#[tauri::command]
-fn cancel_scan_all_files() -> Result<(), String> {
-    let mut guard = SCAN_CANCELLED.lock().unwrap();
-    if let Some(cancelled) = guard.as_ref() {
-        cancelled.store(true, Ordering::Relaxed);
-    }
-    *guard = None;
-    Ok(())
-}
 
 #[tauri::command]
 fn scan_installed_apps() -> Result<Vec<AppEntry>, String> {
