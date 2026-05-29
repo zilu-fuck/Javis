@@ -1,9 +1,42 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { createClassificationPrompt } from "@javis/core";
 import type { ClassifiedFile } from "@javis/core";
 import type { ModelProvider } from "./model-provider";
 
 const MAX_FILES_PER_BATCH = 50;
+const DEFAULT_MAX_CONCURRENT_BATCHES = 3;
+
+/** Progress payload emitted by the Rust scan-all-files walker. */
+export interface ScanProgressPayload {
+  scanId: string;
+  current: number;
+  total: number;
+}
+
+/** Payload emitted when scan_all_user_files completes. */
+export interface ScanDonePayload {
+  scanId: string;
+  entries: FileEntry[];
+}
+
+/** Payload emitted when scan_all_user_files fails. */
+export interface ScanErrorPayload {
+  scanId: string;
+  error: string;
+}
+
+export interface MountRoot {
+  name: string;
+  path: string;
+}
+
+/** Options for classifyDocuments enhanced mode. */
+export interface ClassifyDocumentsOptions {
+  onBatchProgress?: (completed: number, total: number, failed: number) => void;
+  signal?: AbortSignal;
+  maxConcurrentBatches?: number;
+}
 
 export interface FileEntry {
   name: string;
@@ -67,15 +100,45 @@ function toClassifiable(entry: ClassifiableInput) {
 export async function classifyDocuments(
   files: ClassifiableInput[],
   provider: ModelProvider,
+  options?: ClassifyDocumentsOptions,
 ): Promise<ClassifiedFile[]> {
   const results: ClassifiedFile[] = [];
+  const batches: ClassifiableInput[][] = [];
   for (let i = 0; i < files.length; i += MAX_FILES_PER_BATCH) {
-    const batch = files.slice(i, i + MAX_FILES_PER_BATCH);
-    const prompt = createClassificationPrompt(batch.map(toClassifiable));
-    const response = await provider.complete(prompt, { maxTokens: 2000, temperature: 0 });
-    const classified = parseClassificationResponse(response.text, batch);
-    results.push(...classified);
+    batches.push(files.slice(i, i + MAX_FILES_PER_BATCH));
   }
+
+  const totalBatches = batches.length;
+  let completedBatches = 0;
+  let failedBatches = 0;
+  const maxConcurrent = options?.maxConcurrentBatches ?? DEFAULT_MAX_CONCURRENT_BATCHES;
+
+  // Process batches with concurrency limit
+  for (let i = 0; i < totalBatches; i += maxConcurrent) {
+    if (options?.signal?.aborted) break;
+
+    const chunk = batches.slice(i, i + maxConcurrent);
+    const batchResults = await Promise.all(
+      chunk.map(async (batch) => {
+        try {
+          const prompt = createClassificationPrompt(batch.map(toClassifiable));
+          const response = await provider.complete(prompt, { maxTokens: 2000, temperature: 0 });
+          return parseClassificationResponse(response.text, batch);
+        } catch (error) {
+          console.warn(`Classification batch failed: ${error}`);
+          failedBatches++;
+          return batch.map(fallbackClassified);
+        }
+      }),
+    );
+
+    for (const classified of batchResults) {
+      results.push(...classified);
+      completedBatches++;
+      options?.onBatchProgress?.(completedBatches, totalBatches, failedBatches);
+    }
+  }
+
   return results;
 }
 
@@ -134,6 +197,90 @@ function fallbackClassified(entry: ClassifiableInput): ClassifiedFile {
     category: "其他",
     confidence: 0,
   };
+}
+
+/**
+ * Scan all user files via the Rust walker. The scan runs in a background
+ * thread; this function resolves with the full file list when the scan
+ * completes, or rejects on error. Progress events are forwarded to the
+ * optional onProgress callback.
+ */
+export async function scanAllUserFiles(
+  extensions?: string[],
+  maxResults?: number,
+  onProgress?: (progress: ScanProgressPayload) => void,
+): Promise<FileEntry[]> {
+  // Start the scan — returns a scan_id immediately
+  const scanId = await invoke<string>("scan_all_user_files", {
+    extensions: extensions ?? null,
+    maxResults: maxResults ?? null,
+  });
+
+  return new Promise<FileEntry[]>((resolve, reject) => {
+    const unlistenFns: (() => void)[] = [];
+
+    const cleanup = () => {
+      for (const fn of unlistenFns) fn();
+    };
+
+    void (async () => {
+      try {
+        // Listen for progress events (filtered by scan_id in callback)
+        if (onProgress) {
+          const unlisten = await listen<ScanProgressPayload>(
+            "scan-all-files-progress",
+            (event) => {
+              if (event.payload.scanId === scanId) {
+                onProgress(event.payload);
+              }
+            },
+          );
+          unlistenFns.push(unlisten);
+        }
+
+        // Listen for completion
+        const unlistenDone = await listen<ScanDonePayload>(
+          "scan-all-files-done",
+          (event) => {
+            if (event.payload.scanId === scanId) {
+              cleanup();
+              resolve(event.payload.entries);
+            }
+          },
+        );
+        unlistenFns.push(unlistenDone);
+
+        // Listen for errors
+        const unlistenError = await listen<ScanErrorPayload>(
+          "scan-all-files-error",
+          (event) => {
+            if (event.payload.scanId === scanId) {
+              cleanup();
+              reject(new Error(event.payload.error));
+            }
+          },
+        );
+        unlistenFns.push(unlistenError);
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
+    })();
+  });
+}
+
+/**
+ * Cancel an in-progress scan-all-files operation by its scan ID.
+ */
+export async function cancelScanAllFiles(scanId: string): Promise<void> {
+  await invoke("cancel_scan_all_files", { scanId });
+}
+
+/**
+ * List available mount roots (drive letters on Windows, ["/"] on Unix).
+ */
+export async function listMountRoots(): Promise<MountRoot[]> {
+  return invoke<MountRoot[]>("list_mount_roots");
 }
 
 export async function readFileChunk(
