@@ -54,6 +54,7 @@ pnpm rust:test           # Rust tests only
 
 ## Code Conventions
 
+- **称呼规则**：每次回答或总结之前，必须以"哥哥"作为称呼开头。
 - Task statuses: `created → planning → running → waiting_permission → running → verifying → completed`
 - Agent kinds: `commander | file | shell | browser | computer | scheduler | research | code | verifier | chinese-reviewer`
 - Permission levels: `read | preview | confirmed_write | dangerous`
