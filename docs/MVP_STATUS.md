@@ -1,6 +1,6 @@
 # MVP Status
 
-Last updated: 2026-05-26
+Last updated: 2026-05-29
 
 This document maps the current implementation against the MVP scenarios in
 `docs/MVP.md`.
@@ -139,7 +139,9 @@ Remaining work is not blocking for the verified MVP baseline, but it is blocking
 for a complete product release:
 
 - Live Code Agent proposal/apply smoke QA with real provider credentials.
-- SQLite migration for durable task and audit storage.
+- ~~SQLite migration for durable task and audit storage.~~ (completed 2026-05-28: all 9 migration sets deployed)
 - Generalized confirmed-write enforcement for all write-capable tools.
 - Signed/versioned release builds with rollback notes.
 - Expanded QA from MVP scenarios to complete-product workflows.
+- Streaming UI consumption (Rust SSE backend done, frontend in progress).
+- ChineseReviewer quantitative A/B evaluation.

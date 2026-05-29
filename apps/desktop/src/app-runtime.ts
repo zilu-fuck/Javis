@@ -390,13 +390,34 @@ export function createJavisRuntime({
             `Workflow: ${request.workflowTitle}`,
             `Collected evidence:\n${evidenceEntries}`,
           ].join("\n");
-          const result = await completeWithChineseReview(
-            prompt,
-            { maxTokens: 800, temperature: 0.3, locale: "zh-CN" },
-            providerFor("commander"),
-            "none",
-          );
-          const message = result.text.trim();
+          let message: string;
+          try {
+            const modelProvider = providerFor("commander");
+            let fullText = "";
+            for await (const chunk of modelProvider.stream(prompt, {
+              maxTokens: 800,
+              temperature: 0.3,
+              locale: "zh-CN",
+            })) {
+              fullText += chunk.text;
+              eventBus.emit({
+                kind: "agent.chunk",
+                taskId,
+                agentKind: "commander",
+                text: chunk.text,
+              });
+            }
+            message = fullText.trim();
+          } catch {
+            // Fallback to non-streaming on stream failure
+            const result = await completeWithChineseReview(
+              prompt,
+              { maxTokens: 800, temperature: 0.3, locale: "zh-CN" },
+              providerFor("commander"),
+              "none",
+            );
+            message = result.text.trim();
+          }
           eventBus.emit({
             kind: "agent.chunk_end",
             taskId,

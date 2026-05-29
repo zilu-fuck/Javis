@@ -78,14 +78,21 @@ pnpm rust:test           # Rust tests only
 - opencode/Code Agent: proposal only, never writes files directly
 - PDF operations: Downloads-scoped, move-only, one-time approval
 
-## Current State (2026-05-27)
+## Current State (2026-05-29)
 
-- Desktop workbench: implemented and packaged (Windows MSI/NSIS)
+- Desktop workbench: implemented and packaged (Windows MSI/NSIS), custom titlebar with drag regions
 - File scan, project inspection, research, PDF organization: implemented
+- AI file classification: classifyDocuments with LLM, 8 predefined categories, progress callbacks
+- RAG-lite: @document references in chat input inject file content into prompts
 - Code Agent (opencode-backed): fixture QA passes (deny + approve), live DeepSeek QA needs reqwest request debugging
-- Chinese optimization: input preprocessor + terminology + reviewer agent done
-- Streaming output: Rust SSE backend fully implemented (background thread → Tauri events → frontend AsyncGenerator), task-flow UI consumption TBD
-- Persistence: model-settings in SQLite; task history, approval records, workspaces still in localStorage pending migration
-- Multi-agent workflow executor: implemented (DAG with parallel step support)
-- SQLite infrastructure: database.rs with rusqlite, Tauri commands, migration system, model-settings already migrated
+- Chinese optimization: input preprocessor + terminology injection + ChineseReviewer agent done
+- Streaming output: Rust SSE backend done (background thread → Tauri events), UI consumption in progress (P0-1)
+- Persistence: fully migrated to SQLite — task history, approval records, scheduled tasks, user preferences, JSONL logs, model settings, model profiles
+- Multi-agent workflow executor: implemented (DAG with parallel step support via Promise.allSettled)
+- Agent Capability Model: capability tags per agent kind, ModelRequirements (prefersVision, prefersCode, minContextTokens)
+- Model Profile system: 3 configurable slots (primary/secondary/tertiary), capability-aware profile scoring
+- ProviderAdapter: abstracted provider protocol (OpenAI, DeepSeek, Anthropic adapters)
+- Custom workspace registration: workspace definitions (JSON) with agents, workflows, routes, dynamic sidebar nav
+- Architecture analysis: AGENT_ARCHITECTURE_ANALYSIS.md — Plan 1/5, Multi-Agent 4/5, HITL 2/5
+- SQLite infrastructure: database.rs with rusqlite, Tauri commands, migration system, 9 migration sets
 - HTTP client: reqwest 0.12 with native-tls (not ureq — project has never used ureq)
