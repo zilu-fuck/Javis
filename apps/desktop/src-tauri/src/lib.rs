@@ -1460,10 +1460,7 @@ fn create_openai_compatible_proposal_body(model: &str, prompt: &str) -> serde_js
             "type": "json_object"
         },
         "temperature": 0,
-        "max_tokens": 4096,
-        "thinking": {
-            "type": "disabled"
-        }
+        "max_tokens": 4096
     })
 }
 
@@ -5303,6 +5300,164 @@ mod tests {
             action: "move".to_string(),
             conflict: None,
         }
+    }
+
+    // ── DeepSeek API request construction tests ─────────────────────
+
+    #[test]
+    fn deepseek_proposal_body_has_required_fields() {
+        let body = create_openai_compatible_proposal_body(
+            "deepseek-chat",
+            "Add a hello world message to src/main.txt",
+        );
+
+        assert_eq!(body["model"], "deepseek-chat");
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["temperature"], 0);
+        assert_eq!(body["max_tokens"], 4096);
+        assert_eq!(body["response_format"]["type"], "json_object");
+        // Messages array: system + user
+        let messages = body["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["role"], "user");
+        assert!(
+            messages[1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("hello world")
+        );
+    }
+
+    #[test]
+    fn deepseek_proposal_body_excludes_thinking_field() {
+        let body = create_openai_compatible_proposal_body("deepseek-chat", "test prompt");
+
+        assert!(
+            body.get("thinking").is_none(),
+            "DeepSeek API does not support the 'thinking' field for deepseek-chat; it must be omitted"
+        );
+    }
+
+    #[test]
+    fn deepseek_completion_body_matches_proposal_structure() {
+        let proposal_body = create_openai_compatible_proposal_body("deepseek-chat", "test");
+        let request = ModelCompletionRequest {
+            prompt: "test".to_string(),
+            provider_id: Some("deepseek".to_string()),
+            model: Some("deepseek-chat".to_string()),
+            api_key: Some("sk-test".to_string()),
+            api_key_reference: None,
+            base_url: None,
+            max_tokens: Some(4096),
+            temperature: Some(0.0),
+            stop_sequences: None,
+            locale: None,
+            protocol: None,
+        };
+        let completion_body = create_openai_compatible_completion_body("deepseek-chat", &request);
+
+        // Both should have the same core structure
+        assert_eq!(proposal_body["model"], completion_body["model"]);
+        assert_eq!(proposal_body["stream"], completion_body["stream"]);
+        // Proposal has system message, completion does not
+        assert_eq!(
+            proposal_body["messages"]
+                .as_array()
+                .unwrap()
+                .first()
+                .unwrap()["role"],
+            "system"
+        );
+        assert_eq!(
+            completion_body["messages"]
+                .as_array()
+                .unwrap()
+                .first()
+                .unwrap()["role"],
+            "user"
+        );
+    }
+
+    #[test]
+    fn deepseek_endpoint_url_is_correctly_constructed() {
+        // From default base URL
+        let base = default_openai_compatible_base_url_for_provider("deepseek");
+        assert_eq!(base, "https://api.deepseek.com/v1");
+        let endpoint = create_chat_completions_endpoint(&base);
+        assert_eq!(endpoint, "https://api.deepseek.com/v1/chat/completions");
+
+        // From user-provided base URL without /v1
+        let endpoint2 = create_chat_completions_endpoint("https://api.deepseek.com");
+        assert_eq!(endpoint2, "https://api.deepseek.com/chat/completions");
+
+        // From user-provided base URL with trailing slash
+        let endpoint3 = create_chat_completions_endpoint("https://api.deepseek.com/v1/");
+        assert_eq!(endpoint3, "https://api.deepseek.com/v1/chat/completions");
+
+        // From user-provided full endpoint
+        let endpoint4 =
+            create_chat_completions_endpoint("https://api.deepseek.com/v1/chat/completions");
+        assert_eq!(endpoint4, "https://api.deepseek.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn deepseek_proposal_request_serializes_to_valid_json() {
+        let body = create_openai_compatible_proposal_body("deepseek-chat", "test prompt");
+        let json_text = serde_json::to_string(&body).expect("serialize proposal body");
+
+        // Must be valid JSON
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_text).expect("re-parse proposal body");
+        assert_eq!(parsed["model"], "deepseek-chat");
+
+        // Must not contain thinking field in serialized form
+        assert!(
+            !json_text.contains("\"thinking\""),
+            "Serialized proposal body must not contain 'thinking' field"
+        );
+    }
+
+    #[test]
+    fn deepseek_should_fallback_when_credentials_present() {
+        let request = CodeProposeEditRequest {
+            workspace_path: "E:/Test".to_string(),
+            user_goal: "Fix a bug".to_string(),
+            changed_files: vec![],
+            diff: String::new(),
+            provider_id: Some("deepseek".to_string()),
+            model: Some("deepseek-chat".to_string()),
+            api_key: Some("sk-test-key".to_string()),
+            api_key_reference: None,
+            base_url: None,
+            locale: None,
+        };
+
+        assert!(
+            should_fallback_to_openai_compatible(&request),
+            "DeepSeek with API key should use direct HTTP API"
+        );
+    }
+
+    #[test]
+    fn deepseek_should_not_fallback_without_credentials() {
+        let request = CodeProposeEditRequest {
+            workspace_path: "E:/Test".to_string(),
+            user_goal: "Fix a bug".to_string(),
+            changed_files: vec![],
+            diff: String::new(),
+            provider_id: Some("deepseek".to_string()),
+            model: Some("deepseek-chat".to_string()),
+            api_key: None,
+            api_key_reference: None,
+            base_url: None,
+            locale: None,
+        };
+
+        assert!(
+            !should_fallback_to_openai_compatible(&request),
+            "DeepSeek without API key should not use direct HTTP API"
+        );
     }
 }
 

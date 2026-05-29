@@ -83,6 +83,36 @@ describe("DeepSeekAdapter", () => {
     const adapter = new DeepSeekAdapter();
     expect(adapter.capabilities.vision).toBe(false);
   });
+
+  it("reports code capability", () => {
+    const adapter = new DeepSeekAdapter();
+    expect(adapter.capabilities.code).toBe(true);
+  });
+
+  it("reports longContext capability", () => {
+    const adapter = new DeepSeekAdapter();
+    expect(adapter.capabilities.longContext).toBe(true);
+  });
+
+  it("passes model name through unchanged for deepseek-chat", () => {
+    const adapter = new DeepSeekAdapter();
+    const payload = adapter.buildCompletionRequest({
+      ...baseInput,
+      providerId: "deepseek",
+      model: "deepseek-chat",
+    });
+    expect(payload.model).toBe("deepseek-chat");
+  });
+
+  it("passes model name through unchanged for deepseek-coder", () => {
+    const adapter = new DeepSeekAdapter();
+    const payload = adapter.buildCompletionRequest({
+      ...baseInput,
+      providerId: "deepseek",
+      model: "deepseek-coder",
+    });
+    expect(payload.model).toBe("deepseek-coder");
+  });
 });
 
 describe("AnthropicAdapter", () => {
