@@ -527,9 +527,9 @@ export function createFileScanTaskRuntime({
   onTaskStarted,
 }: FileScanRuntimeOptions): TaskRuntime {
   const runtimeState = createRuntimeState(createInitialTaskSnapshot(), delayMs);
-  if (eventBus) {
-    eventBus.on((e) => runtimeState.emitDelta(e));
-  }
+  const eventBusUnsubscribe = eventBus
+    ? eventBus.on((e) => runtimeState.emitDelta(e))
+    : undefined;
   const permissionHandlers = new Map<string, PendingPermissionHandler>();
   const queuedPermissionDecisions = new Map<string, "approved" | "denied">();
   let queuedLegacyPermissionDecision: "approved" | "denied" | undefined;
@@ -746,6 +746,7 @@ export function createFileScanTaskRuntime({
       void handler(decision);
     },
     dispose() {
+      eventBusUnsubscribe?.();
       runtimeState.dispose();
     },
   };

@@ -1911,3 +1911,275 @@ function createExecution(operations: PlannedPathOperation[]): FileOrganizationEx
     })),
   };
 }
+
+// ── Streaming pipeline tests ────────────────────────────────────────────────
+
+import { createTaskEventBus } from "./task-event-bus";
+
+describe("completeGeneralChat streaming pipeline", () => {
+  it("streams LLM output through eventBus and accumulates streamingText in snapshot", async () => {
+    const chunks = ["Hello", " world", "!"];
+
+    // Use a plain async generator — vi.fn wrapping can interfere with
+    // async iterable protocol detection.
+    async function* mockStream() {
+      for (const text of chunks) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        yield { text };
+      }
+    }
+
+    const mockChatTool = {
+      complete: vi.fn(async () => ({ text: chunks.join(""), tokenUsage: undefined })),
+      stream: mockStream,
+    };
+
+    const eventBus = createTaskEventBus();
+    const runtime = createFileScanTaskRuntime({
+      fileTool: undefined as any,
+      chatTool: mockChatTool,
+      eventBus,
+    });
+
+    const { snapshots } = subscribeToRuntime(runtime);
+    runtime.start("test streaming", { mode: "chat", taskId: "task-stream-test" });
+
+    // Wait for completion with a generous timeout
+    await vi.waitFor(() => {
+      const last = snapshots[snapshots.length - 1];
+      expect(last?.status).toBe("completed");
+    }, { timeout: 5000 });
+
+    // Verify streaming took the streaming path (not fallback)
+    expect(mockChatTool.complete).not.toHaveBeenCalled();
+
+    // Check that streaming snapshots were emitted during the run
+    const streamingSnapshots = snapshots.filter(
+      (s) => s.streamingText != null && s.streamingText.length > 0,
+    );
+    expect(streamingSnapshots.length).toBeGreaterThan(0);
+
+    const lastStreaming = streamingSnapshots[streamingSnapshots.length - 1];
+    expect(lastStreaming?.streamingText?.length).toBeGreaterThan(0);
+    expect(lastStreaming?.streamingAgentKind).toBe("commander");
+
+    const finalSnapshot = snapshots[snapshots.length - 1];
+    expect(finalSnapshot?.commanderMessage).toBe("Hello world!");
+
+    runtime.dispose();
+  });
+
+  it("falls back to non-streaming when eventBus is not provided", async () => {
+    const streamSpy = vi.fn();
+    const mockChatTool = {
+      complete: vi.fn(async () => ({ text: "fallback response", tokenUsage: undefined })),
+      stream: streamSpy,
+    };
+
+    const runtime = createFileScanTaskRuntime({
+      fileTool: undefined as any,
+      chatTool: mockChatTool,
+    });
+
+    const { snapshots } = subscribeToRuntime(runtime);
+    runtime.start("test fallback", { mode: "chat", taskId: "task-fallback-test" });
+
+    await vi.waitFor(() => {
+      expect(snapshots[snapshots.length - 1]?.status).toBe("completed");
+    }, { timeout: 3000 });
+
+    expect(mockChatTool.complete).toHaveBeenCalled();
+    expect(mockChatTool.stream).not.toHaveBeenCalled();
+
+    runtime.dispose();
+  });
+
+  it("falls back to complete() when stream is not available", async () => {
+    const mockChatTool = {
+      complete: vi.fn(async () => ({ text: "no-stream response", tokenUsage: undefined })),
+      // stream is absent
+    };
+
+    const eventBus = createTaskEventBus();
+    const runtime = createFileScanTaskRuntime({
+      fileTool: undefined as any,
+      chatTool: mockChatTool,
+      eventBus,
+    });
+
+    const { snapshots } = subscribeToRuntime(runtime);
+    runtime.start("test no stream", { mode: "chat", taskId: "task-nostream-test" });
+
+    await vi.waitFor(() => {
+      expect(snapshots[snapshots.length - 1]?.status).toBe("completed");
+    }, { timeout: 3000 });
+
+    expect(mockChatTool.complete).toHaveBeenCalled();
+
+    runtime.dispose();
+  });
+
+  it("falls back to complete() on stream failure", async () => {
+    async function* brokenStream() {
+      yield { text: "partial" };
+      throw new Error("stream broken");
+    }
+    const mockChatTool = {
+      complete: vi.fn(async () => ({ text: "recovered after stream failure", tokenUsage: undefined })),
+      stream: brokenStream,
+    };
+
+    const eventBus = createTaskEventBus();
+    const runtime = createFileScanTaskRuntime({
+      fileTool: undefined as any,
+      chatTool: mockChatTool,
+      eventBus,
+    });
+
+    const { snapshots } = subscribeToRuntime(runtime);
+    runtime.start("test stream failure", { mode: "chat", taskId: "task-failure-test" });
+
+    await vi.waitFor(() => {
+      expect(snapshots[snapshots.length - 1]?.status).toBe("completed");
+    }, { timeout: 3000 });
+
+    // Should have recovered via complete()
+    expect(mockChatTool.complete).toHaveBeenCalled();
+    const final = snapshots[snapshots.length - 1];
+    expect(final?.commanderMessage).toBe("recovered after stream failure");
+
+    runtime.dispose();
+  });
+
+  it("handles cancellation mid-stream gracefully", async () => {
+    async function* hangingStream() {
+      yield { text: "chunk1 " };
+      yield { text: "chunk2 " };
+      // Stream would continue but cancellation stops it
+      await new Promise(() => {}); // never resolves
+    }
+    const mockChatTool = {
+      complete: vi.fn(async () => ({ text: "should not be called", tokenUsage: undefined })),
+      stream: hangingStream,
+    };
+
+    const eventBus = createTaskEventBus();
+    const runtime = createFileScanTaskRuntime({
+      fileTool: undefined as any,
+      chatTool: mockChatTool,
+      eventBus,
+    });
+
+    const { snapshots } = subscribeToRuntime(runtime);
+    runtime.start("test cancel", { mode: "chat", taskId: "task-cancel-test" });
+
+    // Wait for at least one streaming snapshot
+    await vi.waitFor(() => {
+      expect(snapshots.some((s) => s.isStreaming)).toBe(true);
+    }, { timeout: 3000 });
+
+    // Simulate cancellation
+    eventBus.emit({
+      kind: "agent.chunk_end",
+      taskId: "task-cancel-test",
+      agentKind: "commander",
+      fullText: "",
+      error: "cancelled",
+    });
+
+    // Should have a cancelled/error state
+    const afterCancel = snapshots[snapshots.length - 1];
+    expect(afterCancel?.isStreaming).toBe(false);
+
+    runtime.dispose();
+  });
+});
+
+import { createDeltaReducer } from "./delta-reducer";
+
+describe("delta-reducer streaming metadata", () => {
+  it("tracks streamingAgentKind and clears on completion", () => {
+    const initial = createInitialTaskSnapshot();
+    const reducer = createDeltaReducer(initial);
+
+    // Start streaming
+    let snapshot = reducer.apply({
+      kind: "agent.chunk_start",
+      taskId: "t1",
+      agentKind: "verifier",
+    });
+    expect(snapshot.isStreaming).toBe(true);
+    expect(snapshot.streamingAgentKind).toBe("verifier");
+    expect(snapshot.streamingText).toBe("");
+
+    // Add chunks
+    snapshot = reducer.apply({
+      kind: "agent.chunk",
+      taskId: "t1",
+      agentKind: "verifier",
+      text: "checking",
+    });
+    expect(snapshot.streamingText).toBe("checking");
+
+    snapshot = reducer.apply({
+      kind: "agent.chunk",
+      taskId: "t1",
+      agentKind: "verifier",
+      text: " evidence",
+    });
+    expect(snapshot.streamingText).toBe("checking evidence");
+
+    // End streaming
+    snapshot = reducer.apply({
+      kind: "agent.chunk_end",
+      taskId: "t1",
+      agentKind: "verifier",
+      fullText: "checking evidence",
+    });
+    expect(snapshot.isStreaming).toBe(false);
+    expect(snapshot.streamingText).toBeUndefined();
+    expect(snapshot.verificationSummary).toBe("checking evidence");
+  });
+
+  it("accumulates commander text during streaming", () => {
+    const initial = createInitialTaskSnapshot();
+    const reducer = createDeltaReducer(initial);
+
+    reducer.apply({
+      kind: "agent.chunk_start",
+      taskId: "t2",
+      agentKind: "commander",
+    });
+
+    reducer.apply({
+      kind: "agent.chunk",
+      taskId: "t2",
+      agentKind: "commander",
+      text: "Based on the ",
+    });
+    reducer.apply({
+      kind: "agent.chunk",
+      taskId: "t2",
+      agentKind: "commander",
+      text: "evidence, ",
+    });
+    const snapshot = reducer.apply({
+      kind: "agent.chunk",
+      taskId: "t2",
+      agentKind: "commander",
+      text: "the project is healthy.",
+    });
+
+    expect(snapshot.streamingText).toBe("Based on the evidence, the project is healthy.");
+    expect(snapshot.isStreaming).toBe(true);
+
+    const final = reducer.apply({
+      kind: "agent.chunk_end",
+      taskId: "t2",
+      agentKind: "commander",
+      fullText: "Based on the evidence, the project is healthy.",
+    });
+    expect(final.commanderMessage).toBe("Based on the evidence, the project is healthy.");
+    expect(final.isStreaming).toBe(false);
+  });
+});

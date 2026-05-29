@@ -86,7 +86,7 @@ pnpm rust:test           # Rust tests only
 - RAG-lite: @document references in chat input inject file content into prompts
 - Code Agent (opencode-backed): fixture QA passes (deny + approve), live DeepSeek QA needs reqwest request debugging
 - Chinese optimization: input preprocessor + terminology injection + ChineseReviewer agent done
-- Streaming output: Rust SSE backend done (background thread → Tauri events), UI consumption in progress (P0-1)
+- Streaming output: end-to-end complete — Rust SSE backend (background thread → Tauri events), model-provider AsyncGenerator wrapping, eventBus → delta-reducer → TaskSnapshot.streamingText, ThreadView StreamingMessage + useSmoothStream typewriter animation, cancel via cancel_all_model_streams, automatic fallback to non-streaming on failure
 - Persistence: fully migrated to SQLite — task history, approval records, scheduled tasks, user preferences, JSONL logs, model settings, model profiles
 - Multi-agent workflow executor: implemented (DAG with parallel step support via Promise.allSettled)
 - Agent Capability Model: capability tags per agent kind, ModelRequirements (prefersVision, prefersCode, minContextTokens)
