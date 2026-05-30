@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::{fs, io::Read, path::{Path, PathBuf}, sync::Mutex};
-use tauri;
 
 use crate::{NativeApprovalBinding, create_native_approval_binding, approve_native_approval_binding, require_native_approval_binding, normalize_path, create_fnv1a_hash, format_system_time, resolve_workspace_path, create_approval_id};
 
@@ -97,7 +96,7 @@ pub(crate) fn scan_markdown_documents(
 ) -> Result<Vec<MarkdownDocument>, String> {
     let workspace = resolve_workspace_path(workspace_path)?;
     let mut documents = Vec::new();
-    scan_directory(&workspace, &workspace, &mut documents)?;
+    scan_directory(&workspace, &mut documents)?;
     documents.sort_by(|left, right| right.modified_at.cmp(&left.modified_at));
     documents.truncate(50);
     Ok(documents)
@@ -368,7 +367,8 @@ pub(crate) fn take_approved_pdf_operations(
         &create_pdf_operations_preview_hash(&pending.operations),
         "PDF organization approval id does not match the pending dry-run.",
         "PDF organization dry-run has not been approved.",
-    )?;
+    )
+    .map_err(|e| e.to_string())?;
     if pending.operations != request.operations {
         return Err(
             "Approved PDF organization operations do not match the current dry-run.".to_string(),
@@ -535,7 +535,13 @@ pub(crate) fn file_operation_result(
 
 
 pub(crate) fn scan_directory(
-    root: &Path,
+    directory: &Path,
+    documents: &mut Vec<MarkdownDocument>,
+) -> Result<(), String> {
+    scan_directory_recursive(directory, documents)
+}
+
+fn scan_directory_recursive(
     directory: &Path,
     documents: &mut Vec<MarkdownDocument>,
 ) -> Result<(), String> {
@@ -548,7 +554,7 @@ pub(crate) fn scan_directory(
         let path = entry.path();
 
         if path.is_dir() {
-            scan_directory(root, &path, documents)?;
+            scan_directory_recursive(&path, documents)?;
             continue;
         }
 

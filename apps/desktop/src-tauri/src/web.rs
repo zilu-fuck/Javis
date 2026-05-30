@@ -426,7 +426,7 @@ pub(crate) fn normalize_bing_url(value: &str) -> Option<String> {
         let encoded = encoded[..end].trim_start_matches("a1");
         if !encoded.is_empty() {
             let mut padded = encoded.replace('-', "+").replace('_', "/");
-            while padded.len() % 4 != 0 {
+            while !padded.len().is_multiple_of(4) {
                 padded.push('=');
             }
             if let Ok(decoded) = STANDARD.decode(padded) {

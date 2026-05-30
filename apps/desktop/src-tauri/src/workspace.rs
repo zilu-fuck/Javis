@@ -23,7 +23,7 @@ fn load_workspace_definitions_impl(app_handle: &tauri::AppHandle) -> Result<Vec<
             && path
                 .file_stem()
                 .and_then(|s| s.to_str())
-                .map_or(false, |s| s.ends_with(".workspace"));
+                .is_some_and(|s| s.ends_with(".workspace"));
         if !is_workspace_file {
             continue;
         }

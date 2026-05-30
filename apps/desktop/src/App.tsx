@@ -315,6 +315,8 @@ function App() {
 
   // ── Local knowledge base state ────────────────────────────────────
   const [skillEntries, setSkillEntries] = useState<WorkbenchSkillEntry[]>([]);
+  const [skillTranslationStatus, setSkillTranslationStatus] =
+    useState<"idle" | "translating" | "error">("idle");
   const [mcpConfig, setMcpConfig] = useState<McpServerConfig[]>([]);
 
   const fileClassificationRepoRef = useRef<FileClassificationRepository | null>(null);
@@ -407,6 +409,42 @@ function App() {
     }));
     setSkillEntries([...tools, ...agents, ...mcps]);
   }, [mcpConfig]);
+
+  async function handleTranslateSkillsToChinese() {
+    if (skillTranslationStatus === "translating") {
+      return;
+    }
+    setSkillTranslationStatus("translating");
+    try {
+      const translated = await runtime.translateSkillsToChinese(
+        skillEntries.map((skill) => ({
+          id: skill.id,
+          name: skill.name,
+          description: skill.description,
+          agentOwners: skill.agentOwners,
+        })),
+      );
+      const byId = new Map(translated.map((skill) => [skill.id, skill]));
+      setSkillEntries((current) =>
+        current.map((skill) => {
+          const next = byId.get(skill.id);
+          if (!next) {
+            return skill;
+          }
+          return {
+            ...skill,
+            name: next.name || skill.name,
+            description: next.description || skill.description,
+            agentOwners: next.agentOwners?.length ? next.agentOwners : skill.agentOwners,
+          };
+        }),
+      );
+      setSkillTranslationStatus("idle");
+    } catch (error) {
+      logNonFatalError("Failed to translate skills to Chinese", error);
+      setSkillTranslationStatus("error");
+    }
+  }
 
   // ── Build sidebar nav items from built-in defaults + workspace defs ─
   const sidebarNavItems = useMemo(() => {
@@ -956,6 +994,8 @@ function App() {
           scheduledTaskToWorkbench(t, history, activeScheduledTaskId),
         )}
         skillEntries={skillEntries}
+        skillTranslationStatus={skillTranslationStatus}
+        onTranslateSkillsToChinese={handleTranslateSkillsToChinese}
         sidebarNavItems={sidebarNavItems}
         task={task}
         userDocuments={userDocuments}

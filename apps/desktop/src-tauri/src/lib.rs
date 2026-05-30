@@ -291,8 +291,8 @@ fn protect_model_api_key_secret(secret: &str) -> Result<String, String> {
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
 
-    let mut input = CRYPT_INTEGER_BLOB {
-        cbData: secret.as_bytes().len() as u32,
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: secret.len() as u32,
         pbData: secret.as_bytes().as_ptr() as *mut u8,
     };
     let mut output = CRYPT_INTEGER_BLOB {
@@ -301,7 +301,7 @@ fn protect_model_api_key_secret(secret: &str) -> Result<String, String> {
     };
     let ok = unsafe {
         CryptProtectData(
-            &mut input,
+            &input,
             std::ptr::null(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
@@ -332,7 +332,7 @@ fn unprotect_model_api_key_secret(secret: &str) -> Result<String, String> {
     let protected = STANDARD
         .decode(encoded)
         .map_err(|error| format!("Model API key secret is invalid: {error}"))?;
-    let mut input = CRYPT_INTEGER_BLOB {
+    let input = CRYPT_INTEGER_BLOB {
         cbData: protected.len() as u32,
         pbData: protected.as_ptr() as *mut u8,
     };
@@ -342,7 +342,7 @@ fn unprotect_model_api_key_secret(secret: &str) -> Result<String, String> {
     };
     let ok = unsafe {
         CryptUnprotectData(
-            &mut input,
+            &input,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
@@ -812,19 +812,19 @@ pub(crate) fn require_native_approval_binding(
     preview_hash: &str,
     mismatch_error: &str,
     unapproved_error: &str,
-) -> Result<(), String> {
+) -> Result<(), error::JavisError> {
     if binding.approval_id != approval_id {
-        return Err(mismatch_error.to_string());
+        return Err(error::JavisError::Permission(mismatch_error.to_string()));
     }
     if binding.tool_name != tool_name {
-        return Err("Approval tool binding does not match the approved dry-run.".to_string());
+        return Err(error::JavisError::Permission("Approval tool binding does not match the approved dry-run.".into()));
     }
     require_native_approval_task_id(binding, task_id)?;
     if binding.preview_hash != preview_hash {
-        return Err("Approval preview hash does not match the approved dry-run.".to_string());
+        return Err(error::JavisError::Permission("Approval preview hash does not match the approved dry-run.".into()));
     }
     if !binding.approved {
-        return Err(unapproved_error.to_string());
+        return Err(error::JavisError::Permission(unapproved_error.to_string()));
     }
     Ok(())
 }
@@ -832,11 +832,11 @@ pub(crate) fn require_native_approval_binding(
 pub(crate) fn require_native_approval_task_id(
     binding: &NativeApprovalBinding,
     task_id: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(), error::JavisError> {
     let approved_task_id = binding.task_id.trim();
     let requested_task_id = task_id.unwrap_or_default().trim();
     if approved_task_id != requested_task_id {
-        return Err("Approval task id does not match the approved request.".to_string());
+        return Err(error::JavisError::Permission("Approval task id does not match the approved request.".into()));
     }
     Ok(())
 }
@@ -1189,7 +1189,7 @@ mod tests {
 
         assert_eq!(
             result.expect_err("approval should be required"),
-            "PDF organization dry-run has not been approved."
+            "Permission denied: PDF organization dry-run has not been approved."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -1267,7 +1267,7 @@ mod tests {
 
         assert_eq!(
             result.expect_err("task id mismatch should fail"),
-            "Approval task id does not match the approved request."
+            "Permission denied: Approval task id does not match the approved request."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -1299,7 +1299,7 @@ mod tests {
 
         assert_eq!(
             result.expect_err("task id mismatch should fail"),
-            "Approval task id does not match the approved request."
+            "Permission denied: Approval task id does not match the approved request."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -1580,8 +1580,8 @@ mod tests {
         );
 
         assert_eq!(
-            result.expect_err("unapproved path should fail"),
-            "Patch includes an unapproved file path: src/other.txt"
+            result.expect_err("unapproved path should fail").to_string(),
+            "Validation error: Patch includes an unapproved file path: src/other.txt"
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -1599,8 +1599,8 @@ mod tests {
         let result = apply_code_patch_in_workspace(&root, request, None);
 
         assert_eq!(
-            result.expect_err("missing approval id should fail"),
-            "Code patch approval id is required."
+            result.expect_err("missing approval id should fail").to_string(),
+            "Validation error: Code patch approval id is required."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -1618,8 +1618,8 @@ mod tests {
         let result = apply_code_patch_in_workspace(&root, request, None);
 
         assert_eq!(
-            result.expect_err("patch hash mismatch should fail"),
-            "Code patch hash does not match the approved proposal."
+            result.expect_err("patch hash mismatch should fail").to_string(),
+            "Validation error: Code patch hash does not match the approved proposal."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -1637,8 +1637,8 @@ mod tests {
         let result = apply_code_patch_in_workspace(&root, request, Some(&approval_state));
 
         assert_eq!(
-            result.expect_err("approval should be required"),
-            "No approved Code Patch proposal is pending."
+            result.expect_err("approval should be required").to_string(),
+            "Permission denied: No approved Code Patch proposal is pending."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -1666,8 +1666,8 @@ mod tests {
 
         assert!(result.applied);
         assert_eq!(
-            second_result.expect_err("approval should be consumed"),
-            "No approved Code Patch proposal is pending."
+            second_result.expect_err("approval should be consumed").to_string(),
+            "Permission denied: No approved Code Patch proposal is pending."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -1691,8 +1691,8 @@ mod tests {
         let result = apply_code_patch_in_workspace(&root, request, Some(&approval_state));
 
         assert_eq!(
-            result.expect_err("proposal mismatch should fail"),
-            "Code patch proposal id does not match the approved proposal."
+            result.expect_err("proposal mismatch should fail").to_string(),
+            "Permission denied: Code patch proposal id does not match the approved proposal."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -1724,8 +1724,8 @@ mod tests {
         let result = apply_code_patch_in_workspace(&root, request, Some(&approval_state));
 
         assert_eq!(
-            result.expect_err("tool binding mismatch should fail"),
-            "Approval tool binding does not match the approved dry-run."
+            result.expect_err("tool binding mismatch should fail").to_string(),
+            "Permission denied: Approval tool binding does not match the approved dry-run."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -1757,8 +1757,8 @@ mod tests {
         let result = apply_code_patch_in_workspace(&root, request, Some(&approval_state));
 
         assert_eq!(
-            result.expect_err("preview hash mismatch should fail"),
-            "Approval preview hash does not match the approved dry-run."
+            result.expect_err("preview hash mismatch should fail").to_string(),
+            "Permission denied: Approval preview hash does not match the approved dry-run."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -1784,8 +1784,8 @@ mod tests {
         let result = apply_code_patch_in_workspace(&root, request, Some(&approval_state));
 
         assert_eq!(
-            result.expect_err("stale approved file should fail"),
-            "Code patch approved files changed before apply."
+            result.expect_err("stale approved file should fail").to_string(),
+            "Permission denied: Code patch approved files changed before apply."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -1828,8 +1828,8 @@ mod tests {
         );
 
         assert_eq!(
-            result.expect_err("unapproved requested path should fail"),
-            "Requested path is not approved: src/other.txt"
+            result.expect_err("unapproved requested path should fail").to_string(),
+            "Validation error: Requested path is not approved: src/other.txt"
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -1851,8 +1851,8 @@ mod tests {
         );
 
         assert_eq!(
-            result.expect_err("root escape should fail"),
-            "Requested path must stay inside root."
+            result.expect_err("root escape should fail").to_string(),
+            "Validation error: Requested path must stay inside root."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
         fs::remove_dir_all(outside).expect("cleanup outside directory");
@@ -1873,8 +1873,8 @@ mod tests {
         );
 
         assert_eq!(
-            result.expect_err("traversal should fail"),
-            "Changed file path cannot contain parent directory traversal."
+            result.expect_err("traversal should fail").to_string(),
+            "Validation error: Changed file path cannot contain parent directory traversal."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -2040,9 +2040,10 @@ mod tests {
         )
         .expect_err("invalid proposal should fail");
 
-        assert!(error.contains("Output excerpt:"));
-        assert!(error.contains("[redacted-secret]"));
-        assert!(!error.contains("sk-super-secret"));
+        let error_msg = error.to_string();
+        assert!(error_msg.contains("Output excerpt:"));
+        assert!(error_msg.contains("[redacted-secret]"));
+        assert!(!error_msg.contains("sk-super-secret"));
     }
 
     #[test]
@@ -2372,8 +2373,8 @@ mod tests {
         let result = parse_code_proposal_from_text_for_request(&root, text, &request);
 
         assert_eq!(
-            result.expect_err("unapproved file should fail"),
-            "Code proposal includes a file outside the approved diff: src/other.txt"
+            result.expect_err("unapproved file should fail").to_string(),
+            "Validation error: Code proposal includes a file outside the approved diff: src/other.txt"
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -2412,8 +2413,8 @@ mod tests {
         let result = parse_code_proposal_from_text(&root, text);
 
         assert_eq!(
-            result.expect_err("unlisted path should fail"),
-            "Code proposal patch includes an unlisted file path: src/other.txt"
+            result.expect_err("unlisted path should fail").to_string(),
+            "Validation error: Code proposal patch includes an unlisted file path: src/other.txt"
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -2443,8 +2444,8 @@ mod tests {
         );
 
         assert_eq!(
-            result.expect_err("fixture should require QA mode"),
-            "Code proposal fixtures require JAVIS_QA_MODE=1."
+            result.expect_err("fixture should require QA mode").to_string(),
+            "Validation error: Code proposal fixtures require JAVIS_QA_MODE=1."
         );
         env::remove_var("JAVIS_CODE_PROPOSAL_FIXTURE_PATH");
         fs::remove_dir_all(root).expect("cleanup test directory");

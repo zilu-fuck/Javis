@@ -42,6 +42,7 @@ export function JavisWorkbench({
   activeHistoryEntryId,
   scheduledTasks = [],
   skillEntries = [],
+  skillTranslationStatus = "idle",
   installedApps = [],
   userDocuments = [],
   userImages = [],
@@ -78,6 +79,7 @@ export function JavisWorkbench({
   onRetryTask,
   onStopTask,
   onSubmitGoal,
+  onTranslateSkillsToChinese,
   onChangeActiveView,
   onSelectComposeMode,
   activeComposeMode,
@@ -295,8 +297,15 @@ export function JavisWorkbench({
     [isTaskActive, effectiveLocale, onDeleteScheduledTask, onToggleScheduledTask, scheduledTasks],
   );
   const renderSkillsView = useCallback(
-    () => <SkillMarketView locale={effectiveLocale} skills={skillEntries} />,
-    [effectiveLocale, skillEntries],
+    () => (
+      <SkillMarketView
+        locale={effectiveLocale}
+        onTranslateToChinese={onTranslateSkillsToChinese}
+        skills={skillEntries}
+        translationStatus={skillTranslationStatus}
+      />
+    ),
+    [effectiveLocale, onTranslateSkillsToChinese, skillEntries, skillTranslationStatus],
   );
   const renderAppsView = useCallback(
     () => (

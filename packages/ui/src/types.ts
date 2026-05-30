@@ -302,6 +302,7 @@ export interface JavisWorkbenchProps {
   activeHistoryEntryId?: string;
   scheduledTasks?: WorkbenchScheduledTask[];
   skillEntries?: WorkbenchSkillEntry[];
+  skillTranslationStatus?: "idle" | "translating" | "error";
   /** Custom sidebar navigation items. Merged with built-in defaults. */
   sidebarNavItems?: SidebarNavItem[];
   installedApps?: WorkbenchAppEntry[];
@@ -341,6 +342,7 @@ export interface JavisWorkbenchProps {
   onRetryTask?: () => void;
   onStopTask?: () => void;
   onSubmitGoal: (goal?: string, workspacePath?: string, scheduledTaskId?: string) => void;
+  onTranslateSkillsToChinese?: () => void;
   onChangeActiveView?: (view: ActiveView) => void;
   onSelectComposeMode?: (mode: "chat" | "project") => void;
   activeComposeMode?: "chat" | "project";

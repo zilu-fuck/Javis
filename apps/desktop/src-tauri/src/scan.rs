@@ -217,13 +217,14 @@ fn collect_files_inner(
 
         if path.is_dir() {
             let name_lower = file_name.to_lowercase();
-            if recursive && !skip_lower.contains(&name_lower) {
-                if !is_root_level_vendor_skip(&file_name, dir) {
-                    collect_files_inner(
-                        &path, extensions, max_results, recursive,
-                        max_depth, depth + 1, entries,
-                    );
-                }
+            if recursive
+                && !skip_lower.contains(&name_lower)
+                && !is_root_level_vendor_skip(&file_name, dir)
+            {
+                collect_files_inner(
+                    &path, extensions, max_results, recursive,
+                    max_depth, depth + 1, entries,
+                );
             }
             continue;
         }
@@ -238,7 +239,7 @@ fn collect_files_inner(
         }
 
         let metadata = fs::metadata(&path).ok();
-        let size_bytes = metadata.as_ref().and_then(|m| Some(m.len()));
+        let size_bytes = metadata.as_ref().map(|m| m.len());
         let modified_at = metadata
             .as_ref()
             .and_then(|m| m.modified().ok())
@@ -585,14 +586,14 @@ pub(crate) fn scan_installed_apps() -> Result<Vec<AppEntry>, String> {
         let mut apps: Vec<AppEntry> = Vec::new();
         let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        let start_menu_paths = vec![
+        let start_menu_paths = [
             PathBuf::from("C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs"),
             dirs::data_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join("Microsoft\\Windows\\Start Menu\\Programs"),
         ];
 
-        let desktop_paths = vec![
+        let desktop_paths = [
             dirs::desktop_dir().unwrap_or_else(|| PathBuf::from(".")),
             PathBuf::from("C:\\Users\\Public\\Desktop"),
         ];
@@ -604,7 +605,7 @@ pub(crate) fn scan_installed_apps() -> Result<Vec<AppEntry>, String> {
             collect_lnk_files(root, &mut apps, &mut seen_names);
         }
 
-        apps.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        apps.sort_by_key(|a| a.name.to_lowercase());
         Ok(apps)
     }
 }

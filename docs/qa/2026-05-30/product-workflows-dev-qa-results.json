@@ -1,0 +1,38 @@
+﻿{
+    "bootstrap":  {
+                      "hasTauri":  false,
+                      "hasInvoke":  false,
+                      "text":  "Javis\nJavis\n/\n+\n新建对话\n^\n聊天\n项目\no\n自动任务\n#\n技能广场\n35\n\n本地知识库\n\n#\n应用\n\u003e\n文档\nv\n\u003e\n图库\nv\n\u003e\n此电脑\nv\n\n项目\n\n▣\nJavis\nE:/Javis\nv\n暂无对话\n▣\n未知\nv\n*\n已回答\n已完成 · 2026/5/29 14:58:08\nx\n*\n已回答\n已完成 · 2026/5/29 14:58:01\nx\n*\n已回答\n已完成 · 2026/5/29 01:15:32\nx\n*\n已回答\n已完成 · 2026/5/29 01:15:01\nx\n⚙\n设置\n今天想跟 Javis 聊点什么？\n+\n发送\n代理图谱\n9\n展开检查器\n活动日志\n1\n展开日志"
+                  },
+    "modelProfilesBeforeRestart":  {
+                                       "calls":  [
+
+                                                 ],
+                                       "visible":  true
+                                   },
+    "modelProfilesAfterRestart":  {
+                                      "profileValues":  [
+
+                                                        ],
+                                      "hasPrimary":  true,
+                                      "hasSecondary":  false,
+                                      "hasMultimodal":  true
+                                  },
+    "scanAndClassify":  {
+
+                        },
+    "ragLite":  null,
+    "providerAdapter":  {
+
+                        },
+    "streamingAndCancel":  {
+
+                           },
+    "workspaceCrud":  {
+
+                      },
+    "tests":  {
+                  "coreWorkflowDag":  "pnpm --filter @javis/core test -- workflow-dag-executor.test.ts: PASS (8 tests)",
+                  "desktopHooks":  "pnpm --filter @javis/desktop test -- use-model-profiles.test.ts use-scanned-data.test.ts use-task-runtime.test.ts model-provider.test.ts: PASS (25 tests)"
+              }
+}

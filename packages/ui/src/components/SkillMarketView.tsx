@@ -3,6 +3,8 @@ import type { WorkbenchLocale, WorkbenchSkillEntry } from "../types";
 interface SkillMarketViewProps {
   skills: WorkbenchSkillEntry[];
   locale: WorkbenchLocale;
+  translationStatus?: "idle" | "translating" | "error";
+  onTranslateToChinese?: () => void;
 }
 
 const PERMISSION_COLORS: Record<string, string> = {
@@ -12,7 +14,12 @@ const PERMISSION_COLORS: Record<string, string> = {
   dangerous: "#f87171",
 };
 
-export function SkillMarketView({ skills, locale }: SkillMarketViewProps) {
+export function SkillMarketView({
+  skills,
+  locale,
+  translationStatus = "idle",
+  onTranslateToChinese,
+}: SkillMarketViewProps) {
   const labels = locale.labels;
 
   const tools = skills.filter((s) => s.category === "tool");
@@ -21,9 +28,27 @@ export function SkillMarketView({ skills, locale }: SkillMarketViewProps) {
 
   return (
     <div className="javis-view-panel">
-      <h2 className="javis-view-title">{labels.skillMarketTitle}</h2>
-      <div className="javis-skill-count">
-        {skills.length} {labels.skillCategoryTool.toLowerCase()}
+      <div className="javis-skill-header">
+        <div>
+          <h2 className="javis-view-title">{labels.skillMarketTitle}</h2>
+          <div className="javis-skill-count">
+            {skills.length} {labels.skillCategoryTool.toLowerCase()}
+          </div>
+        </div>
+        {onTranslateToChinese ? (
+          <button
+            className="javis-skill-translate-button"
+            disabled={translationStatus === "translating"}
+            onClick={onTranslateToChinese}
+            type="button"
+          >
+            {translationStatus === "translating"
+              ? "翻译中..."
+              : translationStatus === "error"
+                ? "翻译失败"
+                : "中文翻译"}
+          </button>
+        ) : null}
       </div>
 
       {tools.length > 0 && (

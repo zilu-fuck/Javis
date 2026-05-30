@@ -118,6 +118,20 @@ const WORKSPACE_SCAFFOLD_SCHEMA_JSON = JSON.stringify({
   ],
 }, null, 2);
 
+interface SkillTranslationInput {
+  id: string;
+  name: string;
+  description: string;
+  agentOwners: string[];
+}
+
+interface SkillTranslationOutput {
+  id: string;
+  name: string;
+  description: string;
+  agentOwners?: string[];
+}
+
 interface CreateJavisRuntimeOptions {
   getWorkspacePath: () => string;
   modelSettings: ModelSettings;
@@ -657,6 +671,10 @@ export function createJavisRuntime({
 
   return {
     ...runtime,
+    async translateSkillsToChinese(skills: SkillTranslationInput[]) {
+      const provider = providerFor("chinese-reviewer");
+      return translateSkillsWithChineseAgent(skills, provider);
+    },
     classifyWithFileAgent(
       files: { name: string; path: string; extension?: string; sizeBytes?: number }[],
       options?: { onBatchProgress?: (completed: number, total: number, failed: number) => void; signal?: AbortSignal },
@@ -713,6 +731,74 @@ function matchesLocalDocumentQuery(name: string, path: string, query: string): b
   }
   const haystack = `${name} ${path}`.toLowerCase();
   return terms.some((term) => haystack.includes(term));
+}
+
+async function translateSkillsWithChineseAgent(
+  skills: SkillTranslationInput[],
+  modelProvider: ModelProvider,
+): Promise<SkillTranslationOutput[]> {
+  if (skills.length === 0) {
+    return [];
+  }
+  const prompt = [
+    "You are Javis ChineseReviewer acting as a Chinese translation agent.",
+    "Translate Javis skill display names, descriptions, and agent owner labels into concise Simplified Chinese.",
+    "Return ONLY a JSON array. Preserve every id exactly. Do not add or remove items.",
+    "Keep product/technical terms such as Javis, Agent, MCP, Markdown, URL, PDF, diff, patch, shell, workspace, provider, and API when clearer.",
+    "For dotted tool names, translate the displayed name into Chinese but keep the original command in parentheses when useful.",
+    "Output schema:",
+    "[{\"id\":\"same id\",\"name\":\"中文名称\",\"description\":\"中文描述\",\"agentOwners\":[\"中文 Agent 名称\"]}]",
+    "Skills:",
+    JSON.stringify(skills),
+  ].join("\n");
+  const response = await modelProvider.complete(prompt, {
+    maxTokens: Math.max(1200, Math.min(5000, skills.length * 90)),
+    temperature: 0.1,
+    locale: "zh-CN",
+  });
+  return parseSkillTranslationResponse(response.text, skills);
+}
+
+function parseSkillTranslationResponse(
+  text: string,
+  source: SkillTranslationInput[],
+): SkillTranslationOutput[] {
+  const value = extractJsonArray(text);
+  if (!Array.isArray(value)) {
+    throw new Error("Skill translation response must be a JSON array.");
+  }
+  const sourceIds = new Set(source.map((skill) => skill.id));
+  return value
+    .filter((item): item is Record<string, unknown> =>
+      typeof item === "object" &&
+      item !== null &&
+      typeof (item as Record<string, unknown>).id === "string" &&
+      sourceIds.has((item as Record<string, unknown>).id as string),
+    )
+    .map((item) => ({
+      id: item.id as string,
+      name: stringOrEmpty(item.name),
+      description: stringOrEmpty(item.description),
+      agentOwners: Array.isArray(item.agentOwners)
+        ? item.agentOwners.filter((owner): owner is string => typeof owner === "string")
+        : undefined,
+    }))
+    .filter((item) => item.name || item.description || item.agentOwners?.length);
+}
+
+function extractJsonArray(text: string): unknown {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fenced?.[1] ?? text;
+  const start = candidate.indexOf("[");
+  const end = candidate.lastIndexOf("]");
+  if (start === -1 || end <= start) {
+    throw new Error("Model response did not contain a JSON array.");
+  }
+  return JSON.parse(candidate.slice(start, end + 1));
+}
+
+function stringOrEmpty(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 async function streamOrCompleteWithReview<T>(

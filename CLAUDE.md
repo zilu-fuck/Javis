@@ -63,6 +63,39 @@ pnpm rust:test           # Rust tests only
 - Context keys in `shared-context.ts` are bilingual (`CONTEXT_KEYS`)
 - Chinese review pipeline: input preprocessor → terminology injection → LLM → ChineseReviewer → output
 
+## Dual-Model Setup
+
+This project uses two models simultaneously:
+
+| Role | Model | Provider | Purpose |
+|---|---|---|---|
+| **Commander** (current session) | `deepseek-v4-pro` | DeepSeek API | Main conversation, planning, coordination |
+| **Sub-agents** (via CLI) | `mimo-v2.5-pro` | Xiaomi Mimo (`token-plan-cn.xiaomimimo.com`) | Code review, research, file analysis |
+
+### Sub-Agent Routing
+
+When delegating work to sub-agents, do NOT use the built-in `Agent` tool (it runs on DeepSeek).
+Instead, route through the Mimo CLI wrapper:
+
+```bash
+# Argument mode
+bash ~/.claude/scripts/mimo-agent.sh "self-contained prompt"
+
+# Stdin mode (for long prompts with special characters)
+echo "self-contained prompt" | bash ~/.claude/scripts/mimo-agent.sh
+```
+
+**Why**: The Mimo terminal has stronger file analysis and reasoning capabilities at a lower cost, so offloading sub-agent work there saves DeepSeek quota for planning and coordination.
+
+**Key constraints**:
+- `claude -p` is stateless — every prompt must be fully self-contained (include file paths, context, expected output format)
+- The Mimo instance runs as a one-shot process; it cannot ask follow-up questions
+- Shell env vars (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`) from the current session override settings.json `env`, so the wrapper script explicitly exports Mimo config and unsets DeepSeek vars
+
+### Script Location
+
+`~/.claude/scripts/mimo-agent.sh` — exports Mimo API config, unsets DeepSeek vars, runs `claude -p --model mimo-v2.5-pro`.
+
 ## Test Expectations
 
 - New features require tests (Vitest for TS, Rust tests for native commands)
@@ -79,7 +112,7 @@ pnpm rust:test           # Rust tests only
 - opencode/Code Agent: proposal only, never writes files directly
 - PDF operations: Downloads-scoped, move-only, one-time approval
 
-## Current State (2026-05-29)
+## Current State (2026-05-30)
 
 - Desktop workbench: implemented and packaged (Windows MSI/NSIS), custom titlebar with drag regions
 - File scan, project inspection, research, PDF organization: implemented
@@ -96,4 +129,12 @@ pnpm rust:test           # Rust tests only
 - Custom workspace registration: workspace definitions (JSON) with agents, workflows, routes, dynamic sidebar nav
 - Architecture analysis: AGENT_ARCHITECTURE_ANALYSIS.md — Plan 1/5, Multi-Agent 4/5, HITL 2/5
 - SQLite infrastructure: database.rs with rusqlite, Tauri commands, migration system, 9 migration sets
-- HTTP client: reqwest 0.12 with native-tls (not ureq — project has never used ureq)
+- HTTP client: reqwest 0.12 with native-tls
+- **5.29**: lib.rs module split (42 files, +6332/-4269), JavisError enum + module-level tests, P0-1 streaming UI consumption + integration tests + eventBus leak fix
+- **5.30**: quality hardening sprint — complete
+  - P0-1: Hook test coverage — 4 files, 28 tests (use-scanned-data 12, use-task-runtime 6, use-scheduled-tasks 5, use-model-profiles 4)
+  - P0-2: Manual QA — 8 scenarios validated via Tauri dev app + CDP, 6 screenshots, evidence in `docs/qa/2026-05-30/`
+  - P0-3: Docs updated — CLAUDE.md current state, task plan, QA report
+  - P1-1: JavisError migration — code.rs 20 functions + `require_native_approval_binding` → Permission variant
+  - P1-2: Dead code + clippy — 14 warnings fixed (scan/pdf/lib/workspace/web/code), 2 remaining (scan.rs too-many-args)
+  - Final: 430 Vitest + 125 Rust = 555 total tests, pnpm check green

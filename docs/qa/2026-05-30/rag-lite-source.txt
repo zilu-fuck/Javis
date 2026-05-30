@@ -1,0 +1,1 @@
+﻿Javis QA sentinel: rag-lite-answer-2026-05-30. The document states that ProviderAdapter switching is validated by provider-specific model calls.
