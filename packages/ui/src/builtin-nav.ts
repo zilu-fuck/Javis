@@ -83,7 +83,11 @@ export function getBuiltinSidebarNavItems(
       label: labels.skillMarket,
       group: "primary",
       order: 2,
-      badge: skillCount,
+      collapsible: true,
+      subitems: [
+        { label: "我的技能", skillPage: "mine", badge: skillCount },
+        { label: labels.skillMarket, skillPage: "market" },
+      ],
     },
     {
       viewId: "apps",

@@ -87,6 +87,30 @@ describe("workspace session persistence", () => {
     ).toBe("E:/Javis");
   });
 
+  it("falls back past empty completed task workspace metadata", () => {
+    expect(
+      getCompletedTaskWorkspacePath({
+        id: "task-1",
+        title: "Project environment inspected",
+        userGoal: "Inspect project",
+        status: "completed",
+        commanderMessage: "Done",
+        plan: [],
+        agents: [],
+        logs: [],
+        workspacePath: "",
+        codeProposedEdit: {
+          proposalId: "proposal-1",
+          workspacePath: "\\\\?\\E:\\Javis",
+          summary: "Update project entry handling.",
+          changedFiles: [],
+          patch: "",
+          patchHash: "fnv1a-test",
+        },
+      }),
+    ).toBe("E:/Javis");
+  });
+
   it("ignores workspace evidence from incomplete tasks", () => {
     expect(
       getCompletedTaskWorkspacePath({

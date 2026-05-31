@@ -1,0 +1,336 @@
+use serde::{Deserialize, Serialize};
+use std::{
+    fs,
+    path::{Component, Path, PathBuf},
+    sync::Mutex,
+};
+
+use crate::{
+    approve_native_approval_binding, create_approval_id, create_fnv1a_hash,
+    create_native_approval_binding, normalize_path, require_native_approval_binding,
+    resolve_workspace_path, NativeApprovalBinding,
+};
+use crate::pdf::{FileDryRunSummary, PlannedPathOperation};
+
+pub(crate) const WRITE_TEXT_APPROVAL_TOOL_NAME: &str = "file.writeText";
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WriteTextFileRequest {
+    pub(crate) target_path: String,
+    pub(crate) content: String,
+    #[serde(default)]
+    pub(crate) workspace_path: Option<String>,
+    #[serde(default)]
+    pub(crate) task_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TextFileWritePlan {
+    approval_id: String,
+    target_path: String,
+    action: String,
+    byte_count: usize,
+    content_hash: String,
+    dry_run: FileDryRunSummary,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExecuteWriteTextFileRequest {
+    pub(crate) approval_id: String,
+    pub(crate) target_path: String,
+    pub(crate) content: String,
+    #[serde(default)]
+    pub(crate) workspace_path: Option<String>,
+    #[serde(default)]
+    pub(crate) task_id: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TextFileWriteResult {
+    pub(crate) target_path: String,
+    pub(crate) action: String,
+    pub(crate) byte_count: usize,
+    pub(crate) status: String,
+    pub(crate) message: String,
+}
+
+#[derive(Default)]
+pub(crate) struct WriteTextApprovalState {
+    pub(crate) pending: Option<PendingWriteTextApproval>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PendingWriteTextApproval {
+    pub(crate) binding: NativeApprovalBinding,
+    pub(crate) target_path: String,
+    pub(crate) content: String,
+    pub(crate) action: String,
+    pub(crate) previous_hash: Option<String>,
+}
+
+#[tauri::command]
+pub(crate) fn plan_write_text_file(
+    request: WriteTextFileRequest,
+    approval_state: tauri::State<'_, Mutex<WriteTextApprovalState>>,
+) -> Result<TextFileWritePlan, String> {
+    let approval_id = create_approval_id();
+    let pending = create_pending_write_text_approval(&approval_id, &request)?;
+    let plan = create_text_write_plan_from_pending(&approval_id, &pending);
+    store_pending_write_text_approval(&approval_state, pending)?;
+    Ok(plan)
+}
+
+#[tauri::command]
+pub(crate) fn approve_write_text_file(
+    approval_id: String,
+    #[allow(unused_variables)] task_id: Option<String>,
+    approval_state: tauri::State<'_, Mutex<WriteTextApprovalState>>,
+) -> Result<(), String> {
+    approve_pending_write_text(&approval_state, &approval_id, task_id.as_deref())
+}
+
+#[tauri::command]
+pub(crate) fn execute_write_text_file(
+    request: ExecuteWriteTextFileRequest,
+    approval_state: tauri::State<'_, Mutex<WriteTextApprovalState>>,
+) -> Result<TextFileWriteResult, String> {
+    let approved = take_approved_write_text(&approval_state, &request)?;
+    let target = resolve_text_target_path(&request.target_path, request.workspace_path.as_deref())?;
+    write_text_file(&target, &approved.content, &approved.action, approved.previous_hash.as_deref())
+}
+
+#[cfg(test)]
+pub(crate) fn replace_pending_write_text_approval(
+    approval_state: &Mutex<WriteTextApprovalState>,
+    approval_id: &str,
+    request: &WriteTextFileRequest,
+) -> Result<(), String> {
+    let pending = create_pending_write_text_approval(approval_id, request)?;
+    let mut state = approval_state
+        .lock()
+        .map_err(|_| "Text write approval state could not be locked.".to_string())?;
+    state.pending = Some(pending);
+    Ok(())
+}
+
+pub(crate) fn approve_pending_write_text(
+    approval_state: &Mutex<WriteTextApprovalState>,
+    approval_id: &str,
+    task_id: Option<&str>,
+) -> Result<(), String> {
+    let mut state = approval_state
+        .lock()
+        .map_err(|_| "Text write approval state could not be locked.".to_string())?;
+    let Some(pending) = state.pending.as_mut() else {
+        return Err("No pending text write approval exists.".to_string());
+    };
+    let hash = pending_preview_hash(pending);
+    approve_native_approval_binding(
+        &mut pending.binding,
+        approval_id,
+        WRITE_TEXT_APPROVAL_TOOL_NAME,
+        task_id,
+        &hash,
+        "Text write approval id does not match the pending dry-run.",
+    )
+}
+
+pub(crate) fn take_approved_write_text(
+    approval_state: &Mutex<WriteTextApprovalState>,
+    request: &ExecuteWriteTextFileRequest,
+) -> Result<PendingWriteTextApproval, String> {
+    let mut state = approval_state
+        .lock()
+        .map_err(|_| "Text write approval state could not be locked.".to_string())?;
+    let Some(pending) = state.pending.as_ref() else {
+        return Err("No approved text write dry-run is pending.".to_string());
+    };
+    require_native_approval_binding(
+        &pending.binding,
+        &request.approval_id,
+        WRITE_TEXT_APPROVAL_TOOL_NAME,
+        request.task_id.as_deref(),
+        &pending_preview_hash(pending),
+        "Text write approval id does not match the pending dry-run.",
+        "Text write dry-run has not been approved.",
+    )
+    .map_err(|error| error.to_string())?;
+
+    let requested_target =
+        normalize_path(&resolve_text_target_path(&request.target_path, request.workspace_path.as_deref())?);
+    if pending.target_path != requested_target || pending.content != request.content {
+        return Err("Approved text write request does not match the current dry-run.".to_string());
+    }
+
+    let approved = state
+        .pending
+        .take()
+        .ok_or_else(|| "No approved text write dry-run is pending.".to_string())?;
+    Ok(approved)
+}
+
+pub(crate) fn create_pending_write_text_approval(
+    approval_id: &str,
+    request: &WriteTextFileRequest,
+) -> Result<PendingWriteTextApproval, String> {
+    let target = resolve_text_target_path(&request.target_path, request.workspace_path.as_deref())?;
+    let target_path = normalize_path(&target);
+    let previous_hash = read_existing_file_hash(&target)?;
+    let action = if previous_hash.is_some() { "overwrite" } else { "create" }.to_string();
+    let content_hash = create_fnv1a_hash(request.content.as_bytes());
+    Ok(PendingWriteTextApproval {
+        binding: create_native_approval_binding(
+            approval_id.to_string(),
+            WRITE_TEXT_APPROVAL_TOOL_NAME,
+            request.task_id.as_deref().unwrap_or_default().trim().to_string(),
+            create_write_text_preview_hash(&target_path, &action, &content_hash, previous_hash.as_deref()),
+            false,
+        ),
+        target_path,
+        content: request.content.clone(),
+        action,
+        previous_hash,
+    })
+}
+
+#[allow(dead_code)]
+pub(crate) fn store_pending_write_text_approval(
+    approval_state: &Mutex<WriteTextApprovalState>,
+    approval: PendingWriteTextApproval,
+) -> Result<(), String> {
+    let mut state = approval_state
+        .lock()
+        .map_err(|_| "Text write approval state could not be locked.".to_string())?;
+    state.pending = Some(approval);
+    Ok(())
+}
+
+fn create_text_write_plan_from_pending(
+    approval_id: &str,
+    pending: &PendingWriteTextApproval,
+) -> TextFileWritePlan {
+    let content_hash = create_fnv1a_hash(pending.content.as_bytes());
+    TextFileWritePlan {
+        approval_id: approval_id.to_string(),
+        target_path: pending.target_path.clone(),
+        action: pending.action.clone(),
+        byte_count: pending.content.as_bytes().len(),
+        content_hash: content_hash.clone(),
+        dry_run: FileDryRunSummary {
+            operation: "Write text file".to_string(),
+            affected_paths: vec![PlannedPathOperation {
+                source: String::new(),
+                target: pending.target_path.clone(),
+                action: pending.action.clone(),
+                conflict: pending
+                    .previous_hash
+                    .is_some()
+                    .then(|| "Target file exists and will be overwritten if approved.".to_string()),
+            }],
+            risk_summary: "Preview only. The file is written only after the current dry-run is approved.".to_string(),
+            reversible: pending.previous_hash.is_none(),
+        },
+    }
+}
+
+pub(crate) fn write_text_file(
+    target: &Path,
+    content: &str,
+    action: &str,
+    approved_previous_hash: Option<&str>,
+) -> Result<TextFileWriteResult, String> {
+    let current_hash = read_existing_file_hash(target)?;
+    if action == "create" && current_hash.is_some() {
+        return Err("Target file now exists; create approval is stale.".to_string());
+    }
+    if action == "overwrite" && current_hash.as_deref() != approved_previous_hash {
+        return Err("Target file changed after approval.".to_string());
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Target directory could not be created: {error}"))?;
+    } else {
+        return Err("Target path does not include a parent directory.".to_string());
+    }
+    fs::write(target, content).map_err(|error| format!("Text file could not be written: {error}"))?;
+    Ok(TextFileWriteResult {
+        target_path: normalize_path(target),
+        action: action.to_string(),
+        byte_count: content.as_bytes().len(),
+        status: "written".to_string(),
+        message: "Text file written successfully.".to_string(),
+    })
+}
+
+fn resolve_text_target_path(
+    target_path: &str,
+    workspace_path: Option<&str>,
+) -> Result<PathBuf, String> {
+    let trimmed = target_path.trim();
+    if trimmed.is_empty() {
+        return Err("Target path cannot be empty.".to_string());
+    }
+    let requested = PathBuf::from(trimmed);
+    if has_parent_dir_component(&requested) {
+        return Err("Text write target path cannot contain parent directory traversal.".to_string());
+    }
+    if has_windows_prefix(&requested) && !requested.is_absolute() {
+        return Err("Text write target path must be absolute or workspace-relative.".to_string());
+    }
+    if requested.is_absolute() {
+        return Ok(requested);
+    }
+    let workspace = resolve_workspace_path(workspace_path.map(str::to_string))
+        .map_err(|error| error.to_string())?;
+    Ok(workspace.join(requested))
+}
+
+fn read_existing_file_hash(path: &Path) -> Result<Option<String>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    if !path.is_file() {
+        return Err("Text write target already exists and is not a file.".to_string());
+    }
+    let bytes = fs::read(path).map_err(|error| format!("Target file cannot be read: {error}"))?;
+    Ok(Some(create_fnv1a_hash(&bytes)))
+}
+
+fn create_write_text_preview_hash(
+    target_path: &str,
+    action: &str,
+    content_hash: &str,
+    previous_hash: Option<&str>,
+) -> String {
+    create_fnv1a_hash(
+        format!(
+            "{}\n{}\n{}\n{}",
+            target_path,
+            action,
+            content_hash,
+            previous_hash.unwrap_or("")
+        )
+        .as_bytes(),
+    )
+}
+
+fn pending_preview_hash(pending: &PendingWriteTextApproval) -> String {
+    create_write_text_preview_hash(
+        &pending.target_path,
+        &pending.action,
+        &create_fnv1a_hash(pending.content.as_bytes()),
+        pending.previous_hash.as_deref(),
+    )
+}
+
+fn has_parent_dir_component(path: &Path) -> bool {
+    path.components().any(|component| matches!(component, Component::ParentDir))
+}
+
+fn has_windows_prefix(path: &Path) -> bool {
+    path.components().any(|component| matches!(component, Component::Prefix(_)))
+}

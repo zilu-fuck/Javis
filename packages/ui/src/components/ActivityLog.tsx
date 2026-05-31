@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { WorkbenchLocale, WorkbenchTask } from "../types";
 import { translateWorkbenchText } from "../utils";
 
@@ -8,6 +9,7 @@ interface ActivityLogProps {
   locale: WorkbenchLocale;
   task: WorkbenchTask;
   onPermissionDecision?: (decision: "approved" | "denied") => void;
+  onAskUserAnswer?: (answer: string) => void;
   onToggle: () => void;
 }
 
@@ -18,6 +20,7 @@ export function ActivityLog({
   locale,
   task,
   onPermissionDecision,
+  onAskUserAnswer,
   onToggle,
 }: ActivityLogProps) {
   return (
@@ -72,6 +75,33 @@ export function ActivityLog({
                 </div>
               </article>
             ) : null}
+            {task.askUserQuestion ? (
+              <article className="javis-log javis-log-ask-user">
+                <div className="javis-log-row">
+                  <strong>{translateWorkbenchText(task.askUserQuestion.question, locale)}</strong>
+                  <span className="javis-log-kind">
+                    {translateWorkbenchText(task.askUserQuestion.status, locale)}
+                  </span>
+                </div>
+                {task.askUserQuestion.choices && task.askUserQuestion.choices.length > 0 ? (
+                  <div className="javis-confirmation-actions compact">
+                    {task.askUserQuestion.choices.map((choice) => (
+                      <button
+                        key={choice}
+                        disabled={task.askUserQuestion!.status !== "pending"}
+                        onClick={() => onAskUserAnswer?.(choice)}
+                        type="button"
+                      >
+                        {translateWorkbenchText(choice, locale)}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+                {task.askUserQuestion.status === "pending" && (!task.askUserQuestion.choices || task.askUserQuestion.choices.length === 0) ? (
+                  <AskUserCompactInput onSubmit={(answer) => onAskUserAnswer?.(answer)} labels={labels} />
+                ) : null}
+              </article>
+            ) : null}
             {task.logs.map((log) => (
               <article className="javis-log" key={log.id}>
                 <div className="javis-log-row">
@@ -89,5 +119,38 @@ export function ActivityLog({
         </div>
       ) : null}
     </section>
+  );
+}
+
+function AskUserCompactInput({
+  onSubmit,
+  labels,
+}: {
+  onSubmit: (answer: string) => void;
+  labels: WorkbenchLocale["labels"];
+}) {
+  const [value, setValue] = useState("");
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const trimmed = value.trim();
+    if (trimmed) {
+      onSubmit(trimmed);
+      setValue("");
+    }
+  }
+
+  return (
+    <form className="javis-ask-user-input compact" onSubmit={handleSubmit}>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder={labels.submitAnswer}
+      />
+      <button type="submit" disabled={!value.trim()}>
+        {labels.submitAnswer}
+      </button>
+    </form>
   );
 }

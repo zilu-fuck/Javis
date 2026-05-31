@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { WorkbenchLocale, WorkbenchTask } from "../types";
 import {
   formatModifiedTime,
@@ -11,9 +12,10 @@ interface TaskSectionsProps {
   locale: WorkbenchLocale;
   task: WorkbenchTask;
   onPermissionDecision?: (decision: "approved" | "denied") => void;
+  onAskUserAnswer?: (answer: string) => void;
 }
 
-export function TaskSections({ labels, locale, task, onPermissionDecision }: TaskSectionsProps) {
+export function TaskSections({ labels, locale, task, onPermissionDecision, onAskUserAnswer }: TaskSectionsProps) {
   return (
     <>
                     {task.status === "failed" ? (
@@ -249,6 +251,44 @@ export function TaskSections({ labels, locale, task, onPermissionDecision }: Tas
                   </section>
                 ) : null}
 
+                {task.askUserQuestion ? (
+                  <section className="javis-ask-user" aria-label={translateWorkbenchText(labels.askUserQuestion, locale)}>
+                    <div className="javis-ask-user-header">
+                      <p className="javis-message-title">
+                        {translateWorkbenchText(labels.askUserQuestion, locale)}
+                      </p>
+                      <span className="javis-status">
+                        {translateWorkbenchText(task.askUserQuestion.status, locale)}
+                      </span>
+                    </div>
+                    <p className="javis-message-body">
+                      {translateWorkbenchText(task.askUserQuestion.question, locale)}
+                    </p>
+                    {task.askUserQuestion.choices && task.askUserQuestion.choices.length > 0 ? (
+                      <div className="javis-ask-user-choices">
+                        {task.askUserQuestion.choices.map((choice) => (
+                          <button
+                            key={choice}
+                            disabled={task.askUserQuestion!.status !== "pending"}
+                            onClick={() => onAskUserAnswer?.(choice)}
+                            type="button"
+                          >
+                            {translateWorkbenchText(choice, locale)}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                    {task.askUserQuestion.status === "pending" && (!task.askUserQuestion.choices || task.askUserQuestion.choices.length === 0) ? (
+                      <AskUserFreeFormInput onSubmit={(answer) => onAskUserAnswer?.(answer)} labels={labels} />
+                    ) : null}
+                    {task.askUserQuestion.answer ? (
+                      <p className="javis-agent-task">
+                        {translateWorkbenchText(task.askUserQuestion.answer, locale)}
+                      </p>
+                    ) : null}
+                  </section>
+                ) : null}
+
                 {task.fileOrganizationExecution ? (
                   <section className="javis-documents" aria-label={labels.fileOrganizationResult}>
                     <p className="javis-message-title">{labels.fileOrganizationResult}</p>
@@ -336,5 +376,38 @@ export function TaskSections({ labels, locale, task, onPermissionDecision }: Tas
                   </article>
                 ) : null}
     </>
+  );
+}
+
+function AskUserFreeFormInput({
+  onSubmit,
+  labels,
+}: {
+  onSubmit: (answer: string) => void;
+  labels: WorkbenchLocale["labels"];
+}) {
+  const [value, setValue] = useState("");
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const trimmed = value.trim();
+    if (trimmed) {
+      onSubmit(trimmed);
+      setValue("");
+    }
+  }
+
+  return (
+    <form className="javis-ask-user-input" onSubmit={handleSubmit}>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        placeholder={labels.submitAnswer}
+      />
+      <button type="submit" disabled={!value.trim()}>
+        {labels.submitAnswer}
+      </button>
+    </form>
   );
 }

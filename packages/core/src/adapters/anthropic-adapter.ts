@@ -20,7 +20,7 @@ import type {
 } from "../provider-adapter";
 
 export class AnthropicAdapter implements ProviderAdapter {
-  readonly adapterId = "anthropic";
+  readonly adapterId: string;
   readonly protocol = "anthropic" as const;
   readonly capabilities: ProviderCapabilities = {
     vision: true,
@@ -28,10 +28,15 @@ export class AnthropicAdapter implements ProviderAdapter {
     longContext: true,
   };
 
+  constructor(adapterId = "anthropic") {
+    this.adapterId = adapterId;
+  }
+
   buildCompletionRequest(input: AdapterCompletionInput): AdapterRequestPayload {
     return {
       prompt: input.prompt,
-      providerId: input.providerId || "anthropic",
+      imageDataUrl: input.imageDataUrl,
+      providerId: input.providerId || this.adapterId,
       model: input.model,
       apiKeyReference: input.apiKeyReference,
       baseUrl: normalizeAnthropicBaseUrl(input.baseUrl),
@@ -53,6 +58,8 @@ export class AnthropicAdapter implements ProviderAdapter {
 function normalizeAnthropicBaseUrl(baseUrl: string): string {
   if (!baseUrl) return baseUrl;
   const trimmed = baseUrl.replace(/\/+$/, "");
+  if (trimmed === "https://api.deepseek.com") return `${trimmed}/anthropic`;
+  if (trimmed === "https://api.deepseek.com/anthropic") return trimmed;
   if (trimmed.endsWith("/v1")) return trimmed;
   return `${trimmed}/v1`;
 }

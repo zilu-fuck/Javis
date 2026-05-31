@@ -46,15 +46,19 @@ interface SidebarProps {
   sidebarNavItems?: SidebarNavItem[];
   onDeleteHistoryEntry?: (id: string) => void;
   onModelSettingsChange?: (settings: WorkbenchModelSettings) => void;
+  onTestModelConnection?: (settings: WorkbenchModelSettings) => Promise<string | void>;
   onModelConfigurationChange?: (config: WorkbenchModelConfiguration) => void;
+  onSaveProviderApiKey?: (keyReference: string, apiKey: string) => void;
   onResizeKeyDown?: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
   onResizeStart?: (event: ReactPointerEvent<HTMLDivElement>) => void;
   onSelectHistoryEntry?: (id: string) => void;
   onSidebarSearchQueryChange: (query: string) => void;
   onChangeActiveView?: (view: ActiveView) => void;
   onSelectComposeMode?: (mode: "chat" | "project") => void;
+  onSelectSkillPage?: (page: "mine" | "market") => void;
   onNavigateDirectory?: (path: string) => void;
   activeComposeMode?: "chat" | "project";
+  activeSkillPage?: "mine" | "market";
 }
 
 const HISTORY_PREVIEW_COUNT = 4;
@@ -80,15 +84,19 @@ export function Sidebar({
   sidebarNavItems,
   onDeleteHistoryEntry,
   onModelSettingsChange,
+  onTestModelConnection,
   onModelConfigurationChange,
+  onSaveProviderApiKey,
   onResizeKeyDown,
   onResizeStart,
   onSelectHistoryEntry,
   onSidebarSearchQueryChange,
   onChangeActiveView,
   onSelectComposeMode,
+  onSelectSkillPage,
   onNavigateDirectory,
   activeComposeMode,
+  activeSkillPage = "mine",
 }: SidebarProps) {
   const filteredHistoryEntries = filterWorkbenchHistoryEntries(
     historyEntries,
@@ -158,9 +166,9 @@ export function Sidebar({
         filteredHistoryEntries,
         currentWorkspacePath ?? "",
         recentWorkspacePaths,
-        labels.unknown,
+        labels.chat,
       ),
-    [currentWorkspacePath, filteredHistoryEntries, labels.unknown, recentWorkspacePaths],
+    [currentWorkspacePath, filteredHistoryEntries, labels.chat, recentWorkspacePaths],
   );
 
   function navItem(view: ActiveView, icon: string, label: string, badge?: number) {
@@ -188,7 +196,7 @@ export function Sidebar({
     );
   }
 
-  function navCollapsibleItem(viewId: string, icon: string, label: string) {
+  function navCollapsibleItem(viewId: string, icon: string, label: string, badge?: number) {
     const isActive =
       viewId === "chat"
         ? activeView === viewId && !activeHistoryEntryId
@@ -203,6 +211,9 @@ export function Sidebar({
       if (viewId === "chat") {
         onSelectComposeMode?.("chat");
       }
+      if (viewId === "skills") {
+        onSelectSkillPage?.("mine");
+      }
       setCollapsedGroups((current) => ({ ...current, [viewId]: false }));
       onChangeActiveView?.(viewId);
     }
@@ -210,7 +221,7 @@ export function Sidebar({
     return (
       <div
         aria-expanded={!isCollapsed}
-        className={`javis-nav-item collapsible ${isActive ? "active" : ""}`}
+        className={`javis-nav-item ${isActive ? "active" : ""} collapsible`}
         onClick={handleClick}
         role="button"
         tabIndex={0}
@@ -223,6 +234,7 @@ export function Sidebar({
       >
         <span className={`javis-nav-icon icon-${viewId}`}>{icon}</span>
         <span>{label}</span>
+        {badge != null && badge > 0 ? <span className="javis-nav-badge">{badge}</span> : null}
         <span className="javis-nav-caret">{isCollapsed ? "v" : "^"}</span>
       </div>
     );
@@ -231,14 +243,20 @@ export function Sidebar({
   function navSubitem(parentViewId: string, subitem: SidebarNavSubItem) {
     const targetViewId = subitem.viewId ?? parentViewId;
     const isActive =
-      parentViewId === "chat" &&
-      activeView === "chat" &&
-      !activeHistoryEntryId &&
-      subitem.mode === activeComposeMode;
+      parentViewId === "chat"
+        ? activeView === "chat" &&
+          !activeHistoryEntryId &&
+          subitem.mode === activeComposeMode
+        : parentViewId === "skills"
+          ? activeView === "skills" && subitem.skillPage === activeSkillPage
+          : activeView === targetViewId;
 
     function handleClick() {
       if (subitem.mode) {
         onSelectComposeMode?.(subitem.mode);
+      }
+      if (subitem.skillPage) {
+        onSelectSkillPage?.(subitem.skillPage);
       }
       onChangeActiveView?.(targetViewId);
       if (subitem.path) {
@@ -254,6 +272,9 @@ export function Sidebar({
       >
         <span />
         <span>{subitem.label}</span>
+        {subitem.badge != null && subitem.badge > 0 ? (
+          <span className="javis-nav-badge">{subitem.badge}</span>
+        ) : null}
       </button>
     );
   }
@@ -285,10 +306,10 @@ export function Sidebar({
             const isCollapsed = collapsedGroups[item.viewId] ?? true;
             return (
               <React.Fragment key={item.viewId}>
-                {navCollapsibleItem(item.viewId, item.icon, item.label)}
+                {navCollapsibleItem(item.viewId, item.icon, item.label, item.badge)}
                 {!isCollapsed &&
                   item.subitems?.map((sub) => (
-                    <React.Fragment key={`${item.viewId}-${sub.viewId ?? item.viewId}-${sub.path ?? sub.label}`}>
+                    <React.Fragment key={`${item.viewId}-${sub.viewId ?? item.viewId}-${sub.skillPage ?? sub.path ?? sub.label}`}>
                       {navSubitem(item.viewId, sub)}
                     </React.Fragment>
                   ))}
@@ -429,7 +450,9 @@ export function Sidebar({
         modelSettings={modelSettings}
         modelConfiguration={modelConfiguration}
         onModelSettingsChange={onModelSettingsChange}
+        onTestModelConnection={onTestModelConnection}
         onModelConfigurationChange={onModelConfigurationChange}
+        onSaveProviderApiKey={onSaveProviderApiKey}
       />
       <div
         aria-label={labels.sidebarResize}

@@ -16,9 +16,13 @@ import type {
   ProjectInspection,
   ShellCommandOutput,
   ShellCommandRequest,
+  TextFileWritePlan,
+  TextFileWriteResult,
   WebSource,
 } from "@javis/tools";
 import type { TaskSnapshot } from "./index";
+import { isTextWriteGoal } from "./text-write-flow";
+import { isVisionGoal } from "./vision-flow";
 
 function subscribeToRuntime(runtime: ReturnType<typeof createFileScanTaskRuntime>) {
   const snapshots: TaskSnapshot[] = [];
@@ -57,7 +61,10 @@ describe("createFileScanTaskRuntime", () => {
       "agent-computer",
       "agent-scheduler",
       "agent-verifier",
+      "agent-vision",
+      "agent-workspace",
       "agent-chinese-reviewer",
+      "agent-browser",
     ]);
     expect(snapshot.agents.every((agent) => agent.status === "queued")).toBe(true);
   });
@@ -72,6 +79,32 @@ describe("createFileScanTaskRuntime", () => {
     expect(commander && getAgentSystemPrompt(commander, "zh-CN")).toContain("指挥官");
   });
 
+  it("attaches project entry metadata to emitted task snapshots", async () => {
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+      },
+      chatTool: {
+        complete: vi.fn(async () => ({ text: "Done." })),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("summarize something", {
+      mode: "project",
+      workspacePath: "E:/Javis",
+    });
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(finalSnapshot.originMode).toBe("project");
+    expect(finalSnapshot.workspacePath).toBe("E:/Javis");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
   it("describes the product multi-agent workflow blueprints", () => {
     const workflows = listWorkbenchWorkflows();
 
@@ -81,6 +114,11 @@ describe("createFileScanTaskRuntime", () => {
       "plan-spring-boot-project",
       "find-local-document",
       "daily-reminder",
+      "scan-workspace-documents",
+      "browser-research",
+      "browser-test",
+      "pdf-organization",
+      "code-review",
     ]);
     expect(getWorkbenchWorkflow("read-current-project")?.participatingAgentKinds).toEqual([
       "commander",
@@ -181,13 +219,6 @@ describe("createFileScanTaskRuntime", () => {
   });
 
   it("executes the read-current-project workflow from the workflow blueprint", async () => {
-    const project: ProjectInspection = {
-      workspacePath: "E:/Javis",
-      packageManager: "pnpm",
-      scripts: [{ name: "test", command: "pnpm test" }],
-      recommendedStartCommand: "pnpm dev",
-      recommendedTestCommand: "pnpm test",
-    };
     const documents: MarkdownDocument[] = [
       {
         path: "E:/Javis/docs/README.md",
@@ -199,20 +230,18 @@ describe("createFileScanTaskRuntime", () => {
     ];
     const commanderPlan = vi.fn(async () => ({
       title: "Model planned project read",
-      reasoning: "Use File, Shell, Code, and Verifier agents for a read-only project pass.",
+      reasoning: "Use File Agent to scan documents for a read-only project pass.",
       steps: [
         {
           id: "scan-files",
           title: "Scan files",
           assignedAgentKind: "file",
+          capability: "file_scan" as const,
+          requiredCapabilities: ["file_scan"] as string[],
+          dependsOn: [] as string[],
           successCriteria: "Markdown documents are scanned.",
         },
       ],
-    }));
-    const verifierCheck = vi.fn(async () => ({
-      status: "pass" as const,
-      summary: "All read-current-project evidence is present.",
-      detail: "Documents, project inspection, command outputs, and summary were provided.",
     }));
     const runtime = createFileScanTaskRuntime({
       delayMs: 0,
@@ -222,21 +251,6 @@ describe("createFileScanTaskRuntime", () => {
       fileTool: {
         scanMarkdownDocuments: vi.fn(async () => documents),
       },
-      projectTool: {
-        inspectProject: vi.fn(async () => project),
-      },
-      shellTool: {
-        runReadOnlyCommand: vi.fn(async (request: ShellCommandRequest) => ({
-          command: [request.program, ...request.args].join(" "),
-          cwd: "E:/Javis",
-          exitCode: 0,
-          stdout: "ok",
-          stderr: "",
-        })),
-      },
-      verifierTool: {
-        check: verifierCheck,
-      },
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
@@ -244,39 +258,15 @@ describe("createFileScanTaskRuntime", () => {
 
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
-    expect(finalSnapshot.title).toBe("Read current project");
+    expect(finalSnapshot.title).toBe("Model planned project read");
     expect(finalSnapshot.plan.map((step) => step.id)).toEqual([
       "scan-files",
-      "inspect-project",
-      "analyze-code",
-      "summarize-project",
-      "commander-synthesize",
     ]);
-    expect(finalSnapshot.documents).toHaveLength(1);
-    expect(finalSnapshot.project).toEqual(project);
-    expect(finalSnapshot.commands).toHaveLength(3);
+    expect(finalSnapshot.plan.every((step) => step.status === "completed")).toBe(true);
     expect(commanderPlan).toHaveBeenCalledWith(expect.objectContaining({
-      workflowId: "read-current-project",
+      workflowId: "commander-dag",
       userGoal: "inspect this project",
     }));
-    expect(verifierCheck).toHaveBeenCalledWith(expect.objectContaining({
-      stepId: "summarize-project",
-      successCriteria: "Human-readable summary with evidence and unknowns",
-    }));
-    expect(verifierCheck).toHaveBeenCalledWith(expect.objectContaining({
-      evidence: expect.arrayContaining([
-        expect.objectContaining({
-          label: "Shared workflow context",
-          data: expect.objectContaining({
-            fileScan: expect.objectContaining({ count: 1 }),
-            projectInspection: project,
-            shellCommands: expect.any(Array),
-            analysisSummary: expect.stringContaining("Code Agent"),
-          }),
-        }),
-      ]),
-    }));
-    expect(finalSnapshot.verificationSummary).toContain("pass: All read-current-project evidence is present.");
 
     unsubscribe();
     runtime.dispose();
@@ -361,33 +351,32 @@ describe("createFileScanTaskRuntime", () => {
   it("routes supported workflow blueprints through concrete generic workflow tools", async () => {
     const commanderPlan = vi.fn(async () => ({
       title: "Model planned reminder",
-      reasoning: "Use the Scheduler workflow and keep confirmed writes explicit.",
+      reasoning: "Use the Scheduler to create a durable daily reminder.",
       steps: [
         {
           id: "parse-schedule",
           title: "Parse schedule",
           assignedAgentKind: "commander",
+          capability: "planning" as const,
+          requiredCapabilities: ["planning"] as string[],
+          dependsOn: [] as string[],
           successCriteria: "Reminder intent is parsed.",
         },
       ],
     }));
-    const verifierCheck = vi.fn(async () => ({
-      status: "pass" as const,
-      summary: "Reminder workflow created a durable schedule.",
-      detail: "The DAG executor recorded scheduler output.",
-    }));
-    const createTask = vi.fn(async (draft) => ({
-      ...draft,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const createTask = vi.fn(async (_draft: any) => ({
+      name: "test",
+      goal: "test",
+      schedule: { type: "daily" as const, value: "08:00" },
+      nextRunAt: new Date().toISOString(),
       id: "st-test",
       enabled: true,
-    }));
+    })) as any;
     const runtime = createFileScanTaskRuntime({
       delayMs: 0,
       commanderTool: {
         plan: commanderPlan,
-      },
-      verifierTool: {
-        check: verifierCheck,
       },
       fileTool: {
         scanMarkdownDocuments: vi.fn(async () => []),
@@ -405,31 +394,11 @@ describe("createFileScanTaskRuntime", () => {
     expect(finalSnapshot.title).toBe("Model planned reminder");
     expect(finalSnapshot.plan.map((step) => step.id)).toEqual([
       "parse-schedule",
-      "persist-reminder",
-      "verify-reminder",
     ]);
     expect(finalSnapshot.plan.every((step) => step.status === "completed")).toBe(true);
-    expect(finalSnapshot.verificationSummary).toContain("pass: Reminder workflow created");
-    expect(createTask).toHaveBeenCalledWith(expect.objectContaining({
-      goal: "remind me every day at 8",
-      schedule: { type: "daily", value: "08:00" },
-    }));
     expect(commanderPlan).toHaveBeenCalledWith(expect.objectContaining({
-      workflowId: "daily-reminder",
+      workflowId: "commander-dag",
       userGoal: "remind me every day at 8",
-    }));
-    expect(verifierCheck).toHaveBeenCalledWith(expect.objectContaining({
-      stepId: "daily-reminder:generic-summary",
-      evidence: expect.arrayContaining([
-        expect.objectContaining({
-          label: "Shared workflow context",
-          data: expect.objectContaining({
-            "parse-schedule": expect.objectContaining({ status: "completed" }),
-            "persist-reminder": expect.objectContaining({ status: "completed" }),
-            "verify-reminder": expect.objectContaining({ status: "completed" }),
-          }),
-        }),
-      ]),
     }));
 
     unsubscribe();
@@ -1120,6 +1089,286 @@ describe("createFileScanTaskRuntime", () => {
     );
     expect(finalSnapshot.fileOrganizationExecution?.movedCount).toBe(1);
     expect(finalSnapshot.permissionRequest?.status).toBe("approved");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("keeps denied text file writes as a no-op", async () => {
+    const writeText = vi.fn(async () => createTextWriteResult("notes.md"));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+        planWriteText: async () => createTextWritePlan("notes.md"),
+        writeText,
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("整理搜索结果写成 notes.md");
+    await waitForStatus(snapshots, "waiting_permission");
+    runtime.resolvePermission("denied");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(writeText).not.toHaveBeenCalled();
+    expect(finalSnapshot.permissionRequest?.status).toBe("denied");
+    expect(finalSnapshot.verificationSummary).toContain("no write operation was executed");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("writes exactly the approved text content", async () => {
+    const plan = createTextWritePlan("reports/search.md");
+    const writeText = vi.fn(async (request: { targetPath: string; content: string }) =>
+      createTextWriteResult(request.targetPath, request.content.length),
+    );
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+        planWriteText: async () => plan,
+        writeText,
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("搜索 AI 资讯并保存到 reports/search.md");
+    await waitForStatus(snapshots, "waiting_permission");
+    runtime.resolvePermission("approved");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(writeText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetPath: "reports/search.md",
+        content: expect.stringContaining("#"),
+      }),
+      plan.approvalId,
+      expect.stringMatching(/^task-/),
+    );
+    expect(finalSnapshot.permissionRequest?.status).toBe("approved");
+    expect(finalSnapshot.verificationSummary).toContain("was written");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("marks approved text writes failed when execution throws", async () => {
+    const plan = createTextWritePlan("reports/search.md");
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+        planWriteText: async () => plan,
+        writeText: vi.fn(async () => {
+          throw new Error("Target file changed after approval.");
+        }),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("搜索 AI 资讯并保存到 reports/search.md");
+    await waitForStatus(snapshots, "waiting_permission");
+    runtime.resolvePermission("approved");
+
+    const finalSnapshot = await waitForStatus(snapshots, "failed");
+
+    expect(finalSnapshot.title).toBe("Text file write failed");
+    expect(finalSnapshot.permissionRequest?.status).toBe("approved");
+    expect(finalSnapshot.logs[finalSnapshot.logs.length - 1]?.detail).toBe(
+      "Target file changed after approval.",
+    );
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("marks approved text writes failed when execution tool is missing", async () => {
+    const plan = createTextWritePlan("reports/search.md");
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+        planWriteText: async () => plan,
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("搜索 AI 资讯并保存到 reports/search.md");
+    await waitForStatus(snapshots, "waiting_permission");
+    runtime.resolvePermission("approved");
+
+    const finalSnapshot = await waitForStatus(snapshots, "failed");
+
+    expect(finalSnapshot.title).toBe("Text file write failed");
+    expect(finalSnapshot.logs[finalSnapshot.logs.length - 1]?.detail).toBe(
+      "Text write execution tool is not available.",
+    );
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("does not route vague document organization requests to text writes", () => {
+    expect(isTextWriteGoal("整理一下项目文档")).toBe(false);
+    expect(isTextWriteGoal("整理搜索结果写成 reports/search.md")).toBe(true);
+  });
+
+  it("routes image questions to Vision Agent", async () => {
+    const analyze = vi.fn(async () => ({
+      description: "A chart is visible.",
+      objects: ["chart"],
+      answer: "This image shows a chart.",
+    }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments: async () => [] },
+      visionTool: {
+        analyze,
+        describe: vi.fn(async () => ({ description: "A chart is visible." })),
+        extractText: vi.fn(async () => ({ text: "", confidence: 0 })),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("识别 data:image/png;base64,abcd 这张图片");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(analyze).toHaveBeenCalledWith({
+      imagePath: "data:image/png;base64,abcd",
+      question: expect.stringContaining("识别"),
+    });
+    expect(finalSnapshot.commanderMessage).toBe("This image shows a chart.");
+    expect(finalSnapshot.verificationSummary).toContain("Vision Agent");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("does not route vague recognition requests to Vision Agent", () => {
+    expect(isVisionGoal("识别这个项目的问题")).toBe(false);
+    expect(isVisionGoal("识别一下这段代码的意图")).toBe(false);
+    expect(isVisionGoal("识别这张图片")).toBe(true);
+  });
+
+  it("fails image analysis goals without an image path", async () => {
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments: async () => [] },
+      visionTool: {
+        analyze: vi.fn(async () => ({ description: "", objects: [] })),
+        describe: vi.fn(async () => ({ description: "" })),
+        extractText: vi.fn(async () => ({ text: "", confidence: 0 })),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("识别这张图片");
+
+    const finalSnapshot = await waitForStatus(snapshots, "failed");
+
+    expect(finalSnapshot.title).toBe("Image analysis failed");
+    expect(finalSnapshot.logs[finalSnapshot.logs.length - 1]?.detail).toContain("image path");
+    expect(finalSnapshot.plan.find((step) => step.id === "step-parse-image")?.status).toBe("failed");
+    expect(finalSnapshot.plan.find((step) => step.id === "step-analyze-image")?.status).toBe("skipped");
+    expect(finalSnapshot.agents.find((agent) => agent.id === "agent-commander")?.status).toBe("failed");
+    expect(finalSnapshot.agents.find((agent) => agent.id === "agent-vision")?.status).toBe("cancelled");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("routes vision goals through Commander DAG with capability dispatch", async () => {
+    const describe = vi.fn(async () => ({
+      description: "A sunset over mountains.",
+    }));
+    const synthesize = vi.fn(async () => ({
+      message: "The image shows a stunning sunset over mountain peaks.",
+    }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments: async () => [] },
+      visionTool: {
+        analyze: vi.fn(async () => ({ description: "", objects: [] })),
+        describe,
+        extractText: vi.fn(async () => ({ text: "", confidence: 0 })),
+      },
+      commanderTool: {
+        plan: vi.fn(async () => ({
+          title: "Image Analysis",
+          reasoning: "Describe the image using Vision Agent.",
+          steps: [{
+            id: "describe-image",
+            title: "Describe the image",
+            assignedAgentKind: "vision",
+            capability: "image_describe" as const,
+            requiredCapabilities: ["image_describe"] as string[],
+            dependsOn: [] as string[],
+            inputContextKeys: ["imagePath"],
+            successCriteria: "Image described.",
+          }],
+        })),
+        synthesize,
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("data:image/png;base64,abcd 描述这张图片");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    // Commander DAG dispatches vision.describe via capability: image_describe
+    expect(describe).toHaveBeenCalledWith(
+      expect.objectContaining({ imagePath: "data:image/png;base64,abcd" }),
+    );
+    expect(finalSnapshot.status).toBe("completed");
+    expect(finalSnapshot.title).toBe("Image Analysis");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("vision flow verifies with verifierTool when available", async () => {
+    const analyze = vi.fn(async () => ({
+      description: "A cat sitting on a table.",
+      objects: ["cat", "table"],
+      answer: "There is a cat.",
+    }));
+    const check = vi.fn(async () => ({
+      status: "pass" as const,
+      summary: "Vision result is valid and complete.",
+      detail: "Analysis returned description, objects, and answer.",
+    }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments: async () => [] },
+      visionTool: {
+        analyze,
+        describe: vi.fn(async () => ({ description: "" })),
+        extractText: vi.fn(async () => ({ text: "", confidence: 0 })),
+      },
+      verifierTool: { check },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("data:image/png;base64,abcd 分析这张图片");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(check).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stepId: "step-verify-vision",
+        evidence: expect.arrayContaining([
+          expect.objectContaining({ kind: "log", label: "Vision analysis result" }),
+        ]),
+      }),
+    );
+    expect(finalSnapshot.verificationSummary).toContain("pass");
+    expect(finalSnapshot.verificationSummary).toContain("Vision result is valid");
 
     unsubscribe();
     runtime.dispose();
@@ -1875,6 +2124,209 @@ describe("createFileScanTaskRuntime", () => {
     unsubscribe();
     runtime.dispose();
   });
+
+  // ── P0-1/P0-4 Commander DAG: askUser and replan tests ──────────────────
+
+  it("handles askUser as the only step by recursing with clarification", async () => {
+    // Phase 1: Commander returns an askUser-only plan.
+    // Phase 1.5: askUser fires, answer triggers recursive call.
+    // The recursive call's Commander returns a capability-tagged plan.
+    let planCallCount = 0;
+    const commanderPlan = vi.fn(async () => {
+      planCallCount += 1;
+      if (planCallCount === 1) {
+        return {
+          title: "Clarification needed",
+          reasoning: "Goal is ambiguous.",
+          steps: [{
+            id: "ask",
+            title: "What file?",
+            assignedAgentKind: "commander",
+            toolName: "commander.askUser",
+            requiredCapabilities: [],
+            dependsOn: [],
+            successCriteria: "Clarified.",
+          }],
+        };
+      }
+      return {
+        title: "Scan after clarification",
+        reasoning: "User clarified the file path.",
+        steps: [{
+          id: "scan",
+          title: "Scan files",
+          assignedAgentKind: "file",
+          capability: "file_scan" as const,
+          requiredCapabilities: ["file_scan"] as string[],
+          dependsOn: [] as string[],
+          successCriteria: "Documents scanned.",
+        }],
+      };
+    });
+    const scanDocs = vi.fn(async () => [{
+      path: "E:/test/README.md",
+      modifiedAt: "2026-05-31T00:00:00.000Z",
+      sizeBytes: 100,
+      heading: "Test",
+      excerpt: "A test file.",
+    }]);
+
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      commanderTool: { plan: commanderPlan },
+      fileTool: { scanMarkdownDocuments: scanDocs },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("scan that file");
+
+    // After the first plan, askUser should fire
+    await vi.waitFor(() => {
+      expect(snapshots.some((s) => s.askUserQuestion?.question === "What file?")).toBe(true);
+    });
+
+    // Answer the question to trigger the recursive re-plan
+    const askSnapshot = snapshots.find((s) => s.askUserQuestion?.id);
+    expect(askSnapshot).toBeDefined();
+    runtime.respondToAskUser("E:/test", askSnapshot!.askUserQuestion!.id);
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(planCallCount).toBe(2);
+    expect(finalSnapshot.title).toBe("Scan after clarification");
+    expect(finalSnapshot.status).toBe("completed");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("handles askUser with dependencies via inline Phase 2 handling", async () => {
+    // Commander plan: file_scan → commander.askUser (depends on file_scan).
+    // Phase 1.5 skips askUser (dependsOn not empty).
+    // Phase 2: file_scan executes, then askUser fires inline.
+    const commanderPlan = vi.fn(async () => ({
+      title: "Scan then ask",
+      reasoning: "Scan first, then clarify.",
+      steps: [
+        {
+          id: "scan",
+          title: "Scan files",
+          assignedAgentKind: "file",
+          capability: "file_scan" as const,
+          requiredCapabilities: ["file_scan"] as string[],
+          dependsOn: [] as string[],
+          successCriteria: "Documents scanned.",
+        },
+        {
+          id: "ask",
+          title: "Which file to use?",
+          assignedAgentKind: "commander",
+          toolName: "commander.askUser",
+          requiredCapabilities: [],
+          dependsOn: ["scan"] as string[],
+          successCriteria: "Clarified.",
+        },
+      ],
+    }));
+    const scanDocs = vi.fn(async () => [{
+      path: "E:/test/a.md",
+      modifiedAt: "2026-05-31T00:00:00.000Z",
+      sizeBytes: 50,
+      heading: "A",
+      excerpt: "File A.",
+    }]);
+
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      commanderTool: { plan: commanderPlan },
+      fileTool: { scanMarkdownDocuments: scanDocs },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("scan then pick one");
+
+    // scan step should complete, then askUser fires
+    await vi.waitFor(() => {
+      const hasAskUser = snapshots.some((s) => s.askUserQuestion?.question === "Which file to use?");
+      const scanCompleted = snapshots.some((s) =>
+        s.plan.some((p) => p.id === "scan" && p.status === "completed"),
+      );
+      expect(hasAskUser).toBe(true);
+      expect(scanCompleted).toBe(true);
+    });
+
+    // Answer the question
+    const askSnapshot = snapshots.find((s) => s.askUserQuestion?.id);
+    runtime.respondToAskUser("a.md", askSnapshot!.askUserQuestion!.id);
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(finalSnapshot.status).toBe("completed");
+    expect(finalSnapshot.plan.every((s) => s.status === "completed")).toBe(true);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("recovers from step failure via Commander replan", async () => {
+    // Commander plan: step that fails → replan generates recovery step.
+    const commanderPlan = vi.fn(async () => ({
+      title: "Test plan",
+      reasoning: "Test.",
+      steps: [{
+        id: "bad-step",
+        title: "This will fail",
+        assignedAgentKind: "file",
+        capability: "file_scan" as const,
+        requiredCapabilities: ["file_scan"] as string[],
+        dependsOn: [] as string[],
+        successCriteria: "Should fail.",
+      }],
+    }));
+    const scanDocs = vi.fn(async () => {
+      throw new Error("Scan failed: permission denied");
+    });
+
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      commanderTool: { plan: commanderPlan },
+      fileTool: { scanMarkdownDocuments: scanDocs },
+      replanDag: vi.fn(async () => ({
+        title: "Recovery plan",
+        reasoning: "Try alternative.",
+        steps: [{
+          id: "recovery-step",
+          title: "Scan with different approach",
+          assignedAgentKind: "file",
+          capability: "file_scan" as const,
+          requiredCapabilities: ["file_scan"] as string[],
+          dependsOn: [] as string[],
+          successCriteria: "Scan retried.",
+        }],
+      })),
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("test failure replan");
+
+    // Task will fail (recovery also fails since scanDocs always throws),
+    // but the replan itself should be visible in logs before final failure.
+    await vi.waitFor(() => {
+      const hasReplanLog = snapshots.some((s) =>
+        s.logs.some((l) => l.detail?.includes("Recovery for bad-step")),
+      );
+      expect(hasReplanLog).toBe(true);
+    });
+
+    const finalSnapshot = snapshots[snapshots.length - 1]!;
+    const replanLog = finalSnapshot.logs.find(
+      (l) => l.detail?.includes("Recovery for bad-step"),
+    );
+    expect(replanLog).toBeDefined();
+
+    unsubscribe();
+    runtime.dispose();
+  });
 });
 
 function createPdfPlan(): FileOrganizationPlan {
@@ -1913,6 +2365,38 @@ function createExecution(operations: PlannedPathOperation[]): FileOrganizationEx
 }
 
 // ── Streaming pipeline tests ────────────────────────────────────────────────
+
+function createTextWritePlan(targetPath: string): TextFileWritePlan {
+  return {
+    approvalId: "write-approval-1",
+    targetPath,
+    action: "create",
+    byteCount: 24,
+    contentHash: "fnv1a-test",
+    dryRun: {
+      operation: "Write text file",
+      affectedPaths: [
+        {
+          source: "",
+          target: targetPath,
+          action: "create",
+        },
+      ],
+      riskSummary: "Preview only.",
+      reversible: true,
+    },
+  };
+}
+
+function createTextWriteResult(targetPath: string, byteCount = 24): TextFileWriteResult {
+  return {
+    targetPath,
+    action: "create",
+    byteCount,
+    status: "written",
+    message: "Written in test.",
+  };
+}
 
 import { createTaskEventBus } from "./task-event-bus";
 

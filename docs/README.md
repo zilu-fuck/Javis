@@ -31,6 +31,7 @@ MVP documents remain as baseline acceptance records.
 - [MVP Specification](MVP.md)
 - [Core Contracts](CORE_CONTRACTS.md)
 - [Permissions and Safety](PERMISSIONS.md)
+- [Agent Learning Boundaries](AGENT_LEARNING_BOUNDARIES.md)
 - [Project Structure](PROJECT_STRUCTURE.md)
 
 The documents above should be normalized against `PRODUCT_READINESS.md`. If

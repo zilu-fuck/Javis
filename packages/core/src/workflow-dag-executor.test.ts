@@ -134,6 +134,147 @@ describe("executeWorkflow", () => {
     expect(result.contextSnapshot.workflowId).toBe("test-workflow");
     expect(failed).toEqual(["analyze-code"]);
   });
+
+  it("can abandon a failed step and continue dependent work with degraded evidence", async () => {
+    const started: string[] = [];
+    const replanned: string[] = [];
+    const workflow = createWorkflow([
+      step("scan-files", [], false),
+      step("summarize", ["scan-files"], false),
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      onStepStarted: (workflowStep) => started.push(workflowStep.id),
+      executeStep: async (workflowStep) => {
+        if (workflowStep.id === "scan-files") {
+          throw new Error("scan timed out");
+        }
+        return { output: workflowStep.id };
+      },
+      onStepFailureReplan: ({ step: failedStep }) => {
+        replanned.push(failedStep.id);
+        return { abandonFailedStep: true };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(started).toEqual(["scan-files", "summarize"]);
+    expect(result.completedStepIds).toEqual(["summarize"]);
+    expect(result.abandonedStepIds).toEqual(["scan-files"]);
+    expect(result.contextSnapshot["step:scan-files:abandoned"]).toMatchObject({
+      error: "scan timed out",
+    });
+    expect(replanned).toEqual(["scan-files"]);
+  });
+
+  it("can append a recovery step after a failed step", async () => {
+    const workflow = createWorkflow([
+      step("scan-files", [], false),
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      executeStep: async (workflowStep) => {
+        if (workflowStep.id === "scan-files") {
+          throw new Error("scan failed");
+        }
+        return { output: workflowStep.id };
+      },
+      onStepFailureReplan: ({ step: failedStep }) => ({
+        abandonFailedStep: true,
+        steps: [
+          {
+            ...step("fallback-scan", [failedStep.id], false),
+            title: "Fallback scan",
+          },
+        ],
+      }),
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.completedStepIds).toEqual(["fallback-scan"]);
+    expect(result.abandonedStepIds).toEqual(["scan-files"]);
+    expect(result.replannedStepIds).toEqual(["fallback-scan"]);
+    expect(result.contextSnapshot["step:fallback-scan"]).toBe("fallback-scan");
+  });
+
+  it("fails instead of deadlocking when replan adds steps without abandoning the failed step", async () => {
+    const workflow = createWorkflow([
+      step("scan-files", [], false),
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      executeStep: async (workflowStep) => {
+        if (workflowStep.id === "scan-files") {
+          throw new Error("scan failed");
+        }
+        return { output: workflowStep.id };
+      },
+      onStepFailureReplan: ({ step: failedStep }) => ({
+        steps: [step("fallback-scan", [failedStep.id], false)],
+      }),
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.failedStepId).toBe("scan-files");
+    expect(result.error).toContain("must abandon the failed step");
+  });
+
+  it("accounts for every failed step in a parallel batch before continuing", async () => {
+    const failed: string[] = [];
+    const workflow = createWorkflow([
+      step("scan-files", [], true),
+      step("inspect-project", [], true),
+      step("summarize", ["scan-files", "inspect-project"], false),
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      executeStep: async (workflowStep) => {
+        if (workflowStep.id === "scan-files" || workflowStep.id === "inspect-project") {
+          throw new Error(`${workflowStep.id} failed`);
+        }
+        return { output: workflowStep.id };
+      },
+      onStepFailureReplan: ({ step: failedStep }) => {
+        failed.push(failedStep.id);
+        return { abandonFailedStep: true };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(failed.sort()).toEqual(["inspect-project", "scan-files"]);
+    expect(result.abandonedStepIds?.sort()).toEqual(["inspect-project", "scan-files"]);
+    expect(result.completedStepIds).toEqual(["summarize"]);
+  });
+
+  it("returns failed result when replanned steps are invalid", async () => {
+    const workflow = createWorkflow([
+      step("scan-files", [], false),
+      step("fallback-scan", [], false),
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      executeStep: async (workflowStep) => {
+        if (workflowStep.id === "scan-files") {
+          throw new Error("scan failed");
+        }
+        return { output: workflowStep.id };
+      },
+      onStepFailureReplan: () => ({
+        abandonFailedStep: true,
+        steps: [step("fallback-scan", ["scan-files"], false)],
+      }),
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.failedStepId).toBe("scan-files");
+    expect(result.error).toContain("duplicates existing step fallback-scan");
+    expect(result.abandonedStepIds).toEqual(["scan-files"]);
+  });
 });
 
 function createWorkflow(steps: WorkbenchWorkflow["steps"]): WorkbenchWorkflow {

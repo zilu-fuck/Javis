@@ -447,6 +447,8 @@ function inferToolNameFromLog(log: TaskSnapshot["logs"][number]): string | null 
     "file.scanMarkdownDocuments",
     "file.planPdfOrganization",
     "file.executePdfOrganization",
+    "file.planWriteText",
+    "file.writeText",
     "project.inspect",
     "code.inspectRepository",
     "code.proposeEdit",
@@ -478,14 +480,17 @@ function inferToolNameFromPermissionRequest(
   if (/pdf|move|organ/i.test(text)) {
     return "file.executePdfOrganization";
   }
+  if (/text|write|file/i.test(text)) {
+    return "file.writeText";
+  }
   return null;
 }
 
 function inferPermissionLevel(toolName: string): ToolCallAuditRecord["permissionLevel"] {
-  if (toolName === "code.applyProposedEdit" || toolName === "file.executePdfOrganization") {
+  if (toolName === "code.applyProposedEdit" || toolName === "file.executePdfOrganization" || toolName === "file.writeText") {
     return "confirmed_write";
   }
-  if (toolName === "code.inspectRepository" || toolName === "code.proposeEdit" || toolName === "file.planPdfOrganization") {
+  if (toolName === "code.inspectRepository" || toolName === "code.proposeEdit" || toolName === "file.planPdfOrganization" || toolName === "file.planWriteText") {
     return "preview";
   }
   return "read";

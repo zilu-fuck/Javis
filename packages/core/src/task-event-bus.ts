@@ -1,4 +1,4 @@
-import type { PermissionRequest as ToolPermissionRequest } from "@javis/tools";
+import type { AskUserQuestionRequest, PermissionRequest as ToolPermissionRequest } from "@javis/tools";
 import type {
   AgentKind,
   AgentRunStatus,
@@ -24,6 +24,8 @@ export type TaskRuntimeEvent =
       requestId: string;
       decision: "approved" | "denied";
     }
+  | { kind: "ask_user.requested"; taskId: ID; question: AskUserQuestionRequest }
+  | { kind: "ask_user.responded"; taskId: ID; requestId: string; answer: string }
   | { kind: "task.completed"; taskId: ID; detail?: string }
   | { kind: "task.failed"; taskId: ID; error: string }
   // Streaming agent output events
@@ -128,6 +130,20 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "permission",
         title: "permission.resolved",
         detail: `Permission ${event.requestId} was ${event.decision}.`,
+      };
+    case "ask_user.requested":
+      return {
+        id: `${event.taskId}-askuser-${event.question.id}-requested`,
+        kind: "event",
+        title: "ask_user.requested",
+        detail: event.question.question,
+      };
+    case "ask_user.responded":
+      return {
+        id: `${event.taskId}-askuser-${event.requestId}-responded`,
+        kind: "event",
+        title: "ask_user.responded",
+        detail: `User answered: ${event.answer}`,
       };
     case "task.completed":
       return {

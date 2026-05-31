@@ -10,15 +10,11 @@ export interface McpServerConfig {
 }
 
 export async function loadMcpConfig(): Promise<McpServerConfig[]> {
-  try {
-    const result = await invoke<string | null>("read_mcp_config");
-    if (!result) return [];
-    const parsed: unknown = JSON.parse(result);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isMcpServerConfig);
-  } catch {
-    return [];
-  }
+  const result = await invoke<string | null>("read_mcp_config");
+  if (!result) return [];
+  const parsed: unknown = JSON.parse(result);
+  if (!Array.isArray(parsed)) return [];
+  return parsed.filter(isMcpServerConfig);
 }
 
 export async function saveMcpConfig(config: McpServerConfig[]): Promise<void> {

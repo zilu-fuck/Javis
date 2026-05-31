@@ -16,6 +16,9 @@ export interface ProviderCapabilities {
 
 export interface AdapterCompletionInput {
   prompt: string;
+  imageDataUrl?: string;
+  /** Multi-image support — passed alongside imageDataUrl for backward compat. */
+  images?: string[];
   model: string;
   providerId: string;
   baseUrl: string;
@@ -28,6 +31,8 @@ export interface AdapterCompletionInput {
 
 export interface AdapterRequestPayload {
   prompt: string;
+  imageDataUrl?: string;
+  images?: string[];
   providerId: string;
   model: string;
   apiKeyReference: string;

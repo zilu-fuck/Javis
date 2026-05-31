@@ -8,6 +8,7 @@ use std::{
     },
     thread,
 };
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
@@ -703,7 +704,7 @@ pub(crate) fn scan_user_images(max_results: Option<usize>) -> Result<Vec<FileEnt
         home.join("Pictures"),
         home.join("Downloads"),
     ];
-    let exts = ["jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "ico"];
+    let exts = ["jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "ico", "tiff", "tif"];
     let max = max_results.unwrap_or(200);
     collect_files(&roots, &exts, max, true)
 }
@@ -818,6 +819,37 @@ pub(crate) fn read_file_chunk(path: String, max_lines: Option<usize>) -> Result<
     Ok(lines.join("\n"))
 }
 
+#[tauri::command]
+pub(crate) fn read_image_data_url(path: String) -> Result<String, String> {
+    let file_path = PathBuf::from(&path);
+    if !file_path.exists() {
+        return Err(format!("Image not found: {}", path));
+    }
+    if !file_path.is_file() {
+        return Err(format!("Path is not an image file: {}", path));
+    }
+    let mime = image_mime_type(&file_path)
+        .ok_or_else(|| "Unsupported image format. Use PNG, JPEG, WebP, GIF, or BMP.".to_string())?;
+    let metadata = fs::metadata(&file_path).map_err(|e| format!("Cannot read image metadata: {e}"))?;
+    if metadata.len() > 10 * 1024 * 1024 {
+        return Err("Image is too large for model analysis; maximum size is 10 MB.".to_string());
+    }
+    let bytes = fs::read(&file_path).map_err(|e| format!("Cannot read image file: {e}"))?;
+    Ok(format!("data:{};base64,{}", mime, STANDARD.encode(bytes)))
+}
+
+fn image_mime_type(path: &Path) -> Option<&'static str> {
+    match path.extension().and_then(|ext| ext.to_str()).map(|ext| ext.to_ascii_lowercase())?.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        "bmp" => Some("image/bmp"),
+        "tiff" | "tif" => Some("image/tiff"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,4 +918,3 @@ mod tests {
         assert!(!is_root_level_vendor_skip("Intel", std::path::Path::new("C:\\Projects")));
     }
 }
-

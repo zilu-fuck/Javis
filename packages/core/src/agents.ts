@@ -8,11 +8,11 @@ export const demoAgents: Agent[] = [
     kind: "commander",
     displayName: "Commander",
     description: "Task planning and orchestration",
-    allowedToolNames: ["commander.plan"],
+    allowedToolNames: ["commander.plan", "commander.synthesize", "commander.askUser"],
     modelRequirements: { prefersVision: false, prefersCode: false, minContextTokens: 16000 },
     systemPrompt: {
-      en: "You are the Commander. Analyze the user's goal, choose the safest workflow, and decompose it into concrete steps with success criteria. Prefer read-only evidence first and never execute write actions yourself.",
-      zhCN: "你是 Javis 的指挥官。分析用户目标，选择最安全的工作流，并拆解为带成功标准的具体步骤。优先安排只读证据收集，绝不自行执行写操作。",
+      en: "You are the Commander. Analyze the user's goal, choose the safest workflow, and decompose it into concrete steps with success criteria. When the goal is ambiguous (missing path, unclear scope, multiple valid interpretations), use commander.askUser to clarify before planning. Prefer read-only evidence first and never execute write actions yourself.",
+      zhCN: "你是 Javis 的指挥官。分析用户目标，选择最安全的工作流，并拆解为带成功标准的具体步骤。当目标模糊时必须先用 commander.askUser 向用户澄清（如路径未指定、范围不明、存在多种合理理解），不可猜测。优先安排只读证据收集，绝不自行执行写操作。",
     },
   },
   {
@@ -20,7 +20,7 @@ export const demoAgents: Agent[] = [
     kind: "file",
     displayName: "File Agent",
     description: "Read-only local document scanning",
-    allowedToolNames: ["file.scanMarkdownDocuments", "file.scanUserDocuments", "file.classifyDocuments"],
+    allowedToolNames: ["file.scanMarkdownDocuments", "file.scanUserDocuments", "file.classifyDocuments", "file.planPdfOrganization", "file.executePdfOrganization", "file.planWriteText", "file.writeText"],
     modelRequirements: { prefersVision: false, prefersCode: false, minContextTokens: 8000 },
     systemPrompt: {
       en: "You are the File Agent. Collect local file and document evidence through read-only tools. Report paths, metadata, and summaries without modifying files.",
@@ -33,7 +33,7 @@ export const demoAgents: Agent[] = [
     displayName: "Shell Agent",
     description: "Read-only command execution",
     allowedToolNames: ["shell.runReadOnlyCommand"],
-    modelRequirements: { prefersVision: false, prefersCode: false, minContextTokens: 4000 },
+    modelRequirements: { prefersVision: false, prefersCode: false, minContextTokens: 8000 },
     systemPrompt: {
       en: "You are the Shell Agent. Run only allowlisted read-only commands, summarize command, cwd, exit code, stdout, and stderr, and stop on unsafe or write-capable requests.",
       zhCN: "你是 Javis 的 Shell 代理。只运行白名单内的只读命令，汇总 command、cwd、退出码、stdout 和 stderr，遇到不安全或写入型请求立即停止。",
@@ -76,10 +76,9 @@ export const demoAgents: Agent[] = [
     allowedToolNames: [
       "file.listDirectory",
       "computer.openPath",
-      "file.scanUserDocuments",
       "file.scanUserImages",
     ],
-    modelRequirements: { prefersVision: true, prefersCode: false, minContextTokens: 4000 },
+    modelRequirements: { prefersVision: false, prefersCode: false, minContextTokens: 8000 },
     systemPrompt: {
       en: "You are the Computer Agent. Browse local directories and help locate files using metadata first. Opening or revealing sensitive paths must remain user-visible.",
       zhCN: "你是 Javis 的电脑代理。浏览本地目录并优先用元数据帮助定位文件。打开或展示敏感路径必须保持用户可见。",
@@ -91,7 +90,7 @@ export const demoAgents: Agent[] = [
     displayName: "Scheduler Agent",
     description: "Local reminders and scheduled task coordination",
     allowedToolNames: ["scheduler.createTask", "scheduler.updateTask", "scheduler.deleteTask"],
-    modelRequirements: { prefersVision: false, prefersCode: false, minContextTokens: 4000 },
+    modelRequirements: { prefersVision: false, prefersCode: false, minContextTokens: 8000 },
     systemPrompt: {
       en: "You are the Scheduler Agent. Parse reminder intent, create or update durable local schedules only with visible confirmation, and report next run time.",
       zhCN: "你是 Javis 的调度代理。解析提醒意图，只在可见确认后创建或更新持久本地计划，并报告下一次运行时间。",
@@ -110,6 +109,30 @@ export const demoAgents: Agent[] = [
     },
   },
   {
+    id: "agent-vision",
+    kind: "vision",
+    displayName: "Vision Agent",
+    description: "Image analysis, visual content description, and OCR text extraction",
+    allowedToolNames: ["vision.analyze", "vision.describe", "vision.extractText"],
+    modelRequirements: { prefersVision: true, prefersCode: false, minContextTokens: 16000 },
+    systemPrompt: {
+      en: "You are the Vision Agent. Analyze images by describing visual content, identifying objects, text, and context. Answer questions about image content accurately and concisely. Never hallucinate details not visible in the image.",
+      zhCN: "你是 Javis 的视觉代理。分析图片内容：描述视觉元素、识别物体和文字、判断图片背景和来源。准确简洁地回答问题，不编造图片中不存在的内容。",
+    },
+  },
+  {
+    id: "agent-workspace",
+    kind: "workspace",
+    displayName: "Workspace Agent",
+    description: "Workspace definition lifecycle management",
+    allowedToolNames: ["workspace.list", "workspace.scaffold", "workspace.create", "workspace.delete"],
+    modelRequirements: { prefersVision: false, prefersCode: false, minContextTokens: 8000 },
+    systemPrompt: {
+      en: "You are the Workspace Agent. Manage workspace definitions: list installed workspaces, scaffold new definitions from descriptions, create and delete workspace configuration files. All write operations require confirmed-write approval.",
+      zhCN: "你是 Javis 的工作区代理。管理工作区定义：列出已安装的工作区、根据自然语言描述生成工作区配置、创建和删除工作区定义文件。所有写操作需要 confirmed-write 审批。",
+    },
+  },
+  {
     id: "agent-chinese-reviewer",
     kind: "chinese-reviewer",
     displayName: "中文审校",
@@ -119,6 +142,29 @@ export const demoAgents: Agent[] = [
     systemPrompt: {
       en: "You are Javis ChineseReviewer. Lightly review Chinese output for natural wording, terminology consistency, and constraint preservation without adding facts.",
       zhCN: "你是 Javis 的中文审校模块。只做轻度修改：去掉模板化表达，减少机械句式，保留原意，不新增事实；技术术语保持英文原文，首次出现时可给出中文解释；只返回审校后的完整文本。",
+    },
+  },
+  {
+    id: "agent-browser",
+    kind: "browser",
+    displayName: "Browser Agent",
+    description: "Web browsing, content extraction, and Playwright test execution",
+    allowedToolNames: [
+      "browser.navigate",
+      "browser.screenshot",
+      "browser.getContent",
+      "browser.click",
+      "browser.type",
+      "browser.evaluate",
+      "browser.runTest",
+      "browser.extractLinks",
+      "browser.upload",
+      "browser.followCandidateLinks",
+    ],
+    modelRequirements: { prefersVision: true, prefersCode: false, minContextTokens: 8000 },
+    systemPrompt: {
+      en: "You are the Browser Agent. Navigate web pages, extract content, and interact with page elements. Read-only operations (navigate, screenshot, getContent) are safe. Click, type, and evaluate require user approval. Never automate account-changing actions.",
+      zhCN: "你是浏览器代理。浏览网页、提取内容、与页面元素交互。只读操作无需审批，点击/输入/执行需用户批准。绝不自动化账户变更操作。",
     },
   },
 ];
@@ -158,6 +204,10 @@ export function researchSnapshot(status: AgentRunStatus, task: string): AgentSna
 
 export function verifierSnapshot(status: AgentRunStatus, task: string): AgentSnapshot {
   return createAgentSnapshot(getAgent("verifier"), status, task);
+}
+
+export function browserSnapshot(status: AgentRunStatus, task: string): AgentSnapshot {
+  return createAgentSnapshot(getAgent("browser"), status, task);
 }
 
 function getAgent(kind: Agent["kind"]): Agent {

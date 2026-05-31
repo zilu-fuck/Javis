@@ -45,6 +45,18 @@ export function isArchivableTask(task: TaskSnapshot): boolean {
   return task.id !== "task-idle" && ARCHIVABLE_STATUSES.has(task.status);
 }
 
+export function getTaskWorkspacePath(task: TaskSnapshot): string {
+  const workspacePath =
+    firstNonEmptyString(
+      task.workspacePath,
+      task.project?.workspacePath,
+      task.codeReviewPreview?.workspacePath,
+      task.codeProposedEdit?.workspacePath,
+      task.codeApplyResult?.workspacePath,
+    ) ?? "";
+  return workspacePath;
+}
+
 export function loadTaskHistory(storage: TaskHistoryReadStorage): TaskSnapshot[] {
   try {
     const raw = storage.getItem(TASK_HISTORY_STORAGE_KEY);
@@ -296,6 +308,12 @@ export function sanitizeTaskSnapshot(value: unknown): TaskSnapshot | null {
   if (isString(value.updatedAt)) {
     snapshot.updatedAt = value.updatedAt;
   }
+  if (value.originMode === "chat" || value.originMode === "project") {
+    snapshot.originMode = value.originMode;
+  }
+  if (isString(value.workspacePath)) {
+    snapshot.workspacePath = value.workspacePath;
+  }
   if (isString(value.scheduledTaskId)) {
     snapshot.scheduledTaskId = value.scheduledTaskId;
   }
@@ -330,6 +348,10 @@ export function sanitizeTaskSnapshot(value: unknown): TaskSnapshot | null {
   if (permissionRequest) {
     snapshot.permissionRequest = permissionRequest;
   }
+  const askUserQuestion = sanitizeAskUserQuestion(value.askUserQuestion);
+  if (askUserQuestion) {
+    snapshot.askUserQuestion = askUserQuestion;
+  }
   if (isResearchReport(value.researchReport)) {
     snapshot.researchReport = value.researchReport;
   }
@@ -361,6 +383,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isString(value: unknown): value is string {
   return typeof value === "string";
+}
+
+function firstNonEmptyString(...values: Array<string | undefined>): string | undefined {
+  return values.find((value) => value?.trim())?.trim();
 }
 
 function isNumber(value: unknown): value is number {
@@ -650,6 +676,43 @@ function sanitizeResolvedPermissionRequest(
     resolvedAt:
       "resolvedAt" in value && isString(value.resolvedAt) ? value.resolvedAt : undefined,
   };
+}
+
+function sanitizeAskUserQuestion(
+  value: unknown,
+): TaskSnapshot["askUserQuestion"] | undefined {
+  if (
+    !isRecord(value) ||
+    !isString(value.id) ||
+    !isString(value.question) ||
+    !isString(value.status) ||
+    !isString(value.createdAt)
+  ) {
+    return undefined;
+  }
+
+  if (value.status !== "answered" && value.status !== "expired" && value.status !== "cancelled") {
+    return undefined;
+  }
+
+  const result: NonNullable<TaskSnapshot["askUserQuestion"]> = {
+    id: value.id,
+    question: value.question,
+    status: value.status,
+    createdAt: value.createdAt,
+  };
+
+  if (Array.isArray(value.choices)) {
+    result.choices = value.choices.filter((c): c is string => isString(c));
+  }
+  if (isString(value.answer)) {
+    result.answer = value.answer;
+  }
+  if (isString(value.resolvedAt)) {
+    result.resolvedAt = value.resolvedAt;
+  }
+
+  return result;
 }
 
 function isProjectInspection(value: unknown): value is TaskSnapshot["project"] {

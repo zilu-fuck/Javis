@@ -75,10 +75,10 @@ describe("AgentRegistry", () => {
       expect(req!.minContextTokens).toBe(16000);
     });
 
-    it("computer agent prefersVision is true", () => {
+    it("computer agent prefersVision is false (no visual tools yet)", () => {
       const req = registry.getModelRequirements("computer");
       expect(req).toBeDefined();
-      expect(req!.prefersVision).toBe(true);
+      expect(req!.prefersVision).toBe(false);
     });
 
     it("commander has minContextTokens 16000", () => {
@@ -96,8 +96,8 @@ describe("AgentRegistry", () => {
   describe("all agents have capability tags", () => {
     const all = registry.list();
 
-    it("has 9 agents registered", () => {
-      expect(all).toHaveLength(9);
+    it("has 12 agents registered", () => {
+      expect(all).toHaveLength(12);
     });
 
     it("every agent has non-empty capabilityTags", () => {

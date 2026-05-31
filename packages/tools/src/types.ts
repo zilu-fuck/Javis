@@ -38,6 +38,17 @@ export interface PermissionRequest {
   resolvedAt?: string;
 }
 
+export interface AskUserQuestionRequest {
+  id: string;
+  question: string;
+  /** Optional predefined choices. If absent, user types free-form text. */
+  choices?: string[];
+  status: "pending" | "answered" | "expired" | "cancelled";
+  createdAt: string;
+  resolvedAt?: string;
+  answer?: string;
+}
+
 export interface FileOrganizationPlan {
   approvalId: string;
   directoryPath: string;
@@ -60,6 +71,28 @@ export interface FileOrganizationExecution {
   results: FileOperationResult[];
 }
 
+export interface WriteTextFileRequest {
+  targetPath: string;
+  content: string;
+}
+
+export interface TextFileWritePlan {
+  approvalId: string;
+  targetPath: string;
+  action: "create" | "overwrite";
+  byteCount: number;
+  contentHash: string;
+  dryRun: DryRunSummary;
+}
+
+export interface TextFileWriteResult {
+  targetPath: string;
+  action: "create" | "overwrite";
+  byteCount: number;
+  status: "written";
+  message: string;
+}
+
 export interface FileTool {
   scanMarkdownDocuments(): Promise<MarkdownDocument[]>;
   planPdfOrganization?(taskId?: string): Promise<FileOrganizationPlan>;
@@ -68,6 +101,15 @@ export interface FileTool {
     approvalId: string,
     taskId?: string,
   ): Promise<FileOrganizationExecution>;
+  planWriteText?(
+    request: WriteTextFileRequest,
+    taskId?: string,
+  ): Promise<TextFileWritePlan>;
+  writeText?(
+    request: WriteTextFileRequest,
+    approvalId: string,
+    taskId?: string,
+  ): Promise<TextFileWriteResult>;
   scanUserDocuments?(request?: {
     query?: string;
     extensions?: string[];
@@ -109,6 +151,8 @@ export interface WebSource {
 export interface WebSearchRequest {
   query: string;
   maxResults?: number;
+  /** "auto" (default): detect intent and route accordingly. "code": prefer GitHub. "web": skip GitHub. */
+  searchType?: "auto" | "code" | "web";
 }
 
 export interface WebSearchResult extends WebSource {}
@@ -161,6 +205,7 @@ export interface CommanderPlanRequest {
     kind: string;
     allowedToolNames: string[];
   }>;
+  availableTools?: ToolDescriptor[];
   workflowId?: string;
 }
 
@@ -171,7 +216,10 @@ export interface CommanderPlanResult {
     id: string;
     title: string;
     assignedAgentKind: string;
+    toolName?: string;
     requiredCapabilities?: string[];
+    /** Step IDs that must complete before this step starts. Empty = can run immediately. */
+    dependsOn?: string[];
     successCriteria: string;
   }>;
 }
@@ -189,6 +237,7 @@ export interface CommanderSynthesizeResult {
 export interface CommanderTool {
   plan(request: CommanderPlanRequest): Promise<CommanderPlanResult>;
   synthesize?(request: CommanderSynthesizeRequest): Promise<CommanderSynthesizeResult>;
+  askUser?(question: string, choices?: string[]): Promise<string>;
 }
 
 export interface VerifierCheckRequest {
@@ -254,6 +303,161 @@ export interface WebTool {
   searchWeb?(request: WebSearchRequest): Promise<WebSearchResult[]>;
 }
 
+// ── Browser Tool ──────────────────────────────────────────────────────────────
+
+export interface BrowserNavigateRequest {
+  url: string;
+  waitForSelector?: string;
+  timeoutMs?: number;
+}
+
+export interface BrowserScreenshotRequest {
+  selector?: string;
+  fullPage?: boolean;
+  format?: "png" | "jpeg";
+  quality?: number;
+}
+
+export interface BrowserGetContentRequest {
+  selector?: string;
+  format?: "text" | "html" | "markdown";
+  maxLength?: number;
+}
+
+export interface BrowserClickRequest {
+  selector: string;
+  button?: "left" | "right" | "middle";
+  clickCount?: number;
+  timeoutMs?: number;
+}
+
+export interface BrowserTypeRequest {
+  selector: string;
+  text: string;
+  delay?: number;
+  clearBefore?: boolean;
+  pressEnter?: boolean;
+}
+
+export interface BrowserEvaluateRequest {
+  expression: string;
+  timeoutMs?: number;
+}
+
+export interface BrowserRunTestRequest {
+  script: string;
+  testFile?: string;
+  timeoutMs?: number;
+}
+
+export interface BrowserNavigateResult {
+  url: string;
+  title: string;
+  status: number;
+  loadState: string;
+}
+
+export interface BrowserScreenshotResult {
+  dataUrl: string;
+  width: number;
+  height: number;
+}
+
+export interface BrowserGetContentResult {
+  content: string;
+  url: string;
+  title: string;
+}
+
+export interface BrowserClickResult {
+  selector: string;
+  clicked: boolean;
+  newUrl?: string;
+}
+
+export interface BrowserTypeResult {
+  selector: string;
+  typed: boolean;
+  value: string;
+}
+
+export interface BrowserEvaluateResult {
+  result: string;
+  type: string;
+}
+
+export interface BrowserRunTestResult {
+  passed: boolean;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  duration: number;
+}
+
+export interface BrowserExtractedLink {
+  href: string;
+  text: string;
+  tag?: string;
+  rel?: string;
+}
+
+export interface BrowserExtractLinksRequest {
+  /** CSS selector to scope link extraction. Defaults to all <a> tags. */
+  selector?: string;
+  /** Max links to return. Defaults to 50. */
+  maxResults?: number;
+}
+
+export interface BrowserExtractLinksResult {
+  links: BrowserExtractedLink[];
+  count: number;
+}
+
+export interface BrowserUploadRequest {
+  /** CSS selector of the file input element. */
+  selector: string;
+  /** Local file path(s) to upload. */
+  filePaths: string[];
+}
+
+export interface BrowserUploadResult {
+  success: boolean;
+  uploadedCount: number;
+  message: string;
+}
+
+export interface BrowserFollowCandidateLinksRequest {
+  /** Candidate URLs extracted from the current page. */
+  candidateLinks: BrowserExtractedLink[];
+  /** Optional URL pattern filter regex. */
+  urlPattern?: string;
+  /** Max links to follow. Defaults to 3. */
+  maxFollow?: number;
+}
+
+export interface BrowserFollowCandidateLinksResult {
+  followed: Array<{
+    url: string;
+    title: string;
+    excerpt: string;
+    status: number;
+  }>;
+  skipped: number;
+}
+
+export interface BrowserTool {
+  navigate(request: BrowserNavigateRequest): Promise<BrowserNavigateResult>;
+  screenshot(request: BrowserScreenshotRequest): Promise<BrowserScreenshotResult>;
+  getContent(request: BrowserGetContentRequest): Promise<BrowserGetContentResult>;
+  click(request: BrowserClickRequest): Promise<BrowserClickResult>;
+  type(request: BrowserTypeRequest): Promise<BrowserTypeResult>;
+  evaluate(request: BrowserEvaluateRequest): Promise<BrowserEvaluateResult>;
+  runTest(request: BrowserRunTestRequest): Promise<BrowserRunTestResult>;
+  extractLinks?(request: BrowserExtractLinksRequest): Promise<BrowserExtractLinksResult>;
+  upload?(request: BrowserUploadRequest): Promise<BrowserUploadResult>;
+  followCandidateLinks?(request: BrowserFollowCandidateLinksRequest): Promise<BrowserFollowCandidateLinksResult>;
+}
+
 export interface ProjectScript {
   name: string;
   command: string;
@@ -299,6 +503,8 @@ export interface ScheduledTaskDraft {
 
 export interface SchedulerTool {
   createTask(request: ScheduledTaskDraft): Promise<ScheduledTaskDraft & { id: string; enabled: boolean }>;
+  updateTask?(id: string, request: Partial<ScheduledTaskDraft>): Promise<ScheduledTaskDraft & { id: string; enabled: boolean }>;
+  deleteTask?(id: string): Promise<void>;
 }
 
 export interface WorkspaceDefinitionSummary {
@@ -321,8 +527,49 @@ export interface WorkspaceTool {
   delete(workspaceId: string): Promise<void>;
 }
 
+// ── Vision Tool ──────────────────────────────────────────────────────────────
+
+export interface VisionAnalyzeRequest {
+  /** Local image path or base64 data URL. */
+  imagePath: string;
+  /** Optional question about the image content. */
+  question?: string;
+}
+
+export interface VisionAnalyzeResult {
+  description: string;
+  objects: string[];
+  text?: string;
+  answer?: string;
+}
+
+export interface VisionDescribeRequest {
+  imagePath: string;
+  detail?: "brief" | "detailed";
+}
+
+export interface VisionOcrRequest {
+  imagePath: string;
+  language?: string;
+}
+
+export interface VisionOcrResult {
+  text: string;
+  confidence: number;
+}
+
+export interface VisionTool {
+  analyze(request: VisionAnalyzeRequest): Promise<VisionAnalyzeResult>;
+  describe(request: VisionDescribeRequest): Promise<{ description: string }>;
+  extractText(request: VisionOcrRequest): Promise<VisionOcrResult>;
+}
+
 export interface ToolDescriptor {
   name: string;
   permissionLevel: PermissionLevel;
   summary: string;
+  /** Capability tags this tool fulfills. Used for agent dispatch. */
+  capabilityTags: string[];
+  /** Agent kinds that are allowed to use this tool. */
+  ownerAgentKinds: string[];
 }

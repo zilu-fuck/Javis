@@ -120,6 +120,9 @@ export const DEFAULT_AGENT_SLOT: Record<string, ModelSlot> = {
   research: "secondary",
   file: "secondary",
   shell: "secondary",
+  workspace: "secondary",
+  browser: "multimodal",
+  vision: "multimodal",
   computer: "multimodal",
 };
 

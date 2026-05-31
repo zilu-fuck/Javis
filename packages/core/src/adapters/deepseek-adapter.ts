@@ -14,7 +14,7 @@ import type {
 } from "../provider-adapter";
 import { normalizeBaseUrl } from "./adapter-utils";
 
-const DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com/v1";
+const DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com";
 
 export class DeepSeekAdapter implements ProviderAdapter {
   readonly adapterId = "deepseek";

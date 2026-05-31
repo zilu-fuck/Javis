@@ -65,7 +65,7 @@ const SAMPLES = [
   {
     id: "mixed-lang",
     label: "Mixed Chinese-English technical text",
-    input: "配置 Model Profile 时，需要指定 provider、model 和 apiKey。如果使用 DeepSeek，baseUrl 默认为 https://api.deepseek.com/v1。支持 OpenAI-compatible 协议的 provider 可以直接复用 OpenAI Adapter。Token 计费方式因 provider 而异。",
+    input: "配置 Model Profile 时，需要指定 provider、model 和 apiKey。如果使用 DeepSeek，baseUrl 默认为 https://api.deepseek.com。支持 OpenAI-compatible 协议的 provider 可以直接复用 OpenAI Adapter。Token 计费方式因 provider 而异。",
     issues: ["中英混杂合理", "技术术语应保持英文"],
   },
 ];
@@ -110,7 +110,7 @@ function simulateReview(sampleId: string, input: string): { text: string; score:
       score: { accuracy: 10, naturalness: 9, style_match: 9, term_consistency: 10, constraint_following: 10, redundancy: 9, needs_revision: false },
     },
     "mixed-lang": {
-      text: "配置 Model Profile 时需指定 provider、model 和 apiKey。DeepSeek 的 baseUrl 默认为 https://api.deepseek.com/v1。支持 OpenAI-compatible 协议的 provider 可复用 OpenAI Adapter。Token 计费方式因 provider 而异。",
+      text: "配置 Model Profile 时需指定 provider、model 和 apiKey。DeepSeek 的 baseUrl 默认为 https://api.deepseek.com。支持 OpenAI-compatible 协议的 provider 可复用 OpenAI Adapter。Token 计费方式因 provider 而异。",
       score: { accuracy: 10, naturalness: 9, style_match: 9, term_consistency: 10, constraint_following: 10, redundancy: 9, needs_revision: false },
     },
   };

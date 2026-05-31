@@ -62,7 +62,10 @@ describe("routing", () => {
 
   it("maps confident routes to workflow blueprints without duplicates", () => {
     expect(getRecommendedWorkflowIds("remind me every day at 8")).toEqual(["daily-reminder"]);
-    expect(getRecommendedWorkflowIds("find my local document")).toEqual(["find-local-document"]);
+    expect(getRecommendedWorkflowIds("find my local document")).toEqual([
+      "find-local-document",
+      "scan-workspace-documents",
+    ]);
     expect(getRecommendedWorkflowIds("how do I start a Spring Boot app")).toEqual([
       "plan-spring-boot-project",
     ]);

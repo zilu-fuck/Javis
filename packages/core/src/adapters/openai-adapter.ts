@@ -26,6 +26,7 @@ export class OpenAIAdapter implements ProviderAdapter {
   buildCompletionRequest(input: AdapterCompletionInput): AdapterRequestPayload {
     return {
       prompt: input.prompt,
+      imageDataUrl: input.imageDataUrl,
       providerId: input.providerId || "openai",
       model: input.model,
       apiKeyReference: input.apiKeyReference,

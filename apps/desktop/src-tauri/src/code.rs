@@ -1300,6 +1300,9 @@ pub(crate) fn create_chat_completions_endpoint(base_url: &str) -> String {
     if trimmed.ends_with("/chat/completions") {
         return trimmed.to_string();
     }
+    if trimmed == "https://api.deepseek.com" {
+        return format!("{trimmed}/v1/chat/completions");
+    }
     format!("{trimmed}/chat/completions")
 }
 

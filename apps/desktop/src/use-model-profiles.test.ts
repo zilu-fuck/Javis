@@ -75,7 +75,7 @@ describe("useModelProfiles", () => {
     expect(onSaved).toHaveBeenCalledOnce();
   });
 
-  it("deletes api key via Tauri when apiKey is empty", async () => {
+  it("deletes api key via Tauri when hasStoredApiKey is true and apiKey is cleared", async () => {
     const repo = createModelProfileRepo();
     const repoRef = { current: repo } as any;
 
@@ -94,6 +94,7 @@ describe("useModelProfiles", () => {
           apiKey: "",
           apiKeyReference: "model_key_removed",
           baseUrl: "",
+          hasStoredApiKey: true,
           capabilities: { vision: true, code: true, contextTokens: 128000 },
         } as any,
       ],
@@ -128,7 +129,7 @@ describe("useModelProfiles", () => {
     }
   });
 
-  it("sets modelConfiguration state to the saved config", async () => {
+  it("sets modelConfiguration state after save with apiKey cleared and hasStoredApiKey set", async () => {
     const repo = createModelProfileRepo();
     const repoRef = { current: repo } as any;
 
@@ -141,6 +142,12 @@ describe("useModelProfiles", () => {
       await result.current.handleModelConfigurationChange(config);
     });
 
-    expect(result.current.modelConfiguration).toEqual(config);
+    // After save, apiKey is cleared from state (stored in OS credential store)
+    // and hasStoredApiKey reflects that a key was successfully saved
+    expect(result.current.modelConfiguration?.profiles[0]?.apiKey).toBe("");
+    expect(result.current.modelConfiguration?.profiles[0]?.hasStoredApiKey).toBe(true);
+    // Profile without a key should not be marked as stored
+    expect(result.current.modelConfiguration?.profiles[1]?.apiKey).toBe("");
+    expect(result.current.modelConfiguration?.profiles[1]?.hasStoredApiKey).toBeFalsy();
   });
 });

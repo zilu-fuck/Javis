@@ -64,7 +64,7 @@ describe("DeepSeekAdapter", () => {
       providerId: "deepseek",
       baseUrl: "",
     });
-    expect(payload.baseUrl).toBe("https://api.deepseek.com/v1");
+    expect(payload.baseUrl).toBe("https://api.deepseek.com");
     expect(payload.protocol).toBe("openai-compatible");
     expect(payload.providerId).toBe("deepseek");
   });
@@ -148,6 +148,26 @@ describe("AnthropicAdapter", () => {
     expect(payload.baseUrl).toBe("https://api.anthropic.com/v1");
   });
 
+  it("normalizes DeepSeek root to Anthropic-compatible endpoint", () => {
+    const adapter = new AnthropicAdapter();
+    const payload = adapter.buildCompletionRequest({
+      ...baseInput,
+      providerId: "deepseek",
+      baseUrl: "https://api.deepseek.com",
+    });
+    expect(payload.baseUrl).toBe("https://api.deepseek.com/anthropic");
+  });
+
+  it("does not append /v1 to DeepSeek Anthropic-compatible endpoint", () => {
+    const adapter = new AnthropicAdapter();
+    const payload = adapter.buildCompletionRequest({
+      ...baseInput,
+      providerId: "deepseek",
+      baseUrl: "https://api.deepseek.com/anthropic/",
+    });
+    expect(payload.baseUrl).toBe("https://api.deepseek.com/anthropic");
+  });
+
   it("reports vision capability", () => {
     const adapter = new AnthropicAdapter();
     expect(adapter.capabilities.vision).toBe(true);
@@ -163,6 +183,12 @@ describe("adapter registry", () => {
   it("returns DeepSeekAdapter for 'deepseek'", () => {
     const adapter = getAdapter("deepseek");
     expect(adapter).toBeInstanceOf(DeepSeekAdapter);
+  });
+
+  it("returns AnthropicAdapter for 'deepseek-anthropic'", () => {
+    const adapter = getAdapter("deepseek-anthropic");
+    expect(adapter).toBeInstanceOf(AnthropicAdapter);
+    expect(adapter.protocol).toBe("anthropic");
   });
 
   it("returns AnthropicAdapter for 'anthropic'", () => {
@@ -186,6 +212,7 @@ describe("adapter registry", () => {
     const ids = all.map((a) => a.adapterId);
     expect(ids).toContain("openai");
     expect(ids).toContain("deepseek");
+    expect(ids).toContain("deepseek-anthropic");
     expect(ids).toContain("anthropic");
   });
 

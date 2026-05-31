@@ -9,7 +9,8 @@ export type RouteKind =
   | "file-scan"
   | "spring-boot"
   | "local-document"
-  | "schedule";
+  | "schedule"
+  | "browser";
 
 export interface RouteScore {
   route: RouteKind;
@@ -46,9 +47,11 @@ export function isPdfOrganizationGoal(userGoal: string): boolean {
 }
 
 export function isDocumentScanGoal(userGoal: string): boolean {
-  const docWords = /document|documents|docs|markdown|\.md|md\s*文件|文档|笔记/i;
-  const actionWords = /scan|find|list|search|workspace|summarize|扫描|查找|搜索|总结|工作区|列出/i;
-  return docWords.test(userGoal) && actionWords.test(userGoal);
+  return getTopRoute(userGoal)?.route === "file-scan";
+}
+
+export function isBrowserGoal(userGoal: string): boolean {
+  return getTopRoute(userGoal)?.route === "browser";
 }
 
 export function scoreRoutes(
@@ -65,6 +68,7 @@ export function scoreRoutes(
     createResearchRouteScore(userGoal, urls),
     createProjectRouteScore(userGoal, context),
     createFileScanRouteScore(userGoal, context),
+    createBrowserRouteScore(userGoal, urls),
   ];
 
   return routeScores.sort((left, right) => right.score - left.score);
@@ -137,6 +141,14 @@ function routeToWorkflowId(
       return /read current project|inspect this project|understand this project|\u7406\u89e3.*\u9879\u76ee|\u9605\u8bfb.*\u9879\u76ee|\u5f53\u524d\u9879\u76ee/i.test(userGoal)
         ? "read-current-project"
         : undefined;
+    case "browser":
+      return /test|e2e|playwright/i.test(userGoal) ? "browser-test" : "browser-research";
+    case "pdf":
+      return "pdf-organization";
+    case "code":
+      return "code-review";
+    case "file-scan":
+      return "scan-workspace-documents";
     default:
       return undefined;
   }
@@ -303,4 +315,28 @@ function createFileScanRouteScore(
   }
 
   return { route: "file-scan", score, signals };
+}
+
+function createBrowserRouteScore(userGoal: string, urls: string[]): RouteScore {
+  const signals: string[] = [];
+  let score = 0;
+
+  if (/browse|browser|open\s+(?:page|website|site)|playwright|screenshot|\u7f51\u9875|\u6d4f\u89c8|\u622a\u56fe|\u6253\u5f00.*\u7f51\u9875/i.test(userGoal)) {
+    signals.push("browser-keyword");
+    score += 3;
+  }
+  if (/click|type|fill|submit|interact|form|login|sign\s*in|\u70b9\u51fb|\u8f93\u5165|\u586b\u5199|\u767b\u5f55/i.test(userGoal)) {
+    signals.push("browser-interaction");
+    score += 1;
+  }
+  if (/e2e|end.to.end|playwright.*test|browser.*test|test.*browser|\u6d4f\u89c8\u5668.*\u6d4b\u8bd5|\u81ea\u52a8\u5316\u6d4b\u8bd5/i.test(userGoal)) {
+    signals.push("browser-test-keyword");
+    score += 2;
+  }
+  if (urls.length > 0 && (signals.includes("browser-keyword") || signals.includes("browser-interaction"))) {
+    signals.push("url-with-browser-context");
+    score += 1;
+  }
+
+  return { route: "browser", score, signals };
 }

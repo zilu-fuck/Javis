@@ -1,27 +1,35 @@
 # Improvement Plan
 
-Last updated: 2026-05-26
+Last updated: 2026-05-31
 
 > **Companion documents**:
-> - [MULTI_AGENT_FIX_PLAN.md](./MULTI_AGENT_FIX_PLAN.md) — specific bugs with
->   file:line references and minimal code fixes.
-> - [CHINESE_OPTIMIZATION.md](./CHINESE_OPTIMIZATION.md) — two-layer strategy
->   for Chinese-native agent output (prompt layer + system prompt layer).
+> - [MULTI_AGENT_FIX_PLAN.md](./MULTI_AGENT_FIX_PLAN.md) — ALL 9 FIXES RESOLVED as of 2026-05-26.
+> - [CHINESE_OPTIMIZATION.md](./CHINESE_OPTIMIZATION.md) — IMPLEMENTED. Both Layer 1 and Layer 2 done.
+> - [AGENT_OPTIMIZATION_ANALYSIS.md](./AGENT_OPTIMIZATION_ANALYSIS.md) — 11/13 issues resolved as of 2026-05-31.
+> - [MULTI_AGENT_ORCHESTRATION_REDESIGN.md](./MULTI_AGENT_ORCHESTRATION_REDESIGN.md) — NOT YET IMPLEMENTED. Core redesign pending.
 
 This document records the architectural improvement path for Javis after the
 current codebase review. The central finding is that Javis is architecturally
 ready for multi-agent work, but its current runtime is still closer to
 single-task serial role routing than true multi-agent collaboration.
 
-**Status as of 2026-05-27**: Phases 1.1-1.3 complete. Phase 2.1 complete
-(ModelProvider in desktop layer). Phase 2.2 partially complete (multi-route
-scoring exists, weighted scoring not yet). Phase 2.3 (SQLite) infrastructure
-complete — rusqlite, Tauri commands, migration system, model-settings already
-migrated; task history, approval records, and workspaces pending migration.
-Phase 3.3 (shared context) complete. Phase 3.5 (DAG executor) implemented.
-Phase 4.1 (streaming events) Rust SSE backend complete (background thread →
-Tauri events → frontend AsyncGenerator, with cancellation); task-flow UI
-consumption of streamed output still TBD.
+**Status as of 2026-05-31**:
+- Phase 1.1-1.3 (Foundation): Complete.
+- Phase 2.1 (ModelProvider): Complete.
+- Phase 2.2 (Route scoring): Partial — multi-route scoring exists, weighted scoring not yet.
+- Phase 2.3 (SQLite): Complete — all 9 migration sets deployed, model-settings migrated; task history/approval/workspaces migration verification in progress.
+- Phase 3.1 (Agent Capability Registry): Implemented — AgentRegistry + AgentCapability model + capability tags from ToolDescriptors.
+- Phase 3.3 (Shared Context): Complete.
+- Phase 3.5 (DAG executor): Implemented.
+- Phase 4.1 (Streaming events): COMPLETE — end-to-end pipeline: Rust SSE → Tauri events → delta-reducer → ThreadView StreamingMessage → useSmoothStream typewriter animation with cancel.
+
+**New since 2026-05-27**:
+- Vision Agent: definition + 3 tool descriptors exist; backend LLM vision API calls not yet wired.
+- Workspace Agent: definition + 4 tools implemented.
+- Browser Agent: definition + 7 tools + Rust backend (browser.rs) + Playwright sidecar complete. 590 tests green.
+- File Write: file_write.rs + file.planWriteText / file.writeText tools exist; confirmed-write wiring in progress.
+- Agent optimization: 11/13 issues resolved (safePlanWorkflow dynamic, commander.synthesize, PDF tools→File Agent, Verifier planning tag removed, Workspace Agent created, SchedulerTool extended, Computer prefersVision+retool, shell.run removed, minContextTokens→8K, Browser workflow currentSupport→partial).
+- 555 total tests (430 Vitest + 125 Rust).
 
 The goal is not to add parallelism early. The safer path is to first strengthen
 the foundation: modular runtime boundaries, reusable write approval, durable

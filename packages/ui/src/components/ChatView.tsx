@@ -18,6 +18,7 @@ interface ChatViewProps {
   onUseWorkspacePath?: (path: string) => void;
   onWorkspacePathChange?: (path: string) => void;
   onPermissionDecision?: (decision: "approved" | "denied") => void;
+  onAskUserAnswer?: (answer: string) => void;
   onRetryTask?: () => void;
   onStopTask?: () => void;
   onSubmitGoal: (goal?: string, workspacePath?: string, scheduledTaskId?: string) => void;
@@ -38,6 +39,7 @@ export function ChatView({
   onUseWorkspacePath,
   onWorkspacePathChange,
   onPermissionDecision,
+  onAskUserAnswer,
   onRetryTask,
   onStopTask,
   onSubmitGoal,
@@ -83,6 +85,7 @@ export function ChatView({
       onDeleteRecentWorkspacePath={onDeleteRecentWorkspacePath}
       onDraftGoalChange={onDraftGoalChange}
       onPermissionDecision={onPermissionDecision}
+      onAskUserAnswer={onAskUserAnswer}
       onRetryTask={onRetryTask}
       onStopTask={onStopTask}
       onSubmit={handleSubmit}

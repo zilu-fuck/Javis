@@ -9,6 +9,7 @@
  */
 
 import type { Agent } from "./index";
+import { initialToolDescriptors } from "@javis/tools";
 
 // ── Capability Tags ──────────────────────────────────────────────────────────
 
@@ -17,6 +18,7 @@ export type AgentCapabilityTag =
   | "planning"           // Decompose user goals into workflow steps
   | "synthesis"          // Merge evidence into user-facing conclusions
   | "file_scan"          // Scan markdown/user documents (read-only)
+  | "file_execute"       // Execute confirmed file organization (write)
   | "document_classify"  // Classify documents by type/purpose
   | "shell_readonly"     // Run allowlisted read-only shell commands
   | "git_inspect"        // Inspect git status, diff, changed files
@@ -25,12 +27,24 @@ export type AgentCapabilityTag =
   | "web_search"         // Search public web sources
   | "web_fetch"          // Fetch and extract public web page content
   | "local_search"       // Search indexed local files by metadata
+  | "image_scan"         // Scan user image files
   | "directory_list"     // List local directories
   | "schedule_create"    // Create durable local scheduled tasks
   | "schedule_update"    // Update existing scheduled tasks
   | "schedule_delete"    // Delete scheduled tasks
   | "evidence_check"     // Check collected evidence against success criteria
-  | "language_review";   // Review output for language naturalness
+  | "language_review"    // Review output for language naturalness
+  | "browser_navigate"   // Navigate to URLs, extract content, take screenshots
+  | "browser_interact"   // Click, type, evaluate in page context
+  | "browser_test"       // Run Playwright test scripts
+  | "workspace_list"     // List installed workspace definitions
+  | "workspace_scaffold" // Generate workspace definition from description
+  | "workspace_create"   // Save a new workspace definition
+  | "workspace_delete"  // Remove a workspace definition
+  | "image_analyze"     // Analyze image content and answer visual questions
+  | "image_describe"    // Generate textual description of an image
+  | "image_ocr"         // Extract text from images via OCR
+  | "clarification";    // Ask user for clarification when goals are ambiguous
 
 // ── Model Requirements ──────────────────────────────────────────────────────
 
@@ -152,86 +166,43 @@ const DEFAULT_MODEL_REQUIREMENTS: ModelRequirements = {
 
 /**
  * Derive capability tags from an agent's allowedToolNames.
- * This is a pure function — same input always produces the same output.
  *
- * Tags are intentionally derived from tool names rather than agent kind
- * because tool names are the contract ("what can this agent actually do").
+ * Tags are resolved from ToolDescriptor.capabilityTags — the single source
+ * of truth is `initialToolDescriptors` in @javis/tools.
+ *
+ * Agent-kind-based tags are only used for agents without tools
+ * (Chinese Reviewer) or for cross-cutting capabilities (Research's synthesis).
  */
+let _toolCapabilityIndex: Map<string, string[]> | undefined;
+
+function getToolCapabilityIndex(): Map<string, string[]> {
+  if (!_toolCapabilityIndex) {
+    _toolCapabilityIndex = new Map(
+      initialToolDescriptors.map((d) => [d.name, d.capabilityTags]),
+    );
+  }
+  return _toolCapabilityIndex;
+}
+
+function getToolCapabilityTags(toolName: string): string[] {
+  return getToolCapabilityIndex().get(toolName) ?? [];
+}
+
 function inferCapabilityTags(agent: Agent): AgentCapabilityTag[] {
   const tags = new Set<AgentCapabilityTag>();
-  const tools = agent.allowedToolNames;
 
-  // Commander always gets planning + synthesis
-  if (agent.kind === "commander") {
-    tags.add("planning");
-    tags.add("synthesis");
-  }
-
-  for (const tool of tools) {
-    switch (tool) {
-      case "commander.plan":
-        tags.add("planning");
-        break;
-      case "file.scanMarkdownDocuments":
-      case "file.scanUserDocuments":
-        tags.add("file_scan");
-        break;
-      case "file.classifyDocuments":
-        tags.add("document_classify");
-        break;
-      case "shell.runReadOnlyCommand":
-        tags.add("shell_readonly");
-        break;
-      case "code.inspectRepository":
-        tags.add("git_inspect");
-        break;
-      case "code.proposeEdit":
-        tags.add("code_propose");
-        break;
-      case "code.applyProposedEdit":
-        tags.add("code_apply");
-        break;
-      case "web.search":
-        tags.add("web_search");
-        break;
-      case "web.fetchSource":
-        tags.add("web_fetch");
-        break;
-      case "file.listDirectory":
-        tags.add("directory_list");
-        break;
-      case "computer.openPath":
-      case "file.scanUserImages":
-        tags.add("local_search");
-        break;
-      case "scheduler.createTask":
-        tags.add("schedule_create");
-        break;
-      case "scheduler.updateTask":
-        tags.add("schedule_update");
-        break;
-      case "scheduler.deleteTask":
-        tags.add("schedule_delete");
-        break;
-      case "verifier.check":
-        tags.add("evidence_check");
-        break;
+  for (const toolName of agent.allowedToolNames) {
+    for (const tag of getToolCapabilityTags(toolName)) {
+      tags.add(tag as AgentCapabilityTag);
     }
   }
 
-  // Chinese reviewer has no tools but gets language_review by kind
+  // Agents with no tools that still need capability tags
   if (agent.kind === "chinese-reviewer") {
     tags.add("language_review");
   }
-
-  // Research agent additionally gets synthesis capability
   if (agent.kind === "research") {
     tags.add("synthesis");
-  }
-
-  // Verifier additionally gets planning capability (verifies plans)
-  if (agent.kind === "verifier") {
-    tags.add("planning");
   }
 
   return [...tags];

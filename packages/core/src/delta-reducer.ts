@@ -121,6 +121,24 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
           activeStreamingAgentKind = undefined;
           break;
         }
+        case "ask_user.requested": {
+          current = { ...current, askUserQuestion: event.question };
+          break;
+        }
+        case "ask_user.responded": {
+          if (current.askUserQuestion?.id === event.requestId) {
+            current = {
+              ...current,
+              askUserQuestion: {
+                ...current.askUserQuestion,
+                status: "answered",
+                answer: event.answer,
+                resolvedAt: new Date().toISOString(),
+              },
+            };
+          }
+          break;
+        }
         // Existing event types are handled by full emit path, not DeltaReducer
         default:
           break;

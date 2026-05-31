@@ -27,6 +27,8 @@ mod workspace;
 mod mcpserv;
 mod scan;
 mod code;
+mod browser;
+mod file_write;
 
 // Re-import from extracted modules
 use code::{normalize_optional_config_value, create_chat_completions_endpoint, CodeProposeEditRequest, default_model_for_locale, default_provider_for_locale, infer_provider_id_from_model, normalize_openai_compatible_model_name, FileContentHash};
@@ -53,6 +55,9 @@ Keep JSON keys, code, paths, commands, and identifiers unchanged."#;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ModelCompletionRequest {
     prompt: String,
+    image_data_url: Option<String>,
+    #[serde(default)]
+    images: Option<Vec<String>>,
     provider_id: Option<String>,
     model: Option<String>,
     api_key: Option<String>,
@@ -90,6 +95,7 @@ struct ModelApiKeySecretRequest {
     key_reference: String,
     api_key: String,
 }
+#[derive(Debug)]
 pub(crate) struct NativeApprovalBinding {
     approval_id: String,
     tool_name: String,
@@ -125,6 +131,23 @@ fn save_model_api_key_secret(
 #[tauri::command]
 fn delete_model_api_key_secret(app: AppHandle, key_reference: String) -> Result<(), String> {
     delete_model_api_key_secret_for_app(&app, &key_reference)
+}
+
+#[derive(Serialize)]
+struct ModelApiKeySecretStatus {
+    exists: bool,
+}
+
+#[tauri::command]
+fn check_model_api_key_secret(
+    app: AppHandle,
+    key_reference: String,
+) -> Result<ModelApiKeySecretStatus, String> {
+    let key_reference = normalize_model_api_key_reference(&key_reference)?;
+    let path = model_api_key_secret_path(&app, &key_reference)?;
+    Ok(ModelApiKeySecretStatus {
+        exists: path.exists(),
+    })
 }
 #[tauri::command]
 fn complete_model_prompt(
@@ -561,12 +584,24 @@ fn create_openai_compatible_completion_body(
     model: &str,
     request: &ModelCompletionRequest,
 ) -> serde_json::Value {
+    let images = build_image_list(request);
+    let user_content = if !images.is_empty() {
+        let mut content: Vec<serde_json::Value> = vec![
+            serde_json::json!({ "type": "text", "text": request.prompt }),
+        ];
+        for img in &images {
+            content.push(serde_json::json!({ "type": "image_url", "image_url": { "url": img } }));
+        }
+        serde_json::json!(content)
+    } else {
+        serde_json::Value::String(request.prompt.clone())
+    };
     let mut body = serde_json::json!({
         "model": model,
         "messages": [
             {
                 "role": "user",
-                "content": request.prompt
+                "content": user_content
             }
         ],
         "stream": false,
@@ -585,6 +620,27 @@ pub(crate) fn create_openai_compatible_stream_body(
     body["stream"] = serde_json::Value::Bool(true);
     body["stream_options"] = serde_json::json!({ "include_usage": true });
     body
+}
+
+/// Collect all image data URLs from both the legacy `image_data_url` field
+/// and the new `images` array, deduplicating by exact match.
+pub(crate) fn build_image_list(request: &ModelCompletionRequest) -> Vec<String> {
+    let mut list: Vec<String> = Vec::new();
+    if let Some(ref url) = request.image_data_url {
+        let trimmed = url.trim().to_string();
+        if !trimmed.is_empty() {
+            list.push(trimmed);
+        }
+    }
+    if let Some(ref image_list) = request.images {
+        for url in image_list {
+            let trimmed = url.trim().to_string();
+            if !trimmed.is_empty() && !list.contains(&trimmed) {
+                list.push(trimmed);
+            }
+        }
+    }
+    list
 }
 
 fn append_completion_stop_sequences(
@@ -671,7 +727,7 @@ pub(crate) fn infer_model_completion_provider_id(request: &ModelCompletionReques
 
 pub(crate) fn default_openai_compatible_base_url_for_provider(provider_id: &str) -> String {
     match provider_id {
-        "deepseek" => "https://api.deepseek.com/v1".to_string(),
+        "deepseek" => "https://api.deepseek.com".to_string(),
         _ => "https://api.openai.com/v1".to_string(),
     }
 }
@@ -694,7 +750,7 @@ pub(crate) fn default_openai_compatible_base_url(request: &CodeProposeEditReques
     let provider_id = normalize_optional_config_value(request.provider_id.as_deref())
         .unwrap_or_else(|| infer_provider_id_from_model(request));
     match provider_id.as_str() {
-        "deepseek" => "https://api.deepseek.com/v1".to_string(),
+        "deepseek" => "https://api.deepseek.com".to_string(),
         _ => "https://api.openai.com/v1".to_string(),
     }
 }
@@ -980,6 +1036,8 @@ mod tests {
     use super::*;
     use super::code::*;
     use super::pdf::*;
+    #[allow(unused_imports)]
+    use super::file_write::*;
     use super::shell::*;
     use super::web::*;
     use super::scan::*;
@@ -1372,6 +1430,132 @@ mod tests {
         assert_eq!(
             second_result.expect_err("approval should be consumed"),
             "No approved PDF organization dry-run is pending."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn write_text_file_requires_approval_before_execution() {
+        let root = create_test_directory("write-text-approval-required");
+        let request = write_text_file_request(&root, "notes.md", "# Notes\n");
+        let approval_state = Mutex::new(file_write::WriteTextApprovalState::default());
+        let approval_id = "approval-1";
+        replace_pending_write_text_approval(&approval_state, approval_id, &request)
+            .expect("store pending text write approval");
+
+        let result = take_approved_write_text(
+            &approval_state,
+            &ExecuteWriteTextFileRequest {
+                approval_id: approval_id.to_string(),
+                target_path: request.target_path.clone(),
+                content: request.content.clone(),
+                workspace_path: request.workspace_path.clone(),
+                task_id: None,
+            },
+        );
+
+        assert_eq!(
+            result.expect_err("approval should be required"),
+            "Permission denied: Text write dry-run has not been approved."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn approved_write_text_creates_file() {
+        let root = create_test_directory("write-text-create");
+        let request = write_text_file_request(&root, "reports/search.md", "# Search\n");
+        let approval_state = Mutex::new(file_write::WriteTextApprovalState::default());
+        let approval_id = "approval-1";
+        replace_pending_write_text_approval(&approval_state, approval_id, &request)
+            .expect("store pending text write approval");
+        approve_pending_write_text(&approval_state, approval_id, None).expect("approve text write");
+        let approved = take_approved_write_text(
+            &approval_state,
+            &ExecuteWriteTextFileRequest {
+                approval_id: approval_id.to_string(),
+                target_path: request.target_path.clone(),
+                content: request.content.clone(),
+                workspace_path: request.workspace_path.clone(),
+                task_id: None,
+            },
+        )
+        .expect("take approved text write");
+
+        let target = root.join("reports").join("search.md");
+        let result = write_text_file(
+            &target,
+            &approved.content,
+            &approved.action,
+            approved.previous_hash.as_deref(),
+        )
+        .expect("write text file");
+
+        assert_eq!(result.status, "written");
+        assert_eq!(fs::read_to_string(target).expect("read written file"), "# Search\n");
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn approved_write_text_rejects_changed_content() {
+        let root = create_test_directory("write-text-content-mismatch");
+        let request = write_text_file_request(&root, "notes.md", "# Notes\n");
+        let approval_state = Mutex::new(file_write::WriteTextApprovalState::default());
+        replace_pending_write_text_approval(&approval_state, "approval-1", &request)
+            .expect("store pending text write approval");
+        approve_pending_write_text(&approval_state, "approval-1", None).expect("approve text write");
+
+        let result = take_approved_write_text(
+            &approval_state,
+            &ExecuteWriteTextFileRequest {
+                approval_id: "approval-1".to_string(),
+                target_path: request.target_path.clone(),
+                content: "# Changed\n".to_string(),
+                workspace_path: request.workspace_path.clone(),
+                task_id: None,
+            },
+        );
+
+        assert_eq!(
+            result.expect_err("changed content should be rejected"),
+            "Approved text write request does not match the current dry-run."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn approved_write_text_rejects_stale_overwrite_target() {
+        let root = create_test_directory("write-text-stale-overwrite");
+        let target = root.join("notes.md");
+        fs::write(&target, "before\n").expect("write original file");
+        let request = write_text_file_request(&root, "notes.md", "after\n");
+        let approval_state = Mutex::new(file_write::WriteTextApprovalState::default());
+        replace_pending_write_text_approval(&approval_state, "approval-1", &request)
+            .expect("store pending text write approval");
+        approve_pending_write_text(&approval_state, "approval-1", None).expect("approve text write");
+        let approved = take_approved_write_text(
+            &approval_state,
+            &ExecuteWriteTextFileRequest {
+                approval_id: "approval-1".to_string(),
+                target_path: request.target_path.clone(),
+                content: request.content.clone(),
+                workspace_path: request.workspace_path.clone(),
+                task_id: None,
+            },
+        )
+        .expect("take approved text write");
+        fs::write(&target, "external edit\n").expect("change target after approval");
+
+        let result = write_text_file(
+            &target,
+            &approved.content,
+            &approved.action,
+            approved.previous_hash.as_deref(),
+        );
+
+        assert_eq!(
+            result.expect_err("stale overwrite should fail"),
+            "Target file changed after approval."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -2063,7 +2247,7 @@ mod tests {
 
         let diagnostic = create_provider_response_diagnostic(
             &request,
-            "https://api.deepseek.com/chat/completions",
+            "https://api.deepseek.com/v1/chat/completions",
             r#"{"error":"Authorization Bearer sk-local-secret-that-must-not-leak apiKey failed"}"#,
         );
 
@@ -2092,6 +2276,8 @@ mod tests {
     fn openai_compatible_completion_stream_body_requests_streaming() {
         let request = ModelCompletionRequest {
             prompt: "Say hello".to_string(),
+            image_data_url: None,
+            images: None,
             provider_id: Some("openai".to_string()),
             model: Some("openai/gpt-test".to_string()),
             api_key: Some("sk-test".to_string()),
@@ -2329,16 +2515,16 @@ mod tests {
         ));
         assert_eq!(
             create_chat_completions_endpoint("https://api.deepseek.com"),
-            "https://api.deepseek.com/chat/completions"
+            "https://api.deepseek.com/v1/chat/completions"
         );
         assert_eq!(
             create_chat_completions_endpoint("https://api.deepseek.com/v1/chat/completions"),
             "https://api.deepseek.com/v1/chat/completions"
         );
-        // DeepSeek default base URL includes /v1 so the final endpoint is correct.
+        // DeepSeek default base URL stays user-friendly; endpoint construction adds /v1.
         assert_eq!(
             default_openai_compatible_base_url_for_provider("deepseek"),
-            "https://api.deepseek.com/v1"
+            "https://api.deepseek.com"
         );
         assert_eq!(
             create_chat_completions_endpoint(&default_openai_compatible_base_url_for_provider(
@@ -2677,6 +2863,7 @@ mod tests {
         let result = search_web_sources(WebSearchRequest {
             query: "fixture guard".to_string(),
             max_results: Some(1),
+            search_type: "auto".to_string(),
         });
 
         assert_eq!(
@@ -2842,6 +3029,19 @@ mod tests {
         }
     }
 
+    fn write_text_file_request(
+        workspace: &Path,
+        target_path: &str,
+        content: &str,
+    ) -> WriteTextFileRequest {
+        WriteTextFileRequest {
+            target_path: target_path.to_string(),
+            content: content.to_string(),
+            workspace_path: Some(normalize_path(workspace)),
+            task_id: None,
+        }
+    }
+
     // ── DeepSeek API request construction tests ─────────────────────
 
     #[test]
@@ -2884,6 +3084,8 @@ mod tests {
         let proposal_body = create_openai_compatible_proposal_body("deepseek-chat", "test");
         let request = ModelCompletionRequest {
             prompt: "test".to_string(),
+            image_data_url: None,
+            images: None,
             provider_id: Some("deepseek".to_string()),
             model: Some("deepseek-chat".to_string()),
             api_key: Some("sk-test".to_string()),
@@ -2921,15 +3123,15 @@ mod tests {
 
     #[test]
     fn deepseek_endpoint_url_is_correctly_constructed() {
-        // From default base URL
+        // From default base URL without requiring users to type /v1
         let base = default_openai_compatible_base_url_for_provider("deepseek");
-        assert_eq!(base, "https://api.deepseek.com/v1");
+        assert_eq!(base, "https://api.deepseek.com");
         let endpoint = create_chat_completions_endpoint(&base);
         assert_eq!(endpoint, "https://api.deepseek.com/v1/chat/completions");
 
         // From user-provided base URL without /v1
         let endpoint2 = create_chat_completions_endpoint("https://api.deepseek.com");
-        assert_eq!(endpoint2, "https://api.deepseek.com/chat/completions");
+        assert_eq!(endpoint2, "https://api.deepseek.com/v1/chat/completions");
 
         // From user-provided base URL with trailing slash
         let endpoint3 = create_chat_completions_endpoint("https://api.deepseek.com/v1/");
@@ -3164,7 +3366,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(Mutex::new(pdf::PdfOrganizationApprovalState::default()))
+        .manage(Mutex::new(file_write::WriteTextApprovalState::default()))
         .manage(Mutex::new(code::CodePatchApprovalState::default()))
+        .manage(browser::BrowserState::new())
         .invoke_handler(tauri::generate_handler![
             pdf::scan_markdown_documents,
             shell::run_read_only_command,
@@ -3173,6 +3377,7 @@ pub fn run() {
             inspect::inspect_project,
             save_model_api_key_secret,
             delete_model_api_key_secret,
+            check_model_api_key_secret,
             code::propose_code_edit,
             complete_model_prompt,
             streaming::stream_model_prompt_start,
@@ -3184,11 +3389,15 @@ pub fn run() {
             pdf::approve_pdf_organization,
             pdf::restore_pdf_organization_approval,
             pdf::execute_pdf_organization,
+            file_write::plan_write_text_file,
+            file_write::approve_write_text_file,
+            file_write::execute_write_text_file,
             scan::scan_installed_apps,
             scan::scan_user_documents,
             scan::scan_user_images,
             scan::list_directory,
             scan::read_file_chunk,
+            scan::read_image_data_url,
             mcpserv::read_mcp_config,
             mcpserv::write_mcp_config,
             audit::append_task_audit_jsonl_line,
@@ -3202,7 +3411,15 @@ pub fn run() {
             workspace::delete_workspace_definition,
             scan::scan_all_user_files,
             scan::list_mount_roots,
-            scan::cancel_scan_all_files
+            scan::cancel_scan_all_files,
+            browser::browser_navigate,
+            browser::browser_screenshot,
+            browser::browser_get_content,
+            browser::browser_click,
+            browser::browser_type,
+            browser::browser_evaluate,
+            browser::browser_run_test,
+            browser::browser_close
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

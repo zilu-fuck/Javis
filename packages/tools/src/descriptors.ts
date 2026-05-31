@@ -1,134 +1,321 @@
 import type { ToolDescriptor } from "./types";
 
 export const initialToolDescriptors: ToolDescriptor[] = [
+  // ── Commander ──────────────────────────────────────────────────────────
   {
     name: "commander.plan",
     permissionLevel: "read",
     summary: "Analyze a user goal and produce a task plan with assigned agent steps.",
+    capabilityTags: ["planning"],
+    ownerAgentKinds: ["commander"],
   },
+  {
+    name: "commander.synthesize",
+    permissionLevel: "read",
+    summary: "Synthesize collected evidence from all workflow steps into a user-facing conclusion.",
+    capabilityTags: ["synthesis"],
+    ownerAgentKinds: ["commander"],
+  },
+  {
+    name: "commander.askUser",
+    permissionLevel: "read",
+    summary: "Ask the user a clarifying question when the goal is ambiguous or information is missing.",
+    capabilityTags: ["clarification"],
+    ownerAgentKinds: ["commander"],
+  },
+
+  // ── Verifier ───────────────────────────────────────────────────────────
   {
     name: "verifier.check",
     permissionLevel: "read",
     summary: "Check collected evidence against success criteria and produce a verdict.",
+    capabilityTags: ["evidence_check"],
+    ownerAgentKinds: ["verifier"],
   },
+
+  // ── File ───────────────────────────────────────────────────────────────
   {
     name: "file.scanMarkdownDocuments",
     permissionLevel: "read",
     summary: "Scan Markdown documents inside the active workspace.",
-  },
-  {
-    name: "shell.runReadOnlyCommand",
-    permissionLevel: "read",
-    summary: "Run an allowlisted read-only shell command in the workspace.",
-  },
-  {
-    name: "shell.run",
-    permissionLevel: "preview",
-    summary: "Preview shell commands before execution.",
-  },
-  {
-    name: "web.fetchSource",
-    permissionLevel: "read",
-    summary: "Fetch a user-provided public web source URL.",
-  },
-  {
-    name: "web.search",
-    permissionLevel: "read",
-    summary: "Search public web sources through a configured provider.",
-  },
-  {
-    name: "project.inspect",
-    permissionLevel: "read",
-    summary: "Inspect package scripts and recommend start/test commands.",
-  },
-  {
-    name: "code.inspectRepository",
-    permissionLevel: "preview",
-    summary: "Collect changed files, diff summary, and diff preview without applying edits.",
-  },
-  {
-    name: "code.proposeEdit",
-    permissionLevel: "preview",
-    summary: "Produce a patch proposal for user review without modifying files.",
-  },
-  {
-    name: "code.applyProposedEdit",
-    permissionLevel: "confirmed_write",
-    summary: "Apply only the approved Code Agent patch proposal.",
-  },
-  {
-    name: "file.planPdfOrganization",
-    permissionLevel: "preview",
-    summary: "Create a dry-run plan for organizing PDF files without moving them.",
-  },
-  {
-    name: "file.executePdfOrganization",
-    permissionLevel: "confirmed_write",
-    summary: "Move PDF files exactly as listed in an approved dry-run plan.",
-  },
-  {
-    name: "file.scanInstalledApps",
-    permissionLevel: "read",
-    summary: "Scan installed desktop applications from Start Menu and Desktop shortcuts.",
+    capabilityTags: ["file_scan"],
+    ownerAgentKinds: ["file"],
   },
   {
     name: "file.scanUserDocuments",
     permissionLevel: "read",
     summary: "Scan user document files across Desktop, Documents, and Downloads.",
-  },
-  {
-    name: "file.scanUserImages",
-    permissionLevel: "read",
-    summary: "Scan user image files across common user directories.",
-  },
-  {
-    name: "file.listDirectory",
-    permissionLevel: "read",
-    summary: "List direct children of a directory for file explorer browsing.",
+    capabilityTags: ["file_scan"],
+    ownerAgentKinds: ["file"],
   },
   {
     name: "file.classifyDocuments",
     permissionLevel: "read",
     summary: "Classify scanned local documents into predefined categories using AI.",
+    capabilityTags: ["document_classify"],
+    ownerAgentKinds: ["file"],
+  },
+  {
+    name: "file.planPdfOrganization",
+    permissionLevel: "preview",
+    summary: "Create a dry-run plan for organizing PDF files without moving them.",
+    capabilityTags: ["file_scan"],
+    ownerAgentKinds: ["file"],
+  },
+  {
+    name: "file.executePdfOrganization",
+    permissionLevel: "confirmed_write",
+    summary: "Move PDF files exactly as listed in an approved dry-run plan.",
+    capabilityTags: ["file_execute"],
+    ownerAgentKinds: ["file"],
+  },
+
+  // ── Shell ──────────────────────────────────────────────────────────────
+  {
+    name: "file.planWriteText",
+    permissionLevel: "preview",
+    summary: "Create a dry-run plan for writing text content to a file.",
+    capabilityTags: ["file_scan"],
+    ownerAgentKinds: ["file"],
+  },
+  {
+    name: "file.writeText",
+    permissionLevel: "confirmed_write",
+    summary: "Write approved text content to a target file.",
+    capabilityTags: ["file_execute"],
+    ownerAgentKinds: ["file"],
+  },
+  {
+    name: "shell.runReadOnlyCommand",
+    permissionLevel: "read",
+    summary: "Run an allowlisted read-only shell command in the workspace.",
+    capabilityTags: ["shell_readonly"],
+    ownerAgentKinds: ["shell", "code"],
+  },
+
+  // ── Project ────────────────────────────────────────────────────────────
+  {
+    name: "project.inspect",
+    permissionLevel: "read",
+    summary: "Inspect package scripts and recommend start/test commands.",
+    capabilityTags: ["shell_readonly"],
+    ownerAgentKinds: ["shell", "file"],
+  },
+
+  // ── Code ───────────────────────────────────────────────────────────────
+  {
+    name: "code.inspectRepository",
+    permissionLevel: "preview",
+    summary: "Collect changed files, diff summary, and diff preview without applying edits.",
+    capabilityTags: ["git_inspect"],
+    ownerAgentKinds: ["code"],
+  },
+  {
+    name: "code.proposeEdit",
+    permissionLevel: "preview",
+    summary: "Produce a patch proposal for user review without modifying files.",
+    capabilityTags: ["code_propose"],
+    ownerAgentKinds: ["code"],
+  },
+  {
+    name: "code.applyProposedEdit",
+    permissionLevel: "confirmed_write",
+    summary: "Apply only the approved Code Agent patch proposal.",
+    capabilityTags: ["code_apply"],
+    ownerAgentKinds: ["code"],
+  },
+
+  // ── Research ──────────────────────────────────────────────────────────
+  {
+    name: "web.search",
+    permissionLevel: "read",
+    summary: "Search public web sources through a configured provider.",
+    capabilityTags: ["web_search"],
+    ownerAgentKinds: ["research"],
+  },
+  {
+    name: "web.fetchSource",
+    permissionLevel: "read",
+    summary: "Fetch a user-provided public web source URL.",
+    capabilityTags: ["web_fetch"],
+    ownerAgentKinds: ["research"],
+  },
+
+  // ── Computer ──────────────────────────────────────────────────────────
+  {
+    name: "file.scanUserImages",
+    permissionLevel: "read",
+    summary: "Scan user image files across common user directories.",
+    capabilityTags: ["image_scan"],
+    ownerAgentKinds: ["computer"],
+  },
+  {
+    name: "file.scanInstalledApps",
+    permissionLevel: "read",
+    summary: "Scan installed desktop applications from Start Menu and Desktop shortcuts.",
+    capabilityTags: ["local_search"],
+    ownerAgentKinds: ["computer"],
+  },
+  {
+    name: "file.listDirectory",
+    permissionLevel: "read",
+    summary: "List direct children of a directory for file explorer browsing.",
+    capabilityTags: ["directory_list"],
+    ownerAgentKinds: ["computer"],
   },
   {
     name: "computer.openPath",
     permissionLevel: "read",
     summary: "Open a file or directory path in the native OS shell.",
+    capabilityTags: ["local_search"],
+    ownerAgentKinds: ["computer"],
   },
+
+  // ── Scheduler ─────────────────────────────────────────────────────────
   {
     name: "scheduler.createTask",
     permissionLevel: "confirmed_write",
     summary: "Create a durable local scheduled task or reminder.",
+    capabilityTags: ["schedule_create"],
+    ownerAgentKinds: ["scheduler"],
   },
   {
     name: "scheduler.updateTask",
     permissionLevel: "confirmed_write",
     summary: "Update a previously created local scheduled task.",
+    capabilityTags: ["schedule_update"],
+    ownerAgentKinds: ["scheduler"],
   },
   {
     name: "scheduler.deleteTask",
     permissionLevel: "confirmed_write",
     summary: "Delete a previously created local scheduled task.",
+    capabilityTags: ["schedule_delete"],
+    ownerAgentKinds: ["scheduler"],
   },
+
+  // ── Workspace ─────────────────────────────────────────────────────────
   {
     name: "workspace.list",
     permissionLevel: "read",
     summary: "List installed custom workspace definitions.",
+    capabilityTags: ["workspace_list"],
+    ownerAgentKinds: ["workspace"],
   },
   {
     name: "workspace.scaffold",
     permissionLevel: "preview",
     summary: "Generate a workspace definition JSON from a natural language description.",
+    capabilityTags: ["workspace_scaffold"],
+    ownerAgentKinds: ["workspace"],
   },
   {
     name: "workspace.create",
     permissionLevel: "confirmed_write",
     summary: "Save a new workspace definition to disk.",
+    capabilityTags: ["workspace_create"],
+    ownerAgentKinds: ["workspace"],
   },
   {
     name: "workspace.delete",
     permissionLevel: "confirmed_write",
     summary: "Remove a workspace definition from disk.",
+    capabilityTags: ["workspace_delete"],
+    ownerAgentKinds: ["workspace"],
+  },
+
+  // ── Browser ───────────────────────────────────────────────────────────
+  {
+    name: "browser.navigate",
+    permissionLevel: "read",
+    summary: "Navigate the browser to a URL and wait for page load.",
+    capabilityTags: ["browser_navigate"],
+    ownerAgentKinds: ["browser"],
+  },
+  {
+    name: "browser.screenshot",
+    permissionLevel: "read",
+    summary: "Capture a screenshot of the current page or a specific element.",
+    capabilityTags: ["browser_navigate"],
+    ownerAgentKinds: ["browser"],
+  },
+  {
+    name: "browser.getContent",
+    permissionLevel: "read",
+    summary: "Extract text, HTML, or markdown content from the current page.",
+    capabilityTags: ["browser_navigate"],
+    ownerAgentKinds: ["browser"],
+  },
+  {
+    name: "browser.click",
+    permissionLevel: "confirmed_write",
+    summary: "Click an element on the page. Requires user approval.",
+    capabilityTags: ["browser_interact"],
+    ownerAgentKinds: ["browser"],
+  },
+  {
+    name: "browser.type",
+    permissionLevel: "confirmed_write",
+    summary: "Type text into an input field. Requires user approval.",
+    capabilityTags: ["browser_interact"],
+    ownerAgentKinds: ["browser"],
+  },
+  {
+    name: "browser.evaluate",
+    permissionLevel: "confirmed_write",
+    summary: "Execute JavaScript in the page context. Requires user approval.",
+    capabilityTags: ["browser_interact"],
+    ownerAgentKinds: ["browser"],
+  },
+  {
+    name: "browser.runTest",
+    permissionLevel: "confirmed_write",
+    summary: "Run a Playwright test script and return pass/fail results. Requires approval — script may contain page interactions.",
+    capabilityTags: ["browser_test"],
+    ownerAgentKinds: ["browser"],
+  },
+  {
+    name: "browser.extractLinks",
+    permissionLevel: "read",
+    summary: "Extract all hyperlinks from the current page with href and text.",
+    capabilityTags: ["browser_navigate"],
+    ownerAgentKinds: ["browser"],
+  },
+  {
+    name: "browser.upload",
+    permissionLevel: "confirmed_write",
+    summary: "Upload local file(s) to a file input element on the page. Requires user approval.",
+    capabilityTags: ["browser_interact"],
+    ownerAgentKinds: ["browser"],
+  },
+  {
+    name: "browser.followCandidateLinks",
+    permissionLevel: "read",
+    summary: "Follow candidate links extracted from the current page and collect content excerpts.",
+    capabilityTags: ["browser_navigate"],
+    ownerAgentKinds: ["browser"],
+  },
+
+  // ── Vision ────────────────────────────────────────────────────────────
+  {
+    name: "vision.analyze",
+    permissionLevel: "read",
+    summary: "Analyze an image and answer questions about its visual content.",
+    capabilityTags: ["image_analyze"],
+    ownerAgentKinds: ["vision"],
+  },
+  {
+    name: "vision.describe",
+    permissionLevel: "read",
+    summary: "Generate a textual description of an image's visual content.",
+    capabilityTags: ["image_describe"],
+    ownerAgentKinds: ["vision"],
+  },
+  {
+    name: "vision.extractText",
+    permissionLevel: "read",
+    summary: "Extract visible text from an image using OCR.",
+    capabilityTags: ["image_ocr"],
+    ownerAgentKinds: ["vision"],
   },
 ];

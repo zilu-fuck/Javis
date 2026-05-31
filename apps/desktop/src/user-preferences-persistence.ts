@@ -6,9 +6,11 @@ export const PREF_KEYS = {
   ACTIVE_VIEW: "active_view",
   IS_ACTIVITY_OPEN: "is_activity_open",
   IS_INSPECTOR_OPEN: "is_inspector_open",
+  SKILL_TRANSLATIONS_ZH: "skill_translations_zh",
 } as const;
 
 export const USER_PREFERENCES_STORAGE_KEY = "javis.userPreferences.v1";
+export const PENDING_USER_PREFERENCES_STORAGE_KEY = "javis.pendingUserPreferences.v1";
 
 export const USER_PREFERENCES_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS user_preferences (

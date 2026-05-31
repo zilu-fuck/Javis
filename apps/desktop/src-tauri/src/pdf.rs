@@ -30,10 +30,10 @@ pub(crate) struct FileOrganizationPlan {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FileDryRunSummary {
-    operation: String,
-    affected_paths: Vec<PlannedPathOperation>,
-    risk_summary: String,
-    reversible: bool,
+    pub(crate) operation: String,
+    pub(crate) affected_paths: Vec<PlannedPathOperation>,
+    pub(crate) risk_summary: String,
+    pub(crate) reversible: bool,
 }
 
 

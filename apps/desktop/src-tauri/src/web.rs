@@ -11,12 +11,39 @@ pub(crate) struct WebSourceRequest {
     url: String,
 }
 
+/// Detect whether a search query is likely a code/tech query that
+/// benefits from GitHub repository search rather than general web search.
+fn is_code_search_query(query: &str) -> bool {
+    let q = query.to_lowercase();
+    let code_patterns = [
+        // English
+        "github", "repo", "repository", "code", "library", "npm", "package",
+        "api", "sdk", "framework", "bug", "issue", "pr ", "pull request",
+        "commit", "release", "changelog", "dependency", "rust ", "crate",
+        "typescript", "javascript", "python ", "golang", "docker", "kubernetes",
+        "open source", "plugin", "extension", "component", "module",
+        // Chinese
+        "代码", "仓库", "开源", "插件", "模块", "组件", "依赖", "框架",
+        "npm 包", "库",
+    ];
+    code_patterns.iter().any(|p| q.contains(p))
+}
+
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WebSearchRequest {
     pub(crate) query: String,
     pub(crate) max_results: Option<usize>,
+    /// "auto" (default): detect intent and route accordingly.
+    /// "code": prefer GitHub CLI search, fall back to web.
+    /// "web": skip GitHub, go directly to web search.
+    #[serde(default = "default_search_type")]
+    pub(crate) search_type: String,
+}
+
+fn default_search_type() -> String {
+    "auto".to_string()
 }
 
 
@@ -98,10 +125,21 @@ pub(crate) fn search_web_sources(request: WebSearchRequest) -> Result<Vec<WebSea
         return Err("Search fixtures require JAVIS_QA_MODE=1.".to_string());
     }
 
+    let prefer_github = match request.search_type.as_str() {
+        "web" => false,                       // Explicitly skip GitHub
+        "code" => true,                       // Explicitly use GitHub
+        _ => is_code_search_query(query),     // "auto": detect intent
+    };
+
     if env_flag_enabled("JAVIS_SEARCH_DISABLE_GITHUB_CLI") {
         return search_with_agent_chrome(query, max_results).map_err(|error| {
             format!("GitHub CLI search disabled; Chrome fallback failed: {error}")
         });
+    }
+
+    if !prefer_github {
+        return search_with_agent_chrome(query, max_results)
+            .map_err(|error| format!("Web search failed: {error}"));
     }
 
     match search_with_github_cli(query, max_results) {

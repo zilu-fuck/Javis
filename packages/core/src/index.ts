@@ -1,4 +1,5 @@
 import type {
+  AskUserQuestionRequest,
   CodeReviewPreview,
   CodeProposedEdit,
   CodeApplyResult,
@@ -22,20 +23,29 @@ import type {
   WebTool,
   WorkspaceTool,
   TokenUsageSummary,
+  BrowserTool,
+  VisionTool,
 } from "@javis/tools";
+import type { AskUserAnswerHandler } from "./ask-user";
 import type { PendingPermissionHandler } from "./confirmed-write";
+import type { AgentReActDecision } from "./agent-react-loop";
+import type { ReActDecisionRequest } from "./agent-react-decider";
+import type { CommanderDagPlan } from "./commander-plan-schema";
 import {
   demoAgents,
 } from "./agents";
 import { runCodeReviewTask } from "./code-review-flow";
 import { runFileScanTask } from "./file-scan-flow";
 import { runPdfOrganizationPreviewTask } from "./pdf-organization-flow";
+import { isTextWriteGoal, runTextWriteTask } from "./text-write-flow";
+import { isVisionGoal, runVisionTask } from "./vision-flow";
 import { runProjectInspectionTask } from "./project-inspection-flow";
 import { runResearchSearchTask, runResearchSourceTask } from "./research-flow";
 import {
   isReadCurrentProjectGoal,
   runGenericWorkbenchWorkflow,
   runReadCurrentProjectWorkflow,
+  runCommanderDagTask,
 } from "./workflow-executor";
 import type { WorkbenchWorkflowId } from "./workflows";
 import {
@@ -58,6 +68,8 @@ export {
   validateCodeApplyResult,
   validateCodeProposal,
 } from "./code-proposal-safety";
+export { createAskUserRequest } from "./ask-user";
+export type { AskUserAnswerHandler } from "./ask-user";
 export { createDryRunBindingHash } from "./permission-state";
 export {
   DOCUMENTED_TASK_TRANSITIONS,
@@ -65,7 +77,7 @@ export {
   isTerminalTaskStatus,
   transitionTask,
 } from "./state/task-state";
-export { demoAgents, getAgentSystemPrompt, createDefaultAgentRegistry } from "./agents";
+export { demoAgents, getAgentSystemPrompt, createDefaultAgentRegistry, browserSnapshot } from "./agents";
 export type {
   AgentCapabilityTag,
   ModelRequirements,
@@ -108,8 +120,19 @@ export { executeWorkflow } from "./workflow-dag-executor";
 export type {
   WorkflowExecutionResult,
   WorkflowExecutorOptions,
+  WorkflowStepFailureReplanAction,
   WorkflowStepExecutionResult,
 } from "./workflow-dag-executor";
+export { runAgentReActLoop } from "./agent-react-loop";
+export type {
+  AgentReActDecision,
+  AgentReActLoopOptions,
+  AgentReActLoopResult,
+  AgentReActObservation,
+  AgentReActTool,
+} from "./agent-react-loop";
+export { buildReActDecisionPrompt } from "./agent-react-decider";
+export type { ReActDecisionRequest } from "./agent-react-decider";
 export { createAgentStateTracker } from "./agent-state-tracker";
 export type {
   AgentState,
@@ -144,6 +167,16 @@ export type {
   RouteScoringContext,
 } from "./route-registry";
 export type { RouteKind } from "./routing";
+export { isBrowserGoal } from "./routing";
+export {
+  COMMANDER_PLAN_SCHEMA_JSON,
+  buildCommanderPlanPrompt,
+  buildCommanderReplanPrompt,
+} from "./commander-plan-schema";
+export type {
+  CommanderDagStep,
+  CommanderDagPlan,
+} from "./commander-plan-schema";
 
 export {
   getAdapter,
@@ -196,6 +229,8 @@ export type AgentKind =
   | "research"
   | "code"
   | "verifier"
+  | "workspace"
+  | "vision"
   | "chinese-reviewer";
 
 export type AgentRunStatus =
@@ -392,6 +427,8 @@ export interface TaskSnapshot {
   userGoal: string;
   status: TaskStatus;
   updatedAt?: ISODateTime;
+  originMode?: "chat" | "project";
+  workspacePath?: string;
   scheduledTaskId?: ID;
   commanderMessage: string;
   plan: TaskStep[];
@@ -405,6 +442,7 @@ export interface TaskSnapshot {
   codeProposedEdit?: CodeProposedEdit;
   codeApplyResult?: CodeApplyResult;
   permissionRequest?: ToolPermissionRequest;
+  askUserQuestion?: AskUserQuestionRequest;
   project?: ProjectInspection;
   researchReport?: ResearchReport;
   sources?: WebSource[];
@@ -431,9 +469,11 @@ export interface TaskRuntime {
       taskId?: ID;
       priorMessages?: ChatMessage[];
       mode?: "auto" | "chat" | "project";
+      workspacePath?: string;
     },
   ): void;
   resolvePermission(decision: "approved" | "denied", requestId?: string): void;
+  respondToAskUser(answer: string, requestId?: string): void;
   dispose(): void;
 }
 
@@ -448,10 +488,21 @@ export interface FileScanRuntimeOptions {
   schedulerTool?: SchedulerTool;
   verifierTool?: VerifierTool;
   webTool?: WebTool;
+  browserTool?: BrowserTool;
+  visionTool?: VisionTool;
   workspaceTool?: WorkspaceTool;
   delayMs?: number;
   eventBus?: TaskEventBus;
   onTaskStarted?: (taskId: string) => void;
+  /** P0-2: LLM-based ReAct decision maker for step execution loops. */
+  reactDecideNext?: (request: ReActDecisionRequest) => Promise<AgentReActDecision>;
+  /** P0-3: Commander replan after step failure or P0-4: after askUser clarification. */
+  replanDag?: (
+    userGoal: string,
+    contextSnapshot: Record<string, unknown>,
+    failedStepId?: string,
+    failureReason?: string,
+  ) => Promise<CommanderDagPlan>;
 }
 
 export interface ChatTool {
@@ -511,6 +562,8 @@ function isConversationAnswerStatus(status: TaskSnapshot["status"]): boolean {
   return status === "completed" || status === "failed" || status === "cancelled";
 }
 
+
+
 export function createFileScanTaskRuntime({
   fileTool,
   chatTool,
@@ -522,9 +575,13 @@ export function createFileScanTaskRuntime({
   schedulerTool,
   verifierTool,
   webTool,
+  browserTool,
+  visionTool,
   delayMs = 250,
   eventBus,
   onTaskStarted,
+  reactDecideNext,
+  replanDag,
 }: FileScanRuntimeOptions): TaskRuntime {
   const runtimeState = createRuntimeState(createInitialTaskSnapshot(), delayMs);
   const eventBusUnsubscribe = eventBus
@@ -532,12 +589,28 @@ export function createFileScanTaskRuntime({
     : undefined;
   const permissionHandlers = new Map<string, PendingPermissionHandler>();
   const queuedPermissionDecisions = new Map<string, "approved" | "denied">();
+  const askUserHandlers = new Map<string, AskUserAnswerHandler>();
+  const queuedAskUserAnswers = new Map<string, string>();
   let queuedLegacyPermissionDecision: "approved" | "denied" | undefined;
   let activeConversation:
     | { taskId: ID; startedMessages: ChatMessage[] }
     | undefined;
+  let activeTaskMetadata:
+    | { taskId: ID; originMode?: "chat" | "project"; workspacePath?: string }
+    | undefined;
   function emit(nextSnapshot: TaskSnapshot) {
-    runtimeState.emit(attachConversationMessages(nextSnapshot));
+    runtimeState.emit(attachConversationMessages(attachTaskMetadata(nextSnapshot)));
+  }
+  function attachTaskMetadata(nextSnapshot: TaskSnapshot): TaskSnapshot {
+    if (!activeTaskMetadata || activeTaskMetadata.taskId !== nextSnapshot.id) {
+      return nextSnapshot;
+    }
+
+    return {
+      ...nextSnapshot,
+      originMode: nextSnapshot.originMode ?? activeTaskMetadata.originMode,
+      workspacePath: nextSnapshot.workspacePath ?? activeTaskMetadata.workspacePath,
+    };
   }
   function attachConversationMessages(nextSnapshot: TaskSnapshot): TaskSnapshot {
     if (!activeConversation || activeConversation.taskId !== nextSnapshot.id) {
@@ -579,11 +652,40 @@ export function createFileScanTaskRuntime({
     }
     permissionHandlers.delete(requestId);
   }
+  function setPendingAskUserHandler(
+    requestId: string,
+    handler: AskUserAnswerHandler | undefined,
+  ) {
+    if (handler) {
+      const wrappedHandler: AskUserAnswerHandler = async (answer) => {
+        await handler(answer);
+        if (eventBus) {
+          const snapshot = runtimeState.getSnapshot();
+          eventBus.emit({
+            kind: "ask_user.responded",
+            taskId: snapshot.id,
+            requestId,
+            answer,
+          });
+        }
+      };
+      const queuedAnswer = queuedAskUserAnswers.get(requestId);
+      if (queuedAnswer !== undefined) {
+        queuedAskUserAnswers.delete(requestId);
+        void wrappedHandler(queuedAnswer);
+        return;
+      }
+      askUserHandlers.set(requestId, wrappedHandler);
+      return;
+    }
+    askUserHandlers.delete(requestId);
+  }
   const wait = runtimeState.wait;
   const controller = {
     emit,
     getSnapshot: runtimeState.getSnapshot,
     wait,
+    setPendingAskUserHandler,
   };
 
   return {
@@ -596,8 +698,15 @@ export function createFileScanTaskRuntime({
       permissionHandlers.clear();
       queuedPermissionDecisions.clear();
       queuedLegacyPermissionDecision = undefined;
+      askUserHandlers.clear();
+      queuedAskUserAnswers.clear();
       const startMode = options.mode ?? "auto";
       const taskId = options.taskId ?? `task-${Date.now()}`;
+      activeTaskMetadata = {
+        taskId,
+        originMode: startMode === "chat" || startMode === "project" ? startMode : undefined,
+        workspacePath: options.workspacePath?.trim() || undefined,
+      };
       activeConversation = {
         taskId,
         startedMessages: [
@@ -616,9 +725,7 @@ export function createFileScanTaskRuntime({
       }
       if (startMode === "project") {
         // Only short-circuit for clearly casual inputs (greetings, small talk).
-        // Everything else falls through to the auto-routing path below, which
-        // already handles URLs, research, project inspection, code review,
-        // document scan, and a final chat fallback.
+        // Everything else falls through to Commander DAG (primary path).
         const isCasual = /^(hi|hello|hey|sup|yo|test|你好|嗨|喂|在吗|测试)$/i.test(
           userGoal.trim(),
         );
@@ -628,6 +735,43 @@ export function createFileScanTaskRuntime({
         }
         // Fall through to auto routing
       }
+
+      // ═══════════════════════════════════════════════════════════════════
+      // P0-1: Commander Dynamic DAG — PRIMARY path for all goals.
+      // The Commander generates a structured DAG plan via LLM, which is
+      // executed by the generic capability-based DAG executor.
+      // Legacy branches below are fallbacks for when Commander is unavailable.
+      // ═══════════════════════════════════════════════════════════════════
+      if (commanderTool) {
+        void runCommanderDagTask({
+          controller: { emit, getSnapshot: runtimeState.getSnapshot, wait, setPendingAskUserHandler },
+          commanderTool,
+          codeTool,
+          computerTool,
+          fileTool,
+          schedulerTool,
+          webTool,
+          browserTool,
+          verifierTool,
+          visionTool,
+          taskId,
+          userGoal,
+          reactDecideNext,
+          replanDag,
+        });
+        return;
+      }
+
+      // ═══════════════════════════════════════════════════════════════════
+      // LEGACY FALLBACKS — only reached when commanderTool is not provided.
+      // These use regex-based goal detection (routing.ts) instead of LLM.
+      // Purpose:
+      //   1. Offline/degraded mode (no API key configured)
+      //   2. Unit testing without LLM mocks
+      //   3. Backward compatibility with workspace definitions lacking commander
+      // Do NOT add new features here. New goal types → Commander DAG path above.
+      // ═══════════════════════════════════════════════════════════════════
+
       if (webTool && extractUrls(userGoal).length > 0) {
         void runResearchSourceTask({ controller, taskId, userGoal, webTool, commanderTool });
         return;
@@ -648,29 +792,63 @@ export function createFileScanTaskRuntime({
         });
         return;
       }
+      if (fileTool.planWriteText && isTextWriteGoal(userGoal)) {
+        void runTextWriteTask({
+          controller,
+          fileTool,
+          webTool,
+          taskId,
+          userGoal,
+          commanderTool,
+          setPendingPermissionHandler,
+        });
+        return;
+      }
+      if (visionTool && isVisionGoal(userGoal)) {
+        void runVisionTask({
+          controller,
+          visionTool,
+          commanderTool,
+          verifierTool,
+          taskId,
+          userGoal,
+        });
+        return;
+      }
       if (webTool?.searchWeb && isResearchGoal(userGoal)) {
         void runResearchSearchTask({ controller, taskId, userGoal, webTool, commanderTool });
         return;
       }
       if (recommendedWorkflowId && recommendedWorkflowId !== "read-current-project") {
+        const dedicatedWorkflowIds = new Set([
+          "pdf-organization",
+          "code-review",
+          "scan-workspace-documents",
+        ]);
         const executableWorkflowIds = recommendedWorkflowIds.filter(
           (workflowId): workflowId is Exclude<WorkbenchWorkflowId, "read-current-project"> =>
-            workflowId !== "read-current-project",
+            workflowId !== "read-current-project" && !dedicatedWorkflowIds.has(workflowId),
         );
-        void runGenericWorkbenchWorkflow({
-          controller,
-          commanderTool,
-          codeTool,
-          computerTool,
-          schedulerTool,
-          webTool,
-          verifierTool,
-          taskId,
-          userGoal,
-          workflowId:
-            executableWorkflowIds.length === 1 ? executableWorkflowIds[0] : executableWorkflowIds,
-        });
-        return;
+        if (executableWorkflowIds.length === 0) {
+          // fall through
+        } else {
+          void runGenericWorkbenchWorkflow({
+            controller,
+            commanderTool,
+            codeTool,
+            computerTool,
+            fileTool,
+            schedulerTool,
+            webTool,
+            browserTool,
+            verifierTool,
+            taskId,
+            userGoal,
+            workflowId:
+              executableWorkflowIds.length === 1 ? executableWorkflowIds[0] : executableWorkflowIds,
+          });
+          return;
+        }
       }
       if (shellTool && projectTool && isProjectInspectionGoal(userGoal)) {
         void runProjectInspectionTask(
@@ -744,6 +922,26 @@ export function createFileScanTaskRuntime({
       ];
       permissionHandlers.delete(onlyRequestId);
       void handler(decision);
+    },
+    respondToAskUser(answer, requestId) {
+      if (requestId) {
+        const handler = askUserHandlers.get(requestId);
+        askUserHandlers.delete(requestId);
+        if (handler) {
+          void handler(answer);
+        } else {
+          queuedAskUserAnswers.set(requestId, answer);
+        }
+        return;
+      }
+      if (askUserHandlers.size < 1) {
+        return;
+      }
+      const [onlyRequestId, handler] = [...askUserHandlers.entries()][
+        askUserHandlers.size - 1
+      ];
+      askUserHandlers.delete(onlyRequestId);
+      void handler(answer);
     },
     dispose() {
       eventBusUnsubscribe?.();

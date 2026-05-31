@@ -19,12 +19,13 @@ import { ScheduledTasksView } from "./components/ScheduledTasksView";
 import { Sidebar } from "./components/Sidebar";
 import { SkillMarketView } from "./components/SkillMarketView";
 import { defaultWorkbenchLocale } from "./locale";
-import type { ActiveView, JavisWorkbenchProps } from "./types";
+import type { ActiveView, JavisWorkbenchProps, WorkbenchDetailItem, WorkbenchSkillPage } from "./types";
 
 const SIDEBAR_MIN_WIDTH = 188;
 const SIDEBAR_MAX_WIDTH = 360;
 const CHAT_MAIN_MIN_WIDTH = 420;
 const RESOURCE_MAIN_MIN_WIDTH = 760;
+const RESOURCE_WITH_DETAILS_MAIN_MIN_WIDTH = 560;
 const SIDEBAR_KEYBOARD_STEP = 16;
 const CHAT_DEFAULT_SIDEBAR_WIDTH = 220;
 const RESOURCE_DEFAULT_SIDEBAR_WIDTH = 238;
@@ -43,6 +44,10 @@ export function JavisWorkbench({
   scheduledTasks = [],
   skillEntries = [],
   skillTranslationStatus = "idle",
+  skillTranslationError = null,
+  skillSearchResults = [],
+  skillSearchStatus = "idle",
+  mcpConfigError = null,
   installedApps = [],
   userDocuments = [],
   userImages = [],
@@ -71,15 +76,20 @@ export function JavisWorkbench({
   onDeleteRecentWorkspacePath,
   onBrowseWorkspacePath,
   onModelSettingsChange,
+  onTestModelConnection,
   onModelConfigurationChange,
+  onSaveProviderApiKey,
   onSelectHistoryEntry,
   onUseWorkspacePath,
   onWorkspacePathChange,
   onPermissionDecision,
+  onAskUserAnswer,
   onRetryTask,
   onStopTask,
   onSubmitGoal,
   onTranslateSkillsToChinese,
+  onSearchSkillMarket,
+  onOpenDetail,
   onChangeActiveView,
   onSelectComposeMode,
   activeComposeMode,
@@ -118,6 +128,8 @@ export function JavisWorkbench({
   const shellRef = useRef<HTMLDivElement | null>(null);
   const [internalActiveView, setInternalActiveView] =
     useState<ActiveView>("chat");
+  const [activeSkillPage, setActiveSkillPage] = useState<WorkbenchSkillPage>("mine");
+  const [detailItem, setDetailItem] = useState<WorkbenchDetailItem | null>(null);
   const activeView = activeViewProp ?? internalActiveView;
 
   const effectiveModelSettings = modelSettings ?? {
@@ -127,7 +139,7 @@ export function JavisWorkbench({
     apiKeyReference: "default",
     baseUrl: "",
   };
-  const activityCount = task.logs.length + (task.permissionRequest ? 1 : 0);
+  const activityCount = task.logs.length + (task.permissionRequest ? 1 : 0) + (task.askUserQuestion ? 1 : 0);
   const isChatView = activeView === "chat";
 
   useEffect(() => {
@@ -169,6 +181,13 @@ export function JavisWorkbench({
     onChangeActiveView?.(view);
     onActiveViewChange?.(view);
     setSidebarSearchQuery("");
+  }
+
+  function handleOpenDetail(detail: WorkbenchDetailItem) {
+    setDetailItem(detail);
+    onOpenDetail?.(detail);
+    setIsInspectorOpen(true);
+    onInspectorOpenChange?.(true);
   }
 
   function handleSidebarResizeStart(event: ReactPointerEvent<HTMLDivElement>) {
@@ -264,6 +283,7 @@ export function JavisWorkbench({
         onDeleteRecentWorkspacePath={onDeleteRecentWorkspacePath}
         onDraftGoalChange={onDraftGoalChange}
         onPermissionDecision={onPermissionDecision}
+        onAskUserAnswer={onAskUserAnswer}
         modelConfiguration={modelConfiguration}
         activeComposeMode={activeComposeMode}
         onRetryTask={onRetryTask}
@@ -278,7 +298,7 @@ export function JavisWorkbench({
     ),
     [
       activeComposeMode, currentWorkspacePath, draftGoal, effectiveLocale,
-      onBrowseWorkspacePath, onDeleteRecentWorkspacePath, onDraftGoalChange,
+      onAskUserAnswer, onBrowseWorkspacePath, onDeleteRecentWorkspacePath, onDraftGoalChange,
       onPermissionDecision, modelConfiguration, onRetryTask, onStopTask,
       onSubmitGoal, onUseWorkspacePath, onWorkspacePathChange,
       recentWorkspacePaths, task, userDocuments,
@@ -299,13 +319,32 @@ export function JavisWorkbench({
   const renderSkillsView = useCallback(
     () => (
       <SkillMarketView
+        activePage={activeSkillPage}
         locale={effectiveLocale}
+        mcpError={mcpConfigError}
+        onSearchSkillMarket={onSearchSkillMarket}
+        onOpenDetail={handleOpenDetail}
         onTranslateToChinese={onTranslateSkillsToChinese}
+        searchResults={skillSearchResults}
+        searchStatus={skillSearchStatus}
         skills={skillEntries}
         translationStatus={skillTranslationStatus}
+        translationError={skillTranslationError}
       />
     ),
-    [effectiveLocale, onTranslateSkillsToChinese, skillEntries, skillTranslationStatus],
+    [
+      activeSkillPage,
+      effectiveLocale,
+      mcpConfigError,
+      handleOpenDetail,
+      onSearchSkillMarket,
+      onTranslateSkillsToChinese,
+      skillEntries,
+      skillSearchResults,
+      skillSearchStatus,
+      skillTranslationStatus,
+      skillTranslationError,
+    ],
   );
   const renderAppsView = useCallback(
     () => (
@@ -453,11 +492,14 @@ export function JavisWorkbench({
         onChangeActiveView={handleChangeActiveView}
         onDeleteHistoryEntry={onDeleteHistoryEntry}
         onModelSettingsChange={onModelSettingsChange}
+        onTestModelConnection={onTestModelConnection}
         onModelConfigurationChange={onModelConfigurationChange}
+        onSaveProviderApiKey={onSaveProviderApiKey}
         onResizeKeyDown={handleSidebarResizeKeyDown}
         onResizeStart={handleSidebarResizeStart}
         onNavigateDirectory={onNavigateDirectory}
         onSelectComposeMode={onSelectComposeMode}
+        onSelectSkillPage={setActiveSkillPage}
         sidebarResizeMax={SIDEBAR_MAX_WIDTH}
         sidebarResizeMin={SIDEBAR_MIN_WIDTH}
         sidebarResizeValue={sidebarResizeValue}
@@ -468,31 +510,35 @@ export function JavisWorkbench({
         skillCount={skillEntries.length}
         sidebarNavItems={sidebarNavItems}
         activeComposeMode={activeComposeMode}
+        activeSkillPage={activeSkillPage}
       />
 
       <main className={`javis-main ${isChatView && task.id === "task-idle" ? "new-chat" : ""}`}>
         {renderMainContent()}
       </main>
 
+      <InspectorPanel
+        detailItem={detailItem}
+        isInspectorOpen={isInspectorOpen}
+        labels={labels}
+        locale={effectiveLocale}
+        onToggle={() => setIsInspectorOpen((current) => {
+          const next = !current;
+          onInspectorOpenChange?.(next);
+          return next;
+        })}
+        task={task}
+      />
+
       {isChatView && (
         <>
-          <InspectorPanel
-            isInspectorOpen={isInspectorOpen}
-            labels={labels}
-            locale={effectiveLocale}
-            onToggle={() => setIsInspectorOpen((current) => {
-              const next = !current;
-              onInspectorOpenChange?.(next);
-              return next;
-            })}
-            task={task}
-          />
           <ActivityLog
             activityCount={activityCount}
             isActivityOpen={isActivityOpen}
             labels={labels}
             locale={effectiveLocale}
             onPermissionDecision={onPermissionDecision}
+            onAskUserAnswer={onAskUserAnswer}
             onToggle={() => setIsActivityOpen((current) => {
               const next = !current;
               onActivityOpenChange?.(next);
@@ -517,7 +563,10 @@ function getSidebarTrackWidth(shell: HTMLElement): number {
 function getSidebarMaxWidth(shell: HTMLElement): number {
   const columns = getGridColumnWidths(shell);
   const trailingWidth = columns.length > 2 ? columns[2] ?? 0 : 0;
-  const mainMinWidth = columns.length > 2 ? CHAT_MAIN_MIN_WIDTH : RESOURCE_MAIN_MIN_WIDTH;
+  const isResourceMode = shell.classList.contains("mode-resource");
+  const mainMinWidth = isResourceMode
+    ? (columns.length > 2 ? RESOURCE_WITH_DETAILS_MAIN_MIN_WIDTH : RESOURCE_MAIN_MIN_WIDTH)
+    : CHAT_MAIN_MIN_WIDTH;
   const style = window.getComputedStyle(shell);
   const contentWidth =
     shell.clientWidth - parseCssPixelValue(style.paddingLeft) - parseCssPixelValue(style.paddingRight);

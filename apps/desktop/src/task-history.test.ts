@@ -9,6 +9,7 @@ import {
   TASK_HISTORY_UPDATED_AT_INDEX_MIGRATION,
   TASK_HISTORY_UPDATED_AT_INDEX_SQL,
   createTaskHistoryRepository,
+  getTaskWorkspacePath,
   getTaskUpdatedAt,
   loadTaskHistory,
   loadTaskHistoryWithStorageFallback,
@@ -321,6 +322,49 @@ describe("task history persistence", () => {
 
   it("returns stable timestamps from task ids when available", () => {
     expect(getTaskUpdatedAt(createTask("task-1000"))).toBe("1970-01-01T00:00:01.000Z");
+  });
+
+  it("keeps project entry metadata in completed task history", () => {
+    const storage = createMemoryStorage();
+    const task = {
+      ...createTask("task-1000"),
+      originMode: "project",
+      workspacePath: "E:/Javis",
+    } satisfies TaskSnapshot;
+
+    saveTaskHistory(storage, [task]);
+    const loaded = loadTaskHistory(storage);
+
+    expect(loaded[0]?.originMode).toBe("project");
+    expect(loaded[0]?.workspacePath).toBe("E:/Javis");
+  });
+
+  it("derives workspace paths from older project history entries", () => {
+    const task = {
+      ...createTask("task-1000"),
+      project: {
+        workspacePath: "E:/Javis",
+        packageManager: "pnpm",
+        scripts: [],
+      },
+    } satisfies TaskSnapshot;
+
+    expect(getTaskWorkspacePath(task)).toBe("E:/Javis");
+  });
+
+  it("ignores empty task workspace metadata when deriving workspace paths", () => {
+    const task = {
+      ...createTask("task-1000"),
+      workspacePath: "",
+      codeReviewPreview: {
+        workspacePath: "E:/Javis",
+        changedFiles: [],
+        diffStat: "0 files changed",
+        diff: "",
+      },
+    } satisfies TaskSnapshot;
+
+    expect(getTaskWorkspacePath(task)).toBe("E:/Javis");
   });
 
   it("drops optional sections with invalid shapes during sanitization", () => {

@@ -1,4 +1,5 @@
 import type { TaskSnapshot } from "@javis/core";
+import { getTaskWorkspacePath } from "./task-history";
 import {
   importRecentWorkspacePathsFromLocalStorage,
   loadRecentWorkspacePathsFromDatabase,
@@ -67,7 +68,7 @@ export function getCompletedTaskWorkspacePath(task: TaskSnapshot): string {
     return "";
   }
 
-  return normalizeWorkspacePath(task.project?.workspacePath ?? task.codeReviewPreview?.workspacePath ?? "");
+  return normalizeWorkspacePath(getTaskWorkspacePath(task));
 }
 
 export function deletePersistedWorkspacePath(

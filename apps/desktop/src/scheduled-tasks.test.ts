@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   clearStaleGuards,
   computeNextRun,
+  createScheduledTask,
   formatSchedule,
   isDue,
   type ScheduledTask,
@@ -76,7 +77,112 @@ describe("scheduled tasks", () => {
   });
 });
 
-function createTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
+describe("createScheduledTask", () => {
+    it("sets source to 'agent' when called by agent workflow", () => {
+      const task = createScheduledTask(
+        { name: "Daily report", goal: "Generate daily report", workspacePath: "E:/Javis", schedule: { type: "daily", value: "09:00" } },
+        "agent",
+      );
+      expect(task.source).toBe("agent");
+    });
+
+    it("sets source to 'user' when called from user action", () => {
+      const task = createScheduledTask(
+        { name: "Reminder", goal: "Check PRs", workspacePath: "E:/Javis", schedule: { type: "interval", value: "3600000" } },
+        "user",
+      );
+      expect(task.source).toBe("user");
+    });
+
+    it("generates a unique id with st- prefix for each call", () => {
+      const a = createScheduledTask(
+        { name: "A", goal: "A", workspacePath: "E:/Javis", schedule: { type: "daily", value: "09:00" } },
+        "user",
+      );
+      const b = createScheduledTask(
+        { name: "B", goal: "B", workspacePath: "E:/Javis", schedule: { type: "daily", value: "09:00" } },
+        "user",
+      );
+      expect(a.id).toMatch(/^st-\d+-[a-z0-9]+$/);
+      expect(b.id).toMatch(/^st-\d+-[a-z0-9]+$/);
+      expect(a.id).not.toBe(b.id);
+    });
+
+    it("sets enabled to true by default", () => {
+      const task = createScheduledTask(
+        { name: "T", goal: "T", workspacePath: "E:/Javis", schedule: { type: "daily", value: "09:00" } },
+        "user",
+      );
+      expect(task.enabled).toBe(true);
+    });
+
+    it("computes nextRunAt by adding the interval to createdAt", () => {
+      const intervalMs = 30 * 60 * 1000;
+      const task = createScheduledTask(
+        { name: "T", goal: "T", workspacePath: "E:/Javis", schedule: { type: "interval", value: String(intervalMs) } },
+        "user",
+      );
+      const diff = new Date(task.nextRunAt).getTime() - new Date(task.createdAt).getTime();
+      expect(diff).toBe(intervalMs);
+    });
+
+    it("computes daily nextRunAt to a future time on the configured date", () => {
+      const task = createScheduledTask(
+        { name: "T", goal: "T", workspacePath: "E:/Javis", schedule: { type: "daily", value: "14:30" } },
+        "user",
+      );
+      const nextRun = new Date(task.nextRunAt);
+      const createdAt = new Date(task.createdAt);
+      // nextRunAt must be after createdAt (either later today or tomorrow)
+      expect(nextRun.getTime()).toBeGreaterThan(createdAt.getTime());
+      // Must not be NaN
+      expect(Number.isNaN(nextRun.getTime())).toBe(false);
+    });
+
+    it("computes weekly nextRunAt to a future time on the configured weekday", () => {
+      const task = createScheduledTask(
+        { name: "T", goal: "T", workspacePath: "E:/Javis", schedule: { type: "weekly", value: "Mon 09:00" } },
+        "user",
+      );
+      const nextRun = new Date(task.nextRunAt);
+      const createdAt = new Date(task.createdAt);
+      // nextRunAt must be after createdAt (next occurrence of the weekday)
+      expect(nextRun.getTime()).toBeGreaterThan(createdAt.getTime());
+      expect(Number.isNaN(nextRun.getTime())).toBe(false);
+    });
+
+    it("falls back to createdAt when once schedule is already past", () => {
+      const pastTime = "2020-01-01T00:00:00.000Z";
+      const task = createScheduledTask(
+        { name: "T", goal: "T", workspacePath: "E:/Javis", schedule: { type: "once", value: pastTime } },
+        "user",
+      );
+      // Once schedule in the past → computeNextRun returns null → falls back to createdAt
+      expect(task.nextRunAt).toBe(task.createdAt);
+      expect(new Date(task.nextRunAt).getTime()).toBeGreaterThan(new Date(pastTime).getTime());
+    });
+
+    it("does not set lastRunAt or lastRunStartedAt on creation", () => {
+      const task = createScheduledTask(
+        { name: "T", goal: "T", workspacePath: "E:/Javis", schedule: { type: "daily", value: "09:00" } },
+        "user",
+      );
+      expect(task.lastRunAt).toBeUndefined();
+      expect(task.lastRunStartedAt).toBeUndefined();
+    });
+
+    it("preserves the pending task name, goal, and workspacePath", () => {
+      const task = createScheduledTask(
+        { name: "My Task", goal: "Do something", workspacePath: "E:/Projects", schedule: { type: "daily", value: "08:00" } },
+        "agent",
+      );
+      expect(task.name).toBe("My Task");
+      expect(task.goal).toBe("Do something");
+      expect(task.workspacePath).toBe("E:/Projects");
+    });
+  });
+
+  function createTask(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
   return {
     id: "st-test",
     name: "Test task",

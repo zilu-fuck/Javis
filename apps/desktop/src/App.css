@@ -217,7 +217,11 @@ textarea:focus-visible {
 
 .javis-shell.mode-resource.inspector-collapsed,
 .javis-shell.mode-resource.inspector-open {
-  grid-template-columns: minmax(188px, var(--javis-sidebar-width, 238px)) minmax(760px, 1fr);
+  grid-template-columns: minmax(188px, var(--javis-sidebar-width, 238px)) minmax(560px, 1fr) 44px;
+}
+
+.javis-shell.mode-resource.inspector-open {
+  grid-template-columns: minmax(188px, var(--javis-sidebar-width, 238px)) minmax(560px, 1fr) 336px;
 }
 
 .javis-shell.mode-resource.activity-collapsed,
@@ -236,6 +240,11 @@ textarea:focus-visible {
   border-right: 0;
   border-radius: 28px;
   background: #f8f8f7;
+  overflow: hidden;
+}
+
+.javis-shell.mode-resource .javis-inspector {
+  border-radius: 24px;
   overflow: hidden;
 }
 
@@ -402,7 +411,7 @@ textarea:focus-visible {
 
 .javis-nav-subitem {
   display: grid;
-  grid-template-columns: 18px 1fr;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
   align-items: center;
   min-height: 34px;
   border: 1px solid transparent;
@@ -738,8 +747,8 @@ textarea:focus-visible {
 .javis-settings-modal {
   display: grid;
   grid-template-columns: 198px minmax(0, 1fr);
-  width: min(800px, calc(100vw - 48px));
-  height: min(600px, calc(100vh - 48px));
+  width: min(960px, calc(100vw - 48px));
+  height: min(720px, calc(100vh - 48px));
   overflow: hidden;
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-xl);
@@ -853,6 +862,27 @@ textarea:focus-visible {
   max-width: 560px;
 }
 
+.javis-ai-settings-section {
+  width: min(100%, 700px);
+  max-width: none;
+  gap: 18px;
+}
+
+.javis-ai-settings-section > h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: -2px;
+}
+
+.javis-ai-settings-section > h2::before {
+  content: "";
+  width: 4px;
+  height: 18px;
+  border-radius: var(--radius-pill);
+  background: linear-gradient(180deg, var(--color-accent), var(--color-accent-strong));
+}
+
 .javis-settings-section p {
   margin: 0;
   color: var(--color-muted);
@@ -886,17 +916,758 @@ textarea:focus-visible {
   font-size: 12px;
 }
 
-.javis-settings-section input {
+.javis-settings-section input,
+.javis-settings-section select {
   min-width: 0;
   border: 1px solid var(--glass-border);
-  border-radius: var(--radius-md);
+  border-radius: 12px;
   padding: 10px 11px;
   color: var(--color-ink);
-  background: var(--glass-bg-strong);
+  background: #ffffff;
   font-size: 13px;
   transition:
     border-color var(--duration-normal) var(--ease-smooth),
+    background-color var(--duration-normal) var(--ease-smooth),
     box-shadow var(--duration-normal) var(--ease-smooth);
+}
+
+.javis-settings-section input:hover,
+.javis-settings-section select:hover {
+  border-color: rgba(45, 111, 103, 0.22);
+}
+
+.javis-settings-section input:focus,
+.javis-settings-section select:focus {
+  border-color: rgba(45, 111, 103, 0.42);
+  background-color: #ffffff;
+  box-shadow: 0 0 0 3px rgba(45, 111, 103, 0.08);
+  outline: 0;
+}
+
+.javis-settings-section select {
+  padding-right: 30px;
+  appearance: none;
+  background:
+    linear-gradient(45deg, transparent 50%, var(--color-subtle) 50%) right 16px center / 6px 6px no-repeat,
+    linear-gradient(135deg, var(--color-subtle) 50%, transparent 50%) right 11px center / 6px 6px no-repeat,
+    #ffffff;
+}
+
+.javis-ai-provider-console {
+  display: grid;
+  grid-template-columns: 184px minmax(0, 1fr);
+  overflow: visible;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  background: var(--glass-bg-strong);
+  box-shadow: 0 18px 48px rgba(24, 49, 44, 0.08);
+}
+
+.javis-ai-provider-list {
+  min-width: 0;
+  border-right: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg) 0 0 var(--radius-lg);
+  padding: 16px 10px;
+  background: linear-gradient(180deg, rgba(242, 246, 243, 0.9), rgba(247, 250, 248, 0.76));
+}
+
+.javis-ai-provider-group {
+  display: grid;
+  gap: 6px;
+}
+
+.javis-ai-provider-group > span {
+  padding: 0 4px 5px;
+  color: var(--color-subtle);
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.javis-ai-provider-group button {
+  display: grid;
+  grid-template-columns: 9px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  padding: 8px 9px;
+  color: var(--color-muted);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  transition:
+    background-color var(--duration-fast) var(--ease-smooth),
+    color var(--duration-fast) var(--ease-smooth),
+    transform var(--duration-fast) var(--ease-spring);
+}
+
+.javis-ai-provider-group button.active,
+.javis-ai-provider-group button:hover {
+  color: var(--color-ink);
+  background: rgba(45, 111, 103, 0.11);
+}
+
+.javis-ai-provider-group button:hover {
+  transform: translateX(1px);
+}
+
+.javis-ai-provider-group button.active {
+  box-shadow: inset 0 0 0 1px rgba(45, 111, 103, 0.09);
+}
+
+.javis-ai-provider-group strong {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 720;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-ai-provider-group em {
+  display: inline-grid;
+  min-width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  color: var(--color-subtle);
+  background: rgba(255, 255, 255, 0.72);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.javis-ai-provider-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--color-subtle);
+}
+
+.javis-ai-provider-group button.active .javis-ai-provider-dot {
+  background: var(--color-accent);
+  box-shadow: 0 0 0 3px rgba(45, 111, 103, 0.1);
+}
+
+.javis-ai-provider-detail {
+  display: grid;
+  position: relative;
+  z-index: 1;
+  gap: 14px;
+  min-width: 0;
+  align-content: start;
+  border-radius: 0 var(--radius-lg) var(--radius-lg) 0;
+  background: var(--glass-bg-strong);
+  padding: 22px;
+}
+
+.javis-ai-provider-detail header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.javis-ai-test-button {
+  flex: 0 0 auto;
+  min-height: 32px;
+  border: 1px solid rgba(45, 111, 103, 0.24);
+  border-radius: var(--radius-md);
+  padding: 0 12px;
+  color: var(--color-accent-strong);
+  background: #ffffff;
+  font-size: 12px;
+  font-weight: 720;
+  white-space: nowrap;
+}
+
+.javis-ai-test-button:hover:not(:disabled) {
+  border-color: rgba(45, 111, 103, 0.38);
+  background: var(--color-accent-soft);
+}
+
+.javis-ai-test-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.javis-ai-provider-detail h3,
+.javis-ai-model-card h3 {
+  margin: 0;
+  color: var(--color-ink);
+  font-size: 15px;
+  font-weight: 760;
+}
+
+.javis-ai-provider-detail h3 {
+  font-size: 16px;
+}
+
+.javis-ai-provider-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.javis-ai-provider-fields label:nth-child(1),
+.javis-ai-provider-fields label:nth-child(2),
+.javis-ai-provider-fields label:nth-child(3) {
+  grid-column: 1 / -1;
+}
+
+.javis-ai-added-models {
+  position: relative;
+  z-index: 5;
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--glass-border);
+  padding-top: 10px;
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.javis-ai-added-models header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.javis-ai-added-models strong {
+  display: inline-grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  color: var(--color-accent-strong);
+  background: var(--color-accent-soft);
+  font-size: 11px;
+}
+
+.javis-ai-added-model-list {
+  display: grid;
+  gap: 6px;
+}
+
+.javis-ai-added-model-row {
+  display: grid;
+  grid-template-columns: minmax(82px, 0.8fr) minmax(0, 1.4fr) 34px;
+  align-items: center;
+  gap: 8px;
+  min-height: 24px;
+  color: var(--color-muted);
+}
+
+.javis-ai-added-model-row span,
+.javis-ai-added-model-row em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-ai-added-model-row span {
+  color: var(--color-ink);
+  font-weight: 700;
+}
+
+.javis-ai-added-model-row em {
+  color: var(--color-subtle);
+  font-style: normal;
+}
+
+.javis-ai-added-model-row small {
+  color: var(--color-muted);
+  font-size: 11px;
+  text-align: right;
+}
+
+.javis-ai-add-model-row {
+  position: relative;
+  z-index: 8;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  overflow: visible;
+  border: 1px solid rgba(45, 111, 103, 0.12);
+  border-radius: 12px;
+  padding: 8px;
+  background: rgba(247, 250, 248, 0.74);
+}
+
+.javis-ai-provider-model-select {
+  position: static;
+  min-width: 0;
+}
+
+.javis-ai-provider-model-trigger {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 16px;
+  width: 100%;
+  min-height: 36px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  padding: 0 12px;
+  color: var(--color-ink);
+  background: #ffffff;
+  font-size: 12px;
+  text-align: left;
+}
+
+.javis-ai-provider-model-trigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.javis-ai-provider-model-trigger span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-ai-provider-model-menu {
+  position: absolute;
+  z-index: 80;
+  top: calc(100% + 8px);
+  right: 0;
+  left: 0;
+  display: grid;
+  max-height: 170px;
+  overflow: auto;
+  border: 1px solid rgba(45, 111, 103, 0.18);
+  border-radius: 14px;
+  padding: 8px;
+  background: #ffffff;
+  box-shadow: 0 18px 36px rgba(24, 49, 44, 0.16);
+}
+
+.javis-ai-provider-model-menu p {
+  margin: 4px 6px 8px;
+  color: var(--color-subtle);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.javis-ai-provider-model-menu button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 11px;
+  padding: 0 10px;
+  color: var(--color-muted);
+  background: transparent;
+  font-size: 12px;
+  text-align: left;
+}
+
+.javis-ai-provider-model-menu button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-ai-provider-model-menu button strong {
+  color: var(--color-accent-strong);
+  font-size: 12px;
+  text-align: center;
+}
+
+.javis-ai-provider-model-menu button:hover,
+.javis-ai-provider-model-menu button.active {
+  color: var(--color-ink);
+  background: rgba(45, 111, 103, 0.1);
+}
+
+.javis-ai-provider-model-manual {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  margin-top: 8px;
+  border-top: 1px solid var(--glass-border);
+  padding-top: 8px;
+}
+
+.javis-ai-provider-model-manual input {
+  min-height: 34px;
+  border-radius: 12px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.javis-ai-provider-model-manual button {
+  min-height: 34px;
+  border: 1px solid rgba(45, 111, 103, 0.24);
+  border-radius: 12px;
+  background: #ffffff;
+  color: var(--color-accent-strong);
+  font-weight: 720;
+}
+
+.javis-ai-add-model-row button {
+  min-height: 36px;
+  border: 1px solid rgba(45, 111, 103, 0.24);
+  border-radius: 12px;
+  padding: 0 12px;
+  color: var(--color-accent-strong);
+  background: #ffffff;
+  font-size: 12px;
+  font-weight: 720;
+  white-space: nowrap;
+}
+
+.javis-ai-add-model-row button:hover:not(:disabled) {
+  background: var(--color-accent-soft);
+}
+
+.javis-ai-add-model-row button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.javis-ai-model-fetch-message {
+  color: var(--color-accent-strong);
+  font-size: 12px;
+}
+
+.javis-ai-test-status {
+  margin: 0;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  padding: 8px 9px;
+  color: var(--color-muted);
+  background: rgba(247, 250, 248, 0.82);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.javis-ai-test-status.success {
+  border-color: rgba(45, 111, 103, 0.22);
+  color: var(--color-accent-strong);
+  background: var(--color-accent-soft);
+}
+
+.javis-ai-test-status.error {
+  border-color: rgba(239, 68, 68, 0.24);
+  color: var(--color-danger);
+  background: rgba(254, 242, 242, 0.86);
+}
+
+.javis-ai-model-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  padding: 12px;
+  background: rgba(247, 250, 248, 0.72);
+}
+
+.javis-ai-model-card {
+  position: relative;
+  z-index: 0;
+  display: grid;
+  grid-template-columns: minmax(150px, 0.42fr) minmax(260px, 1fr);
+  align-content: start;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid rgba(45, 111, 103, 0.1);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  background: #ffffff;
+  box-shadow: 0 8px 20px rgba(24, 49, 44, 0.04);
+  transition:
+    border-color var(--duration-fast) var(--ease-smooth),
+    box-shadow var(--duration-fast) var(--ease-smooth),
+    transform var(--duration-fast) var(--ease-spring);
+}
+
+.javis-ai-model-card:focus-within {
+  z-index: 20;
+}
+
+.javis-ai-model-card:hover {
+  border-color: rgba(45, 111, 103, 0.2);
+  box-shadow: 0 12px 28px rgba(24, 49, 44, 0.07);
+  transform: translateX(1px);
+}
+
+.javis-ai-model-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.javis-ai-model-card h3::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--color-accent);
+}
+
+.javis-ai-model-card label {
+  gap: 6px;
+}
+
+.javis-ai-rounded-select {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+}
+
+.javis-ai-rounded-select-trigger {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  width: 100%;
+  min-height: 40px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  padding: 0 10px 0 12px;
+  color: var(--color-ink);
+  background: #ffffff;
+  font-size: 13px;
+  text-align: left;
+  transition:
+    border-color var(--duration-normal) var(--ease-smooth),
+    background-color var(--duration-normal) var(--ease-smooth),
+    box-shadow var(--duration-normal) var(--ease-smooth);
+}
+
+.javis-ai-rounded-select-trigger span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-ai-rounded-select-trigger:hover:not(:disabled),
+.javis-ai-rounded-select-trigger[aria-expanded="true"] {
+  border-color: rgba(45, 111, 103, 0.42);
+  background: #ffffff;
+  box-shadow: 0 0 0 3px rgba(45, 111, 103, 0.08);
+}
+
+.javis-ai-rounded-select-caret {
+  color: var(--color-subtle);
+  font-size: 16px;
+  line-height: 1;
+  text-align: center;
+}
+
+.javis-ai-rounded-select-menu {
+  position: absolute;
+  z-index: 90;
+  top: calc(100% + 8px);
+  right: 0;
+  left: 0;
+  display: grid;
+  max-height: 190px;
+  overflow: auto;
+  border: 1px solid rgba(45, 111, 103, 0.18);
+  border-radius: 14px;
+  padding: 8px;
+  background: #ffffff;
+  box-shadow: 0 18px 36px rgba(24, 49, 44, 0.16);
+}
+
+.javis-ai-rounded-select-menu button {
+  overflow: hidden;
+  min-height: 34px;
+  border: 0;
+  border-radius: 11px;
+  padding: 0 10px;
+  color: var(--color-muted);
+  background: transparent;
+  font-size: 13px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-ai-rounded-select-menu button:hover:not(:disabled),
+.javis-ai-rounded-select-menu button.active {
+  color: var(--color-ink);
+  background: rgba(45, 111, 103, 0.1);
+}
+
+.javis-ai-rounded-select-menu button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.javis-ai-provider-fields label:focus-within,
+.javis-ai-agent-card label:focus-within {
+  position: relative;
+  z-index: 60;
+}
+
+.javis-ai-model-select {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+}
+
+.javis-ai-model-select-trigger {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  width: 100%;
+  min-height: 40px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--glass-border);
+  border-radius: 12px;
+  padding: 0 10px 0 12px;
+  color: var(--color-ink);
+  background: #ffffff;
+  font-size: 13px;
+  text-align: left;
+  transition:
+    border-color var(--duration-normal) var(--ease-smooth),
+    background-color var(--duration-normal) var(--ease-smooth),
+    box-shadow var(--duration-normal) var(--ease-smooth);
+}
+
+.javis-ai-model-select-trigger span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-ai-model-select-trigger:hover:not(:disabled),
+.javis-ai-model-select-trigger[aria-expanded="true"] {
+  border-color: rgba(45, 111, 103, 0.42);
+  background: #ffffff;
+  box-shadow: 0 0 0 3px rgba(45, 111, 103, 0.08);
+}
+
+.javis-ai-model-select-trigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.javis-ai-model-select-caret {
+  color: var(--color-subtle);
+  font-size: 16px;
+  line-height: 1;
+  text-align: center;
+}
+
+.javis-ai-model-select-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 8px);
+  right: 0;
+  left: 0;
+  display: grid;
+  max-height: 190px;
+  overflow: auto;
+  border: 1px solid rgba(45, 111, 103, 0.18);
+  border-radius: 14px;
+  padding: 8px;
+  background: #ffffff;
+  box-shadow: 0 18px 36px rgba(24, 49, 44, 0.16);
+}
+
+.javis-ai-model-select-menu button {
+  overflow: hidden;
+  min-height: 34px;
+  border: 0;
+  border-radius: 11px;
+  padding: 0 10px;
+  color: var(--color-muted);
+  background: transparent;
+  font-size: 13px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-ai-model-select-menu button:hover,
+.javis-ai-model-select-menu button.active {
+  color: var(--color-ink);
+  background: rgba(45, 111, 103, 0.1);
+}
+
+.javis-ai-model-card.wide {
+  grid-column: auto;
+}
+
+.javis-ai-model-card-meta {
+  overflow: hidden;
+  margin: 0;
+  color: var(--color-subtle);
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-ai-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.javis-settings-save-btn {
+  min-height: 36px;
+  border: 1px solid rgba(45, 111, 103, 0.26);
+  border-radius: var(--radius-md);
+  padding: 0 14px;
+  color: #ffffff;
+  background: linear-gradient(135deg, var(--color-accent-strong), var(--color-accent));
+  box-shadow: 0 12px 24px rgba(23, 79, 73, 0.16);
+  font-size: 13px;
+  font-weight: 760;
+}
+
+.javis-settings-save-btn:hover {
+  box-shadow: 0 14px 28px rgba(23, 79, 73, 0.2);
+  transform: translateY(-1px);
+}
+
+.javis-settings-save-toast {
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.javis-settings-save-toast.saved {
+  color: var(--color-accent-strong);
+}
+
+.javis-settings-save-toast.error {
+  color: var(--color-danger);
+}
+
+.javis-ai-agent-card {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 760px) {
+  .javis-ai-provider-console,
+  .javis-ai-provider-fields,
+  .javis-ai-model-grid,
+  .javis-ai-model-card,
+  .javis-ai-agent-card {
+    grid-template-columns: 1fr;
+  }
+
+  .javis-ai-provider-list {
+    border-right: 0;
+    border-bottom: 1px solid var(--glass-border);
+  }
+
+  .javis-ai-provider-fields label:nth-child(1),
+  .javis-ai-provider-fields label:nth-child(2),
+  .javis-ai-provider-fields label:nth-child(3) {
+    grid-column: auto;
+  }
 }
 
 .javis-history-select {
@@ -1979,6 +2750,103 @@ textarea:focus-visible {
     inset 0 1px 0 rgba(255, 255, 255, 0.5);
 }
 
+.javis-ask-user {
+  border-color: rgba(100, 160, 220, 0.34);
+  background: linear-gradient(135deg, rgba(240, 248, 255, 0.72), rgba(225, 240, 255, 0.52));
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  box-shadow:
+    0 8px 32px rgba(60, 120, 180, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+.javis-ask-user-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.javis-ask-user-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.javis-ask-user-choices button {
+  min-height: 36px;
+  min-width: 84px;
+  padding: 8px 12px;
+  border: 1px solid var(--color-accent-strong);
+  border-radius: var(--radius-md);
+  color: #ffffff;
+  background: linear-gradient(135deg, var(--color-accent-strong), var(--color-accent));
+  font-weight: 650;
+  transition:
+    transform var(--duration-fast) var(--ease-spring),
+    box-shadow var(--duration-normal) var(--ease-smooth);
+}
+
+.javis-ask-user-choices button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 24px rgba(23, 79, 73, 0.2);
+}
+
+.javis-ask-user-choices button:disabled {
+  opacity: 0.5;
+  cursor: default;
+  transform: none;
+  box-shadow: none;
+}
+
+.javis-ask-user-input {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.javis-ask-user-input input[type="text"] {
+  flex: 1;
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  background: var(--glass-bg-strong);
+  font-size: 14px;
+}
+
+.javis-ask-user-input button {
+  min-height: 36px;
+  min-width: 84px;
+  padding: 8px 12px;
+  border: 1px solid var(--color-accent-strong);
+  border-radius: var(--radius-md);
+  color: #ffffff;
+  background: linear-gradient(135deg, var(--color-accent-strong), var(--color-accent));
+  font-weight: 650;
+  transition:
+    transform var(--duration-fast) var(--ease-spring),
+    box-shadow var(--duration-normal) var(--ease-smooth);
+}
+
+.javis-ask-user-input button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 24px rgba(23, 79, 73, 0.2);
+}
+
+.javis-ask-user-input button:disabled {
+  opacity: 0.5;
+  cursor: default;
+  transform: none;
+  box-shadow: none;
+}
+
+.javis-log-ask-user {
+  border-color: rgba(100, 160, 220, 0.34);
+  background: rgba(240, 248, 255, 0.72);
+  backdrop-filter: blur(12px);
+}
+
 .javis-confirmation-header,
 .javis-confirmation-actions {
   display: flex;
@@ -2221,6 +3089,13 @@ textarea:focus-visible {
   -webkit-backdrop-filter: blur(var(--glass-blur));
 }
 
+.javis-inspector-rail {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding: 12px 6px;
+}
+
 .javis-inspector-toggle {
   align-self: start;
   justify-self: center;
@@ -2230,7 +3105,7 @@ textarea:focus-visible {
   align-items: center;
   justify-content: center;
   gap: 8px;
-  margin: 12px 6px;
+  margin: 0;
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-pill);
   padding: 10px 5px;
@@ -2245,6 +3120,12 @@ textarea:focus-visible {
     border-color var(--duration-normal) var(--ease-smooth),
     background var(--duration-normal) var(--ease-smooth),
     transform var(--duration-fast) var(--ease-spring);
+}
+
+.javis-inspector-toggle.active {
+  border-color: rgba(45, 111, 103, 0.28);
+  color: var(--color-accent-strong);
+  background: #ffffff;
 }
 
 .javis-inspector-toggle:hover,
@@ -2263,7 +3144,8 @@ textarea:focus-visible {
 }
 
 .javis-agent-list,
-.javis-activity-list {
+.javis-activity-list,
+.javis-review-inspector {
   display: grid;
   gap: 10px;
   align-content: start;
@@ -2273,7 +3155,8 @@ textarea:focus-visible {
 }
 
 .javis-agent,
-.javis-log {
+.javis-log,
+.javis-review-card {
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-md);
   background: var(--glass-bg-strong);
@@ -2281,18 +3164,110 @@ textarea:focus-visible {
   box-shadow: var(--glass-shadow);
 }
 
-.javis-agent {
+.javis-agent,
+.javis-review-card {
   display: grid;
   gap: 8px;
   padding: 12px;
 }
 
 .javis-agent-row,
-.javis-log-row {
+.javis-log-row,
+.javis-review-card-title {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+}
+
+.javis-review-card-title span {
+  max-width: 46%;
+  overflow: hidden;
+  border-radius: var(--radius-pill);
+  padding: 2px 7px;
+  color: var(--color-accent-strong);
+  background: var(--color-accent-soft);
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-review-card p {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.javis-review-card pre {
+  max-height: 260px;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 9px;
+  color: #2d3631;
+  background: rgba(247, 250, 248, 0.75);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.javis-detail-metadata {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.javis-detail-metadata div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.javis-detail-metadata dt {
+  color: var(--color-subtle);
+  font-size: 11px;
+}
+
+.javis-detail-metadata dd {
+  overflow: hidden;
+  margin: 0;
+  color: var(--color-ink);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-detail-link {
+  overflow: hidden;
+  color: var(--color-accent-strong);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-review-file-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.javis-review-file-list li {
+  overflow: hidden;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  color: #34413c;
+  background: rgba(247, 250, 248, 0.72);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .javis-agent-name {
@@ -2845,6 +3820,47 @@ textarea:focus-visible {
   gap: 16px;
 }
 
+.javis-skill-market-home {
+  display: grid;
+  align-content: start;
+  min-height: 100%;
+  padding-top: min(9vh, 88px);
+}
+
+.javis-skill-market-home .javis-skill-header {
+  justify-content: center;
+  text-align: center;
+}
+
+.javis-skill-market-home .javis-view-title {
+  font-size: 34px;
+  line-height: 42px;
+  font-weight: 800;
+}
+
+.javis-skill-market-home .javis-skill-count {
+  justify-content: center;
+  margin-top: 8px;
+}
+
+.javis-skill-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.javis-skill-header-actions select,
+.javis-skill-kind-select,
+.javis-skill-search-box select {
+  min-height: 34px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  padding: 0 30px 0 10px;
+  color: var(--color-ink);
+  background: var(--glass-bg-strong);
+  font-size: 13px;
+}
+
 .javis-skill-translate-button {
   min-width: 92px;
   min-height: 34px;
@@ -2861,6 +3877,158 @@ textarea:focus-visible {
 .javis-skill-translate-button:hover:not(:disabled) {
   transform: translateY(-1px);
   box-shadow: 0 14px 28px rgba(23, 79, 73, 0.2);
+}
+
+.javis-skill-translate-wrapper {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.javis-skill-translate-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-danger);
+  max-width: 260px;
+  text-align: right;
+  line-height: 1.4;
+}
+
+.javis-skill-market-browser {
+  display: grid;
+  gap: 26px;
+  width: min(100%, 1200px);
+  margin: 0 auto;
+}
+
+.javis-skill-search-row {
+  display: grid;
+  grid-template-columns: minmax(320px, 860px) 48px auto;
+  justify-content: center;
+  gap: 12px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.javis-skill-search-box {
+  display: grid;
+  grid-template-columns: 116px minmax(0, 1fr);
+  align-items: center;
+  min-height: 48px;
+  border: 1px solid rgba(45, 111, 103, 0.13);
+  border-radius: 999px;
+  background: var(--glass-bg-strong);
+  box-shadow: 0 18px 46px rgba(24, 49, 44, 0.09);
+  overflow: hidden;
+}
+
+.javis-skill-search-box select {
+  height: 100%;
+  border: 0;
+  border-right: 1px solid var(--glass-border);
+  border-radius: 0;
+  background: rgba(247, 250, 248, 0.82);
+}
+
+.javis-skill-search-box input {
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  padding: 0 18px;
+  color: var(--color-ink);
+  background: transparent;
+  font-size: 15px;
+  outline: 0;
+}
+
+.javis-skill-icon-button {
+  display: inline-flex;
+  width: 48px;
+  height: 48px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(45, 111, 103, 0.22);
+  border-radius: 16px;
+  background: linear-gradient(135deg, var(--color-accent-strong), var(--color-accent));
+  box-shadow: 0 10px 22px rgba(23, 79, 73, 0.14);
+}
+
+.javis-skill-icon-button span {
+  width: 16px;
+  height: 16px;
+  background: #ffffff;
+  mask-position: center;
+  mask-repeat: no-repeat;
+  mask-size: contain;
+  -webkit-mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-size: contain;
+}
+
+.javis-skill-icon-button.search span {
+  mask-image: url("./assets/570icons/search.svg");
+  -webkit-mask-image: url("./assets/570icons/search.svg");
+}
+
+.javis-skill-icon-button.refresh span {
+  mask-image: url("./assets/570icons/refresh.svg");
+  -webkit-mask-image: url("./assets/570icons/refresh.svg");
+}
+
+.javis-skill-kind-select {
+  min-width: 92px;
+  height: 48px;
+  border-radius: 16px;
+  box-shadow: 0 14px 34px rgba(24, 49, 44, 0.06);
+}
+
+.javis-skill-search-status {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.javis-skill-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.javis-skill-section-header h3 {
+  margin: 0;
+}
+
+.javis-hot-skill-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.javis-hot-skill-card {
+  display: grid;
+  gap: 8px;
+  min-height: 88px;
+  text-align: left;
+}
+
+.javis-hot-skill-card strong {
+  color: var(--color-ink);
+  font-size: 14px;
+}
+
+.javis-hot-skill-card span {
+  color: var(--color-muted);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.javis-skill-result-card {
+  display: block;
+  color: inherit;
+  text-decoration: none;
 }
 
 .javis-skill-section {
@@ -3458,6 +4626,7 @@ textarea:focus-visible {
 .javis-plan,
 .javis-documents,
 .javis-confirmation,
+.javis-ask-user,
 .javis-recovery {
   animation: javis-fade-in var(--duration-normal) var(--ease-smooth) both;
 }

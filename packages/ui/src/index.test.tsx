@@ -680,7 +680,7 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).toContain("aria-expanded=\"true\"");
     expect(html).toContain("F:/Other");
     expect(html).toContain("暂无对话");
-    expect(html).toContain("未知");
+    expect(html).toContain("聊天");
     expect(html).toContain("展开显示");
     expect(html).toContain("Fallback history entry");
     expect(html).toContain("Research sources collected");

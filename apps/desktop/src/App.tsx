@@ -13,9 +13,13 @@ import type {
   WorkbenchModelConfiguration,
   WorkbenchScheduledTask,
   WorkbenchSkillEntry,
+  WorkbenchSkillSearchKind,
+  WorkbenchSkillSearchResult,
+  WorkbenchSkillSearchSource,
 } from "@javis/ui";
 import { JavisWorkbench, zhCNWorkbenchLocale, defaultWorkbenchLocale } from "@javis/ui";
 import {
+  getTaskWorkspacePath,
   getTaskUpdatedAt,
   isArchivableTask,
   loadTaskHistory,
@@ -56,6 +60,7 @@ import {
   runRestoredPdfOrganization,
 } from "./restored-approval";
 import { useModelSettingsControls } from "./use-model-settings";
+import { createConfiguredModelProvider } from "./model-provider";
 import { useModelProfiles, type ModelProfileRepositoryLike } from "./use-model-profiles";
 import { useScannedData } from "./use-scanned-data";
 import { useScheduledTasks } from "./use-scheduled-tasks";
@@ -112,6 +117,7 @@ import {
 } from "./task-session-log";
 import {
   createUserPreferencesRepository,
+  PENDING_USER_PREFERENCES_STORAGE_KEY,
   PREF_KEYS,
   USER_PREFERENCES_MIGRATIONS,
   type UserPreferencesRepository,
@@ -152,6 +158,16 @@ const currentWindow =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window
     ? getCurrentWindow()
     : null;
+
+type SkillTranslationCache = Record<
+  string,
+  {
+    name?: string;
+    description?: string;
+    agentOwners?: string[];
+    sourceSignature?: string;
+  }
+>;
 
 function scheduledTaskToWorkbench(
   task: ScheduledTask,
@@ -287,6 +303,20 @@ function App() {
   const [activeView, setActiveView] = useState<ActiveView>("chat");
   const [activeHistoryEntryId, setActiveHistoryEntryId] = useState<string | undefined>();
   const [localePreference, setLocalePreference] = useState<string>("zh-CN");
+  async function testModelConnection(settings: typeof modelSettings): Promise<string> {
+    if (settings.apiKey.trim()) {
+      await updateModelSettings(settings);
+      void modelSettingsRepoRef.current?.save(settings);
+    }
+    const provider = createConfiguredModelProvider(settings);
+    const result = await provider.complete("Reply with OK.", {
+      maxTokens: 8,
+      temperature: 0,
+      locale: localePreference,
+    });
+    const modelLabel = result.model || settings.model;
+    return modelLabel ? `API 连通正常：${modelLabel}` : "API 连通正常";
+  }
   const [prefSidebarWidth, setPrefSidebarWidth] = useState<number | undefined>();
   const [prefIsActivityOpen, setPrefIsActivityOpen] = useState<boolean | undefined>();
   const [prefIsInspectorOpen, setPrefIsInspectorOpen] = useState<boolean | undefined>();
@@ -315,9 +345,15 @@ function App() {
 
   // ── Local knowledge base state ────────────────────────────────────
   const [skillEntries, setSkillEntries] = useState<WorkbenchSkillEntry[]>([]);
+  const [skillTranslationCache, setSkillTranslationCache] = useState<SkillTranslationCache>({});
   const [skillTranslationStatus, setSkillTranslationStatus] =
     useState<"idle" | "translating" | "error">("idle");
+  const [skillTranslationError, setSkillTranslationError] = useState<string | null>(null);
+  const [skillSearchStatus, setSkillSearchStatus] =
+    useState<"idle" | "searching" | "error">("idle");
+  const [skillSearchResults, setSkillSearchResults] = useState<WorkbenchSkillSearchResult[]>([]);
   const [mcpConfig, setMcpConfig] = useState<McpServerConfig[]>([]);
+  const [mcpConfigError, setMcpConfigError] = useState<string | null>(null);
 
   const fileClassificationRepoRef = useRef<FileClassificationRepository | null>(null);
   const modelProfileRepoRef = useRef<ModelProfileRepositoryLike>(null);
@@ -377,92 +413,122 @@ function App() {
   });
   submitGoalRef.current = submitGoal;
   useEffect(() => {
-    const tools: WorkbenchSkillEntry[] = initialToolDescriptors.map((d) => {
-      const owners = demoAgents
-        .filter((a) => a.allowedToolNames.includes(d.name))
-        .map((a) => a.displayName);
-      return {
-        id: d.name,
-        name: d.name,
-        description: d.summary,
-        category: "tool" as const,
-        permissionLevel: d.permissionLevel,
-        agentOwners: owners,
-        enabled: true,
-      };
-    });
-    const agents: WorkbenchSkillEntry[] = demoAgents.map((a) => ({
-      id: a.id,
-      name: a.displayName,
-      description: a.description,
-      category: "agent" as const,
-      agentOwners: [],
-      enabled: true,
-    }));
-    const mcps: WorkbenchSkillEntry[] = mcpConfig.map((s) => ({
-      id: `mcp-${s.name}`,
-      name: s.name,
-      description: `${s.transport} · ${s.command ?? s.url ?? ""}`,
-      category: "mcp" as const,
-      agentOwners: [],
-      enabled: s.enabled,
-    }));
-    setSkillEntries([...tools, ...agents, ...mcps]);
-  }, [mcpConfig]);
+    setSkillEntries(applySkillTranslationCache(buildSkillEntries(mcpConfig), skillTranslationCache));
+  }, [mcpConfig, skillTranslationCache]);
 
   async function handleTranslateSkillsToChinese() {
     if (skillTranslationStatus === "translating") {
       return;
     }
     setSkillTranslationStatus("translating");
+    setSkillTranslationError(null);
     try {
+      const sourceSkills = buildSkillEntries(mcpConfig);
+      const missingSkills = sourceSkills.filter((skill) => {
+        const cached = skillTranslationCache[skill.id];
+        return !cached || cached.sourceSignature !== getSkillTranslationSourceSignature(skill);
+      });
+      if (missingSkills.length === 0) {
+        setSkillEntries(applySkillTranslationCache(sourceSkills, skillTranslationCache));
+        setSkillTranslationStatus("idle");
+        return;
+      }
       const translated = await runtime.translateSkillsToChinese(
-        skillEntries.map((skill) => ({
+        missingSkills.map((skill) => ({
           id: skill.id,
           name: skill.name,
           description: skill.description,
           agentOwners: skill.agentOwners,
         })),
       );
-      const byId = new Map(translated.map((skill) => [skill.id, skill]));
-      setSkillEntries((current) =>
-        current.map((skill) => {
-          const next = byId.get(skill.id);
-          if (!next) {
-            return skill;
-          }
-          return {
-            ...skill,
-            name: next.name || skill.name,
-            description: next.description || skill.description,
-            agentOwners: next.agentOwners?.length ? next.agentOwners : skill.agentOwners,
-          };
-        }),
-      );
+      const sourceById = new Map(sourceSkills.map((skill) => [skill.id, skill]));
+      const nextCache: SkillTranslationCache = { ...skillTranslationCache };
+      for (const skill of translated) {
+        const sourceSkill = sourceById.get(skill.id);
+        nextCache[skill.id] = {
+          name: skill.name,
+          description: skill.description,
+          agentOwners: skill.agentOwners,
+          sourceSignature: sourceSkill ? getSkillTranslationSourceSignature(sourceSkill) : undefined,
+        };
+      }
+      setSkillTranslationCache(nextCache);
+      setSkillEntries(applySkillTranslationCache(sourceSkills, nextCache));
+      persistPreference(PREF_KEYS.SKILL_TRANSLATIONS_ZH, JSON.stringify(nextCache));
       setSkillTranslationStatus("idle");
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       logNonFatalError("Failed to translate skills to Chinese", error);
       setSkillTranslationStatus("error");
+      setSkillTranslationError(message);
     }
   }
 
   // ── Build sidebar nav items from built-in defaults + workspace defs ─
+  async function handleSearchSkillMarket(
+    query: string,
+    source: WorkbenchSkillSearchSource,
+    kind: WorkbenchSkillSearchKind,
+  ) {
+    const trimmed = query.trim();
+    if (!trimmed || skillSearchStatus === "searching") {
+      return;
+    }
+    setSkillSearchStatus("searching");
+    try {
+      const searchQuery = [
+        trimmed,
+        kind === "mcp" ? "MCP server" : "Codex skill",
+        source === "github" ? "site:github.com" : "",
+      ].filter(Boolean).join(" ");
+      const results = await invoke<Array<{
+        url: string;
+        title?: string;
+        excerpt: string;
+        provider?: string;
+      }>>("search_web_sources", {
+        request: {
+          query: searchQuery,
+          maxResults: 8,
+        },
+      });
+      setSkillSearchResults(results.map((result, index) => ({
+        id: `${result.url}-${index}`,
+        title: result.title?.trim() || result.url,
+        description: result.excerpt,
+        url: result.url,
+        source: result.provider || source,
+        kind,
+      })));
+      setSkillSearchStatus("idle");
+    } catch (error) {
+      logNonFatalError("Failed to search skill market", error);
+      setSkillSearchStatus("error");
+    }
+  }
+
   const sidebarNavItems = useMemo(() => {
     const labels =
       localePreference === "en" ? defaultWorkbenchLocale.labels : zhCNWorkbenchLocale.labels;
-    return mergeSidebarNavItems(
-      getBuiltinSidebarNavItems(
-        labels,
-        scheduledTasks.filter((t) => t.enabled).length,
-        skillEntries.length,
-      ),
-      buildWorkspaceNavItems(workspaceDefs),
+    const builtin = getBuiltinSidebarNavItems(
+      labels,
+      scheduledTasks.filter((t) => t.enabled).length,
+      skillEntries.length,
     );
+    return mergeSidebarNavItems(builtin, buildWorkspaceNavItems(workspaceDefs));
   }, [workspaceDefs, scheduledTasks, skillEntries, localePreference]);
 
   // ── Load MCP config on mount ──────────────────────────────────────
   useEffect(() => {
-    loadMcpConfig().then(setMcpConfig).catch((error) => logNonFatalError("Failed to load MCP config", error));
+    loadMcpConfig()
+      .then((config) => {
+        setMcpConfig(config);
+        setMcpConfigError(null);
+      })
+      .catch((error) => {
+        logNonFatalError("Failed to load MCP config", error);
+        setMcpConfigError(String(error));
+      });
   }, []);
 
   // ── Initialize SQLite database ────────────────────────────────────
@@ -523,8 +589,21 @@ function App() {
       for (const [key, value] of Object.entries(loadedConfig.agentOverrides)) {
         if (value) cleanOverrides[key] = value;
       }
+      // Check which profiles have stored API keys in the OS credential store
+      const profilesWithKeyStatus = await Promise.all(
+        loadedConfig.profiles.map(async (p) => {
+          try {
+            const status = await invoke<{ exists: boolean }>("check_model_api_key_secret", {
+              keyReference: p.apiKeyReference,
+            });
+            return { ...p, apiKey: "", hasStoredApiKey: status.exists };
+          } catch {
+            return { ...p, apiKey: "", hasStoredApiKey: false };
+          }
+        }),
+      );
       setModelConfiguration({
-        profiles: loadedConfig.profiles.map((p) => ({ ...p, apiKey: "" })),
+        profiles: profilesWithKeyStatus,
         agentOverrides: cleanOverrides,
       });
 
@@ -543,11 +622,22 @@ function App() {
       }
 
       // Import user preferences from localStorage
-      const importedPrefs = await preferencesRepo.importFromLocalStorage(window.localStorage);
+      let importedPrefs = await preferencesRepo.importFromLocalStorage(window.localStorage);
+      const pendingPrefs = loadPendingPreferencesFromLocalStorage();
+      if (Object.keys(pendingPrefs).length > 0) {
+        for (const [key, value] of Object.entries(pendingPrefs)) {
+          await preferencesRepo.set(key, value);
+        }
+        importedPrefs = { ...importedPrefs, ...pendingPrefs };
+        removePendingPreferencesFromLocalStorage();
+      }
       if (importedPrefs[PREF_KEYS.LOCALE]) setLocalePreference(importedPrefs[PREF_KEYS.LOCALE]);
       if (importedPrefs[PREF_KEYS.SIDEBAR_WIDTH]) setPrefSidebarWidth(Number(importedPrefs[PREF_KEYS.SIDEBAR_WIDTH]));
       if (importedPrefs[PREF_KEYS.IS_ACTIVITY_OPEN]) setPrefIsActivityOpen(importedPrefs[PREF_KEYS.IS_ACTIVITY_OPEN] === "true");
       if (importedPrefs[PREF_KEYS.IS_INSPECTOR_OPEN]) setPrefIsInspectorOpen(importedPrefs[PREF_KEYS.IS_INSPECTOR_OPEN] === "true");
+      if (importedPrefs[PREF_KEYS.SKILL_TRANSLATIONS_ZH]) {
+        setSkillTranslationCache(parseSkillTranslationCache(importedPrefs[PREF_KEYS.SKILL_TRANSLATIONS_ZH]));
+      }
       if (importedPrefs[PREF_KEYS.ACTIVE_VIEW]) {
         const validViews: ActiveView[] = ["chat", "automated", "skills", "apps", "documents", "gallery", "computer"];
         if (validViews.includes(importedPrefs[PREF_KEYS.ACTIVE_VIEW] as ActiveView)) {
@@ -629,6 +719,10 @@ function App() {
       !goalOverride && !workspacePathOverride && !scheduledTaskId
         ? composeMode
         : undefined;
+    const taskWorkspacePath =
+      startMode === "project" || workspacePathOverride || scheduledTaskId
+        ? workspacePathOverride ?? workspaceRef.current
+        : undefined;
     clearQueuedTaskSnapshots();
     if (continuationTask) {
       setActiveHistoryEntryId(continuationTask.id);
@@ -667,6 +761,7 @@ function App() {
         runtime.start(resolvedGoal, {
           ...startOptions,
           mode: startMode,
+          workspacePath: taskWorkspacePath,
         });
       })();
       return;
@@ -675,6 +770,7 @@ function App() {
     runtime.start(goal, {
       ...startOptions,
       mode: startMode,
+      workspacePath: taskWorkspacePath,
     });
   }
 
@@ -848,6 +944,16 @@ function App() {
     runtime.resolvePermission(decision, request?.id);
   }
 
+  function handleAskUserAnswer(answer: string) {
+    const request = task.askUserQuestion;
+    if (
+      (task.status === "waiting_permission" || task.status === "running") &&
+      request?.status === "pending"
+    ) {
+      runtime.respondToAskUser(answer, request.id);
+    }
+  }
+
   function selectHistoryEntry(id: string) {
     const entry = history.find((item) => item.id === id);
     if (entry) {
@@ -855,6 +961,7 @@ function App() {
       setTask(entry);
       setActiveHistoryEntryId(id);
       setDraftGoal("");
+      setComposeMode(entry.originMode ?? (getTaskWorkspacePath(entry) ? "project" : "chat"));
       setActiveView("chat");
     }
   }
@@ -897,9 +1004,14 @@ function App() {
     const repo = preferencesRepoRef.current;
     if (repo) {
       void repo.set(key, value).catch((error) =>
-        console.warn(`Failed to persist preference "${key}"`, error),
+        {
+          console.warn(`Failed to persist preference "${key}"`, error);
+          persistPendingPreferenceToLocalStorage(key, value);
+        },
       );
+      return;
     }
+    persistPendingPreferenceToLocalStorage(key, value);
   }
 
   return (
@@ -924,12 +1036,8 @@ function App() {
           status: entry.status,
           userGoal: entry.userGoal,
           updatedAt: getTaskUpdatedAt(entry),
-          workspacePath:
-            entry.project?.workspacePath ??
-            entry.codeReviewPreview?.workspacePath ??
-            entry.codeProposedEdit?.workspacePath ??
-            entry.codeApplyResult?.workspacePath ??
-            "",
+          originMode: entry.originMode,
+          workspacePath: getTaskWorkspacePath(entry),
           scheduledTaskId: entry.scheduledTaskId,
         }))}
         imagesError={imagesError}
@@ -953,14 +1061,21 @@ function App() {
           await updateModelSettings(settings);
           void modelSettingsRepoRef.current?.save(settings);
         }}
+        onTestModelConnection={testModelConnection}
         modelConfiguration={modelConfiguration}
         onModelConfigurationChange={handleModelConfigurationChange}
+        onSaveProviderApiKey={(keyReference, apiKey) => {
+          invoke("save_model_api_key_secret", {
+            request: { keyReference, apiKey },
+          }).catch((error) => console.error("Failed to save provider API key:", error));
+        }}
         onNavigateDirectory={handleNavigateDirectory}
         onListDirectory={handleListDirectory}
         onOpenFile={handleOpenFile}
         onPermissionDecision={
           task.id.startsWith("restored-approval-") ? resolveRestoredApproval : handlePermissionDecision
         }
+        onAskUserAnswer={handleAskUserAnswer}
         onRefreshApps={handleRefreshApps}
         onRefreshDocuments={handleRefreshDocuments}
         onRefreshImages={handleRefreshImages}
@@ -995,7 +1110,12 @@ function App() {
         )}
         skillEntries={skillEntries}
         skillTranslationStatus={skillTranslationStatus}
+        skillTranslationError={skillTranslationError}
+        skillSearchResults={skillSearchResults}
+        skillSearchStatus={skillSearchStatus}
+        mcpConfigError={mcpConfigError}
         onTranslateSkillsToChinese={handleTranslateSkillsToChinese}
+        onSearchSkillMarket={handleSearchSkillMarket}
         sidebarNavItems={sidebarNavItems}
         task={task}
         userDocuments={userDocuments}
@@ -1076,6 +1196,142 @@ function TitleBar() {
       ) : null}
     </header>
   );
+}
+
+function applySkillTranslationCache(
+  skills: WorkbenchSkillEntry[],
+  cache: SkillTranslationCache,
+): WorkbenchSkillEntry[] {
+  return skills.map((skill) => {
+    const translated = cache[skill.id];
+    if (!translated || translated.sourceSignature !== getSkillTranslationSourceSignature(skill)) {
+      return skill;
+    }
+    return {
+      ...skill,
+      name: translated.name || skill.name,
+      description: translated.description || skill.description,
+      agentOwners: translated.agentOwners?.length ? translated.agentOwners : skill.agentOwners,
+    };
+  });
+}
+
+function buildSkillEntries(mcpConfig: McpServerConfig[]): WorkbenchSkillEntry[] {
+  const tools: WorkbenchSkillEntry[] = initialToolDescriptors.map((descriptor) => {
+    const owners = demoAgents
+      .filter((agent) => agent.allowedToolNames.includes(descriptor.name))
+      .map((agent) => agent.displayName);
+    return {
+      id: descriptor.name,
+      name: descriptor.name,
+      description: descriptor.summary,
+      category: "tool",
+      permissionLevel: descriptor.permissionLevel,
+      agentOwners: owners,
+      enabled: true,
+    };
+  });
+  const agents: WorkbenchSkillEntry[] = demoAgents.map((agent) => ({
+    id: agent.id,
+    name: agent.displayName,
+    description: agent.description,
+    category: "agent",
+    agentOwners: [],
+    enabled: true,
+  }));
+  const mcps: WorkbenchSkillEntry[] = mcpConfig.map((server) => ({
+    id: `mcp-${server.name}`,
+    name: server.name,
+    description: `${server.transport} · ${server.command ?? server.url ?? ""}`,
+    category: "mcp",
+    agentOwners: [],
+    enabled: server.enabled,
+  }));
+  return [...tools, ...agents, ...mcps];
+}
+
+function getSkillTranslationSourceSignature(skill: WorkbenchSkillEntry): string {
+  return JSON.stringify({
+    name: skill.name,
+    description: skill.description,
+    agentOwners: skill.agentOwners,
+  });
+}
+
+function parseSkillTranslationCache(value: string): SkillTranslationCache {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    const result: SkillTranslationCache = {};
+    for (const [id, entry] of Object.entries(parsed)) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        continue;
+      }
+      const candidate = entry as Record<string, unknown>;
+      result[id] = {
+        name: typeof candidate.name === "string" ? candidate.name : undefined,
+        description: typeof candidate.description === "string" ? candidate.description : undefined,
+        agentOwners: Array.isArray(candidate.agentOwners)
+          ? candidate.agentOwners.filter((owner): owner is string => typeof owner === "string")
+          : undefined,
+        sourceSignature: typeof candidate.sourceSignature === "string" ? candidate.sourceSignature : undefined,
+      };
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function persistPendingPreferenceToLocalStorage(key: string, value: string) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    const preferences = loadPendingPreferencesFromLocalStorage();
+    window.localStorage.setItem(
+      PENDING_USER_PREFERENCES_STORAGE_KEY,
+      JSON.stringify({ ...preferences, [key]: value }),
+    );
+  } catch (error) {
+    console.warn(`Failed to persist pending preference "${key}" to localStorage`, error);
+  }
+}
+
+function loadPendingPreferencesFromLocalStorage(): Record<string, string> {
+  if (typeof window === "undefined") {
+    return {};
+  }
+  try {
+    const raw = window.localStorage.getItem(PENDING_USER_PREFERENCES_STORAGE_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    const result: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      result[key] = String(value);
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+function removePendingPreferencesFromLocalStorage() {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.removeItem(PENDING_USER_PREFERENCES_STORAGE_KEY);
+  } catch {
+    // Pending preference cleanup should not block startup.
+  }
 }
 
 export default App;

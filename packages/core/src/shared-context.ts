@@ -29,6 +29,8 @@ export const CONTEXT_KEYS = {
   BASE_GIT_HEAD: { en: "baseGitHead", zhCN: "基准提交" },
   STRUCTURED_HUNKS: { en: "structuredHunks", zhCN: "结构化差异块" },
   PREPROCESSED_INPUT: { en: "preprocessedInput", zhCN: "预处理输入" },
+  ASK_USER_QUESTION: { en: "askUserQuestion", zhCN: "用户提问" },
+  ASK_USER_RESPONSE: { en: "askUserResponse", zhCN: "用户回答" },
 } as const;
 
 export type ContextKey = (typeof CONTEXT_KEYS)[keyof typeof CONTEXT_KEYS];
@@ -62,4 +64,38 @@ export function createSharedTaskContext(
       return contextKeyForLocale(key, locale);
     },
   };
+}
+
+/**
+ * Resolve the input for a step by reading its declared inputContextKeys from SharedContext.
+ * Returns a record of { key: value } for each key that has data in the context.
+ */
+export function resolveStepInput(
+  inputContextKeys: string[] | undefined,
+  context: SharedTaskContext,
+): Record<string, unknown> {
+  if (!inputContextKeys || inputContextKeys.length === 0) {
+    return {};
+  }
+  const input: Record<string, unknown> = {};
+  for (const key of inputContextKeys) {
+    const value = context.get(key);
+    if (value !== undefined) {
+      input[key] = value;
+    }
+  }
+  return input;
+}
+
+/**
+ * Write a step's output to SharedContext under its declared outputContextKey.
+ * No-op if outputContextKey is not set.
+ */
+export function writeStepOutput(
+  outputContextKey: string | undefined,
+  output: unknown,
+  context: SharedTaskContext,
+): void {
+  if (!outputContextKey) return;
+  context.set(outputContextKey, output);
 }

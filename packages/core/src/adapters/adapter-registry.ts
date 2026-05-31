@@ -12,6 +12,7 @@ import { AnthropicAdapter } from "./anthropic-adapter";
 const adapters = new Map<string, ProviderAdapter>([
   ["openai", new OpenAIAdapter()],
   ["deepseek", new DeepSeekAdapter()],
+  ["deepseek-anthropic", new AnthropicAdapter("deepseek-anthropic")],
   ["anthropic", new AnthropicAdapter()],
 ]);
 

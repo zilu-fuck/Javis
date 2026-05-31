@@ -29,6 +29,7 @@ interface ThreadViewProps {
   onDeleteRecentWorkspacePath?: (path: string) => void;
   onDraftGoalChange: (nextGoal: string) => void;
   onPermissionDecision?: (decision: "approved" | "denied") => void;
+  onAskUserAnswer?: (answer: string) => void;
   onRetryTask?: () => void;
   onStopTask?: () => void;
   onSubmit: FormEventHandler<HTMLFormElement>;
@@ -50,6 +51,7 @@ export function ThreadView({
   onDeleteRecentWorkspacePath,
   onDraftGoalChange,
   onPermissionDecision,
+  onAskUserAnswer,
   onRetryTask,
   onStopTask,
   onSubmit,
@@ -160,6 +162,7 @@ export function ThreadView({
             labels={labels}
             locale={locale}
             onPermissionDecision={onPermissionDecision}
+            onAskUserAnswer={onAskUserAnswer}
             task={task}
           />
         ) : null}
@@ -207,6 +210,7 @@ function hasTaskProcessDetails(task: WorkbenchTask): boolean {
       task.codeApplyResult ||
       task.fileOrganizationExecution ||
       task.permissionRequest ||
+      task.askUserQuestion ||
       task.project ||
       task.researchReport ||
       task.sources?.length ||

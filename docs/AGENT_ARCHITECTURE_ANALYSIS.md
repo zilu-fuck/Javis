@@ -52,7 +52,7 @@ Agent 与人类交互的机制——"不懂就问"。
 
 | 要素 | 实现 |
 |------|------|
-| 角色专业化 | 9 个 Agent 类型（Commander / File / Shell / Code / Research / Computer / Scheduler / Verifier / ChineseReviewer），各有限定工具白名单和双语系统提示词 |
+| 角色专业化 | 12 个 Agent 类型（Commander / File / Shell / Code / Research / Computer / Scheduler / Verifier / ChineseReviewer / Browser / Vision / Workspace），各有限定工具白名单和双语系统提示词 |
 | 任务分解与分发 | Commander 选择工作流，DAG 执行器按 `agentKind` + `requiredCapabilities` 分发步骤 |
 | 共享上下文 | `SharedTaskContext` 在步骤间传递，`context.set(step:${id})` 写入中间结果 |
 | 质量门 | Verifier Agent 逐项检查步骤证据是否满足成功标准 |
@@ -60,7 +60,7 @@ Agent 与人类交互的机制——"不懂就问"。
 
 **缺失：**
 
-- 工作流只有 5 个预定义模板，Commander 不能**动态组合** Agent
+- 工作流只有 7 个预定义模板，Commander 不能**动态组合** Agent
 - Agent 间通信是单向 DAG（上游→下游），没有**对等协商**（如 Code Agent 要求 File Agent 重新扫描）
 - 缺少 Agent 执行日志的结构化追踪
 
@@ -76,34 +76,28 @@ Agent 与人类交互的机制——"不懂就问"。
 |------|------|
 | DAG 依赖解析 | `workflow-dag-executor.ts` 正确实现了依赖分析 + 并行执行 |
 | 步骤状态机 | `TaskStatus` 覆盖 `created → planning → running → verifying → completed` |
+| 动态步骤生成 | P0-1: Commander LLM 动态生成 DAG（`runCommanderDagTask`），legacy 分支仅作 fallback |
+| Agent ReAct 循环 | P0-2: `executeStepWithReAct` + `runAgentReActLoop`（max 4 iterations），LLM 决策下一步工具 |
+| 失败重规划 | P0-3: `handleStepFailureReplan` + `replanDag`，Commander 生成 recovery steps |
+| 工具注册表 | 42 个 ToolDescriptor 通过 `initialToolDescriptors` 暴露给 LLM 做 tool selection |
 
 **缺失（按影响程度排序）：**
 
 | 缺口 | 现状 | 影响 |
 |------|------|------|
-| **动态步骤生成** | Commander 只从 5 个硬编码工作流中选一个（`workflows.ts`），不生成步骤 | 换个项目类型（Rust vs Spring Boot）步骤完全一样，失去"智能"意义 |
-| **Agent 内部 ReAct 循环** | 每个 Agent 执行一次 tool call 就结束，没有 observe→plan→act 闭环 | File Agent 扫描不全时不会自己补扫，Shell Agent 命令失败不会换方式重试 |
-| **工具自主选择** | Agent 的 `allowedToolNames` 是固定白名单 | Agent 不会根据中间结果决定"下一步该用哪个工具" |
-| **失败重规划** | DAG 某步失败 → 整个 workflow 直接 `failed` | 扫描超时不会触发降级策略，依赖失败不会重新调度 |
+| **ReAct 仅在 Commander DAG 路径生效** | legacy fallback 分支仍用单次 tool call | 无 Commander Tool（离线/测试模式）时无 ReAct 循环 |
+| **ReAct 决策依赖 LLM** | `reactDecideNext` 每次迭代需一次 LLM 调用 | 增加 token 消耗，延迟较高 |
+| **ReAct 失败直接触发 replan** | 无本地重试策略（如换参数重试），失败直接抛给 Commander | 增加不必要的 LLM 调用 |
 
 **当前 Plan 模式的实际流程：**
 
 ```
-用户目标 → 路由评分（routing.ts）→ 匹配预定义 workflow → DAG 执行 → 完成/失败
-              ↑ 这一步是"匹配"不是"规划"
+用户目标 → Commander LLM 动态生成 DAG → ReAct 每步执行
+              ↑ (P0-3: 失败时 replan)    ↑ (P0-2: observe→decide→act, max 4 iters)
+         legacy fallback（仅无 Commander Tool 时）
 ```
 
-**真正的 Plan 模式应该是：**
-
-```
-用户目标 → Commander 分析 → 动态生成步骤 DAG → 逐步执行
-              ↓ (每步执行后)
-         observe 结果 → 调整后续步骤 → 继续执行
-                           ↓ (失败时)
-                    分析原因 → 替换步骤 → 重新执行
-```
-
-**评分理由**：DAG 基础设施是好的，但规划层几乎是空的。Commander 的 system prompt 说 "decompose into concrete steps"，实际上它不做 decompose，它做的是 "select from 5 templates"。这是产品从"原型"到"可用"的最大障碍。
+**评分修正**：原评分 ★☆☆☆☆（1/5）已不准确。动态规划、ReAct 循环、失败重规划三项核心能力均已实现。剩余缺口为 legacy 路径覆盖和 ReAct 本地优化。修正为 **★★★☆☆（3/5）**。
 
 **补充：动态规划的安全风险**
 
@@ -120,7 +114,7 @@ Agent 与人类交互的机制——"不懂就问"。
 
 ---
 
-### 人在回路模式 — 安全有余、澄清为零（★★☆☆☆ 2/5）
+### 人在回路模式 — 安全完整、澄清已就位（★★★☆☆ 3/5）
 
 **已具备（安全回路）：**
 
@@ -138,12 +132,12 @@ Agent 与人类交互的机制——"不懂就问"。
 
 | 缺口 | 现状 | 影响 |
 |------|------|------|
-| **无 AskUser 工具** | 工具描述符中没有 `commander.askUser` 或类似工具 | Agent 遇到歧义只能猜，不能问 |
-| **Commander 不澄清** | `clarify-requirements` 步骤标记为 `planned`，从未实现 | 用户说"帮我看看这个项目"，Commander 不会反问"当前目录还是指定路径？" |
+| **无 AskUser 工具** | ~~原缺口~~ **[已于 2026-05-31 修复]** `commander.askUser` 工具已实现：descriptor 存在（descriptors.ts:20-25），Commander 的 `allowedToolNames` 包含（agents.ts:11），workflow-executor.ts 有完整 DAG 处理（行 1487-1706），App.tsx 有 UI 卡片，task-history.ts 有持久化 | Agent 遇到歧义可以主动提问 |
+| **Commander 不澄清** | Commander systemPrompt 已包含 "当目标模糊时必须先用 commander.askUser 向用户澄清"（agents.ts:14-15），P0-3/P0-4 replan+askUser 支持已实现（app-runtime.ts:899） | Commander 在目标模糊时能反问 |
 | **Agent 不追问** | 各 Agent system prompt 没有"信息不足时询问"的指令 | 缺参数时 Agent 用默认值填，而不是提示用户补充 |
 | **无确认阈值策略** | 所有 confirmed_write 操作一视同仁 | 改一个变量名和删除一个文件的确认流程完全相同，没有风险分级 |
 
-**评分理由**：安全回路是 Javis 的亮点——四道防线（UI → approval binding → path guard → one-shot）。但澄清回路完全没有，用户和 Agent 的交互仅限于"批准/拒绝"。桌面工作台产品的核心竞争力在于"让用户信任 Agent 能理解自己"，不会提问的 Agent 会让用户觉得不靠谱。
+**评分理由**：安全回路是 Javis 的亮点——四道防线（UI → approval binding → path guard → one-shot）。澄清回路已通过 `commander.askUser` 工具实现。风险分级仍未实现。扣分在"确认阈值策略"。
 
 ---
 
@@ -153,55 +147,41 @@ Agent 与人类交互的机制——"不懂就问"。
 |------|:---:|:---:|:---:|
 | **当前评分** | ★★★★☆ | ★☆☆☆☆ | ★★☆☆☆ |
 | **关注点** | Agent 间如何分工协作 | Agent 内部如何思考行动 | Agent 与人类如何交互 |
-| **Javis 现状** | 9 个 Agent + DAG 调度 | 5 个静态工作流 | 安全审批完整，无澄清机制 |
-| **最大短板** | 工作流不可动态组合 | Commander 不做规划 | Agent 不会提问 |
-| **投产价值** | 已可用 | 核心逻辑缺失 | 安全隐患已覆盖 |
+| **Javis 现状** | 12 个 Agent + DAG 调度 | Commander LLM 动态 DAG + ReAct 循环 + 失败重规划 | 安全审批完整，`commander.askUser` 澄清已实现 |
+| **最大短板** | 工作流不可动态组合（仅 legacy fallback 为静态） | ReAct 依赖 LLM 决策，legacy 路径无 ReAct | 无风险分级审批（所有 confirmed_write 同级） |
+| **投产价值** | 已可用 | 核心能力已就位 | 安全 + 澄清均已覆盖 |
 
 ---
 
 ## 改进路线
 
-### 第一阶段：Plan 模式核心（P0，预计 3-5 天）
+### 第一阶段：Plan 模式核心（P0）— ✅ 已完成
 
-```
-目标：让 Commander 从"匹配工作流"变成"规划工作流"
-```
+> **实施状态（2026-05-31）**：6 项全部实现。Commander LLM 动态 DAG 为主路径（`runCommanderDagTask`），legacy 路由仅在无 Commander Tool 时作为 fallback。
 
-| 项 | 说明 |
-|----|------|
-| Commander 动态规划 | Commander 接到目标后，调用 LLM 动态生成步骤列表（含 agentKind / tool / dependsOn / 预期输出），输出结构化的 `WorkbenchWorkflow` |
-| Commander 智能路由 | 用户未明确选择工作流时，Commander 分析意图自动选择模式。替代当前正则关键词匹配（`routing.ts`），改为 LLM 驱动的意图分类 + 工作流推荐 |
-| Agent ReAct 循环 | 每个 Agent 改为多轮循环：执行工具 → 观察结果 → 判断是否完成 → 未完成则选择下一个工具 |
-| 失败重规划 | DAG 某步失败后触发 Commander 重新评估，注入失败原因到上下文，生成修正后的后续步骤 |
-| 工具注册表 | 将 `descriptors.ts` 中的 21 个工具描述符暴露给 LLM 做 tool selection，替代固定 `allowedToolNames` |
+| 项 | 说明 | 状态 |
+|----|------|------|
+| Commander 动态规划 | Commander 调用 LLM 动态生成 DAG（agentKind / tool / dependsOn / 预期输出） | ✅ P0-1 |
+| Commander 智能路由 | Commander DAG 替代正则路由为主路径，legacy routing 仅做 fallback | ✅ P0-1 |
+| Agent ReAct 循环 | `executeStepWithReAct` + `runAgentReActLoop`，max 4 iterations，LLM 决策 | ✅ P0-2 |
+| 失败重规划 | `handleStepFailureReplan` + `replanDag`，Commander 生成 recovery steps | ✅ P0-3 |
+| 工具注册表 | 42 个 `initialToolDescriptors` 为单一真相源，暴露给 LLM | ✅ |
+| 动态规划安全校验 | 非法工具名/循环依赖/权限越界/步骤爆炸四道防线（`validateWorkflowDag` 等） | ✅ |
 
-**验收标准：**
+**遗留**：legacy fallback 路径无 ReAct/Replan 支持（仅无 Commander Tool 时触发）。
 
-- Commander 对非预定义目标（如"分析这个 Rust 项目"）能生成 ≥ 3 步的有效 DAG
-- DAG 通过 `validateWorkflowDag` 校验
-- 至少 5 个不同类型的用户目标（读项目、查文档、搜网页、创建提醒、代码修改）均生成合法步骤
-- 动态规划失败（非法工具名 / 循环依赖）时返回明确错误而非静默跳过
-- **智能路由**：用户输入模糊目标（如"帮我看看这个"）时，Commander 基于上下文（workspace 类型、文件类型、git 状态）推断最合适的工作流，准确率 ≥ 当前正则路由
+### 第二阶段：主动澄清（P1）— ⚠️ 部分完成
 
-### 第二阶段：主动澄清（P1，预计 2-3 天）
+> **实施状态（2026-05-31）**：`commander.askUser` 已完整实现（descriptor + DAG handler + UI + 持久化）。风险分级审批未做。
 
-```
-目标：让 Agent 学会提问
-```
+| 项 | 说明 | 状态 |
+|----|------|------|
+| `commander.askUser` 工具 | descriptor 存在 + DAG 中暂停执行 + UI 弹出问题卡片 + 用户回复后继续 | ✅ P0-4 |
+| Commander 澄清 prompt | systemPrompt 含 "当目标模糊时必须先用 commander.askUser 向用户澄清" | ✅ |
+| 确认阈值分级 | confirmed_write 分为 safe / risky / dangerous，UI 警告级别不同 | ❌ |
+| 澄清超时策略 | 用户超时未响应 → 任务自动暂停 | ❌ |
 
-| 项 | 说明 |
-|----|------|
-| `commander.askUser` 工具 | 新增工具描述符 + Rust 命令。LLM 调用时暂停 DAG，UI 弹出问题卡片，用户回复后继续 |
-| Commander 澄清 prompt | 在 Commander system prompt 中加入"遇到以下情况时必须先问用户：目标模糊、路径未指定、多选无法自动判断" |
-| 确认阈值分级 | 将 confirmed_write 分为 `safe`（修改变量名）/ `risky`（删除文件）/ `dangerous`（修改配置），UI 警告级别不同 |
-| 澄清超时策略 | 用户 5 分钟未响应 → 提示一次 → 30 分钟未响应 → 任务自动暂停（而非永久阻塞） |
-
-**验收标准：**
-
-- Commander 在目标模糊时调用 `askUser` 而非猜测（如"帮我看看"→ 反问"当前目录还是指定路径？"）
-- 用户回复后 DAG 从暂停点继续执行
-- 超时暂停的任务可在 UI 中手动恢复
-- confirmed_write 分级 UI 展示：safe（蓝色）/ risky（橙色）/ dangerous（红色）
+**验收标准**：Commander 在目标模糊时调用 `askUser`（✅）。confirmed_write 分级 UI（❌）。
 
 ### 第三阶段：多 Agent 深化（P2，预计 2-3 天）
 
@@ -242,15 +222,15 @@ Tool Dry Run → UI Approval Card → User Approve/Deny
 
 | Agent | 工具 | 权限 |
 |-------|------|------|
-| Commander | `commander.plan` | read |
-| File | `file.scanMarkdownDocuments`, `file.scanUserDocuments`, `file.classifyDocuments` | read |
+| Commander | `commander.plan`, `commander.synthesize` | read |
+| File | `file.scanMarkdownDocuments`, `file.scanUserDocuments`, `file.classifyDocuments`, `file.planPdfOrganization`, `file.executePdfOrganization`, `file.planWriteText`, `file.writeText` | read / preview / confirmed_write |
 | Shell | `shell.runReadOnlyCommand` | read |
 | Code | `code.inspectRepository`, `code.proposeEdit`, `code.applyProposedEdit` | read / preview / confirmed_write |
 | Research | `web.search`, `web.fetchSource` | read |
-| Computer | `file.listDirectory`, `computer.openPath`, `file.scanUserDocuments`, `file.scanUserImages` | read |
+| Computer | `file.listDirectory`, `computer.openPath`, `file.scanUserImages` | read |
+| Vision | `vision.analyze`, `vision.describe`, `vision.extractText` | read |
 | Scheduler | `scheduler.createTask`, `scheduler.updateTask`, `scheduler.deleteTask` | confirmed_write |
+| Workspace | `workspace.list`, `workspace.scaffold`, `workspace.create`, `workspace.delete` | read / preview / confirmed_write |
 | Verifier | `verifier.check` | read |
-| ChineseReviewer | (无工具，纯文本审校) | — |
-| Browser | (类型已定义，Agent 定义缺失 — 见 `AgentKind` 含 `browser` 但 `agents.ts` 无对应条目) | read |
-
-> **已知不一致**：`AgentKind` 类型和 `workflows.ts` 中引用了 `browser` Agent，但 `agents.ts` 的 `demoAgents` 数组中没有 Browser Agent 定义。需要补 Agent 定义或从类型中移除。
+| ChineseReviewer | (无 tool，纯 LLM 输出审校) | — |
+| Browser | `browser.navigate`, `browser.screenshot`, `browser.getContent`, `browser.click`, `browser.type`, `browser.evaluate`, `browser.runTest` | read / confirmed_write |

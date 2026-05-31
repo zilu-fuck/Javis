@@ -56,6 +56,14 @@ export interface WorkbenchPermissionRequest {
   };
 }
 
+export interface WorkbenchAskUserQuestion {
+  id: string;
+  question: string;
+  choices?: string[];
+  status: string;
+  answer?: string;
+}
+
 export interface WorkbenchFileOrganizationExecution {
   attemptedCount: number;
   movedCount: number;
@@ -146,6 +154,8 @@ export type WorkbenchStreamingAgentKind =
   | "research"
   | "code"
   | "verifier"
+  | "workspace"
+  | "vision"
   | "chinese-reviewer";
 
 export interface WorkbenchModelSettings {
@@ -169,6 +179,8 @@ export interface WorkbenchModelProfile {
   apiKeyReference: string;
   baseUrl: string;
   apiKey: string;  // only used in UI, never persisted
+  /** Whether an API key is already stored in the OS credential store for this profile. */
+  hasStoredApiKey?: boolean;
   capabilities: {
     vision: boolean;
     code: boolean;
@@ -188,6 +200,7 @@ export interface WorkbenchHistoryEntry {
   status: string;
   userGoal: string;
   updatedAt: string;
+  originMode?: "chat" | "project";
   workspacePath?: string;
   scheduledTaskId?: string;
 }
@@ -202,6 +215,8 @@ export interface WorkbenchTask {
   title: string;
   userGoal: string;
   status: string;
+  originMode?: "chat" | "project";
+  workspacePath?: string;
   commanderMessage: string;
   plan: WorkbenchStep[];
   agents: WorkbenchAgent[];
@@ -210,6 +225,7 @@ export interface WorkbenchTask {
   commands?: WorkbenchCommand[];
   fileOrganizationExecution?: WorkbenchFileOrganizationExecution;
   permissionRequest?: WorkbenchPermissionRequest;
+  askUserQuestion?: WorkbenchAskUserQuestion;
   project?: WorkbenchProject;
   codeReviewPreview?: WorkbenchCodeReviewPreview;
   codeProposedEdit?: WorkbenchCodeProposedEdit;
@@ -226,12 +242,15 @@ export interface WorkbenchTask {
 
 /** View identifier. Built-in values: "chat" | "automated" | "skills" | "apps" | "documents" | "gallery" | "computer". Workspace definitions may register additional view IDs. */
 export type ActiveView = string;
+export type WorkbenchSkillPage = "mine" | "market";
 
 export interface SidebarNavSubItem {
   label: string;
   path?: string;
   viewId?: ActiveView;
   mode?: "chat" | "project";
+  skillPage?: WorkbenchSkillPage;
+  badge?: number;
 }
 
 export interface SidebarNavItem {
@@ -269,6 +288,27 @@ export interface WorkbenchSkillEntry {
   enabled: boolean;
 }
 
+export type WorkbenchSkillSearchKind = "skill" | "mcp";
+export type WorkbenchSkillSearchSource = "github";
+
+export interface WorkbenchSkillSearchResult {
+  id: string;
+  title: string;
+  description: string;
+  url: string;
+  source: WorkbenchSkillSearchSource | string;
+  kind: WorkbenchSkillSearchKind;
+}
+
+export interface WorkbenchDetailItem {
+  title: string;
+  description?: string;
+  kind?: string;
+  source?: string;
+  url?: string;
+  metadata?: Array<{ label: string; value: string }>;
+}
+
 export interface WorkbenchFileEntry {
   name: string;
   path: string;
@@ -303,6 +343,10 @@ export interface JavisWorkbenchProps {
   scheduledTasks?: WorkbenchScheduledTask[];
   skillEntries?: WorkbenchSkillEntry[];
   skillTranslationStatus?: "idle" | "translating" | "error";
+  skillTranslationError?: string | null;
+  skillSearchResults?: WorkbenchSkillSearchResult[];
+  skillSearchStatus?: "idle" | "searching" | "error";
+  mcpConfigError?: string | null;
   /** Custom sidebar navigation items. Merged with built-in defaults. */
   sidebarNavItems?: SidebarNavItem[];
   installedApps?: WorkbenchAppEntry[];
@@ -334,15 +378,24 @@ export interface JavisWorkbenchProps {
   onDeleteRecentWorkspacePath?: (path: string) => void;
   onBrowseWorkspacePath?: () => void;
   onModelSettingsChange?: (settings: WorkbenchModelSettings) => void;
+  onTestModelConnection?: (settings: WorkbenchModelSettings) => Promise<string | void>;
   onModelConfigurationChange?: (config: WorkbenchModelConfiguration) => void;
+  onSaveProviderApiKey?: (keyReference: string, apiKey: string) => void;
   onSelectHistoryEntry?: (id: string) => void;
   onUseWorkspacePath?: (path: string) => void;
   onWorkspacePathChange?: (path: string) => void;
   onPermissionDecision?: (decision: "approved" | "denied") => void;
+  onAskUserAnswer?: (answer: string) => void;
   onRetryTask?: () => void;
   onStopTask?: () => void;
   onSubmitGoal: (goal?: string, workspacePath?: string, scheduledTaskId?: string) => void;
   onTranslateSkillsToChinese?: () => void;
+  onSearchSkillMarket?: (
+    query: string,
+    source: WorkbenchSkillSearchSource,
+    kind: WorkbenchSkillSearchKind,
+  ) => void;
+  onOpenDetail?: (detail: WorkbenchDetailItem) => void;
   onChangeActiveView?: (view: ActiveView) => void;
   onSelectComposeMode?: (mode: "chat" | "project") => void;
   activeComposeMode?: "chat" | "project";
@@ -373,6 +426,7 @@ export interface WorkbenchLocale {
     accountSettings: string;
     aiModeSettings: string;
     apps: string;
+    askUserQuestion: string;
     automatedTasks: string;
     collapseActivityLog: string;
     agentContextInspector: string;
@@ -437,6 +491,7 @@ export interface WorkbenchLocale {
     retryTask: string;
     send: string;
     stopTask: string;
+    submitAnswer: string;
     searchPlaceholder: string;
     settings: string;
     settingsPlaceholder: string;
@@ -483,6 +538,7 @@ export interface WorkbenchLocale {
     skillCategoryAgent: string;
     skillCategoryMcp: string;
     noMcpConfig: string;
+    mcpLoadError?: string;
     skillUiFeatureLabel: string;
     privacySecuritySettings: string;
     aboutFeedbackSettings: string;

@@ -116,9 +116,9 @@ importers:
       '@types/react-window':
         specifier: ^1.8.8
         version: 1.8.8
-      happy-dom:
-        specifier: ^20.9.0
-        version: 20.9.0
+      jsdom:
+        specifier: ^29.1.1
+        version: 29.1.1
       react-dom:
         specifier: ^19.1.0
         version: 19.2.6(react@19.2.6)
@@ -1800,6 +1800,7 @@ snapshots:
   '@types/node@25.9.1':
     dependencies:
       undici-types: 7.24.6
+    optional: true
 
   '@types/react-dom@19.2.3(@types/react@19.2.15)':
     dependencies:
@@ -1813,11 +1814,13 @@ snapshots:
     dependencies:
       csstype: 3.2.3
 
-  '@types/whatwg-mimetype@3.0.2': {}
+  '@types/whatwg-mimetype@3.0.2':
+    optional: true
 
   '@types/ws@8.18.1':
     dependencies:
       '@types/node': 25.9.1
+    optional: true
 
   '@vitejs/plugin-react@4.7.0(vite@7.3.3(@types/node@25.9.1))':
     dependencies:
@@ -1934,7 +1937,8 @@ snapshots:
 
   electron-to-chromium@1.5.361: {}
 
-  entities@7.0.1: {}
+  entities@7.0.1:
+    optional: true
 
   entities@8.0.0: {}
 
@@ -1997,6 +2001,7 @@ snapshots:
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
+    optional: true
 
   html-encoding-sniffer@6.0.0:
     dependencies:
@@ -2248,7 +2253,8 @@ snapshots:
 
   typescript@5.8.3: {}
 
-  undici-types@7.24.6: {}
+  undici-types@7.24.6:
+    optional: true
 
   undici@7.26.0: {}
 
@@ -2305,7 +2311,8 @@ snapshots:
 
   webidl-conversions@8.0.1: {}
 
-  whatwg-mimetype@3.0.0: {}
+  whatwg-mimetype@3.0.0:
+    optional: true
 
   whatwg-mimetype@5.0.0: {}
 
@@ -2322,7 +2329,8 @@ snapshots:
       siginfo: 2.0.0
       stackback: 0.0.2
 
-  ws@8.21.0: {}
+  ws@8.21.0:
+    optional: true
 
   xml-name-validator@5.0.0: {}
 

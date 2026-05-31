@@ -7,6 +7,8 @@ import type { ProviderAdapter } from "@javis/core";
 
 export interface CompletionOptions {
   model?: string;
+  imageDataUrl?: string;
+  images?: string[];
   maxTokens?: number;
   temperature?: number;
   stopSequences?: string[];
@@ -282,6 +284,7 @@ function createModelRequest(
   if (adapter) {
     return adapter.buildCompletionRequest({
       prompt: injectTerminologyPrompt(prompt, options?.locale),
+      imageDataUrl: options?.imageDataUrl,
       model: options?.model ?? providerSettings.model,
       providerId,
       baseUrl: providerSettings.baseUrl,
@@ -295,6 +298,7 @@ function createModelRequest(
 
   return {
     prompt: injectTerminologyPrompt(prompt, options?.locale),
+    imageDataUrl: options?.imageDataUrl,
     providerId,
     model: options?.model ?? providerSettings.model,
     apiKeyReference: providerSettings.apiKeyReference,

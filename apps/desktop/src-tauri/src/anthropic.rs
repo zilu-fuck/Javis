@@ -4,6 +4,7 @@ use std::{
     time::Duration,
 };
 
+use base64::{engine::general_purpose::STANDARD, Engine};
 use tauri::{AppHandle, Emitter};
 
 use crate::{
@@ -25,33 +26,42 @@ fn anthropic_endpoint(base_url: &str) -> String {
     if trimmed.ends_with("/messages") {
         return trimmed.to_string();
     }
+    if trimmed == "https://api.deepseek.com" {
+        return format!("{trimmed}/anthropic/messages");
+    }
     format!("{trimmed}/messages")
 }
 
 fn default_anthropic_base_url(provider_id: &str) -> String {
     match provider_id {
         "anthropic" => "https://api.anthropic.com/v1".to_string(),
+        "deepseek" | "deepseek-anthropic" => "https://api.deepseek.com/anthropic".to_string(),
         _ => "https://api.anthropic.com/v1".to_string(),
     }
 }
 
-fn build_anthropic_headers(api_key: &str) -> Vec<(String, String)> {
-    vec![
+fn build_anthropic_headers(api_key: &str, provider_id: &str) -> Vec<(String, String)> {
+    let mut headers = vec![
         ("x-api-key".to_string(), api_key.to_string()),
         ("anthropic-version".to_string(), ANTHROPIC_API_VERSION.to_string()),
         ("content-type".to_string(), "application/json".to_string()),
-    ]
+    ];
+    if provider_id == "deepseek" || provider_id == "deepseek-anthropic" {
+        headers.push(("Authorization".to_string(), format!("Bearer {api_key}")));
+    }
+    headers
 }
 
-fn build_anthropic_completion_body(model: &str, request: &ModelCompletionRequest) -> serde_json::Value {
+fn build_anthropic_completion_body(model: &str, request: &ModelCompletionRequest) -> Result<serde_json::Value, String> {
     let max_tokens = request.max_tokens.unwrap_or(2048);
+    let content = build_anthropic_message_content(request)?;
     let mut body = serde_json::json!({
         "model": model,
         "max_tokens": max_tokens,
         "messages": [
             {
                 "role": "user",
-                "content": request.prompt
+                "content": content
             }
         ],
         "stream": false,
@@ -64,18 +74,19 @@ fn build_anthropic_completion_body(model: &str, request: &ModelCompletionRequest
             body["stop_sequences"] = serde_json::json!(stop_sequences);
         }
     }
-    body
+    Ok(body)
 }
 
-fn build_anthropic_stream_body(model: &str, request: &ModelCompletionRequest) -> serde_json::Value {
+fn build_anthropic_stream_body(model: &str, request: &ModelCompletionRequest) -> Result<serde_json::Value, String> {
     let max_tokens = request.max_tokens.unwrap_or(2048);
+    let content = build_anthropic_message_content(request)?;
     let mut body = serde_json::json!({
         "model": model,
         "max_tokens": max_tokens,
         "messages": [
             {
                 "role": "user",
-                "content": request.prompt
+                "content": content
             }
         ],
         "stream": true,
@@ -88,7 +99,54 @@ fn build_anthropic_stream_body(model: &str, request: &ModelCompletionRequest) ->
             body["stop_sequences"] = serde_json::json!(stop_sequences);
         }
     }
-    body
+    Ok(body)
+}
+
+fn build_anthropic_message_content(request: &ModelCompletionRequest) -> Result<serde_json::Value, String> {
+    let images = crate::build_image_list(request);
+    if images.is_empty() {
+        return Ok(serde_json::Value::String(request.prompt.clone()));
+    }
+    let mut content: Vec<serde_json::Value> = vec![
+        serde_json::json!({ "type": "text", "text": request.prompt }),
+    ];
+    for image_data_url in &images {
+        let (media_type, data) = parse_data_url(image_data_url)?;
+        content.push(serde_json::json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data
+            }
+        }));
+    }
+    Ok(serde_json::json!(content))
+}
+
+fn parse_data_url(value: &str) -> Result<(String, String), String> {
+    let rest = value
+        .strip_prefix("data:")
+        .ok_or_else(|| "Image data URL must start with data:.".to_string())?;
+    let (metadata, data) = rest
+        .split_once(',')
+        .ok_or_else(|| "Image data URL must include a base64 payload.".to_string())?;
+    let media_type = metadata
+        .strip_suffix(";base64")
+        .ok_or_else(|| "Image data URL must use base64 encoding.".to_string())?;
+    let normalized_media_type = match media_type.to_ascii_lowercase().as_str() {
+        "image/png" => "image/png",
+        "image/jpeg" | "image/jpg" => "image/jpeg",
+        "image/webp" => "image/webp",
+        "image/gif" => "image/gif",
+        "image/bmp" => "image/bmp",
+        "image/tiff" | "image/tif" => "image/tiff",
+        _ => return Err("Unsupported image data URL format. Use PNG, JPEG, WebP, GIF, BMP, or TIFF.".to_string()),
+    };
+    if data.is_empty() || STANDARD.decode(data).is_err() {
+        return Err("Image data URL must contain a valid non-empty base64 payload.".to_string());
+    }
+    Ok((normalized_media_type.to_string(), data.to_string()))
 }
 
 fn extract_anthropic_usage(value: &serde_json::Value) -> Option<ModelUsage> {
@@ -128,7 +186,7 @@ pub(crate) fn run_anthropic_completion_request(
     let base_url = normalize_optional_config_value(request.base_url.as_deref())
         .unwrap_or_else(|| default_anthropic_base_url(&provider_id));
     let endpoint = anthropic_endpoint(&base_url);
-    let body = build_anthropic_completion_body(&model, request);
+    let body = build_anthropic_completion_body(&model, request)?;
     let body_text = serde_json::to_string(&body).map_err(|error| error.to_string())?;
 
     let client = reqwest::blocking::Client::builder()
@@ -137,7 +195,7 @@ pub(crate) fn run_anthropic_completion_request(
         .map_err(|error| error.to_string())?;
 
     let mut req_builder = client.post(&endpoint);
-    for (key, value) in build_anthropic_headers(&api_key) {
+    for (key, value) in build_anthropic_headers(&api_key, &provider_id) {
         req_builder = req_builder.header(&key, &value);
     }
 
@@ -178,7 +236,7 @@ pub(crate) fn execute_anthropic_streaming_request(
     let base_url = normalize_optional_config_value(request.base_url.as_deref())
         .unwrap_or_else(|| default_anthropic_base_url(&provider_id));
     let endpoint = anthropic_endpoint(&base_url);
-    let body = build_anthropic_stream_body(&model, request);
+    let body = build_anthropic_stream_body(&model, request)?;
     let body_text = serde_json::to_string(&body).map_err(|error| error.to_string())?;
 
     let client = reqwest::blocking::Client::builder()
@@ -187,7 +245,7 @@ pub(crate) fn execute_anthropic_streaming_request(
         .map_err(|error| error.to_string())?;
 
     let mut req_builder = client.post(&endpoint);
-    for (key, value) in build_anthropic_headers(&api_key) {
+    for (key, value) in build_anthropic_headers(&api_key, &provider_id) {
         req_builder = req_builder.header(&key, &value);
     }
 

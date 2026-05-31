@@ -87,6 +87,8 @@ Status: complete for the 2026-05-23 QA pass.
 
 ## Milestone 3: Persistence And Workspace Management
 
+Status: substantially complete (2026-05-31).
+
 - Store task history locally. Initial completed/failed/cancelled snapshot
   persistence is implemented in the desktop app.
 - Add durable approval records for pending and resolved confirmed-write
@@ -102,10 +104,13 @@ Status: complete for the 2026-05-23 QA pass.
 - Restore pending approval cards from durable approval records, and persist
   approve/deny/expired outcomes as audit evidence.
 - Add a clear history deletion path. Initial sidebar deletion is implemented.
-- Add workspace selection and remembered recent workspaces.
+- Add workspace selection and remembered recent workspaces. Implemented: desktop sidebar accepts manual paths and native directory picker, restores recent workspaces after restart.
 - Avoid storing secrets, tokens, raw cookies, or private keys.
+- SQLite migration: all 9 migration sets deployed, model-settings migrated; task history/approval/workspaces migration verification in progress.
 
 ## Milestone 4: Generalized Permission System
+
+Status: partially complete (2026-05-31).
 
 - Move approval-state enforcement from the PDF-specific path into a reusable
   confirmed-write mechanism.
@@ -125,20 +130,23 @@ Status: complete for the 2026-05-23 QA pass.
   native approval binding abstraction. Durable approval restore also recomputes
   the dry-run binding hash and checks Code Patch proposal files against the
   approved dry-run. Task binding and broader write-command migration remain.
+- File Write tool (file.planWriteText / file.writeText / file_write.rs) added; confirmed-write wiring in progress.
 - Keep dangerous actions rejected by default.
 
 ## Milestone 5: Product Hardening
+
+Status: partially complete (2026-05-31).
 
 - Improve empty states, loading states, and recovery paths.
 - Keep browser local storage free of model API keys. New saves now persist only
   provider/model/base URL and a key reference, legacy stored keys are cleared on
   load, and Windows native storage protects the referenced secret with DPAPI
   before single-request use by the Code Agent proposal command.
-- Add structured event stream objects instead of only snapshot updates.
+- Add structured event stream objects instead of only snapshot updates. Streaming pipeline complete: Rust SSE → Tauri events → delta-reducer → StreamingMessage → useSmoothStream typewriter animation with cancel support.
 - Add telemetry-free diagnostics export for local debugging.
 - Add signed builds, version strategy, artifact checksums, release notes, and
-  rollback notes.
-- Expand manual QA from MVP scenarios to complete-product workflows.
+  rollback notes. (not yet done)
+- Expand manual QA from MVP scenarios to complete-product workflows. QA evidence at docs/qa/2026-05-30/. 555 total tests (430 Vitest + 125 Rust).
 
 ## Explicit Non-Goals Until Product-Ready Core Is Complete
 
