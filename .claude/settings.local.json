@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(pnpm --filter @javis/ui typecheck)"
+      "Bash(pnpm --filter @javis/ui typecheck)",
+      "Bash(pnpm check *)"
     ]
   }
 }

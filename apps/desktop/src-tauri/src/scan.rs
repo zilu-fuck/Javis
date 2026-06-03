@@ -12,6 +12,24 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
+#[cfg(target_os = "windows")]
+use std::{ffi::{c_void, OsStr}, os::windows::ffi::OsStrExt, ptr::null_mut};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::{
+    Graphics::Gdi::{
+        CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+    },
+    UI::{
+        Controls::ILD_TRANSPARENT,
+        Shell::{
+            SHGetFileInfoW, SHGetImageList, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON,
+            SHGFI_SYSICONINDEX, SHIL_EXTRALARGE, SHIL_JUMBO,
+        },
+        WindowsAndMessaging::{DestroyIcon, DrawIconEx, HICON, DI_NORMAL},
+    },
+};
+
 // ── Sidebar scanning infrastructure ──────────────────────────────────
 
 #[derive(Clone, Serialize)]
@@ -337,8 +355,10 @@ struct ActiveScan {
 
 static ACTIVE_SCANS: Mutex<Vec<ActiveScan>> = Mutex::new(Vec::new());
 
-fn register_scan() -> (String, Arc<AtomicBool>) {
-    let scan_id = format!("scan-{}", NEXT_SCAN_ID.fetch_add(1, Ordering::Relaxed));
+fn register_scan(scan_id: Option<String>) -> (String, Arc<AtomicBool>) {
+    let scan_id = scan_id
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or_else(|| format!("scan-{}", NEXT_SCAN_ID.fetch_add(1, Ordering::Relaxed)));
     let cancelled = Arc::new(AtomicBool::new(false));
     let mut scans = ACTIVE_SCANS.lock().unwrap();
     scans.retain(|s| !s.cancelled.load(Ordering::Relaxed));
@@ -362,6 +382,25 @@ struct ScanProgressPayload {
     total: usize,
 }
 
+fn emit_scan_progress(
+    app: &AppHandle,
+    event_name: &str,
+    scan_id: Option<&str>,
+    current: usize,
+    total: usize,
+) {
+    if let Some(scan_id) = scan_id {
+        let _ = app.emit(
+            event_name,
+            ScanProgressPayload {
+                scan_id: scan_id.to_string(),
+                current,
+                total,
+            },
+        );
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ScanDonePayload {
@@ -381,8 +420,9 @@ pub(crate) fn scan_all_user_files(
     app_handle: AppHandle,
     extensions: Option<Vec<String>>,
     max_results: Option<usize>,
+    scan_id: Option<String>,
 ) -> Result<String, String> {
-    let (scan_id, cancelled) = register_scan();
+    let (scan_id, cancelled) = register_scan(scan_id);
     let scan_id_clone = scan_id.clone();
     let app = app_handle.clone();
 
@@ -438,23 +478,17 @@ pub(crate) fn execute_scan(
     scan_id: &str,
 ) -> Result<Vec<FileEntry>, String> {
     let mut entries = Vec::new();
-    let total = roots.len();
+    let total = count_matching_files(roots, ext_lower, filter_by_ext, max, max_depth, cancelled);
+    let total = total.max(1);
+    let mut current = 0usize;
 
-    for (index, root) in roots.iter().enumerate() {
+    for root in roots {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
         if !root.exists() || !root.is_dir() {
             continue;
         }
-        let _ = app.emit(
-            "scan-all-files-progress",
-            ScanProgressPayload {
-                scan_id: scan_id.to_string(),
-                current: index + 1,
-                total,
-            },
-        );
         collect_files_inner_for_scan(
             root,
             ext_lower,
@@ -464,6 +498,10 @@ pub(crate) fn execute_scan(
             0,
             &mut entries,
             cancelled,
+            Some(app),
+            Some(scan_id),
+            total,
+            &mut current,
         );
         if entries.len() >= max {
             break;
@@ -478,6 +516,91 @@ pub(crate) fn execute_scan(
     });
     entries.truncate(max);
     Ok(entries)
+}
+
+fn count_matching_files(
+    roots: &[PathBuf],
+    extensions: &[String],
+    filter_by_ext: bool,
+    max_results: usize,
+    max_depth: usize,
+    cancelled: &AtomicBool,
+) -> usize {
+    let mut total = 0usize;
+    for root in roots {
+        if cancelled.load(Ordering::Relaxed) || total >= max_results {
+            break;
+        }
+        if root.exists() && root.is_dir() {
+            count_matching_files_inner(
+                root,
+                extensions,
+                filter_by_ext,
+                max_results,
+                max_depth,
+                0,
+                &mut total,
+                cancelled,
+            );
+        }
+    }
+    total
+}
+
+fn count_matching_files_inner(
+    dir: &Path,
+    extensions: &[String],
+    filter_by_ext: bool,
+    max_results: usize,
+    max_depth: usize,
+    depth: usize,
+    total: &mut usize,
+    cancelled: &AtomicBool,
+) {
+    if *total >= max_results || depth >= max_depth || cancelled.load(Ordering::Relaxed) {
+        return;
+    }
+    let read_dir = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+    let skip_lower: Vec<String> = SKIP_DIRS.iter().map(|d| d.to_lowercase()).collect();
+    for entry in read_dir {
+        if *total >= max_results || cancelled.load(Ordering::Relaxed) {
+            return;
+        }
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        if path.is_dir() {
+            let name_lower = file_name.to_lowercase();
+            if !skip_lower.contains(&name_lower)
+                && !is_root_level_vendor_skip(&file_name, dir)
+            {
+                count_matching_files_inner(
+                    &path,
+                    extensions,
+                    filter_by_ext,
+                    max_results,
+                    max_depth,
+                    depth + 1,
+                    total,
+                    cancelled,
+                );
+            }
+            continue;
+        }
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if !filter_by_ext || extensions.contains(&ext) {
+            *total += 1;
+        }
+    }
 }
 
 #[tauri::command]
@@ -506,6 +629,10 @@ pub(crate) fn collect_files_inner_for_scan(
     depth: usize,
     entries: &mut Vec<FileEntry>,
     cancelled: &AtomicBool,
+    app: Option<&AppHandle>,
+    scan_id: Option<&str>,
+    total: usize,
+    current: &mut usize,
 ) {
     if entries.len() >= max_results || depth >= max_depth {
         return;
@@ -539,7 +666,7 @@ pub(crate) fn collect_files_inner_for_scan(
             {
                 collect_files_inner_for_scan(
                     &path, extensions, filter_by_ext, max_results,
-                    max_depth, depth + 1, entries, cancelled,
+                    max_depth, depth + 1, entries, cancelled, app, scan_id, total, current,
                 );
             }
             continue;
@@ -570,12 +697,25 @@ pub(crate) fn collect_files_inner_for_scan(
             modified_at,
             extension: Some(ext),
         });
+        *current += 1;
+        if let Some(app) = app {
+            emit_scan_progress(
+                app,
+                "scan-all-files-progress",
+                scan_id,
+                (*current).min(total),
+                total,
+            );
+        }
     }
 }
 
 
 #[tauri::command]
-pub(crate) fn scan_installed_apps() -> Result<Vec<AppEntry>, String> {
+pub(crate) fn scan_installed_apps(
+    app_handle: AppHandle,
+    scan_id: Option<String>,
+) -> Result<Vec<AppEntry>, String> {
     // Windows-only: scan Start Menu and Desktop shortcuts
     #[cfg(not(target_os = "windows"))]
     {
@@ -585,6 +725,7 @@ pub(crate) fn scan_installed_apps() -> Result<Vec<AppEntry>, String> {
     #[cfg(target_os = "windows")]
     {
         let mut apps: Vec<AppEntry> = Vec::new();
+        let mut shortcuts: Vec<AppShortcut> = Vec::new();
         let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         let start_menu_paths = [
@@ -599,11 +740,39 @@ pub(crate) fn scan_installed_apps() -> Result<Vec<AppEntry>, String> {
             PathBuf::from("C:\\Users\\Public\\Desktop"),
         ];
 
-        for root in start_menu_paths.iter().chain(desktop_paths.iter()) {
-            if !root.exists() {
-                continue;
+        let roots = start_menu_paths.iter().chain(desktop_paths.iter()).collect::<Vec<_>>();
+        for root in roots {
+            if root.exists() {
+                collect_lnk_shortcuts(root, &mut shortcuts, &mut seen_names);
             }
-            collect_lnk_files(root, &mut apps, &mut seen_names);
+        }
+
+        let total = shortcuts.len().max(1);
+        let mut current = 0usize;
+        for shortcut in shortcuts {
+            let (resolved_path, icon_path) =
+                resolve_lnk_target(&shortcut.path).unwrap_or_else(|| {
+                    (shortcut.path.to_string_lossy().to_string(), None)
+                });
+
+            apps.push(AppEntry {
+                name: shortcut.name,
+                path: resolved_path,
+                icon_path,
+                publisher: None,
+                install_location: shortcut
+                    .path
+                    .parent()
+                    .map(|p| p.to_string_lossy().to_string()),
+            });
+            current += 1;
+            emit_scan_progress(
+                &app_handle,
+                "scan-installed-apps-progress",
+                scan_id.as_deref(),
+                current.min(total),
+                total,
+            );
         }
 
         apps.sort_by_key(|a| a.name.to_lowercase());
@@ -618,13 +787,248 @@ pub(crate) fn scan_installed_apps() -> Result<Vec<AppEntry>, String> {
 // A future phase can add full resolution to show the actual executable path.
 #[cfg(target_os = "windows")]
 fn resolve_lnk_target(lnk_path: &Path) -> Option<(String, Option<String>)> {
-    Some((lnk_path.to_string_lossy().to_string(), None))
+    Some((
+        lnk_path.to_string_lossy().to_string(),
+        extract_file_icon_data_url(lnk_path),
+    ))
 }
 
 #[cfg(target_os = "windows")]
-fn collect_lnk_files(
+fn extract_file_icon_data_url(path: &Path) -> Option<String> {
+    if let Some(icon) = extract_system_image_list_icon_data_url(path) {
+        return Some(icon);
+    }
+
+    let wide_path = wide_path(path);
+    let mut file_info: SHFILEINFOW = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        SHGetFileInfoW(
+            wide_path.as_ptr(),
+            0,
+            &mut file_info,
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_ICON | SHGFI_LARGEICON,
+        )
+    };
+    if result == 0 || file_info.hIcon.is_null() {
+        return None;
+    }
+
+    let icon = file_info.hIcon;
+    let png = render_icon_png(icon, 48);
+    unsafe {
+        DestroyIcon(icon);
+    }
+    png.map(|bytes| format!("data:image/png;base64,{}", STANDARD.encode(bytes)))
+}
+
+#[cfg(target_os = "windows")]
+fn wide_path(path: &Path) -> Vec<u16> {
+    OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(target_os = "windows")]
+fn extract_system_image_list_icon_data_url(path: &Path) -> Option<String> {
+    let icon_index = system_icon_index(path)?;
+    let icon = image_list_icon(icon_index, SHIL_JUMBO)
+        .or_else(|| image_list_icon(icon_index, SHIL_EXTRALARGE))?;
+    let png = render_icon_png(icon, 96);
+    unsafe {
+        DestroyIcon(icon);
+    }
+    png.map(|bytes| format!("data:image/png;base64,{}", STANDARD.encode(bytes)))
+}
+
+#[cfg(target_os = "windows")]
+fn system_icon_index(path: &Path) -> Option<i32> {
+    let wide_path = wide_path(path);
+    let mut file_info: SHFILEINFOW = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        SHGetFileInfoW(
+            wide_path.as_ptr(),
+            0,
+            &mut file_info,
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_SYSICONINDEX,
+        )
+    };
+    if result == 0 {
+        return None;
+    }
+    Some(file_info.iIcon)
+}
+
+#[repr(C)]
+#[cfg(target_os = "windows")]
+struct ImageList {
+    vtable: *const ImageListVtable,
+}
+
+#[repr(C)]
+#[cfg(target_os = "windows")]
+struct ImageListVtable {
+    query_interface: usize,
+    add_ref: usize,
+    release: unsafe extern "system" fn(*mut ImageList) -> u32,
+    add: usize,
+    replace_icon: usize,
+    set_overlay_image: usize,
+    replace: usize,
+    add_masked: usize,
+    draw: usize,
+    remove: usize,
+    get_icon: unsafe extern "system" fn(*mut ImageList, i32, u32, *mut HICON) -> i32,
+}
+
+#[cfg(target_os = "windows")]
+fn image_list_icon(icon_index: i32, image_list_size: u32) -> Option<HICON> {
+    const IID_IIMAGE_LIST: windows_sys::core::GUID =
+        windows_sys::core::GUID::from_u128(0x46eb5926_582e_4017_9fdf_e8998daa0950);
+
+    let mut list_ptr: *mut c_void = null_mut();
+    let hr = unsafe {
+        SHGetImageList(
+            image_list_size as i32,
+            &IID_IIMAGE_LIST,
+            &mut list_ptr,
+        )
+    };
+    if hr < 0 || list_ptr.is_null() {
+        return None;
+    }
+
+    let list = list_ptr as *mut ImageList;
+    let vtable = unsafe { (*list).vtable };
+    if vtable.is_null() {
+        return None;
+    }
+
+    let mut icon: HICON = null_mut();
+    let icon_hr = unsafe {
+        ((*vtable).get_icon)(list, icon_index, ILD_TRANSPARENT, &mut icon)
+    };
+    unsafe {
+        ((*vtable).release)(list);
+    }
+
+    if icon_hr < 0 || icon.is_null() {
+        return None;
+    }
+    Some(icon)
+}
+
+#[cfg(target_os = "windows")]
+fn render_icon_png(icon: HICON, size: i32) -> Option<Vec<u8>> {
+    if icon.is_null() || size <= 0 {
+        return None;
+    }
+
+    let dc = unsafe { CreateCompatibleDC(null_mut()) };
+    if dc.is_null() {
+        return None;
+    }
+
+    let mut bits: *mut c_void = null_mut();
+    let mut bitmap_info: BITMAPINFO = unsafe { std::mem::zeroed() };
+    bitmap_info.bmiHeader = BITMAPINFOHEADER {
+        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: size,
+        biHeight: -size,
+        biPlanes: 1,
+        biBitCount: 32,
+        biCompression: BI_RGB,
+        biSizeImage: 0,
+        biXPelsPerMeter: 0,
+        biYPelsPerMeter: 0,
+        biClrUsed: 0,
+        biClrImportant: 0,
+    };
+
+    let bitmap = unsafe {
+        CreateDIBSection(
+            dc,
+            &bitmap_info,
+            DIB_RGB_COLORS,
+            &mut bits,
+            null_mut(),
+            0,
+        )
+    };
+    if bitmap.is_null() || bits.is_null() {
+        unsafe {
+            DeleteDC(dc);
+        }
+        return None;
+    }
+
+    let old_bitmap = unsafe { SelectObject(dc, bitmap) };
+    let drawn = unsafe {
+        DrawIconEx(
+            dc,
+            0,
+            0,
+            icon,
+            size,
+            size,
+            0,
+            null_mut(),
+            DI_NORMAL,
+        )
+    };
+
+    let result = if drawn != 0 {
+        let byte_len = (size as usize) * (size as usize) * 4;
+        let bgra = unsafe { std::slice::from_raw_parts(bits as *const u8, byte_len) };
+        encode_bgra_png(bgra, size as u32, size as u32)
+    } else {
+        None
+    };
+
+    unsafe {
+        if !old_bitmap.is_null() {
+            SelectObject(dc, old_bitmap);
+        }
+        DeleteObject(bitmap);
+        DeleteDC(dc);
+    }
+
+    result
+}
+
+#[cfg(target_os = "windows")]
+fn encode_bgra_png(bgra: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    use image::ImageEncoder as _;
+
+    let has_alpha = bgra.chunks_exact(4).any(|pixel| pixel[3] > 0);
+    let mut rgba = Vec::with_capacity(bgra.len());
+    for pixel in bgra.chunks_exact(4) {
+        let alpha = if has_alpha {
+            pixel[3]
+        } else if pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0 {
+            255
+        } else {
+            0
+        };
+        rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], alpha]);
+    }
+
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
+        .ok()?;
+    Some(png)
+}
+
+#[cfg(target_os = "windows")]
+struct AppShortcut {
+    name: String,
+    path: PathBuf,
+}
+
+#[cfg(target_os = "windows")]
+fn collect_lnk_shortcuts(
     dir: &Path,
-    apps: &mut Vec<AppEntry>,
+    shortcuts: &mut Vec<AppShortcut>,
     seen_names: &mut std::collections::HashSet<String>,
 ) {
     let read_dir = match fs::read_dir(dir) {
@@ -638,38 +1042,33 @@ fn collect_lnk_files(
         };
         let path = entry.path();
         if path.is_dir() {
-            collect_lnk_files(&path, apps, seen_names);
+            collect_lnk_shortcuts(&path, shortcuts, seen_names);
             continue;
         }
-        let ext = path
-            .extension()
-            .map(|e| e.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        if ext != "lnk" {
+
+        let Some(name) = shortcut_name_from_path(&path) else {
             continue;
-        }
-        let name = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
+        };
         let normalized = name.to_lowercase();
         if seen_names.contains(&normalized) {
             continue;
         }
         seen_names.insert(normalized);
-
-        // Resolve .lnk target using Windows COM IShellLink
-        let (resolved_path, icon_path) =
-            resolve_lnk_target(&path).unwrap_or_else(|| (path.to_string_lossy().to_string(), None));
-
-        apps.push(AppEntry {
-            name,
-            path: resolved_path,
-            icon_path,
-            publisher: None,
-            install_location: path.parent().map(|p| p.to_string_lossy().to_string()),
-        });
+        shortcuts.push(AppShortcut { name, path });
     }
+}
+
+#[cfg(target_os = "windows")]
+fn shortcut_name_from_path(path: &Path) -> Option<String> {
+    let ext = path.extension()?.to_string_lossy().to_lowercase();
+    if ext != "lnk" {
+        return None;
+    }
+    let name = path.file_stem()?.to_string_lossy().trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    Some(name)
 }
 
 #[tauri::command]

@@ -55,8 +55,26 @@ export interface AppEntry {
   installLocation?: string;
 }
 
-export async function scanInstalledApps(): Promise<AppEntry[]> {
-  return invoke<AppEntry[]>("scan_installed_apps");
+export async function scanInstalledApps(
+  onProgress?: (progress: ScanProgressPayload) => void,
+): Promise<AppEntry[]> {
+  const scanId = createScanId("apps");
+  let unlisten: (() => void) | undefined;
+  if (onProgress) {
+    unlisten = await listen<ScanProgressPayload>(
+      "scan-installed-apps-progress",
+      (event) => {
+        if (event.payload.scanId === scanId) {
+          onProgress(event.payload);
+        }
+      },
+    );
+  }
+  try {
+    return await invoke<AppEntry[]>("scan_installed_apps", { scanId });
+  } finally {
+    unlisten?.();
+  }
 }
 
 export async function scanUserDocuments(
@@ -75,6 +93,10 @@ export async function scanUserImages(
   return invoke<FileEntry[]>("scan_user_images", {
     maxResults: maxResults ?? null,
   });
+}
+
+function createScanId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 export async function listDirectory(path: string): Promise<FileEntry[]> {
@@ -210,11 +232,7 @@ export async function scanAllUserFiles(
   maxResults?: number,
   onProgress?: (progress: ScanProgressPayload) => void,
 ): Promise<FileEntry[]> {
-  // Start the scan — returns a scan_id immediately
-  const scanId = await invoke<string>("scan_all_user_files", {
-    extensions: extensions ?? null,
-    maxResults: maxResults ?? null,
-  });
+  const scanId = createScanId("files");
 
   return new Promise<FileEntry[]>((resolve, reject) => {
     const unlistenFns: (() => void)[] = [];
@@ -261,6 +279,12 @@ export async function scanAllUserFiles(
           },
         );
         unlistenFns.push(unlistenError);
+
+        await invoke<string>("scan_all_user_files", {
+          extensions: extensions ?? null,
+          maxResults: maxResults ?? null,
+          scanId,
+        });
       } catch (error) {
         cleanup();
         reject(error);

@@ -1,16 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   createInitialTaskSnapshot,
+  getAdapter,
+  hasImageAttachments,
   injectDocumentContext,
+  PROVIDER_DEFINITIONS,
   type ChatMessage,
   type TaskSnapshot,
 } from "@javis/core";
+import { bridgeVisionIfNeeded } from "./vision-bridge";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openPath } from "@tauri-apps/plugin-opener";
 import type {
   ActiveView,
+  WorkbenchPermissionDecision,
   WorkbenchModelConfiguration,
+  WorkbenchModelProfile,
   WorkbenchScheduledTask,
   WorkbenchSkillEntry,
   WorkbenchSkillSearchKind,
@@ -39,7 +45,8 @@ import {
   APPROVAL_RECORDS_MIGRATIONS,
   createApprovalRecordsRepository,
 } from "./approval-records-persistence";
-import { createJavisRuntime } from "./app-runtime";
+import { createJavisRuntime, loadTrustedComputerApps, removeTrustedComputerApp } from "./app-runtime";
+import { ErrorBoundary } from "./ErrorBoundary";
 import {
   CODE_PATCH_APPROVAL_TITLE,
   CODE_PATCH_APPROVAL_TOOL_NAME,
@@ -128,6 +135,7 @@ import {
   importToolCallAuditJsonlFromLocalStorage,
   JSONL_LOG_MIGRATIONS,
 } from "./jsonl-log-persistence";
+import type { TrustedComputerApp } from "@javis/tools";
 import { initialToolDescriptors } from "@javis/tools";
 import {
   createDefaultAgentRegistry,
@@ -231,6 +239,33 @@ function logNonFatalError(context: string, error: unknown) {
 
 type SubmitGoalHandler = (goalOverride?: string, workspacePathOverride?: string, scheduledTaskId?: string) => void;
 
+function hasUsableAiConfiguration(
+  modelConfiguration: WorkbenchModelConfiguration | undefined,
+  modelSettings: { provider: string; model: string; apiKey: string; baseUrl: string },
+): boolean {
+  if (modelSettings.model.trim() && (modelSettings.apiKey.trim() || allowsLocalModelWithoutKey(modelSettings))) {
+    return true;
+  }
+  return Boolean(modelConfiguration?.profiles.some(isUsableModelProfile));
+}
+
+function isUsableModelProfile(profile: WorkbenchModelProfile): boolean {
+  if (!profile.provider.trim() || !profile.model.trim()) {
+    return false;
+  }
+  return Boolean(profile.apiKey.trim() || profile.hasStoredApiKey || allowsLocalModelWithoutKey(profile));
+}
+
+function allowsLocalModelWithoutKey(settings: { provider: string; baseUrl: string }): boolean {
+  const provider = settings.provider.trim().toLowerCase();
+  const baseUrl = settings.baseUrl.trim().toLowerCase();
+  return provider === "ollama"
+    || baseUrl.startsWith("http://localhost")
+    || baseUrl.startsWith("http://127.")
+    || baseUrl.startsWith("http://[::1]")
+    || baseUrl.startsWith("http://::1");
+}
+
 function App() {
   const databaseRef = useRef<DesktopDatabase | null>(null);
   const taskHistoryRepoRef = useRef<TaskHistoryRepositoryLike>(null);
@@ -261,6 +296,21 @@ function App() {
   } = useWorkspaceSessionControls(window.localStorage, workspaceSessionRepoRef);
   const { recentWorkspacePaths, workspacePath } = workspaceSession;
   const { modelSettings, updateModelSettings } = useModelSettingsControls(window.localStorage);
+  const providerCatalog = useMemo(
+    () =>
+      PROVIDER_DEFINITIONS.map((def) => ({
+        id: def.id,
+        label: def.label,
+        defaultBaseUrl: def.defaultBaseUrl,
+        apiType: (def.protocol === "anthropic" ? "anthropic-messages" : "openai-compatible") as "openai-compatible" | "anthropic-messages",
+        modelListMode: def.modelListMode,
+      })),
+    [],
+  );
+  const getProviderCapabilities = useMemo(
+    () => (providerId: string) => getAdapter(providerId).capabilities,
+    [],
+  );
   // Ref always holds the effective workspace for the current/next run.
   // When a scheduled task fires with its own workspace, the ref is updated
   // synchronously so the runtime reads the correct path even before React
@@ -298,6 +348,7 @@ function App() {
   const auditRecordIdsRef = useRef(new Set<string>());
   const [draftGoal, setDraftGoal] = useState(DEFAULT_DRAFT_GOAL);
   const [composeMode, setComposeMode] = useState<"chat" | "project">("chat");
+  const [aiConfigPrompt, setAiConfigPrompt] = useState<{ title: string; message: string } | null>(null);
 
   // ── Sidebar view state ───────────────────────────────────────────
   const [activeView, setActiveView] = useState<ActiveView>("chat");
@@ -309,13 +360,35 @@ function App() {
       void modelSettingsRepoRef.current?.save(settings);
     }
     const provider = createConfiguredModelProvider(settings);
-    const result = await provider.complete("Reply with OK.", {
-      maxTokens: 8,
-      temperature: 0,
-      locale: localePreference,
-    });
-    const modelLabel = result.model || settings.model;
-    return modelLabel ? `API 连通正常：${modelLabel}` : "API 连通正常";
+    try {
+      const result = await provider.complete("Hi", {
+        maxTokens: 16,
+        temperature: 0,
+        locale: localePreference,
+      });
+      const modelLabel = result.model || settings.model;
+      return modelLabel ? `API 连通正常：${modelLabel}` : "API 连通正常";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // Classify common failures with actionable messages (inspired by openhanako).
+      if (message.includes("401") || message.includes("Unauthorized") || message.includes("invalid token")) {
+        throw new Error("API Key 无效，请检查密钥是否正确");
+      }
+      if (message.includes("403") || message.includes("Forbidden")) {
+        throw new Error("API 访问被拒，请检查权限或 Base URL");
+      }
+      if (message.includes("Could not read model API key secret")) {
+        throw new Error("未找到 API Key。请在左侧 provider 面板保存密钥，并将模型分配到 Primary 槽位后重试");
+      }
+      if (message.includes("timed out") || message.includes("Timeout") || message.includes("timeout")) {
+        throw new Error("连接超时，无法连接到 API 服务器，请检查网络或 Base URL");
+      }
+      if (message.includes("refused") || message.includes("Connection refused") || message.includes("dns error") || message.includes("Name or service not known")) {
+        throw new Error("无法连接到 API 服务器，请检查 Base URL 是否正确");
+      }
+      // Re-throw with original message for unrecognized errors
+      throw new Error(message);
+    }
   }
   const [prefSidebarWidth, setPrefSidebarWidth] = useState<number | undefined>();
   const [prefIsActivityOpen, setPrefIsActivityOpen] = useState<boolean | undefined>();
@@ -354,6 +427,9 @@ function App() {
   const [skillSearchResults, setSkillSearchResults] = useState<WorkbenchSkillSearchResult[]>([]);
   const [mcpConfig, setMcpConfig] = useState<McpServerConfig[]>([]);
   const [mcpConfigError, setMcpConfigError] = useState<string | null>(null);
+  const [trustedComputerApps, setTrustedComputerApps] = useState<TrustedComputerApp[]>(
+    () => loadTrustedComputerApps(),
+  );
 
   const fileClassificationRepoRef = useRef<FileClassificationRepository | null>(null);
   const modelProfileRepoRef = useRef<ModelProfileRepositoryLike>(null);
@@ -382,6 +458,9 @@ function App() {
     imagesError,
     computerError,
     scanProgress,
+    appsProgress,
+    docsProgress,
+    imagesProgress,
     classifying,
     classifyProgress,
     mountRoots,
@@ -392,7 +471,7 @@ function App() {
     handleNavigateDirectory,
     handleListDirectory,
     handleRefreshScan,
-    handleClassifyDocuments,
+    handleClassifyDocuments: runClassifyDocuments,
     handleCancelClassify,
     scanning,
   } = useScannedData({
@@ -415,6 +494,35 @@ function App() {
   useEffect(() => {
     setSkillEntries(applySkillTranslationCache(buildSkillEntries(mcpConfig), skillTranslationCache));
   }, [mcpConfig, skillTranslationCache]);
+
+  // Keep trusted computer apps in sync with localStorage writes from app-runtime.
+  useEffect(() => {
+    const handler = () => setTrustedComputerApps(loadTrustedComputerApps());
+    window.addEventListener("javis:computer-trusted-apps-changed", handler);
+    return () => window.removeEventListener("javis:computer-trusted-apps-changed", handler);
+  }, []);
+
+  function showAiConfigRequired(feature: string) {
+    setAiConfigPrompt({
+      title: "需要先配置 AI",
+      message: `${feature} 需要可用的 AI 模型。请先在左侧底部“设置 > AI 模式”里添加模型并保存密钥。`,
+    });
+  }
+
+  function ensureAiConfigured(feature: string): boolean {
+    if (hasUsableAiConfiguration(modelConfigRef.current, modelSettings)) {
+      return true;
+    }
+    showAiConfigRequired(feature);
+    return false;
+  }
+
+  async function handleClassifyDocuments() {
+    if (!ensureAiConfigured("文档和图片的智能分类/检索")) {
+      return;
+    }
+    await runClassifyDocuments();
+  }
 
   async function handleTranslateSkillsToChinese() {
     if (skillTranslationStatus === "translating") {
@@ -567,6 +675,22 @@ function App() {
       modelSettingsRepoRef.current = modelSettingsRepo;
       modelProfileRepoRef.current = modelProfileRepo;
 
+      // Load saved model configuration so chat/commands work on first launch
+      try {
+        const savedConfig = await modelProfileRepo.load();
+        if (savedConfig.profiles.length > 0) {
+          const uiConfig = {
+            profiles: savedConfig.profiles.map((p) => ({ ...p, apiKey: "", hasStoredApiKey: true })),
+            agentOverrides: savedConfig.agentOverrides,
+          };
+          setModelConfiguration(uiConfig as WorkbenchModelConfiguration);
+          modelConfigRef.current = uiConfig as WorkbenchModelConfiguration;
+          runtime.clearProviderCache();
+        }
+      } catch (error) {
+        console.error("Failed to load model configuration:", error);
+      }
+
       const scheduledTasksRepo = createScheduledTasksRepository(database);
       scheduledTasksRepoRef.current = scheduledTasksRepo;
 
@@ -696,9 +820,12 @@ function App() {
     setTask(createRestoredPdfApprovalTask(pendingRecord));
   }, [approvalRecords, areDurableApprovalRecordsReady]);
 
-  function submitGoal(goalOverride?: string, workspacePathOverride?: string, scheduledTaskId?: string) {
-    const goal = (goalOverride ?? draftGoal).trim();
-    if (!goal) {
+  function submitGoal(goalOverride?: string, workspacePathOverride?: string, scheduledTaskId?: string, _attachments?: File[], imageDataUrls?: string[]) {
+    const rawGoal = (goalOverride ?? draftGoal).trim();
+    if (!rawGoal) {
+      return;
+    }
+    if (!ensureAiConfigured(composeMode === "project" ? "Agent 模式" : "Chat 模式")) {
       return;
     }
     const continuationTask =
@@ -744,34 +871,83 @@ function App() {
     }
     auditRecordIdsRef.current.clear();
 
+    // ── Vision Bridge: if the goal has image attachments and the primary
+    //     model lacks vision, analyze images with the multimodal model first.
+    async function resolveWithVisionBridge(rawGoal: string): Promise<{
+      finalGoal: string;
+      bridgeUsed: boolean;
+    }> {
+      if (!hasImageAttachments(rawGoal)) return { finalGoal: rawGoal, bridgeUsed: false };
+      const config = modelConfigRef.current;
+      if (!config) return { finalGoal: rawGoal, bridgeUsed: false };
+      const primary = config.profiles.find((p) => p.slot === "primary");
+      const multimodal = config.profiles.find((p) => p.slot === "multimodal");
+      if (!primary || !multimodal) return { finalGoal: rawGoal, bridgeUsed: false };
+      const { enrichedMessage, bridgeUsed } = await bridgeVisionIfNeeded({
+        userMessage: rawGoal,
+        primaryProfile: primary,
+        multimodalProfile: multimodal,
+        locale: localePreference,
+      });
+      return { finalGoal: enrichedMessage, bridgeUsed };
+    }
+
+    // Determine display goal and attachments.
+    const hasImages = imageDataUrls?.length;
+    // Construct temporary bridge input with [image: data:...] markers
+    // for VisionBridge detection. The full base64 stays here, never in goal text.
+    const bridgeInput = hasImages
+      ? imageDataUrls!.map((url) => `[image: ${url}]`).join("\n") + "\n" + rawGoal
+      : rawGoal;
+
     // Resolve @document references — read file content and inject into prompt
-    const atRefs = extractAtReferences(goal);
+    const atRefs = extractAtReferences(bridgeInput);
     if (atRefs.length > 0) {
       void (async () => {
-        let resolvedGoal = goal;
+        let resolvedGoal = bridgeInput;
         for (const ref of atRefs) {
           try {
             const content = await readFileChunk(ref.path);
             resolvedGoal = injectDocumentContext(resolvedGoal, ref.path, content);
           } catch (error) {
             logNonFatalError(`Failed to read referenced file ${ref.path}`, error);
-            // File not readable — leave the @reference as-is in the goal
           }
         }
-        runtime.start(resolvedGoal, {
+        // Vision bridge
+        let finalGoal = resolvedGoal;
+        let bridgeUsed = false;
+        if (hasImages) {
+          const bridgeResult = await resolveWithVisionBridge(resolvedGoal);
+          bridgeUsed = bridgeResult.bridgeUsed;
+          finalGoal = bridgeResult.finalGoal;
+        }
+        runtime.start(finalGoal, {
           ...startOptions,
-          mode: startMode,
+          mode: bridgeUsed ? "chat" : startMode,
+          displayGoal: hasImages ? rawGoal : undefined,
+          displayAttachments: hasImages ? imageDataUrls : undefined,
           workspacePath: taskWorkspacePath,
         });
       })();
       return;
     }
 
-    runtime.start(goal, {
-      ...startOptions,
-      mode: startMode,
-      workspacePath: taskWorkspacePath,
-    });
+    void (async () => {
+      let finalGoal = bridgeInput;
+      let bridgeUsed = false;
+      if (hasImages) {
+        const bridgeResult = await resolveWithVisionBridge(bridgeInput);
+        bridgeUsed = bridgeResult.bridgeUsed;
+        finalGoal = bridgeResult.finalGoal;
+      }
+      runtime.start(finalGoal, {
+        ...startOptions,
+        mode: bridgeUsed ? "chat" : startMode,
+        displayGoal: hasImages ? rawGoal : undefined,
+        displayAttachments: hasImages ? imageDataUrls : undefined,
+        workspacePath: taskWorkspacePath,
+      });
+    })();
   }
 
   function handleStopTask() {
@@ -929,7 +1105,7 @@ function App() {
     });
   }
 
-  function handlePermissionDecision(decision: "approved" | "denied") {
+  function handlePermissionDecision(decision: WorkbenchPermissionDecision) {
     const request = task.permissionRequest;
     if (
       task.status === "waiting_permission" &&
@@ -938,7 +1114,7 @@ function App() {
     ) {
       const record = approvalRecords.find((item) => item.approvalId === request.id);
       if (record?.status === "pending") {
-        updateApprovalRecord(resolveApprovalRecord(record, decision, new Date().toISOString()));
+        updateApprovalRecord(resolveApprovalRecord(record, decision === "approved_always" ? "approved" : decision, new Date().toISOString()));
       }
     }
     runtime.resolvePermission(decision, request?.id);
@@ -952,6 +1128,10 @@ function App() {
     ) {
       runtime.respondToAskUser(answer, request.id);
     }
+  }
+
+  function handleRemoveTrustedComputerApp(title: string) {
+    setTrustedComputerApps(removeTrustedComputerApp(title));
   }
 
   function selectHistoryEntry(id: string) {
@@ -1017,17 +1197,38 @@ function App() {
   return (
     <div className="javis-desktop-frame">
       <TitleBar />
+      <ErrorBoundary>
+      {aiConfigPrompt ? (
+        <div className="javis-ai-config-modal-backdrop" role="presentation">
+          <section
+            aria-label={aiConfigPrompt.title}
+            aria-modal="true"
+            className="javis-ai-config-modal"
+            role="dialog"
+          >
+            <h2>{aiConfigPrompt.title}</h2>
+            <p>{aiConfigPrompt.message}</p>
+            <div className="javis-ai-config-modal-actions">
+              <button onClick={() => setAiConfigPrompt(null)} type="button">
+                我知道了
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
       <JavisWorkbench
         activeHistoryEntryId={activeHistoryEntryId}
         activeView={activeView}
         appsError={appsError}
         appsLoading={appsLoading}
+        appsProgress={appsProgress}
         computerEntries={computerEntries}
         computerError={computerError}
         computerLoading={computerLoading}
         computerPath={computerPath}
         docsError={docsError}
         docsLoading={docsLoading}
+        docsProgress={docsProgress}
         draftGoal={draftGoal}
         currentWorkspacePath={workspacePath}
         historyEntries={history.map((entry) => ({
@@ -1042,6 +1243,7 @@ function App() {
         }))}
         imagesError={imagesError}
         imagesLoading={imagesLoading}
+        imagesProgress={imagesProgress}
         initialIsActivityOpen={prefIsActivityOpen}
         initialIsInspectorOpen={prefIsInspectorOpen}
         initialSidebarWidth={prefSidebarWidth}
@@ -1064,16 +1266,54 @@ function App() {
         onTestModelConnection={testModelConnection}
         modelConfiguration={modelConfiguration}
         onModelConfigurationChange={handleModelConfigurationChange}
-        onSaveProviderApiKey={(keyReference, apiKey) => {
-          invoke("save_model_api_key_secret", {
+        onSaveProviderApiKey={async (keyReference, apiKey) => {
+          await invoke("save_model_api_key_secret", {
             request: { keyReference, apiKey },
-          }).catch((error) => console.error("Failed to save provider API key:", error));
+          });
         }}
+        onFetchProviderModels={async ({ provider: _provider, baseUrl, apiKey, apiType, keyReference, modelListMode }) => {
+          if (modelListMode === "unsupported") {
+            throw new Error("This provider does not support automatic model fetch yet. Enter the model ID manually.");
+          }
+          // If user typed a key, fetch directly from JS
+          if (apiKey) {
+            const normalizedBase = baseUrl.replace(/\/+$/, "");
+            const url = modelListMode === "anthropic"
+              ? `${normalizedBase}/v1/models?limit=1000`
+              : `${normalizedBase}/models`;
+            const headers: Record<string, string> = { "Content-Type": "application/json" };
+            if (modelListMode === "anthropic") {
+              headers["x-api-key"] = apiKey;
+              headers["anthropic-version"] = "2023-06-01";
+            } else {
+              headers["Authorization"] = `Bearer ${apiKey}`;
+            }
+            const response = await fetch(url, { method: "GET", headers, signal: AbortSignal.timeout(15000) });
+            if (!response.ok) {
+              const text = await response.text().catch(() => "");
+              throw new Error(`HTTP ${response.status}${text ? `: ${text.slice(0, 200)}` : ""}`);
+            }
+            const data = await response.json() as { data?: Array<{ id: string }> };
+            return (data.data || []).map((m) => m.id);
+          }
+          // Key is in OS credential store — proxy through Rust
+          const result = await invoke<{ models: string[]; error: string | null }>("fetch_provider_models", {
+            request: { keyReference, baseUrl, apiType, modelListMode },
+          });
+          if (result.error) throw new Error(result.error);
+          return result.models;
+        }}
+        providerCatalog={providerCatalog}
+        getProviderCapabilities={getProviderCapabilities}
         onNavigateDirectory={handleNavigateDirectory}
         onListDirectory={handleListDirectory}
         onOpenFile={handleOpenFile}
         onPermissionDecision={
-          task.id.startsWith("restored-approval-") ? resolveRestoredApproval : handlePermissionDecision
+          task.id.startsWith("restored-approval-")
+            ? (decision) => {
+                void resolveRestoredApproval(decision === "approved_always" ? "approved" : decision);
+              }
+            : handlePermissionDecision
         }
         onAskUserAnswer={handleAskUserAnswer}
         onRefreshApps={handleRefreshApps}
@@ -1129,7 +1369,10 @@ function App() {
         onRefreshScan={handleRefreshScan}
         onClassifyDocuments={handleClassifyDocuments}
         onCancelClassify={handleCancelClassify}
+        trustedComputerApps={trustedComputerApps}
+        onRemoveTrustedComputerApp={handleRemoveTrustedComputerApp}
       />
+      </ErrorBoundary>
     </div>
   );
 }

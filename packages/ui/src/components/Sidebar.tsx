@@ -48,7 +48,17 @@ interface SidebarProps {
   onModelSettingsChange?: (settings: WorkbenchModelSettings) => void;
   onTestModelConnection?: (settings: WorkbenchModelSettings) => Promise<string | void>;
   onModelConfigurationChange?: (config: WorkbenchModelConfiguration) => void;
-  onSaveProviderApiKey?: (keyReference: string, apiKey: string) => void;
+  onSaveProviderApiKey?: (keyReference: string, apiKey: string) => Promise<void>;
+  onFetchProviderModels?: (params: {
+    provider: string;
+    baseUrl: string;
+    apiKey: string;
+    apiType: string;
+    keyReference: string;
+    modelListMode: "openai" | "anthropic" | "unsupported";
+  }) => Promise<string[]>;
+  providerCatalog?: readonly import("../types").ProviderCatalogEntry[];
+  getProviderCapabilities?: (provider: string) => import("../types").ProviderCapabilities;
   onResizeKeyDown?: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
   onResizeStart?: (event: ReactPointerEvent<HTMLDivElement>) => void;
   onSelectHistoryEntry?: (id: string) => void;
@@ -87,6 +97,9 @@ export function Sidebar({
   onTestModelConnection,
   onModelConfigurationChange,
   onSaveProviderApiKey,
+  onFetchProviderModels,
+  providerCatalog,
+  getProviderCapabilities,
   onResizeKeyDown,
   onResizeStart,
   onSelectHistoryEntry,
@@ -453,6 +466,9 @@ export function Sidebar({
         onTestModelConnection={onTestModelConnection}
         onModelConfigurationChange={onModelConfigurationChange}
         onSaveProviderApiKey={onSaveProviderApiKey}
+        onFetchProviderModels={onFetchProviderModels}
+        providerCatalog={providerCatalog}
+        getProviderCapabilities={getProviderCapabilities}
       />
       <div
         aria-label={labels.sidebarResize}

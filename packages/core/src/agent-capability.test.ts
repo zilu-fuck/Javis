@@ -75,10 +75,11 @@ describe("AgentRegistry", () => {
       expect(req!.minContextTokens).toBe(16000);
     });
 
-    it("computer agent prefersVision is false (no visual tools yet)", () => {
+    it("computer agent prefersVision is true (screenshots for desktop automation)", () => {
       const req = registry.getModelRequirements("computer");
       expect(req).toBeDefined();
-      expect(req!.prefersVision).toBe(false);
+      expect(req!.prefersVision).toBe(true);
+      expect(req!.minContextTokens).toBe(16000);
     });
 
     it("commander has minContextTokens 16000", () => {

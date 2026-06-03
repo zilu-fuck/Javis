@@ -4,6 +4,7 @@ import {
   getTopRoutes,
   getRecommendedWorkflowIds,
   isPdfOrganizationGoal,
+  isComputerUseGoal,
   scoreRoutes,
 } from "./routing";
 
@@ -70,5 +71,48 @@ describe("routing", () => {
       "plan-spring-boot-project",
     ]);
     expect(getRecommendedWorkflowIds("inspect this project")).toEqual(["read-current-project"]);
+  });
+
+  // ── Computer Use routing ────────────────────────────────────────────────
+
+  it("routes desktop automation verbs to computer-use", () => {
+    expect(isComputerUseGoal("操控桌面打开 Chrome")).toBe(true);
+    expect(isComputerUseGoal("desktop automation to open Notepad")).toBe(true);
+    expect(isComputerUseGoal("控制桌面操作 VS Code")).toBe(true);
+  });
+
+  it("routes app name + action word combos to computer-use", () => {
+    expect(isComputerUseGoal("打开计算器")).toBe(true);
+    expect(isComputerUseGoal("打开 VS Code")).toBe(true);
+    expect(isComputerUseGoal("open Calculator")).toBe(true);
+    expect(isComputerUseGoal("launch Excel")).toBe(true);
+  });
+
+  it("routes desktop/window keywords to computer-use when combined", () => {
+    // "桌面" alone gives +2, not enough (threshold 4)
+    // But "打开计算器" gives +4 from app+action combo
+    expect(isComputerUseGoal("桌面截图")).toBe(false); // only +2 from desktop keyword
+  });
+
+  it("does not route vague goals to computer-use", () => {
+    expect(isComputerUseGoal("打开项目文件夹")).toBe(false);
+    expect(isComputerUseGoal("点击确认按钮")).toBe(false);
+    expect(isComputerUseGoal("输入命令")).toBe(false);
+    expect(isComputerUseGoal("帮我看看这个网站")).toBe(false);
+  });
+
+  it("routes computer-use to the correct workflow", () => {
+    expect(getRecommendedWorkflowIds("操控桌面打开 Chrome")).toEqual(["computer-use"]);
+    expect(getRecommendedWorkflowIds("打开计算器")).toEqual(["computer-use"]);
+  });
+
+  it("scores computer-use route correctly for strong signals", () => {
+    const routes = scoreRoutes("操控桌面打开 Chrome 并截图");
+    const cuRoute = routes.find((r) => r.route === "computer-use");
+    expect(cuRoute).toBeDefined();
+    expect(cuRoute!.score).toBeGreaterThanOrEqual(4);
+    expect(cuRoute!.signals).toContain("desktop-automation-verb");
+    expect(cuRoute!.signals).toContain("app-name-with-action");
+    expect(cuRoute!.signals).toContain("desktop-keyword");
   });
 });

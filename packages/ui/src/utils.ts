@@ -199,3 +199,8 @@ function translateWorkbenchPattern(value: string): string {
     .replace(/\bOnly move operations are supported\./g, "仅支持移动操作。")
     .replace(/\bSource cannot be read:/g, "无法读取源文件：");
 }
+
+/** Strip <vision-context> tags from user-facing display text. */
+export function stripVisionContextMarkers(text: string): string {
+  return text.replace(/<vision-context>[\s\S]*?<\/vision-context>\n?/gi, "").trim();
+}

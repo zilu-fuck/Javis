@@ -30,6 +30,8 @@ interface ChatComposerProps {
   onDraftGoalChange: (nextGoal: string) => void;
   onStopTask?: () => void;
   onSubmit: FormEventHandler<HTMLFormElement>;
+  /** Called instead of onSubmit when there are image attachments, with the raw File objects. */
+  onSubmitWithAttachments?: (goal: string, attachments: File[]) => void;
   onUseWorkspacePath?: (path: string) => void;
   onWorkspacePathChange?: (path: string) => void;
 }
@@ -59,6 +61,7 @@ export function ChatComposer({
   onDraftGoalChange,
   onStopTask,
   onSubmit,
+  onSubmitWithAttachments,
   onUseWorkspacePath,
   onWorkspacePathChange,
 }: ChatComposerProps) {
@@ -111,21 +114,23 @@ export function ChatComposer({
 
   function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>) {
     if (disabled) return;
-    const files = Array.from(event.clipboardData.files);
+    const files = Array.from(event.clipboardData?.files ?? []);
     if (files.length === 0) return;
     event.preventDefault();
     addFiles(files);
   }
 
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const target = event.currentTarget;
+    if (!target) return;
     if (disabled) {
-      event.currentTarget.value = "";
+      target.value = "";
       return;
     }
-    if (event.currentTarget.files) {
-      addFiles(event.currentTarget.files);
+    if (target.files) {
+      addFiles(target.files);
     }
-    event.currentTarget.value = "";
+    target.value = "";
   }
 
   // ── @mention detection ───────────────────────────────────────────
@@ -171,9 +176,11 @@ export function ChatComposer({
   }
 
   function handleChangeWithMention(event: ChangeEvent<HTMLTextAreaElement>) {
-    const value = event.currentTarget.value;
+    const target = event.currentTarget;
+    if (!target) return;
+    const value = target.value;
     onDraftGoalChange(value);
-    const query = resolveMentionQuery(value, event.currentTarget.selectionStart);
+    const query = resolveMentionQuery(value, target.selectionStart);
     setMentionQuery(query);
     setMentionIndex(0);
   }
@@ -211,8 +218,15 @@ export function ChatComposer({
   }
 
   const handleSubmit: FormEventHandler<HTMLFormElement> = (event) => {
+    event.preventDefault();
     setMentionQuery(null);
     setMentionIndex(0);
+    if (attachments.length > 0 && onSubmitWithAttachments) {
+      const files = attachments.map((a) => a.file);
+      setAttachments([]);
+      onSubmitWithAttachments(draftGoal, files);
+      return;
+    }
     onSubmit(event);
   };
 

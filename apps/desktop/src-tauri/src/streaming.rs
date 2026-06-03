@@ -19,6 +19,7 @@ use crate::{
     hydrate_model_completion_api_key_secret,
     infer_model_completion_provider_id,
     normalize_model_completion_model_name,
+    openai_compatible_request_requires_api_key,
     ModelCompletionRequest,
     ModelUsage,
 };
@@ -156,14 +157,16 @@ fn execute_streaming_request(
         return crate::anthropic::execute_anthropic_streaming_request(request, app, stream_id, cancelled);
     }
 
-    let api_key = normalize_optional_config_value(request.api_key.as_deref())
-        .ok_or_else(|| "Model stream requires an API key.".to_string())?;
     let model = normalize_model_completion_model_name(request)
         .ok_or_else(|| "Model stream requires a model.".to_string())?;
     let provider_id = normalize_optional_config_value(request.provider_id.as_deref())
         .unwrap_or_else(|| infer_model_completion_provider_id(request));
     let base_url = normalize_optional_config_value(request.base_url.as_deref())
         .unwrap_or_else(|| default_openai_compatible_base_url_for_provider(&provider_id));
+    let api_key = normalize_optional_config_value(request.api_key.as_deref());
+    if api_key.is_none() && openai_compatible_request_requires_api_key(&provider_id, &base_url) {
+        return Err("Model stream requires an API key.".to_string());
+    }
     let endpoint = create_chat_completions_endpoint(&base_url);
     let body = create_openai_compatible_stream_body(&model, request);
     let body_text = serde_json::to_string(&body).map_err(|error| error.to_string())?;
@@ -172,11 +175,14 @@ fn execute_streaming_request(
         .timeout(STREAMING_READ_TIMEOUT)
         .build()
         .map_err(|error| error.to_string())?;
-    let response = client
+    let mut request_builder = client
         .post(&endpoint)
-        .header("Authorization", &format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
-        .body(body_text)
+        .body(body_text);
+    if let Some(api_key) = api_key {
+        request_builder = request_builder.header("Authorization", &format!("Bearer {api_key}"));
+    }
+    let response = request_builder
         .send()
         .map_err(|error| format!("Model stream request failed: {error}"))?;
     let buf_reader = BufReader::new(response);

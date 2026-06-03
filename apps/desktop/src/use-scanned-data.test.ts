@@ -52,6 +52,16 @@ function createFileEntry(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe("useScannedData", () => {
   beforeEach(() => {
     mockListMountRoots.mockReset();
@@ -106,8 +116,11 @@ describe("useScannedData", () => {
 
   // ── Scan Dispatching ─────────────────────────────────────────────────────
 
-  it("dispatches document scan when activeView is documents", async () => {
-    mockScanUserDocuments.mockResolvedValue([createFileEntry()]);
+  it("dispatches document scan with progress when activeView is documents", async () => {
+    mockScanAllUserFiles.mockImplementation(async (_extensions, _maxResults, onProgress) => {
+      onProgress?.({ scanId: "docs", current: 1, total: 2 });
+      return [createFileEntry()];
+    });
     const repo = createFileClassificationRepo();
     const repoRef = { current: repo } as any;
 
@@ -116,12 +129,69 @@ describe("useScannedData", () => {
     );
 
     await waitFor(() => {
-      expect(mockScanUserDocuments).toHaveBeenCalledOnce();
+      expect(mockScanAllUserFiles).toHaveBeenCalledWith(
+        expect.arrayContaining(["pdf", "docx"]),
+        200,
+        expect.any(Function),
+      );
     });
   });
 
-  it("dispatches image scan when activeView is gallery", async () => {
-    mockScanUserImages.mockResolvedValue([createFileEntry({ name: "photo.jpg" })]);
+  it("keeps document scan results after the loading rerender", async () => {
+    const deferred = createDeferred<ReturnType<typeof createFileEntry>[]>();
+    mockScanAllUserFiles.mockReturnValue(deferred.promise);
+    const repo = createFileClassificationRepo();
+    const repoRef = { current: repo } as any;
+
+    const { result } = renderHook(() =>
+      useScannedData({ activeView: "documents", runtime: {} as any, fileClassificationRepoRef: repoRef }),
+    );
+
+    await waitFor(() => {
+      expect(result.current.docsLoading).toBe(true);
+    });
+
+    await act(async () => {
+      deferred.resolve([createFileEntry({ name: "notes.pdf", extension: "pdf" })]);
+      await deferred.promise;
+    });
+
+    await waitFor(() => {
+      expect(result.current.docsLoading).toBe(false);
+      expect(result.current.userDocuments).toHaveLength(1);
+    });
+  });
+
+  it("keeps app scan results after the loading rerender", async () => {
+    const deferred = createDeferred<{ name: string; path: string }[]>();
+    mockScanInstalledApps.mockReturnValue(deferred.promise);
+    const repo = createFileClassificationRepo();
+    const repoRef = { current: repo } as any;
+
+    const { result } = renderHook(() =>
+      useScannedData({ activeView: "apps", runtime: {} as any, fileClassificationRepoRef: repoRef }),
+    );
+
+    await waitFor(() => {
+      expect(result.current.appsLoading).toBe(true);
+    });
+
+    await act(async () => {
+      deferred.resolve([{ name: "Calculator", path: "C:\\Calculator.lnk" }]);
+      await deferred.promise;
+    });
+
+    await waitFor(() => {
+      expect(result.current.appsLoading).toBe(false);
+      expect(result.current.installedApps).toHaveLength(1);
+    });
+  });
+
+  it("dispatches image scan with progress when activeView is gallery", async () => {
+    mockScanAllUserFiles.mockImplementation(async (_extensions, _maxResults, onProgress) => {
+      onProgress?.({ scanId: "images", current: 1, total: 2 });
+      return [createFileEntry({ name: "photo.jpg" })];
+    });
     const repo = createFileClassificationRepo();
     const repoRef = { current: repo } as any;
 
@@ -130,7 +200,11 @@ describe("useScannedData", () => {
     );
 
     await waitFor(() => {
-      expect(mockScanUserImages).toHaveBeenCalledOnce();
+      expect(mockScanAllUserFiles).toHaveBeenCalledWith(
+        expect.arrayContaining(["jpg", "png"]),
+        200,
+        expect.any(Function),
+      );
     });
   });
 
@@ -209,10 +283,10 @@ describe("useScannedData", () => {
     const repoRef = { current: repo } as any;
 
     const { result } = renderHook(() =>
-      useScannedData({ activeView: "computer", runtime: {} as any, fileClassificationRepoRef: repoRef }),
+      useScannedData({ activeView: "chat", runtime: {} as any, fileClassificationRepoRef: repoRef }),
     );
 
-    const entries = await act(async () => result.current.handleListDirectory("/data"));
+    const entries = await result.current.handleListDirectory("/data");
     expect(entries.length).toBe(1);
     expect(entries[0].name).toBe("file.txt");
   });
@@ -226,12 +300,10 @@ describe("useScannedData", () => {
     const runtime = { classifyWithFileAgent: vi.fn().mockResolvedValue([]), subscribe: vi.fn(), dispose: vi.fn() };
 
     const { result } = renderHook(() =>
-      useScannedData({ activeView: "documents", runtime: runtime as any, fileClassificationRepoRef: repoRef }),
+      useScannedData({ activeView: "chat", runtime: runtime as any, fileClassificationRepoRef: repoRef }),
     );
 
-    await act(async () => {
-      await result.current.handleClassifyDocuments();
-    });
+    await result.current.handleClassifyDocuments();
 
     expect(runtime.classifyWithFileAgent).not.toHaveBeenCalled();
   });

@@ -119,6 +119,7 @@ describe("createFileScanTaskRuntime", () => {
       "browser-test",
       "pdf-organization",
       "code-review",
+      "computer-use",
     ]);
     expect(getWorkbenchWorkflow("read-current-project")?.participatingAgentKinds).toEqual([
       "commander",
@@ -466,6 +467,17 @@ describe("createFileScanTaskRuntime", () => {
       },
       computerTool: {
         searchLocalDocuments,
+        screenshot: vi.fn(async () => ({ dataUrl: "", width: 0, height: 0, capturedAt: "" })),
+        listWindows: vi.fn(async () => ({ windows: [] })),
+        focusWindow: vi.fn(async () => ({ focused: true, title: "" })),
+        moveMouse: vi.fn(async () => ({ x: 0, y: 0 })),
+        click: vi.fn(async () => ({ x: 0, y: 0, clicked: true })),
+        type: vi.fn(async () => ({ typed: true, length: 0 })),
+        keyCombo: vi.fn(async () => ({ combo: "", executed: true })),
+        scroll: vi.fn(async () => ({ x: 0, y: 0, delta: 0 })),
+        wait: vi.fn(async () => ({ waited: 0 })),
+        openPath: vi.fn(async () => ({ opened: true })),
+        approveAction: vi.fn(async () => ({ approvalId: "test-approval" })),
       },
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
@@ -1282,12 +1294,14 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
-  it("routes vision goals through Commander DAG with capability dispatch", async () => {
+  it("routes vision goals directly to runVisionTask before Commander DAG", async () => {
     const describe = vi.fn(async () => ({
       description: "A sunset over mountains.",
     }));
-    const synthesize = vi.fn(async () => ({
-      message: "The image shows a stunning sunset over mountain peaks.",
+    const plan = vi.fn(async () => ({
+      title: "Should not be called",
+      reasoning: "",
+      steps: [],
     }));
     const runtime = createFileScanTaskRuntime({
       delayMs: 0,
@@ -1298,21 +1312,8 @@ describe("createFileScanTaskRuntime", () => {
         extractText: vi.fn(async () => ({ text: "", confidence: 0 })),
       },
       commanderTool: {
-        plan: vi.fn(async () => ({
-          title: "Image Analysis",
-          reasoning: "Describe the image using Vision Agent.",
-          steps: [{
-            id: "describe-image",
-            title: "Describe the image",
-            assignedAgentKind: "vision",
-            capability: "image_describe" as const,
-            requiredCapabilities: ["image_describe"] as string[],
-            dependsOn: [] as string[],
-            inputContextKeys: ["imagePath"],
-            successCriteria: "Image described.",
-          }],
-        })),
-        synthesize,
+        plan,
+        synthesize: vi.fn(async () => ({ message: "OK" })),
       },
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
@@ -1321,12 +1322,13 @@ describe("createFileScanTaskRuntime", () => {
 
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
-    // Commander DAG dispatches vision.describe via capability: image_describe
+    // Vision goal is intercepted BEFORE Commander DAG — plan never called.
+    expect(plan).not.toHaveBeenCalled();
     expect(describe).toHaveBeenCalledWith(
       expect.objectContaining({ imagePath: "data:image/png;base64,abcd" }),
     );
     expect(finalSnapshot.status).toBe("completed");
-    expect(finalSnapshot.title).toBe("Image Analysis");
+    expect(finalSnapshot.title).toBe("Image described");
 
     unsubscribe();
     runtime.dispose();

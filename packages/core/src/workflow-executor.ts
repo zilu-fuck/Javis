@@ -1369,6 +1369,10 @@ interface CommanderDagTaskOptions {
       requestId: string,
       handler: ((answer: string) => void | Promise<void>) | undefined,
     ): void;
+    setPendingPermissionHandler?(
+      requestId: string,
+      handler: ((decision: string) => void | Promise<void>) | undefined,
+    ): void;
   };
   commanderTool: CommanderTool;
   codeTool?: CodeTool;
@@ -1392,6 +1396,12 @@ interface CommanderDagTaskOptions {
     failedStepId?: string,
     failureReason?: string,
   ) => Promise<CommanderDagPlan>;
+  computerUseLoopRunner?: (options: {
+    userGoal: string;
+    computerTool: ComputerTool;
+    approveAction: (action: { tool: string; params: Record<string, unknown> }) => Promise<{ approvalId: string; taskId?: string }>;
+    onStep?: (step: unknown) => void;
+  }) => Promise<unknown[]>;
 }
 
 /**

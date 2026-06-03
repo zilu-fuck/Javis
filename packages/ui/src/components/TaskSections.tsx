@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { WorkbenchLocale, WorkbenchTask } from "../types";
+import type { WorkbenchLocale, WorkbenchPermissionDecision, WorkbenchTask } from "../types";
 import {
   formatModifiedTime,
   formatSize,
@@ -11,7 +11,7 @@ interface TaskSectionsProps {
   labels: WorkbenchLocale["labels"];
   locale: WorkbenchLocale;
   task: WorkbenchTask;
-  onPermissionDecision?: (decision: "approved" | "denied") => void;
+  onPermissionDecision?: (decision: WorkbenchPermissionDecision) => void;
   onAskUserAnswer?: (answer: string) => void;
 }
 
@@ -232,6 +232,15 @@ export function TaskSections({ labels, locale, task, onPermissionDecision, onAsk
                       >
                         {labels.approve}
                       </button>
+                      {task.permissionRequest.dryRun.operation.startsWith("computer.") ? (
+                        <button
+                          disabled={task.permissionRequest.status !== "pending"}
+                          onClick={() => onPermissionDecision?.("approved_always")}
+                          type="button"
+                        >
+                          {labels.alwaysAllow}
+                        </button>
+                      ) : null}
                       <button
                         disabled={task.permissionRequest.status !== "pending"}
                         onClick={() => onPermissionDecision?.("denied")}

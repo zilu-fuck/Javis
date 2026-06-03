@@ -56,6 +56,8 @@ export interface WorkbenchPermissionRequest {
   };
 }
 
+export type WorkbenchPermissionDecision = "approved" | "approved_always" | "denied";
+
 export interface WorkbenchAskUserQuestion {
   id: string;
   question: string;
@@ -158,6 +160,20 @@ export type WorkbenchStreamingAgentKind =
   | "vision"
   | "chinese-reviewer";
 
+export interface ProviderCatalogEntry {
+  id: string;
+  label: string;
+  defaultBaseUrl: string;
+  apiType: "openai-compatible" | "anthropic-messages";
+  modelListMode: "openai" | "anthropic" | "unsupported";
+}
+
+export interface ProviderCapabilities {
+  vision: boolean;
+  code: boolean;
+  longContext: boolean;
+}
+
 export interface WorkbenchModelSettings {
   provider: string;
   model: string;
@@ -194,6 +210,12 @@ export interface WorkbenchModelConfiguration {
   agentOverrides: Record<string, string>;
 }
 
+export interface WorkbenchProgress {
+  current: number;
+  total: number;
+  startedAt?: number;
+}
+
 export interface WorkbenchHistoryEntry {
   id: string;
   title: string;
@@ -208,6 +230,7 @@ export interface WorkbenchHistoryEntry {
 export interface WorkbenchChatMessage {
   role: "user" | "assistant";
   content: string;
+  attachments?: string[];
 }
 
 export interface WorkbenchTask {
@@ -321,6 +344,11 @@ export interface WorkbenchFileEntry {
   confidence?: number;
 }
 
+export interface WorkbenchTrustedComputerApp {
+  title: string;
+  trustedAt: string;
+}
+
 export interface WorkbenchAppEntry {
   name: string;
   path: string;
@@ -353,6 +381,7 @@ export interface JavisWorkbenchProps {
   userDocuments?: WorkbenchFileEntry[];
   userImages?: WorkbenchFileEntry[];
   computerEntries?: WorkbenchFileEntry[];
+  trustedComputerApps?: WorkbenchTrustedComputerApp[];
   computerPath?: string;
   mountRoots?: { name: string; path: string }[];
   isTaskActive?: boolean;
@@ -366,9 +395,12 @@ export interface JavisWorkbenchProps {
   computerError?: string;
   // ── File classification ─────────────────────────────────────────
   scanning?: boolean;
-  scanProgress?: { current: number; total: number };
+  scanProgress?: WorkbenchProgress;
+  appsProgress?: WorkbenchProgress;
+  docsProgress?: WorkbenchProgress;
+  imagesProgress?: WorkbenchProgress;
   classifying?: boolean;
-  classifyProgress?: { completed: number; total: number };
+  classifyProgress?: WorkbenchProgress & { completed?: number };
   categoryStats?: { category: string; count: number }[];
   onRefreshScan?: () => void;
   onClassifyDocuments?: () => void;
@@ -380,15 +412,27 @@ export interface JavisWorkbenchProps {
   onModelSettingsChange?: (settings: WorkbenchModelSettings) => void;
   onTestModelConnection?: (settings: WorkbenchModelSettings) => Promise<string | void>;
   onModelConfigurationChange?: (config: WorkbenchModelConfiguration) => void;
-  onSaveProviderApiKey?: (keyReference: string, apiKey: string) => void;
+  onSaveProviderApiKey?: (keyReference: string, apiKey: string) => Promise<void>;
+  onFetchProviderModels?: (params: {
+    provider: string;
+    baseUrl: string;
+    apiKey: string;
+    apiType: string;
+    keyReference: string;
+    modelListMode: "openai" | "anthropic" | "unsupported";
+  }) => Promise<string[]>;
+  /** External provider catalog from @javis/core. When provided, replaces the built-in catalog. */
+  providerCatalog?: readonly ProviderCatalogEntry[];
+  /** Resolve default capabilities for a provider from its registered adapter. */
+  getProviderCapabilities?: (provider: string) => ProviderCapabilities;
   onSelectHistoryEntry?: (id: string) => void;
   onUseWorkspacePath?: (path: string) => void;
   onWorkspacePathChange?: (path: string) => void;
-  onPermissionDecision?: (decision: "approved" | "denied") => void;
+  onPermissionDecision?: (decision: WorkbenchPermissionDecision) => void;
   onAskUserAnswer?: (answer: string) => void;
   onRetryTask?: () => void;
   onStopTask?: () => void;
-  onSubmitGoal: (goal?: string, workspacePath?: string, scheduledTaskId?: string) => void;
+  onSubmitGoal: (goal?: string, workspacePath?: string, scheduledTaskId?: string, attachments?: File[], imageDataUrls?: string[]) => void;
   onTranslateSkillsToChinese?: () => void;
   onSearchSkillMarket?: (
     query: string,
@@ -407,6 +451,7 @@ export interface JavisWorkbenchProps {
   onNavigateDirectory?: (path: string) => void;
   onListDirectory?: (path: string) => Promise<WorkbenchFileEntry[]>;
   onOpenFile?: (path: string) => void;
+  onRemoveTrustedComputerApp?: (title: string) => void;
   onSidebarWidthChange?: (width: number) => void;
   onActiveViewChange?: (view: ActiveView) => void;
   onActivityOpenChange?: (open: boolean) => void;
@@ -434,6 +479,7 @@ export interface WorkbenchLocale {
     agentStates: string;
     collapseInspector: string;
     approve: string;
+    alwaysAllow: string;
     commandResults: string;
     commander: string;
     codeReview: string;
@@ -508,6 +554,8 @@ export interface WorkbenchLocale {
     tokenInput: string;
     tokenOutput: string;
     tokenCalls: string;
+    trustedComputerApps: string;
+    removeTrustedApp: string;
     contextWindow: string;
     contextUsed: string;
     contextRemaining: string;

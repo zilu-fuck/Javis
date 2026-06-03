@@ -87,7 +87,6 @@ export function useTaskRuntime({
       if (!nextTask) {
         return;
       }
-
       setTask(nextTask);
 
       if (taskQueueRef.current.length > 0) {
@@ -181,7 +180,10 @@ export function useTaskRuntime({
     return () => {
       clearQueuedTaskSnapshots();
       unsubscribe();
-      runtime.dispose();
+      // NOTE: Do NOT call runtime.dispose() here — it irreversibly
+      // unregisters the eventBus handler, which breaks streaming.
+      // React StrictMode double-invokes effects, so the cleanup runs
+      // between mount/unmount, leaving the eventBus bridge broken.
     };
   }, [
     runtime,

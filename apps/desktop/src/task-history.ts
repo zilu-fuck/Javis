@@ -258,13 +258,23 @@ ON CONFLICT(id) DO UPDATE SET
 }
 
 function taskHistoryBindValues(task: TaskSnapshot): DatabaseValue[] {
+  // Strip base64 image attachments before persisting — too large for SQLite.
+  const toStore: TaskSnapshot = task.conversationMessages?.some((m) => m.attachments?.length)
+    ? {
+        ...task,
+        conversationMessages: task.conversationMessages.map((m) => ({
+          role: m.role,
+          content: m.content,
+        })),
+      }
+    : task;
   return [
-    task.id,
-    task.title,
-    task.userGoal,
-    task.status,
-    getTaskUpdatedAt(task),
-    JSON.stringify(task),
+    toStore.id,
+    toStore.title,
+    toStore.userGoal,
+    toStore.status,
+    getTaskUpdatedAt(toStore),
+    JSON.stringify(toStore),
   ];
 }
 
@@ -535,7 +545,9 @@ function isChatMessageArray(value: unknown): value is NonNullable<TaskSnapshot["
       (message) =>
         isRecord(message) &&
         (message.role === "user" || message.role === "assistant") &&
-        isString(message.content),
+        isString(message.content) &&
+        (message.attachments === undefined ||
+         (Array.isArray(message.attachments) && message.attachments.every(isString))),
     )
   );
 }

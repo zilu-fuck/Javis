@@ -484,11 +484,38 @@ export interface ComputerFileCandidate {
   extension?: string;
 }
 
+export interface TrustedComputerApp {
+  title: string;
+  trustedAt: string;
+}
+
 export interface ComputerTool {
   searchLocalDocuments(request: {
     query: string;
     maxResults?: number;
   }): Promise<ComputerFileCandidate[]>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  screenshot(...args: any[]): Promise<any>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  listWindows(...args: any[]): Promise<any>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  focusWindow(...args: any[]): Promise<any>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  moveMouse(...args: any[]): Promise<any>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  click(...args: any[]): Promise<any>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  type(...args: any[]): Promise<any>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  keyCombo(...args: any[]): Promise<any>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  scroll(...args: any[]): Promise<any>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  wait(...args: any[]): Promise<any>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  openPath(...args: any[]): Promise<any>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  approveAction?(...args: any[]): Promise<any>;
 }
 
 export interface ScheduledTaskDraft {

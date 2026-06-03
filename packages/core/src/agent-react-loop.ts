@@ -40,6 +40,8 @@ export interface AgentReActLoopOptions {
     observations: AgentReActObservation[];
     availableToolNames: string[];
   }): Promise<AgentReActDecision> | AgentReActDecision;
+  /** Called after each ReAct iteration (tool execution) to emit progress snapshots. */
+  onIteration?: (iteration: number, observation: AgentReActObservation) => void;
 }
 
 export interface AgentReActLoopResult {
@@ -49,14 +51,17 @@ export interface AgentReActLoopResult {
   reason: string;
 }
 
-export async function runAgentReActLoop({
-  agent,
-  step,
-  context,
-  tools,
-  maxIterations = 4,
-  decideNext,
-}: AgentReActLoopOptions): Promise<AgentReActLoopResult> {
+export async function runAgentReActLoop(
+  options: AgentReActLoopOptions,
+): Promise<AgentReActLoopResult> {
+  const {
+    agent,
+    step,
+    context,
+    tools,
+    maxIterations = 4,
+    decideNext,
+  } = options;
   assertAgentOwnsStep(agent, step.agentKind);
 
   const toolMap = new Map(tools.map((tool) => [tool.name, tool]));
@@ -142,6 +147,7 @@ export async function runAgentReActLoop({
     }
     observations.push(observation);
     context.set(`react:${step.id}:${iteration}`, observation);
+    options.onIteration?.(iteration, observation);
   }
 
   return {

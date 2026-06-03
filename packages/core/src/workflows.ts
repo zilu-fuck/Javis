@@ -11,7 +11,8 @@ export type WorkbenchWorkflowId =
   | "browser-research"
   | "browser-test"
   | "pdf-organization"
-  | "code-review";
+  | "code-review"
+  | "computer-use";
 
 export interface WorkbenchWorkflowStep {
   id: string;
@@ -578,6 +579,60 @@ export const WORKBENCH_WORKFLOWS: WorkbenchWorkflow[] = [
         "Verification of review coverage and actionable items",
         "read",
         ["review-diff"],
+        false,
+      ),
+    ],
+  },
+  {
+    id: "computer-use",
+    title: "Desktop Computer Use",
+    triggerExamples: [
+      "open the calculator",
+      "打开计算器",
+      "open VS Code and check settings",
+      "操控桌面打开 Chrome",
+      "click the Start menu and search for Notepad",
+    ],
+    goal: "Screenshot the desktop, understand the UI visually, and interact with Windows applications via mouse and keyboard to accomplish a user goal.",
+    coordinatorAgentKind: "commander",
+    participatingAgentKinds: ["commander", "computer", "verifier"],
+    currentSupport: "planned",
+    safetyNotes: [
+      "All write operations (click, type, keyCombo, scroll, focusWindow) require user approval.",
+      "Dangerous windows (Task Manager, Registry Editor, UAC) are blocked at the Rust layer.",
+      "Dangerous key combos (Win+R, Ctrl+Alt+Del, Alt+F4) are blocked at the Rust layer.",
+      "Screenshot data is kept in memory only — never persisted to disk or logs.",
+      "Approval records expire after 5 minutes to prevent stale approvals.",
+    ],
+    steps: [
+      createStep(
+        "analyze-desktop",
+        "Commander and Computer Agent analyze the goal and take initial screenshot",
+        "computer",
+        "User goal description",
+        "Desktop state analysis with initial screenshot",
+        "read",
+        [],
+        false,
+      ),
+      createStep(
+        "execute-actions",
+        "Computer Agent executes actions in a screenshot→analyze→act loop",
+        "computer",
+        "Desktop state analysis and user goal",
+        "Completed action sequence with final screenshot",
+        "confirmed_write",
+        ["analyze-desktop"],
+        false,
+      ),
+      createStep(
+        "verify-outcome",
+        "Verifier checks the final desktop state against the user goal",
+        "verifier",
+        "Action sequence and final screenshot",
+        "Verification summary confirming goal achievement",
+        "read",
+        ["execute-actions"],
         false,
       ),
     ],

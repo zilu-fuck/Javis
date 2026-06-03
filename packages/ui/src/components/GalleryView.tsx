@@ -2,19 +2,22 @@ import { useState } from "react";
 import type {
   WorkbenchFileEntry,
   WorkbenchLocale,
+  WorkbenchProgress,
 } from "../types";
 import { formatModifiedTime, formatSize } from "../utils";
+import { ProgressBar } from "./ProgressBar";
 import { createCountLabel, ResourceIconButton, ResourceShell } from "./ResourceShell";
 
 interface GalleryViewProps {
   images: WorkbenchFileEntry[];
   locale: WorkbenchLocale;
   loading?: boolean;
+  loadProgress?: WorkbenchProgress;
   error?: string;
   scanning?: boolean;
-  scanProgress?: { current: number; total: number };
+  scanProgress?: WorkbenchProgress;
   classifying?: boolean;
-  classifyProgress?: { completed: number; total: number };
+  classifyProgress?: WorkbenchProgress & { completed?: number };
   categoryStats?: { category: string; count: number }[];
   onRefresh?: () => void;
   onRefreshScan?: () => void;
@@ -27,6 +30,7 @@ export function GalleryView({
   images,
   locale,
   loading,
+  loadProgress,
   error,
   scanning,
   scanProgress,
@@ -116,6 +120,15 @@ export function GalleryView({
         icon="▣"
         title={labels.gallery}
       >
+        <div className="javis-view-loading">
+          <ProgressBar
+            current={loadProgress?.current}
+            indeterminate={!loadProgress}
+            label={labels.scanInProgress}
+            startedAt={loadProgress?.startedAt}
+            total={loadProgress?.total}
+          />
+        </div>
         <div className="javis-gallery-skeleton">
           {Array.from({ length: 8 }).map((_, i) => (
             <div className="javis-gallery-thumb skeleton" key={i} />
@@ -156,37 +169,36 @@ export function GalleryView({
       {(scanning || classifying || classifyProgress) && (
         <div className="javis-classify-status">
           {scanning && (
-            <div className="javis-classify-status-row">
-              <span className="javis-spinner javis-spinner--small" />
-              <span>{labels.scanInProgress}</span>
-              {scanProgress && (
-                <span className="javis-classify-count">
-                  {scanProgress.current.toLocaleString()} / {scanProgress.total.toLocaleString()}
-                </span>
-              )}
-            </div>
+            <ProgressBar
+              current={scanProgress?.current}
+              indeterminate={!scanProgress}
+              label={labels.scanInProgress}
+              startedAt={scanProgress?.startedAt}
+              total={scanProgress?.total}
+            />
           )}
           {classifying && classifyProgress && (
-            <div className="javis-classify-status-row">
-              <span className="javis-spinner javis-spinner--small" />
-              <span>{labels.classifyButton}</span>
-              <span className="javis-classify-count">
-                {classifyProgress.completed} / {classifyProgress.total}
-              </span>
+            <>
+              <ProgressBar
+                current={classifyProgress.completed ?? classifyProgress.current}
+                label={labels.classifyButton}
+                startedAt={classifyProgress.startedAt}
+                total={classifyProgress.total}
+              />
               {unclassifiedCount > 0 && (
                 <span className="javis-classify-pending">
                   ({unclassifiedCount.toLocaleString()} pending)
                 </span>
               )}
-            </div>
+            </>
           )}
           {classifyProgress && !classifying && (
-            <div className="javis-classify-progress-bar">
-              <div
-                className="javis-classify-progress-fill"
-                style={{ width: `${(classifyProgress.completed / classifyProgress.total) * 100}%` }}
-              />
-            </div>
+            <ProgressBar
+              current={classifyProgress.completed ?? classifyProgress.current}
+              label={labels.classifyButton}
+              startedAt={classifyProgress.startedAt}
+              total={classifyProgress.total}
+            />
           )}
         </div>
       )}

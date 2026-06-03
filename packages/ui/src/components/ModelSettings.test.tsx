@@ -102,6 +102,23 @@ describe("ModelSettings", () => {
     expect(document.body.querySelectorAll(".javis-ai-model-card")).toHaveLength(3);
   });
 
+  it("shows OpenAI-compatible providers from the built-in catalog", () => {
+    const { container, getByText } = render(
+      <ModelSettings
+        labels={labels}
+        modelSettings={{ provider: "openai", model: "gpt-4.1", apiKey: "", apiKeyReference: "default", baseUrl: "" }}
+      />,
+    );
+
+    fireEvent.click(container.querySelector(".javis-settings-trigger")!);
+    fireEvent.click(getByText(labels.aiModeSettings));
+
+    expect(getByText("OpenRouter")).toBeTruthy();
+    expect(getByText("阿里云百炼 (DashScope)")).toBeTruthy();
+    expect(getByText("Ollama (本地)")).toBeTruthy();
+    expect(getByText("Google Gemini")).toBeTruthy();
+  });
+
   it("runs the API connection test from the AI settings page", async () => {
     const onTestModelConnection = vi.fn().mockResolvedValue("API 连通正常");
     const { container, getByText } = render(
@@ -118,6 +135,48 @@ describe("ModelSettings", () => {
 
     await waitFor(() => expect(onTestModelConnection).toHaveBeenCalledOnce());
     expect(document.body.querySelector(".javis-ai-test-status")?.textContent).toContain("API 连通正常");
+  });
+
+  it("tests provider connections with the configured profile key reference", async () => {
+    const onTestModelConnection = vi.fn().mockResolvedValue("API 连通正常");
+    const { container, getByText } = render(
+      <ModelSettings
+        labels={labels}
+        modelSettings={{ provider: "deepseek", model: "", apiKey: "", apiKeyReference: "default", baseUrl: "" }}
+        modelConfiguration={{
+          profiles: [
+            {
+              id: "primary",
+              slot: "primary",
+              displayName: "Primary",
+              provider: "deepseek",
+              model: "deepseek-chat",
+              apiKeyReference: "model.primary",
+              baseUrl: "https://api.deepseek.com",
+              apiKey: "",
+              hasStoredApiKey: true,
+              capabilities: { vision: false, code: true, longContext: false },
+            },
+          ],
+          agentOverrides: {},
+        }}
+        onTestModelConnection={onTestModelConnection}
+      />,
+    );
+
+    fireEvent.click(container.querySelector(".javis-settings-trigger")!);
+    fireEvent.click(getByText(labels.aiModeSettings));
+    fireEvent.click(document.body.querySelector(".javis-ai-test-button")!);
+
+    await waitFor(() => expect(onTestModelConnection).toHaveBeenCalledOnce());
+    expect(onTestModelConnection).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "deepseek",
+        model: "deepseek-chat",
+        apiKeyReference: "model.primary",
+        baseUrl: "https://api.deepseek.com",
+      }),
+    );
   });
 
   it("assigns configured provider models to model slots with dropdowns", () => {
@@ -200,20 +259,25 @@ describe("ModelSettings", () => {
     });
   });
 
-  it("adds provider models to the saved configuration", () => {
+  it("adds provider models to the saved configuration", async () => {
     const onModelConfigurationChange = vi.fn();
+    const onFetchProviderModels = vi.fn(async () => ["deepseek-v4-pro", "deepseek-v4-turbo"]);
     const { container, getByText } = render(
       <ModelSettings
         labels={labels}
         modelSettings={{ provider: "deepseek", model: "deepseek-v4-pro", apiKey: "", apiKeyReference: "default", baseUrl: "https://api.deepseek.com" }}
         onModelConfigurationChange={onModelConfigurationChange}
+        onFetchProviderModels={onFetchProviderModels}
       />,
     );
 
     fireEvent.click(container.querySelector(".javis-settings-trigger")!);
     fireEvent.click(getByText(labels.aiModeSettings));
-    fireEvent.click(getByText("查看已添加"));
-    expect(document.body.querySelector(".javis-ai-model-fetch-message")?.textContent).toContain("已添加");
+    fireEvent.click(getByText("获取模型"));
+    await vi.waitFor(() => {
+      const menu = document.body.querySelector(".javis-ai-provider-model-menu");
+      expect(menu).toBeTruthy();
+    });
     const deepseekProOption = [...document.body.querySelectorAll(".javis-ai-provider-model-menu button")]
       .find((button) => button.textContent?.includes("deepseek-v4-pro")) as HTMLButtonElement;
     fireEvent.click(deepseekProOption);
@@ -233,5 +297,51 @@ describe("ModelSettings", () => {
         }),
       ]),
     );
+  });
+
+  it("fetches models with the selected provider default Base URL", async () => {
+    const onFetchProviderModels = vi.fn(async () => ["openai/gpt-oss-120b"]);
+    const { container, getByText } = render(
+      <ModelSettings
+        labels={labels}
+        modelSettings={{ provider: "openai", model: "", apiKey: "", apiKeyReference: "default", baseUrl: "" }}
+        onFetchProviderModels={onFetchProviderModels}
+      />,
+    );
+
+    fireEvent.click(container.querySelector(".javis-settings-trigger")!);
+    fireEvent.click(getByText(labels.aiModeSettings));
+    fireEvent.click(getByText("OpenRouter"));
+    fireEvent.click(getByText("获取模型"));
+
+    await vi.waitFor(() => expect(onFetchProviderModels).toHaveBeenCalledOnce());
+    expect(onFetchProviderModels).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "openrouter",
+        baseUrl: "https://openrouter.ai/api/v1",
+        apiType: "openai-compatible",
+        keyReference: "model.openrouter",
+        modelListMode: "openai",
+      }),
+    );
+  });
+
+  it("does not call the provider API for providers without a supported model list endpoint", async () => {
+    const onFetchProviderModels = vi.fn(async () => ["gemini-2.5-pro"]);
+    const { container, getByText } = render(
+      <ModelSettings
+        labels={labels}
+        modelSettings={{ provider: "openai", model: "", apiKey: "", apiKeyReference: "default", baseUrl: "" }}
+        onFetchProviderModels={onFetchProviderModels}
+      />,
+    );
+
+    fireEvent.click(container.querySelector(".javis-settings-trigger")!);
+    fireEvent.click(getByText(labels.aiModeSettings));
+    fireEvent.click(getByText("Google Gemini"));
+    fireEvent.click(getByText("获取模型"));
+
+    expect(onFetchProviderModels).not.toHaveBeenCalled();
+    expect(document.body.querySelector(".javis-ai-model-fetch-message")?.textContent).toContain("模型 ID");
   });
 });

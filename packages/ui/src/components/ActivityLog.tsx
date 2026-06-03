@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { WorkbenchLocale, WorkbenchTask } from "../types";
+import type { WorkbenchLocale, WorkbenchPermissionDecision, WorkbenchTask } from "../types";
 import { translateWorkbenchText } from "../utils";
 
 interface ActivityLogProps {
@@ -8,7 +8,7 @@ interface ActivityLogProps {
   labels: WorkbenchLocale["labels"];
   locale: WorkbenchLocale;
   task: WorkbenchTask;
-  onPermissionDecision?: (decision: "approved" | "denied") => void;
+  onPermissionDecision?: (decision: WorkbenchPermissionDecision) => void;
   onAskUserAnswer?: (answer: string) => void;
   onToggle: () => void;
 }
@@ -52,10 +52,7 @@ export function ActivityLog({
                   </span>
                 </div>
                 <p className="javis-log-detail">
-                  {translateWorkbenchText(
-                    `${task.permissionRequest.dryRun.affectedPaths.length} planned path operation(s) require ${task.permissionRequest.level}.`,
-                    locale,
-                  )}
+                  {translateWorkbenchText(permissionLogDetail(task), locale)}
                 </p>
                 <div className="javis-confirmation-actions compact">
                   <button
@@ -65,6 +62,15 @@ export function ActivityLog({
                   >
                     {labels.approve}
                   </button>
+                  {isComputerPermission(task) ? (
+                    <button
+                      disabled={task.permissionRequest.status !== "pending"}
+                      onClick={() => onPermissionDecision?.("approved_always")}
+                      type="button"
+                    >
+                      {labels.alwaysAllow}
+                    </button>
+                  ) : null}
                   <button
                     disabled={task.permissionRequest.status !== "pending"}
                     onClick={() => onPermissionDecision?.("denied")}
@@ -153,4 +159,17 @@ function AskUserCompactInput({
       </button>
     </form>
   );
+}
+
+function permissionLogDetail(task: WorkbenchTask): string {
+  const request = task.permissionRequest;
+  if (!request) return "";
+  if (request.dryRun.operation.startsWith("computer.")) {
+    return `${request.dryRun.operation} requires ${request.level}: ${request.dryRun.riskSummary}`;
+  }
+  return `${request.dryRun.affectedPaths.length} planned path operation(s) require ${request.level}.`;
+}
+
+function isComputerPermission(task: WorkbenchTask): boolean {
+  return Boolean(task.permissionRequest?.dryRun.operation.startsWith("computer."));
 }

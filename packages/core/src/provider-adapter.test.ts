@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { OpenAIAdapter } from "./adapters/openai-adapter";
+import { OpenAICompatibleAdapter } from "./adapters/openai-compatible-adapter";
 import { DeepSeekAdapter } from "./adapters/deepseek-adapter";
 import { AnthropicAdapter } from "./adapters/anthropic-adapter";
 import { getAdapter, listAdapters, registerAdapter } from "./adapters/adapter-registry";
@@ -53,6 +54,34 @@ describe("OpenAIAdapter", () => {
     const adapter = new OpenAIAdapter();
     const response = { text: "hi", model: "gpt-4", provider: "openai" };
     expect(adapter.normalizeCompletionResponse(response)).toEqual(response);
+  });
+});
+
+describe("OpenAICompatibleAdapter", () => {
+  it("uses provider-specific default baseUrl when empty", () => {
+    const adapter = new OpenAICompatibleAdapter("openrouter", "https://openrouter.ai/api/v1");
+    const payload = adapter.buildCompletionRequest({
+      ...baseInput,
+      providerId: "openrouter",
+      baseUrl: "",
+      model: "anthropic/claude-sonnet-4.5",
+    });
+
+    expect(payload.protocol).toBe("openai-compatible");
+    expect(payload.providerId).toBe("openrouter");
+    expect(payload.baseUrl).toBe("https://openrouter.ai/api/v1");
+    expect(payload.model).toBe("anthropic/claude-sonnet-4.5");
+  });
+
+  it("uses provided baseUrl over provider default", () => {
+    const adapter = new OpenAICompatibleAdapter("dashscope", "https://dashscope.aliyuncs.com/compatible-mode/v1");
+    const payload = adapter.buildCompletionRequest({
+      ...baseInput,
+      providerId: "dashscope",
+      baseUrl: "https://example.test/v1///",
+    });
+
+    expect(payload.baseUrl).toBe("https://example.test/v1");
   });
 });
 
@@ -196,6 +225,32 @@ describe("adapter registry", () => {
     expect(adapter).toBeInstanceOf(AnthropicAdapter);
   });
 
+  it("returns generic OpenAI-compatible adapters for built-in compatible providers", () => {
+    const dashscope = getAdapter("dashscope");
+    expect(dashscope).toBeInstanceOf(OpenAICompatibleAdapter);
+    expect(dashscope.protocol).toBe("openai-compatible");
+
+    const payload = dashscope.buildCompletionRequest({
+      ...baseInput,
+      providerId: "dashscope",
+      baseUrl: "",
+      model: "qwen-plus",
+    });
+    expect(payload.baseUrl).toBe("https://dashscope.aliyuncs.com/compatible-mode/v1");
+  });
+
+  it("returns OpenAI-compatible Gemini adapter using the OpenAI bridge endpoint", () => {
+    const adapter = getAdapter("gemini");
+    expect(adapter).toBeInstanceOf(OpenAICompatibleAdapter);
+    const payload = adapter.buildCompletionRequest({
+      ...baseInput,
+      providerId: "gemini",
+      baseUrl: "",
+      model: "gemini-2.5-pro",
+    });
+    expect(payload.baseUrl).toBe("https://generativelanguage.googleapis.com/v1beta/openai");
+  });
+
   it("falls back to OpenAIAdapter for unknown provider", () => {
     const adapter = getAdapter("some-custom-provider");
     expect(adapter).toBeInstanceOf(OpenAIAdapter);
@@ -214,6 +269,9 @@ describe("adapter registry", () => {
     expect(ids).toContain("deepseek");
     expect(ids).toContain("deepseek-anthropic");
     expect(ids).toContain("anthropic");
+    expect(ids).toContain("dashscope");
+    expect(ids).toContain("openrouter");
+    expect(ids).toContain("ollama");
   });
 
   it("supports custom adapter registration", () => {

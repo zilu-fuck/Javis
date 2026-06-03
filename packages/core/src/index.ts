@@ -1,3 +1,5 @@
+console.log("[Javis-CORE] module loaded", new Date().toISOString());
+
 import type {
   AskUserQuestionRequest,
   CodeReviewPreview,
@@ -167,7 +169,19 @@ export type {
   RouteScoringContext,
 } from "./route-registry";
 export type { RouteKind } from "./routing";
-export { isBrowserGoal } from "./routing";
+export { isBrowserGoal, isComputerUseGoal } from "./routing";
+export {
+  COMPUTER_USE_SYSTEM_PROMPT,
+  COMPUTER_USE_OUTPUT_SCHEMA,
+  DEFAULT_COMPUTER_USE_CONFIG,
+} from "./computer-use-prompt";
+export { parseModelAction, parseModelOutput } from "./computer-use-types";
+export type {
+  ComputerUseLoopConfig,
+  ComputerUseStep,
+  ComputerUseAction,
+  ComputerUseModelOutput,
+} from "./computer-use-types";
 export {
   COMMANDER_PLAN_SCHEMA_JSON,
   buildCommanderPlanPrompt,
@@ -178,14 +192,6 @@ export type {
   CommanderDagPlan,
 } from "./commander-plan-schema";
 
-export {
-  getAdapter,
-  registerAdapter,
-  listAdapters,
-} from "./adapters/adapter-registry";
-export { OpenAIAdapter } from "./adapters/openai-adapter";
-export { DeepSeekAdapter } from "./adapters/deepseek-adapter";
-export { AnthropicAdapter } from "./adapters/anthropic-adapter";
 export type {
   ProviderProtocol,
   ProviderCapabilities,
@@ -194,6 +200,36 @@ export type {
   AdapterCompletionResponse,
   ProviderAdapter,
 } from "./provider-adapter";
+
+export {
+  getAdapter,
+  registerAdapter,
+  listAdapters,
+} from "./adapters/adapter-registry";
+export { OpenAIAdapter } from "./adapters/openai-adapter";
+export { OpenAICompatibleAdapter } from "./adapters/openai-compatible-adapter";
+export { DeepSeekAdapter } from "./adapters/deepseek-adapter";
+export { AnthropicAdapter } from "./adapters/anthropic-adapter";
+
+export {
+  PROVIDER_DEFINITIONS,
+  PROVIDER_BY_ID,
+  PROVIDER_IDS,
+} from "./provider-definitions";
+export type {
+  ProviderDefinition,
+  AdapterKind,
+} from "./provider-definitions";
+
+export {
+  extractImageDataUrls,
+  hasImageAttachments,
+  stripImageMarkers,
+  stripVisionContextMarkers,
+  buildVisionBridgePrompt,
+  formatVisionContext,
+  modelSupportsVision,
+} from "./vision-bridge";
 
 export {
   PREDEFINED_CATEGORIES,
@@ -419,6 +455,8 @@ export interface TaskLogEntry {
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+  /** Base64 image data URLs attached to this message (user messages only). Stripped before SQLite persistence. */
+  attachments?: string[];
 }
 
 export interface TaskSnapshot {
@@ -470,9 +508,13 @@ export interface TaskRuntime {
       priorMessages?: ChatMessage[];
       mode?: "auto" | "chat" | "project";
       workspacePath?: string;
+      /** User-facing text (without <vision-context>). Defaults to userGoal. */
+      displayGoal?: string;
+      /** Image data URLs for display in the user's message bubble. */
+      displayAttachments?: string[];
     },
   ): void;
-  resolvePermission(decision: "approved" | "denied", requestId?: string): void;
+  resolvePermission(decision: "approved" | "approved_always" | "denied", requestId?: string): void;
   respondToAskUser(answer: string, requestId?: string): void;
   dispose(): void;
 }
@@ -503,6 +545,16 @@ export interface FileScanRuntimeOptions {
     failedStepId?: string,
     failureReason?: string,
   ) => Promise<CommanderDagPlan>;
+  /**
+   * Vision-model-driven action loop for computer-use steps.
+   * Injected from desktop layer (where ModelProvider lives).
+   */
+  computerUseLoopRunner?: (options: {
+    userGoal: string;
+    computerTool: import("@javis/tools").ComputerTool;
+    approveAction: (action: { tool: string; params: Record<string, unknown> }) => Promise<{ approvalId: string; taskId?: string }>;
+    onStep?: (step: unknown) => void;
+  }) => Promise<unknown[]>;
 }
 
 export interface ChatTool {
@@ -582,16 +634,19 @@ export function createFileScanTaskRuntime({
   onTaskStarted,
   reactDecideNext,
   replanDag,
+  computerUseLoopRunner,
 }: FileScanRuntimeOptions): TaskRuntime {
   const runtimeState = createRuntimeState(createInitialTaskSnapshot(), delayMs);
   const eventBusUnsubscribe = eventBus
-    ? eventBus.on((e) => runtimeState.emitDelta(e))
+    ? eventBus.on((e) => {
+        runtimeState.emitDelta(e);
+      })
     : undefined;
   const permissionHandlers = new Map<string, PendingPermissionHandler>();
-  const queuedPermissionDecisions = new Map<string, "approved" | "denied">();
+  const queuedPermissionDecisions = new Map<string, "approved" | "approved_always" | "denied">();
   const askUserHandlers = new Map<string, AskUserAnswerHandler>();
   const queuedAskUserAnswers = new Map<string, string>();
-  let queuedLegacyPermissionDecision: "approved" | "denied" | undefined;
+  let queuedLegacyPermissionDecision: "approved" | "approved_always" | "denied" | undefined;
   let activeConversation:
     | { taskId: ID; startedMessages: ChatMessage[] }
     | undefined;
@@ -711,13 +766,17 @@ export function createFileScanTaskRuntime({
         taskId,
         startedMessages: [
           ...(options.priorMessages ?? []),
-          { role: "user", content: userGoal },
+          {
+            role: "user",
+            content: options.displayGoal ?? userGoal,
+            attachments: options.displayAttachments,
+          },
         ],
       };
       onTaskStarted?.(taskId);
       if (startMode === "chat") {
         if (chatTool) {
-          void runChatTask(taskId, userGoal, chatTool, options.priorMessages ?? []);
+          void runChatTask(taskId, userGoal, chatTool, options.priorMessages ?? [], options.displayGoal, options.displayAttachments);
           return;
         }
         runClarificationTask(taskId, userGoal);
@@ -730,10 +789,27 @@ export function createFileScanTaskRuntime({
           userGoal.trim(),
         );
         if (isCasual && chatTool) {
-          void runChatTask(taskId, userGoal, chatTool, options.priorMessages ?? []);
+          void runChatTask(taskId, userGoal, chatTool, options.priorMessages ?? [], options.displayGoal, options.displayAttachments);
           return;
         }
         // Fall through to auto routing
+      }
+
+      // ═══════════════════════════════════════════════════════════════════
+      // Vision — check BEFORE Commander DAG so multimodal model is used.
+      // Commander uses the primary (non-vision) model and cannot handle
+      // image analysis; the vision flow uses the multimodal slot.
+      // ═══════════════════════════════════════════════════════════════════
+      if (visionTool && isVisionGoal(userGoal) && !userGoal.includes("<vision-context>")) {
+        void runVisionTask({
+          controller,
+          visionTool,
+          commanderTool,
+          verifierTool,
+          taskId,
+          userGoal,
+        });
+        return;
       }
 
       // ═══════════════════════════════════════════════════════════════════
@@ -744,7 +820,13 @@ export function createFileScanTaskRuntime({
       // ═══════════════════════════════════════════════════════════════════
       if (commanderTool) {
         void runCommanderDagTask({
-          controller: { emit, getSnapshot: runtimeState.getSnapshot, wait, setPendingAskUserHandler },
+          controller: {
+            emit,
+            getSnapshot: runtimeState.getSnapshot,
+            wait,
+            setPendingAskUserHandler,
+            setPendingPermissionHandler,
+          },
           commanderTool,
           codeTool,
           computerTool,
@@ -758,6 +840,7 @@ export function createFileScanTaskRuntime({
           userGoal,
           reactDecideNext,
           replanDag,
+          computerUseLoopRunner,
         });
         return;
       }
@@ -804,7 +887,7 @@ export function createFileScanTaskRuntime({
         });
         return;
       }
-      if (visionTool && isVisionGoal(userGoal)) {
+      if (visionTool && isVisionGoal(userGoal) && !userGoal.includes("<vision-context>")) {
         void runVisionTask({
           controller,
           visionTool,
@@ -896,7 +979,7 @@ export function createFileScanTaskRuntime({
       }
 
       if (chatTool) {
-        void runChatTask(taskId, userGoal, chatTool, options.priorMessages ?? []);
+        void runChatTask(taskId, userGoal, chatTool, options.priorMessages ?? [], options.displayGoal, options.displayAttachments);
         return;
       }
 
@@ -954,11 +1037,14 @@ export function createFileScanTaskRuntime({
     userGoal: string,
     activeChatTool: ChatTool,
     priorMessages: ChatMessage[] = [],
+    displayGoal?: string,
+    displayAttachments?: string[],
   ) {
     const isChinese = /[\u3400-\u9fff]/u.test(userGoal);
+    const displayContent = displayGoal ?? userGoal;
     const startedMessages: ChatMessage[] = [
       ...priorMessages,
-      { role: "user", content: userGoal },
+      { role: "user", content: displayContent, attachments: displayAttachments },
     ];
     emit({
       id: taskId,
@@ -1061,7 +1147,10 @@ export function createFileScanTaskRuntime({
       locale?: string;
     },
   ): Promise<{ text: string; tokenUsage?: ModelUsage }> {
-    if (!activeChatTool.stream || !eventBus) {
+    if (!activeChatTool.stream) {
+      return activeChatTool.complete(prompt, options);
+    }
+    if (!eventBus) {
       return activeChatTool.complete(prompt, options);
     }
 
@@ -1082,6 +1171,8 @@ export function createFileScanTaskRuntime({
           agentKind: "commander",
           text: chunk.text,
         });
+        // Yield to the event loop so React can render between chunks
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
       }
       eventBus.emit({
         kind: "agent.chunk_end",
@@ -1090,7 +1181,8 @@ export function createFileScanTaskRuntime({
         fullText: text,
       });
       return { text, tokenUsage };
-    } catch {
+    } catch (streamError) {
+      console.log("[Javis] stream() threw, falling back to complete():", streamError);
       eventBus.emit({
         kind: "agent.chunk_end",
         taskId,

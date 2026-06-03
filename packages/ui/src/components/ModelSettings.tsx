@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import type {
   WorkbenchLocale,
@@ -7,6 +7,13 @@ import type {
   WorkbenchModelSettings,
   WorkbenchModelSlot,
 } from "../types";
+import type { ProviderCatalogEntry } from "../types";
+
+interface ProviderCapabilities {
+  vision: boolean;
+  code: boolean;
+  longContext: boolean;
+}
 
 interface ModelSettingsProps {
   labels: WorkbenchLocale["labels"];
@@ -16,7 +23,26 @@ interface ModelSettingsProps {
   onTestModelConnection?: (settings: WorkbenchModelSettings) => Promise<string | void>;
   onModelConfigurationChange?: (config: WorkbenchModelConfiguration) => void;
   /** Save a per-provider API key to the OS credential store immediately. */
-  onSaveProviderApiKey?: (keyReference: string, apiKey: string) => void;
+  onSaveProviderApiKey?: (keyReference: string, apiKey: string) => Promise<void>;
+  /**
+   * Fetch available model IDs from the provider API.
+   * When apiKey is empty, the desktop layer resolves the key from the OS credential store.
+   */
+  onFetchProviderModels?: (params: {
+    provider: string;
+    baseUrl: string;
+    apiKey: string;
+    apiType: string;
+    keyReference: string;
+    modelListMode: ModelListMode;
+  }) => Promise<string[]>;
+  /**
+   * External provider catalog. When provided, replaces the built-in PROVIDER_CATALOG.
+   * The desktop layer passes this to centralize provider metadata in @javis/core.
+   */
+  providerCatalog?: readonly ProviderCatalogEntry[];
+  /** Resolve default capabilities for a provider. Falls back to all-false when omitted. */
+  getProviderCapabilities?: (provider: string) => ProviderCapabilities;
 }
 
 type SettingsTab = "general" | "ai" | "privacy" | "about";
@@ -44,26 +70,53 @@ const KNOWN_AGENT_KINDS = [
   "vision",
 ];
 
-const PROVIDER_OPTIONS = [
-  "openai",
-  "deepseek",
-  "deepseek-anthropic",
-  "anthropic",
-];
-
-const PROVIDER_LABELS: Record<string, string> = {
-  openai: "OpenAI",
-  deepseek: "DeepSeek",
-  "deepseek-anthropic": "DeepSeek Anthropic",
-  anthropic: "Anthropic",
-};
-
 const API_TYPE_OPTIONS = [
   { value: "openai-compatible", label: "OpenAI Compatible" },
   { value: "anthropic-messages", label: "Anthropic Messages" },
 ] as const;
 
 type ApiType = (typeof API_TYPE_OPTIONS)[number]["value"];
+type ModelListMode = "openai" | "anthropic" | "unsupported";
+
+const PROVIDER_CATALOG = [
+  { id: "openai", label: "OpenAI", defaultBaseUrl: "https://api.openai.com/v1", apiType: "openai-compatible", modelListMode: "openai" },
+  { id: "deepseek", label: "DeepSeek", defaultBaseUrl: "https://api.deepseek.com", apiType: "openai-compatible", modelListMode: "openai" },
+  { id: "deepseek-anthropic", label: "DeepSeek Anthropic", defaultBaseUrl: "https://api.deepseek.com/anthropic", apiType: "anthropic-messages", modelListMode: "anthropic" },
+  { id: "anthropic", label: "Anthropic", defaultBaseUrl: "https://api.anthropic.com", apiType: "anthropic-messages", modelListMode: "anthropic" },
+  { id: "dashscope", label: "阿里云百炼 (DashScope)", defaultBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", apiType: "openai-compatible", modelListMode: "openai" },
+  { id: "dashscope-coding", label: "百炼 Coding Plan", defaultBaseUrl: "https://coding.dashscope.aliyuncs.com/v1", apiType: "openai-compatible", modelListMode: "unsupported" },
+  { id: "siliconflow", label: "SiliconFlow (硅基流动)", defaultBaseUrl: "https://api.siliconflow.cn/v1", apiType: "openai-compatible", modelListMode: "openai" },
+  { id: "zhipu", label: "智谱 AI (GLM)", defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4", apiType: "openai-compatible", modelListMode: "unsupported" },
+  { id: "moonshot", label: "Moonshot (Kimi)", defaultBaseUrl: "https://api.moonshot.cn/v1", apiType: "openai-compatible", modelListMode: "openai" },
+  { id: "baichuan", label: "百川智能", defaultBaseUrl: "https://api.baichuan-ai.com/v1", apiType: "openai-compatible", modelListMode: "unsupported" },
+  { id: "stepfun", label: "阶跃星辰 (StepFun)", defaultBaseUrl: "https://api.stepfun.com/v1", apiType: "openai-compatible", modelListMode: "unsupported" },
+  { id: "volcengine", label: "火山引擎 (豆包)", defaultBaseUrl: "https://ark.cn-beijing.volces.com/api/v3", apiType: "openai-compatible", modelListMode: "unsupported" },
+  { id: "volcengine-coding", label: "火山引擎 Coding Plan", defaultBaseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3", apiType: "openai-compatible", modelListMode: "unsupported" },
+  { id: "hunyuan", label: "腾讯混元", defaultBaseUrl: "https://api.hunyuan.cloud.tencent.com/v1", apiType: "openai-compatible", modelListMode: "unsupported" },
+  { id: "baidu-cloud", label: "百度智能云 (文心)", defaultBaseUrl: "https://qianfan.baidubce.com/v2", apiType: "openai-compatible", modelListMode: "unsupported" },
+  { id: "modelscope", label: "魔搭 (ModelScope)", defaultBaseUrl: "https://api-inference.modelscope.cn/v1", apiType: "openai-compatible", modelListMode: "openai" },
+  { id: "infini", label: "无问芯穹 (Infini)", defaultBaseUrl: "https://cloud.infini-ai.com/maas/v1", apiType: "openai-compatible", modelListMode: "unsupported" },
+  { id: "mimo", label: "Xiaomi (MiMo)", defaultBaseUrl: "https://api.xiaomimimo.com/v1", apiType: "openai-compatible", modelListMode: "openai" },
+  { id: "openrouter", label: "OpenRouter", defaultBaseUrl: "https://openrouter.ai/api/v1", apiType: "openai-compatible", modelListMode: "openai" },
+  { id: "groq", label: "Groq", defaultBaseUrl: "https://api.groq.com/openai/v1", apiType: "openai-compatible", modelListMode: "openai" },
+  { id: "together", label: "Together AI", defaultBaseUrl: "https://api.together.xyz/v1", apiType: "openai-compatible", modelListMode: "openai" },
+  { id: "fireworks", label: "Fireworks AI", defaultBaseUrl: "https://api.fireworks.ai/inference/v1", apiType: "openai-compatible", modelListMode: "openai" },
+  { id: "mistral", label: "Mistral AI", defaultBaseUrl: "https://api.mistral.ai/v1", apiType: "openai-compatible", modelListMode: "openai" },
+  { id: "perplexity", label: "Perplexity", defaultBaseUrl: "https://api.perplexity.ai", apiType: "openai-compatible", modelListMode: "unsupported" },
+  { id: "xai", label: "xAI (Grok)", defaultBaseUrl: "https://api.x.ai/v1", apiType: "openai-compatible", modelListMode: "openai" },
+  { id: "gemini", label: "Google Gemini", defaultBaseUrl: "https://generativelanguage.googleapis.com/v1beta/openai", apiType: "openai-compatible", modelListMode: "unsupported" },
+  { id: "minimax-token-plan", label: "MiniMax Token Plan", defaultBaseUrl: "https://api.minimax.io/v1", apiType: "openai-compatible", modelListMode: "unsupported" },
+  { id: "ollama", label: "Ollama (本地)", defaultBaseUrl: "http://localhost:11434/v1", apiType: "openai-compatible", modelListMode: "openai" },
+] as const satisfies readonly ProviderCatalogEntry[];
+
+const PROVIDER_LABELS: Record<string, string> = Object.fromEntries(
+  PROVIDER_CATALOG.map((provider) => [provider.id, provider.label]),
+);
+
+const PROVIDERS_BY_ID = new Map<string, ProviderCatalogEntry>(
+  PROVIDER_CATALOG.map((provider) => [provider.id, provider]),
+);
+
 
 interface ConfiguredModelOption {
   value: string;
@@ -102,12 +155,34 @@ export function ModelSettings({
   onTestModelConnection,
   onModelConfigurationChange,
   onSaveProviderApiKey,
+  onFetchProviderModels,
+  providerCatalog,
+  getProviderCapabilities,
 }: ModelSettingsProps) {
   const [isOpen, setOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
   const isWebPreview =
     typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);
   const isZh = labels.aiModeSettings === "AI 模式";
+
+  // Effective catalog: external prop overrides built-in, falls back to hardcoded default.
+  const effectiveCatalog = providerCatalog ?? PROVIDER_CATALOG;
+  const effectiveOptions = useMemo(
+    () => effectiveCatalog.map((p) => p.id),
+    [effectiveCatalog],
+  );
+  const effectiveLabels: Record<string, string> = useMemo(
+    () => Object.fromEntries(effectiveCatalog.map((p) => [p.id, p.label])),
+    [effectiveCatalog],
+  );
+  const effectiveById = useMemo(
+    () => new Map(effectiveCatalog.map((p) => [p.id, p])),
+    [effectiveCatalog],
+  );
+
+  function resolveDefaultCapabilities(provider: string): ProviderCapabilities {
+    return getProviderCapabilities?.(provider) ?? { vision: false, code: false, longContext: false };
+  }
 
   // Per-provider state
   const [providerApiKeys, setProviderApiKeys] = useState<Record<string, string>>({});
@@ -129,7 +204,44 @@ export function ModelSettings({
   const [openProviderModelMenu, setOpenProviderModelMenu] = useState(false);
   const [fetchedModelsByProvider, setFetchedModelsByProvider] = useState<Record<string, string[]>>({});
   const [modelFetchMessage, setModelFetchMessage] = useState("");
+  const [modelFetchLoading, setModelFetchLoading] = useState(false);
   const [modelIdToAdd, setModelIdToAdd] = useState("");
+  const modelMenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const [modelMenuStyle, setModelMenuStyle] = useState<CSSProperties>({});
+
+  function openModelMenu() {
+    if (modelMenuTriggerRef.current) {
+      const rect = modelMenuTriggerRef.current.getBoundingClientRect();
+      setModelMenuStyle({
+        position: "fixed",
+        zIndex: 600,
+        top: rect.bottom + 8,
+        left: rect.left,
+        width: rect.width,
+      });
+    }
+    setOpenProviderModelMenu(true);
+  }
+
+  function closeModelMenu() {
+    setOpenProviderModelMenu(false);
+  }
+
+  // Click-outside for the portaled menu — the onBlur approach can't work
+  // because the menu is outside the container's DOM hierarchy.
+  useEffect(() => {
+    if (!openProviderModelMenu) return;
+    function handleMouseDown(event: MouseEvent) {
+      const target = event.target as Node | null;
+      if (!target) return;
+      const menu = document.querySelector(".javis-ai-provider-model-menu");
+      if (menu?.contains(target)) return;
+      if (modelMenuTriggerRef.current?.contains(target)) return;
+      closeModelMenu();
+    }
+    document.addEventListener("mousedown", handleMouseDown, true);
+    return () => document.removeEventListener("mousedown", handleMouseDown, true);
+  }, [openProviderModelMenu]);
 
   // Sync from props when configuration changes (not on every modal open).
   const prevConfigRef = useRef(modelConfiguration);
@@ -149,8 +261,12 @@ export function ModelSettings({
         }
       }
       if (Object.keys(storedStatuses).length > 0) {
-        setProviderKeySaved((prev) => ({ ...storedStatuses, ...prev }));
+        setProviderKeySaved((prev) => ({ ...prev, ...storedStatuses }));
       }
+      setProviderBaseUrls((prev) => ({
+        ...providerBaseUrlsFromProfiles(modelConfiguration.profiles),
+        ...prev,
+      }));
     }
   }, [modelConfiguration]);
 
@@ -222,7 +338,12 @@ export function ModelSettings({
     setTimeout(() => setSaveStatus("idle"), 2500);
   }
 
-  async function handleTestModelConnectionForProvider(provider: string, model: string, baseUrl: string) {
+  async function handleTestModelConnectionForProvider(
+    provider: string,
+    model: string,
+    baseUrl: string,
+    apiKeyReference: string,
+  ) {
     if (!onTestModelConnection || testStatus === "testing") return;
     setTestStatus("testing");
     setTestMessage(isZh ? "正在测试 API 连通性..." : "Testing API connection...");
@@ -231,7 +352,7 @@ export function ModelSettings({
         provider,
         model,
         apiKey: providerApiKeys[provider] ?? "",
-        apiKeyReference: `model.${provider}`,
+        apiKeyReference,
         baseUrl,
       };
       const message = await onTestModelConnection(testSettings);
@@ -263,11 +384,6 @@ export function ModelSettings({
       selectProvider(apiType === "anthropic-messages" ? "deepseek-anthropic" : "deepseek");
       return;
     }
-    if (selectedProvider === "anthropic") {
-      selectProvider("anthropic");
-      return;
-    }
-    selectProvider("openai");
   }
 
   function providerCount(provider: string): number {
@@ -280,10 +396,13 @@ export function ModelSettings({
       profile.provider === selectedProvider &&
       (profile.baseUrl || profile.apiKeyReference),
     );
-    const baseUrl = providerBaseUrls[selectedProvider]
-      ?? matchingProviderProfile?.baseUrl
-      ?? modelSettings.baseUrl
-      ?? "";
+    const baseUrl = getProviderBaseUrl(
+      selectedProvider,
+      slotProfiles,
+      providerBaseUrls,
+      modelSettings,
+      effectiveById,
+    );
     // Always use per-provider key reference — not legacy "default"
     const apiKeyReference = matchingProviderProfile?.apiKeyReference ?? `model.${selectedProvider}`;
     setSlotProfiles((current) => {
@@ -291,6 +410,7 @@ export function ModelSettings({
         return current;
       }
       const id = uniqueProfileId(current, `${selectedProvider}.${model}`);
+      const apiKey = providerApiKeys[selectedProvider]?.trim() ?? "";
       return [
         ...current,
         {
@@ -301,8 +421,9 @@ export function ModelSettings({
           model,
           apiKeyReference,
           baseUrl,
-          apiKey: "",
-          capabilities: { vision: false, code: true, longContext: false },
+          apiKey,
+          hasStoredApiKey: Boolean(apiKey) || providerKeySaved[selectedProvider],
+          capabilities: resolveDefaultCapabilities(selectedProvider),
         },
       ];
     });
@@ -312,34 +433,119 @@ export function ModelSettings({
     setModelIdToAdd("");
   }
 
-  const configuredModels = buildConfiguredModelOptions(modelSettings, slotProfiles.filter((profile) => profile.slot === null));
+  const configuredModels = buildConfiguredModelOptions(modelSettings, slotProfiles.filter((profile) => profile.slot === null), effectiveLabels);
   const providerModels = buildConfiguredModelOptions(
     { ...modelSettings, model: "" },
     slotProfiles.filter((profile) => profile.slot === null && profile.provider === selectedProvider),
+    effectiveLabels,
   );
   const fetchedProviderModels = fetchedModelsByProvider[selectedProvider] ?? [];
   const addedProviderModelNames = new Set(providerModels.map((model) => model.model));
-  const selectedProviderLabel = PROVIDER_LABELS[selectedProvider] ?? selectedProvider;
-  const selectedApiType = getApiTypeForProvider(selectedProvider);
+  const selectedProviderLabel = effectiveLabels[selectedProvider] ?? selectedProvider;
+  const selectedApiType = resolveApiType(selectedProvider, effectiveById);
+  const selectedModelListMode = getModelListModeForProvider(selectedProvider, effectiveById);
 
-  function fetchProviderModels() {
-    const models = buildFetchedProviderModels(selectedProvider, modelSettings, slotProfiles);
-    setFetchedModelsByProvider((current) => ({
-      ...current,
-      [selectedProvider]: models,
-    }));
-    setOpenProviderModelMenu(true);
-    setModelFetchMessage(
-      isZh
-        ? `${selectedProvider} 已添加 ${models.length} 个模型`
-        : `${selectedProvider}: ${models.length} model(s) added`,
-    );
+  async function fetchProviderModels() {
+    const modelListMode = getModelListModeForProvider(selectedProvider, effectiveById);
+    if (modelListMode === "unsupported") {
+      openModelMenu();
+      setModelFetchMessage(
+        isZh
+          ? "当前供应商暂不支持自动获取模型，请手动输入模型 ID"
+          : "This provider does not support automatic model fetch yet. Enter the model ID manually.",
+      );
+      return;
+    }
+
+    const baseUrl = getProviderBaseUrl(
+      selectedProvider,
+      slotProfiles,
+      providerBaseUrls,
+      modelSettings,
+      effectiveById,
+    ).trim();
+    if (!baseUrl) {
+      setModelFetchMessage(isZh ? "请先配置 Base URL" : "Please configure a Base URL first");
+      return;
+    }
+
+    const typedKey = providerApiKeys[selectedProvider]?.trim() ?? "";
+    const selectedApiType = resolveApiType(selectedProvider, effectiveById);
+    const keyRef = getProviderKeyReference(selectedProvider, slotProfiles);
+
+    setModelFetchLoading(true);
+    setModelFetchMessage(isZh ? "正在获取模型列表..." : "Fetching model list...");
+    try {
+      let modelIds: string[];
+
+      if (onFetchProviderModels) {
+        // Desktop layer handles both typed and stored keys
+        modelIds = await onFetchProviderModels({
+          provider: selectedProvider,
+          baseUrl,
+          apiKey: typedKey,
+          apiType: selectedApiType,
+          keyReference: keyRef,
+          modelListMode,
+        });
+      } else {
+        // Web preview fallback: fetch directly with typed key
+        const normalizedBase = baseUrl.replace(/\/+$/, "");
+        const url = modelListMode === "anthropic"
+          ? `${normalizedBase}/v1/models?limit=1000`
+          : `${normalizedBase}/models`;
+
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (typedKey) {
+          if (modelListMode === "anthropic") {
+            headers["x-api-key"] = typedKey;
+            headers["anthropic-version"] = "2023-06-01";
+          } else {
+            headers["Authorization"] = `Bearer ${typedKey}`;
+          }
+        }
+
+        const response = await fetch(url, {
+          method: "GET",
+          headers,
+          signal: AbortSignal.timeout(15000),
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text().catch(() => "");
+          throw new Error(`HTTP ${response.status}${errorText ? `: ${errorText.slice(0, 200)}` : ""}`);
+        }
+
+        const data = await response.json();
+        modelIds = (data.data || []).map((m: { id: string }) => m.id);
+      }
+
+      if (modelIds.length === 0) {
+        setModelFetchMessage(isZh ? "未找到可用模型" : "No models found");
+        setModelFetchLoading(false);
+        return;
+      }
+
+      setFetchedModelsByProvider((current) => ({
+        ...current,
+        [selectedProvider]: modelIds,
+      }));
+      openModelMenu();
+      setModelFetchMessage("");
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      setModelFetchMessage(
+        isZh ? `获取失败：${msg}` : `Fetch failed: ${msg}`,
+      );
+    } finally {
+      setModelFetchLoading(false);
+    }
   }
 
   return (
     <div className="javis-settings">
       <datalist id="javis-provider-options">
-        {PROVIDER_OPTIONS.map((provider) => (
+        {effectiveOptions.map((provider) => (
           <option key={provider} value={provider} />
         ))}
       </datalist>
@@ -399,7 +605,7 @@ export function ModelSettings({
                     <aside className="javis-ai-provider-list" aria-label={isZh ? "供应商列表" : "Provider list"}>
                       <div className="javis-ai-provider-group">
                         <span>API</span>
-                        {PROVIDER_OPTIONS.map((provider) => (
+                        {effectiveOptions.map((provider) => (
                           <button
                             className={selectedProvider === provider ? "active" : ""}
                             key={provider}
@@ -407,7 +613,7 @@ export function ModelSettings({
                             type="button"
                           >
                             <span className="javis-ai-provider-dot" />
-                            <strong>{PROVIDER_LABELS[provider] ?? provider}</strong>
+                            <strong>{effectiveLabels[provider] ?? provider}</strong>
                             <em>{providerCount(provider)}</em>
                           </button>
                         ))}
@@ -420,12 +626,19 @@ export function ModelSettings({
                           className="javis-ai-test-button"
                           disabled={!onTestModelConnection || testStatus === "testing" || !selectedProvider}
                           onClick={() => {
-                            const providerModels = slotProfiles.filter(
-                              (p) => p.provider === selectedProvider && p.model,
+                            const connection = getProviderConnectionSettings(
+                              selectedProvider,
+                              slotProfiles,
+                              modelSettings,
+                              providerBaseUrls,
+                              effectiveById,
                             );
-                            const testModel = providerModels[0]?.model || modelSettings.model;
-                            const testBaseUrl = providerBaseUrls[selectedProvider] || providerModels[0]?.baseUrl || modelSettings.baseUrl;
-                            void handleTestModelConnectionForProvider(selectedProvider, testModel, testBaseUrl);
+                            void handleTestModelConnectionForProvider(
+                              selectedProvider,
+                              connection.model,
+                              connection.baseUrl,
+                              connection.apiKeyReference,
+                            );
                           }}
                           type="button"
                         >
@@ -454,10 +667,13 @@ export function ModelSettings({
                           <div style={{ display: "flex", gap: "0.5rem" }}>
                             <input
                               aria-label={labels.modelApiKey}
-                              onChange={(event) => setProviderApiKeys((prev) => ({
-                                ...prev,
-                                [selectedProvider]: event.currentTarget.value,
-                              }))}
+                              onChange={(event) => {
+                                const nextValue = event.currentTarget?.value ?? "";
+                                setProviderApiKeys((prev) => ({
+                                  ...prev,
+                                  [selectedProvider]: nextValue,
+                                }));
+                              }}
                               placeholder={providerKeySaved[selectedProvider] ? "••••••••" : ""}
                               type="password"
                               value={providerApiKeys[selectedProvider] ?? ""}
@@ -465,11 +681,32 @@ export function ModelSettings({
                             />
                             <button
                               disabled={!providerApiKeys[selectedProvider]?.trim()}
-                              onClick={() => {
+                              onClick={async () => {
                                 const key = providerApiKeys[selectedProvider]?.trim();
                                 if (!key || !onSaveProviderApiKey) return;
-                                const keyRef = `model.${selectedProvider}`;
-                                onSaveProviderApiKey(keyRef, key);
+                                const keyRef = getProviderKeyReference(selectedProvider, slotProfiles);
+                                try {
+                                  await onSaveProviderApiKey(keyRef, key);
+                                } catch (error) {
+                                  const msg = error instanceof Error ? error.message : String(error);
+                                  setModelFetchMessage(
+                                    isZh ? `密钥保存失败：${msg}` : `Failed to save key: ${msg}`,
+                                  );
+                                  return;
+                                }
+                                setSlotProfiles((current) =>
+                                  current.map((profile) => {
+                                    if (profile.apiKeyReference === keyRef) {
+                                      return { ...profile, apiKey: key, hasStoredApiKey: true };
+                                    }
+                                    // Align slot profiles that share this provider
+                                    // so the key reference is consistent for lookups.
+                                    if (profile.provider === selectedProvider) {
+                                      return { ...profile, apiKeyReference: keyRef, hasStoredApiKey: true };
+                                    }
+                                    return profile;
+                                  }),
+                                );
                                 setProviderKeySaved((prev) => ({ ...prev, [selectedProvider]: true }));
                                 setProviderApiKeys((prev) => ({ ...prev, [selectedProvider]: "" }));
                               }}
@@ -488,12 +725,21 @@ export function ModelSettings({
                           <span>{labels.modelBaseUrl}</span>
                           <input
                             aria-label={labels.modelBaseUrl}
-                            onChange={(event) => setProviderBaseUrls((prev) => ({
-                              ...prev,
-                              [selectedProvider]: event.currentTarget.value,
-                            }))}
-                            placeholder={selectedProvider === "deepseek-anthropic" ? "https://api.deepseek.com/anthropic" : "https://api.deepseek.com"}
-                            value={providerBaseUrls[selectedProvider] ?? ""}
+                            onChange={(event) => {
+                              const nextValue = event.currentTarget?.value ?? "";
+                              setProviderBaseUrls((prev) => ({
+                                ...prev,
+                                [selectedProvider]: nextValue,
+                              }));
+                            }}
+                            placeholder={getProviderDefaultBaseUrl(selectedProvider, effectiveById)}
+                            value={getProviderBaseUrl(
+                              selectedProvider,
+                              slotProfiles,
+                              providerBaseUrls,
+                              modelSettings,
+                              effectiveById,
+                            )}
                           />
                         </label>
                         <label>
@@ -503,7 +749,7 @@ export function ModelSettings({
                             onChange={(value) => updateApiType(value as ApiType)}
                             options={API_TYPE_OPTIONS.map((option) => ({
                               ...option,
-                              disabled: !isApiTypeSupportedForProvider(selectedProvider, option.value),
+                              disabled: !isApiTypeSupportedForProvider(selectedProvider, option.value, effectiveById),
                             }))}
                             value={selectedApiType}
                           />
@@ -518,7 +764,7 @@ export function ModelSettings({
                           <div className="javis-ai-added-model-list">
                             {providerModels.map((model) => (
                               <div className="javis-ai-added-model-row" key={model.value}>
-                                <span>{PROVIDER_LABELS[model.provider] ?? model.provider}</span>
+                                <span>{effectiveLabels[model.provider] ?? model.provider}</span>
                                 <em>{model.model}</em>
                                 <small title={model.apiKeyReference}>{model.apiKeyReference}</small>
                               </div>
@@ -530,24 +776,26 @@ export function ModelSettings({
                         <div className="javis-ai-add-model-row">
                           <div
                             className="javis-ai-provider-model-select"
-                            onBlur={(event) => {
-                              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-                                setOpenProviderModelMenu(false);
-                              }
-                            }}
                           >
                             <button
                               aria-expanded={openProviderModelMenu}
                               aria-haspopup="listbox"
                               className="javis-ai-provider-model-trigger"
-                              onClick={() => setOpenProviderModelMenu((open) => !open)}
-                              type="button"
-                            >
+                              onClick={() => {
+                                  if (openProviderModelMenu) {
+                                    setOpenProviderModelMenu(false);
+                                  } else {
+                                    openModelMenu();
+                                  }
+                                }}
+                                ref={modelMenuTriggerRef}
+                                type="button"
+                              >
                               <span>{isZh ? "添加模型" : "Add model"}</span>
                               <span>⌄</span>
                             </button>
-                            {openProviderModelMenu ? (
-                              <div className="javis-ai-provider-model-menu" role="listbox">
+                            {openProviderModelMenu ? createPortal(
+                              <div className="javis-ai-provider-model-menu" role="listbox" style={modelMenuStyle}>
                                 {fetchedProviderModels.length > 0 ? fetchedProviderModels.map((model) => {
                                   const isAdded = addedProviderModelNames.has(model);
                                   return (
@@ -569,7 +817,7 @@ export function ModelSettings({
                                 <div className="javis-ai-provider-model-manual">
                                   <input
                                     aria-label={isZh ? "输入模型 ID" : "Enter model ID"}
-                                    onChange={(event) => setModelIdToAdd(event.currentTarget.value)}
+                                    onChange={(event) => setModelIdToAdd(event.currentTarget?.value ?? "")}
                                     onKeyDown={(event) => {
                                       if (event.key === "Enter") {
                                         event.preventDefault();
@@ -587,15 +835,21 @@ export function ModelSettings({
                                     {isZh ? "添加" : "Add"}
                                   </button>
                                 </div>
-                              </div>
+                              </div>,
+                              document.body,
                             ) : null}
                           </div>
                           <button
-                            disabled={!selectedProvider}
+                            disabled={!selectedProvider || modelFetchLoading}
                             onClick={fetchProviderModels}
+                            title={selectedModelListMode === "unsupported"
+                              ? (isZh ? "当前供应商请手动输入模型 ID" : "Enter model ID manually for this provider")
+                              : undefined}
                             type="button"
                           >
-                            {isZh ? "查看已添加" : "Show added"}
+                            {modelFetchLoading
+                              ? (isZh ? "获取中..." : "Fetching...")
+                              : (isZh ? "获取模型" : "Fetch models")}
                           </button>
                         </div>
                         {modelFetchMessage ? (
@@ -685,7 +939,7 @@ export function ModelSettings({
                               </label>
                               <p className="javis-ai-model-card-meta">
                                 {selectedModel
-                                  ? `${PROVIDER_LABELS[selectedModel.provider] ?? selectedModel.provider} · ${selectedModel.model}`
+                                  ? `${effectiveLabels[selectedModel.provider] ?? selectedModel.provider} · ${selectedModel.model}`
                                   : (isZh ? "从上方已配置模型中选择" : "Choose from configured provider models")}
                               </p>
                             </div>
@@ -839,6 +1093,7 @@ function SettingsPlaceholder({
 function buildConfiguredModelOptions(
   modelSettings: WorkbenchModelSettings,
   profiles: WorkbenchModelProfile[],
+  labels: Record<string, string> = PROVIDER_LABELS,
 ): ConfiguredModelOption[] {
   const options: ConfiguredModelOption[] = [];
   const seen = new Set<string>();
@@ -858,7 +1113,7 @@ function buildConfiguredModelOptions(
 
   addOption({
     value: "current",
-    label: `${PROVIDER_LABELS[modelSettings.provider] ?? modelSettings.provider} / ${modelSettings.model}`,
+    label: `${labels[modelSettings.provider] ?? modelSettings.provider} / ${modelSettings.model}`,
     provider: modelSettings.provider,
     model: modelSettings.model,
     baseUrl: modelSettings.baseUrl,
@@ -868,7 +1123,7 @@ function buildConfiguredModelOptions(
   profiles.forEach((profile) => {
     addOption({
       value: profile.id,
-      label: `${PROVIDER_LABELS[profile.provider] ?? profile.provider} / ${profile.model}`,
+      label: `${labels[profile.provider] ?? profile.provider} / ${profile.model}`,
       provider: profile.provider,
       model: profile.model,
       baseUrl: profile.baseUrl,
@@ -892,16 +1147,89 @@ function getConfiguredModelValue(
   return match?.value ?? "";
 }
 
-function getApiTypeForProvider(provider: string): ApiType {
-  return provider === "anthropic" || provider === "deepseek-anthropic"
-    ? "anthropic-messages"
-    : "openai-compatible";
+function providerBaseUrlsFromProfiles(
+  profiles: WorkbenchModelProfile[],
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const profile of profiles) {
+    if (profile.provider && profile.baseUrl && !result[profile.provider]) {
+      result[profile.provider] = profile.baseUrl;
+    }
+  }
+  return result;
 }
 
-function isApiTypeSupportedForProvider(provider: string, apiType: ApiType): boolean {
+function getProviderConnectionSettings(
+  provider: string,
+  profiles: WorkbenchModelProfile[],
+  modelSettings: WorkbenchModelSettings,
+  providerBaseUrls: Record<string, string>,
+  byId: Map<string, ProviderCatalogEntry> = PROVIDERS_BY_ID,
+): Pick<WorkbenchModelSettings, "model" | "baseUrl" | "apiKeyReference"> {
+  const profile = profiles.find((p) => p.provider === provider && p.model);
+  return {
+    model: profile?.model || modelSettings.model,
+    baseUrl: getProviderBaseUrl(provider, profiles, providerBaseUrls, modelSettings, byId),
+    apiKeyReference: getProviderKeyReference(provider, profiles),
+  };
+}
+
+function getProviderBaseUrl(
+  provider: string,
+  profiles: WorkbenchModelProfile[],
+  providerBaseUrls: Record<string, string>,
+  modelSettings: WorkbenchModelSettings,
+  byId: Map<string, ProviderCatalogEntry> = PROVIDERS_BY_ID,
+): string {
+  if (Object.prototype.hasOwnProperty.call(providerBaseUrls, provider)) {
+    return providerBaseUrls[provider] ?? "";
+  }
+  const profileBaseUrl = profiles.find((profile) =>
+    profile.provider === provider && profile.baseUrl,
+  )?.baseUrl;
+  if (profileBaseUrl) return profileBaseUrl;
+  if (modelSettings.provider === provider && modelSettings.baseUrl) {
+    return modelSettings.baseUrl;
+  }
+  return getProviderDefaultBaseUrl(provider, byId);
+}
+
+function getProviderDefaultBaseUrl(
+  provider: string,
+  byId: Map<string, ProviderCatalogEntry> = PROVIDERS_BY_ID,
+): string {
+  return byId.get(provider)?.defaultBaseUrl ?? "";
+}
+
+function getProviderKeyReference(
+  provider: string,
+  profiles: WorkbenchModelProfile[],
+): string {
+  return profiles.find((profile) => profile.provider === provider && profile.apiKeyReference)
+    ?.apiKeyReference ?? `model.${provider}`;
+}
+
+function resolveApiType(
+  provider: string,
+  byId: Map<string, ProviderCatalogEntry> = PROVIDERS_BY_ID,
+): ApiType {
+  return byId.get(provider)?.apiType ?? "openai-compatible";
+}
+
+function getModelListModeForProvider(
+  provider: string,
+  byId: Map<string, ProviderCatalogEntry> = PROVIDERS_BY_ID,
+): ModelListMode {
+  return byId.get(provider)?.modelListMode ?? "unsupported";
+}
+
+function isApiTypeSupportedForProvider(
+  provider: string,
+  apiType: ApiType,
+  byId: Map<string, ProviderCatalogEntry> = PROVIDERS_BY_ID,
+): boolean {
   if (provider === "deepseek" || provider === "deepseek-anthropic") return true;
-  if (provider === "anthropic") return apiType === "anthropic-messages";
-  return apiType === "openai-compatible";
+  return resolveApiType(provider, byId) === apiType;
 }
 
 function uniqueProfileId(profiles: WorkbenchModelProfile[], seed: string): string {
@@ -925,21 +1253,4 @@ function uniqueProfileId(profiles: WorkbenchModelProfile[], seed: string): strin
 function extractProviderFromKeyRef(keyRef: string): string | null {
   const match = keyRef.match(/^model\.(.+)$/);
   return match ? match[1] : null;
-}
-
-function buildFetchedProviderModels(
-  provider: string,
-  modelSettings: WorkbenchModelSettings,
-  profiles: WorkbenchModelProfile[],
-): string[] {
-  const models = new Set<string>();
-  if (modelSettings.provider === provider && modelSettings.model.trim()) {
-    models.add(modelSettings.model.trim());
-  }
-  profiles.forEach((profile) => {
-    if (profile.slot === null && profile.provider === provider && profile.model.trim()) {
-      models.add(profile.model.trim());
-    }
-  });
-  return [...models];
 }

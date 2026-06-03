@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import type { WorkbenchFileEntry, WorkbenchLocale } from "../types";
+import type { WorkbenchFileEntry, WorkbenchLocale, WorkbenchTrustedComputerApp } from "../types";
 import { formatModifiedTime, formatSize } from "../utils";
+import { ProgressBar } from "./ProgressBar";
 import { createCountLabel, ResourceIconButton, ResourceShell } from "./ResourceShell";
 
 interface ComputerViewProps {
@@ -12,6 +13,8 @@ interface ComputerViewProps {
   onListDirectory?: (path: string) => Promise<WorkbenchFileEntry[]>;
   onNavigate?: (path: string) => void;
   onOpen?: (path: string) => void;
+  onRemoveTrustedApp?: (title: string) => void;
+  trustedApps?: WorkbenchTrustedComputerApp[];
 }
 
 type ComputerLayout = "columns" | "grid" | "list";
@@ -33,6 +36,8 @@ export function ComputerView({
   onListDirectory,
   onNavigate,
   onOpen,
+  onRemoveTrustedApp,
+  trustedApps = [],
 }: ComputerViewProps) {
   const labels = locale.labels;
   const [query, setQuery] = useState("");
@@ -221,6 +226,7 @@ export function ComputerView({
       >
         <div className="javis-view-loading">
           <span className="javis-spinner" />
+          <ProgressBar indeterminate label={labels.scanInProgress} />
         </div>
       </ResourceShell>
     );
@@ -273,6 +279,26 @@ export function ComputerView({
             ))
           : null}
       </nav>
+      {trustedApps.length > 0 ? (
+        <section className="javis-computer-trust-list" aria-label={labels.trustedComputerApps}>
+          <div className="javis-document-row">
+            <strong>{labels.trustedComputerApps}</strong>
+            <span>{trustedApps.length}</span>
+          </div>
+          <div className="javis-computer-list">
+            {trustedApps.map((app) => (
+              <div className="javis-computer-row" key={app.title}>
+                <span className="javis-computer-icon file small" aria-hidden="true">APP</span>
+                <span className="javis-computer-name">{app.title}</span>
+                <span className="javis-computer-date">{formatModifiedTime(app.trustedAt)}</span>
+                <button type="button" onClick={() => onRemoveTrustedApp?.(app.title)}>
+                  {labels.removeTrustedApp}
+                </button>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
       {visibleEntries.length === 0 ? (
         <div className="javis-view-empty">
           <p>{labels.fileExplorerEmpty}</p>

@@ -44,7 +44,11 @@ export type AgentCapabilityTag =
   | "image_analyze"     // Analyze image content and answer visual questions
   | "image_describe"    // Generate textual description of an image
   | "image_ocr"         // Extract text from images via OCR
-  | "clarification";    // Ask user for clarification when goals are ambiguous
+  | "clarification"     // Ask user for clarification when goals are ambiguous
+  | "desktop_screenshot"    // Capture desktop/window screenshots
+  | "desktop_list_windows"  // Enumerate OS windows
+  | "desktop_focus"         // Focus/foreground a window
+  | "desktop_input";        // Inject mouse/keyboard input events
 
 // ── Model Requirements ──────────────────────────────────────────────────────
 

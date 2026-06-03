@@ -52,6 +52,7 @@ export function JavisWorkbench({
   userDocuments = [],
   userImages = [],
   computerEntries = [],
+  trustedComputerApps = [],
   computerPath = "",
   mountRoots = [],
   isTaskActive = false,
@@ -65,6 +66,9 @@ export function JavisWorkbench({
   computerError,
   scanning = false,
   scanProgress,
+  appsProgress,
+  docsProgress,
+  imagesProgress,
   classifying = false,
   classifyProgress,
   categoryStats = [],
@@ -79,6 +83,9 @@ export function JavisWorkbench({
   onTestModelConnection,
   onModelConfigurationChange,
   onSaveProviderApiKey,
+  onFetchProviderModels,
+  providerCatalog,
+  getProviderCapabilities,
   onSelectHistoryEntry,
   onUseWorkspacePath,
   onWorkspacePathChange,
@@ -101,6 +108,7 @@ export function JavisWorkbench({
   onNavigateDirectory,
   onListDirectory,
   onOpenFile,
+  onRemoveTrustedComputerApp,
   onSidebarWidthChange,
   onActiveViewChange,
   onActivityOpenChange,
@@ -355,9 +363,10 @@ export function JavisWorkbench({
         locale={effectiveLocale}
         onOpen={onOpenFile}
         onRefresh={onRefreshApps}
+        progress={appsProgress}
       />
     ),
-    [installedApps, appsError, appsLoading, effectiveLocale, onOpenFile, onRefreshApps],
+    [installedApps, appsError, appsLoading, effectiveLocale, onOpenFile, onRefreshApps, appsProgress],
   );
   const renderDocumentsView = useCallback(
     () => (
@@ -374,12 +383,13 @@ export function JavisWorkbench({
         onOpen={onOpenFile}
         onRefresh={onRefreshDocuments}
         onRefreshScan={onRefreshScan}
+        loadProgress={docsProgress}
         scanProgress={scanProgress}
         scanning={scanning}
       />
     ),
     [
-      categoryStats, classifying, classifyProgress, userDocuments, docsError,
+      categoryStats, classifying, classifyProgress, userDocuments, docsError, docsProgress,
       docsLoading, effectiveLocale, onCancelClassify, onClassifyDocuments,
       onOpenFile, onRefreshDocuments, onRefreshScan, scanProgress, scanning,
     ],
@@ -399,12 +409,13 @@ export function JavisWorkbench({
         onOpen={onOpenFile}
         onRefresh={onRefreshImages}
         onRefreshScan={onRefreshScan}
+        loadProgress={imagesProgress}
         scanProgress={scanProgress}
         scanning={scanning}
       />
     ),
     [
-      categoryStats, classifying, classifyProgress, imagesError, userImages,
+      categoryStats, classifying, classifyProgress, imagesError, userImages, imagesProgress,
       imagesLoading, effectiveLocale, onCancelClassify, onClassifyDocuments,
       onOpenFile, onRefreshImages, onRefreshScan, scanProgress, scanning,
     ],
@@ -420,11 +431,14 @@ export function JavisWorkbench({
         onListDirectory={onListDirectory}
         onNavigate={onNavigateDirectory}
         onOpen={onOpenFile}
+        onRemoveTrustedApp={onRemoveTrustedComputerApp}
+        trustedApps={trustedComputerApps}
       />
     ),
     [
       computerPath, computerEntries, computerError, computerLoading,
       effectiveLocale, onListDirectory, onNavigateDirectory, onOpenFile,
+      onRemoveTrustedComputerApp, trustedComputerApps,
     ],
   );
 
@@ -495,6 +509,9 @@ export function JavisWorkbench({
         onTestModelConnection={onTestModelConnection}
         onModelConfigurationChange={onModelConfigurationChange}
         onSaveProviderApiKey={onSaveProviderApiKey}
+        onFetchProviderModels={onFetchProviderModels}
+        providerCatalog={providerCatalog}
+        getProviderCapabilities={getProviderCapabilities}
         onResizeKeyDown={handleSidebarResizeKeyDown}
         onResizeStart={handleSidebarResizeStart}
         onNavigateDirectory={onNavigateDirectory}

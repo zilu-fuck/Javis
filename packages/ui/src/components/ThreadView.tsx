@@ -3,11 +3,12 @@ import type {
   WorkbenchFileEntry,
   WorkbenchLocale,
   WorkbenchModelConfiguration,
+  WorkbenchPermissionDecision,
   WorkbenchStreamingAgentKind,
   WorkbenchTask,
 } from "../types";
 import { useSmoothStream } from "../use-smooth-stream";
-import { translateWorkbenchText } from "../utils";
+import { stripVisionContextMarkers, translateWorkbenchText } from "../utils";
 import { ChatComposer } from "./ChatComposer";
 import { ContextRing } from "./ContextRing";
 import { ContextStats } from "./ContextStats";
@@ -28,11 +29,12 @@ interface ThreadViewProps {
   onBrowseWorkspacePath?: () => void;
   onDeleteRecentWorkspacePath?: (path: string) => void;
   onDraftGoalChange: (nextGoal: string) => void;
-  onPermissionDecision?: (decision: "approved" | "denied") => void;
+  onPermissionDecision?: (decision: WorkbenchPermissionDecision) => void;
   onAskUserAnswer?: (answer: string) => void;
   onRetryTask?: () => void;
   onStopTask?: () => void;
   onSubmit: FormEventHandler<HTMLFormElement>;
+  onSubmitWithAttachments?: (goal: string, attachments: File[]) => void;
   onUseWorkspacePath?: (path: string) => void;
   onWorkspacePathChange?: (path: string) => void;
 }
@@ -55,6 +57,7 @@ export function ThreadView({
   onRetryTask,
   onStopTask,
   onSubmit,
+  onSubmitWithAttachments,
   onUseWorkspacePath,
   onWorkspacePathChange,
 }: ThreadViewProps) {
@@ -101,7 +104,11 @@ export function ThreadView({
 
       <section className="javis-thread" aria-label={labels.activeTask}>
         {hasConversationMessages ? (
-          conversationMessages.map((message, index) => (
+          conversationMessages.map((message, index) => {
+            const displayContent = message.role === "user"
+              ? stripVisionContextMarkers(message.content)
+              : message.content;
+            return (
             <article
               className={`javis-message ${message.role === "user" ? "user" : ""}`}
               key={`${message.role}-${index}`}
@@ -109,15 +116,18 @@ export function ThreadView({
               <p className="javis-message-title">
                 {message.role === "user" ? labels.user : labels.commander}
               </p>
+              {message.role === "user" && message.attachments?.map((url, i) => (
+                <img key={i} src={url} className="javis-message-attachment" alt="" />
+              ))}
               <Markdown
                 className="javis-message-body"
-                text={translateWorkbenchText(message.content, locale)}
+                text={translateWorkbenchText(displayContent, locale)}
               />
               {message.role === "assistant" && index === conversationMessages.length - 1 ? (
                 <ContextStats task={task} labels={labels} />
               ) : null}
             </article>
-          ))
+          )})
         ) : (
           <article className="javis-message user">
             <p className="javis-message-title">{labels.user}</p>
@@ -189,6 +199,7 @@ export function ThreadView({
         onDraftGoalChange={onDraftGoalChange}
         onStopTask={onStopTask}
         onSubmit={onSubmit}
+        onSubmitWithAttachments={onSubmitWithAttachments}
         onUseWorkspacePath={onUseWorkspacePath}
         onWorkspacePathChange={onWorkspacePathChange}
         recentWorkspacePaths={recentWorkspacePaths}

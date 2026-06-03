@@ -2,19 +2,42 @@
  * Provider 适配器注册表
  *
  * 按 providerId 查找适配器，未知 provider 回退到 OpenAIAdapter。
+ * All built-in adapters are constructed from PROVIDER_DEFINITIONS —
+ * the single source of truth for provider metadata.
  */
 
 import type { ProviderAdapter } from "../provider-adapter";
+import {
+  PROVIDER_DEFINITIONS,
+  type ProviderDefinition,
+} from "../provider-definitions";
 import { OpenAIAdapter } from "./openai-adapter";
+import { OpenAICompatibleAdapter } from "./openai-compatible-adapter";
 import { DeepSeekAdapter } from "./deepseek-adapter";
 import { AnthropicAdapter } from "./anthropic-adapter";
 
-const adapters = new Map<string, ProviderAdapter>([
-  ["openai", new OpenAIAdapter()],
-  ["deepseek", new DeepSeekAdapter()],
-  ["deepseek-anthropic", new AnthropicAdapter("deepseek-anthropic")],
-  ["anthropic", new AnthropicAdapter()],
-]);
+function createAdapter(def: ProviderDefinition): ProviderAdapter {
+  switch (def.adapterKind) {
+    case "openai":
+      return new OpenAIAdapter();
+    case "deepseek":
+      return new DeepSeekAdapter();
+    case "anthropic":
+      return new AnthropicAdapter(
+        def.id === "anthropic" ? undefined : def.id,
+      );
+    case "openai-compatible":
+      return new OpenAICompatibleAdapter(
+        def.id,
+        def.defaultBaseUrl,
+        def.capabilities,
+      );
+  }
+}
+
+const adapters = new Map<string, ProviderAdapter>(
+  PROVIDER_DEFINITIONS.map((def) => [def.id, createAdapter(def)]),
+);
 
 const openaiFallback = new OpenAIAdapter();
 

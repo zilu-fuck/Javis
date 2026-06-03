@@ -27,6 +27,7 @@ export const zhCNWorkbenchLocale: WorkbenchLocale = {
     agentStates: "代理状态",
     collapseInspector: "收起检查器",
     approve: "批准",
+    alwaysAllow: "始终允许",
     commandResults: "只读命令",
     commander: "指挥官",
     codeReview: "代码审查",
@@ -168,6 +169,8 @@ export const zhCNWorkbenchLocale: WorkbenchLocale = {
     classifyFailed: "分类失败",
     allCategories: "全部",
     categoryBadge: "分类",
+    trustedComputerApps: "受信桌面应用",
+    removeTrustedApp: "移除",
     confidenceLabel: "置信度",
   },
   phrases: {
@@ -293,6 +296,7 @@ export const defaultWorkbenchLocale: WorkbenchLocale = {
     agentStates: "Agent states",
     collapseInspector: "Collapse inspector",
     approve: "Approve",
+    alwaysAllow: "Always Allow",
     commandResults: "Read-only Commands",
     commander: "Commander",
     codeReview: "Code Review",
@@ -434,6 +438,8 @@ export const defaultWorkbenchLocale: WorkbenchLocale = {
     classifyFailed: "Failed",
     allCategories: "All",
     categoryBadge: "Category",
+    trustedComputerApps: "Trusted Apps",
+    removeTrustedApp: "Remove",
     confidenceLabel: "Confidence",
   },
 };

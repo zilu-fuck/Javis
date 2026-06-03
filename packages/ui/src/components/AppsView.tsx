@@ -1,11 +1,13 @@
 import { useState } from "react";
-import type { WorkbenchAppEntry, WorkbenchLocale } from "../types";
+import type { WorkbenchAppEntry, WorkbenchLocale, WorkbenchProgress } from "../types";
+import { ProgressBar } from "./ProgressBar";
 import { createCountLabel, ResourceIconButton, ResourceShell } from "./ResourceShell";
 
 interface AppsViewProps {
   apps: WorkbenchAppEntry[];
   locale: WorkbenchLocale;
   loading?: boolean;
+  progress?: WorkbenchProgress;
   error?: string;
   onRefresh?: () => void;
   onOpen?: (path: string) => void;
@@ -15,6 +17,7 @@ export function AppsView({
   apps,
   locale,
   loading,
+  progress,
   error,
   onRefresh,
   onOpen,
@@ -54,7 +57,13 @@ export function AppsView({
       >
         <div className="javis-view-loading">
           <span className="javis-spinner" />
-          <span>{labels.scanInProgress}</span>
+          <ProgressBar
+            current={progress?.current}
+            indeterminate={!progress}
+            label={labels.scanInProgress}
+            startedAt={progress?.startedAt}
+            total={progress?.total}
+          />
         </div>
       </ResourceShell>
     );
@@ -100,9 +109,7 @@ export function AppsView({
               onClick={() => onOpen?.(app.path)}
               type="button"
             >
-              <span className="javis-app-icon">
-                {app.name.charAt(0).toUpperCase()}
-              </span>
+              <AppIcon app={app} />
               <span className="javis-app-name">{app.name}</span>
               {app.publisher && (
                 <span className="javis-app-publisher">{app.publisher}</span>
@@ -113,4 +120,24 @@ export function AppsView({
       )}
     </ResourceShell>
   );
+}
+
+function AppIcon({ app }: { app: WorkbenchAppEntry }) {
+  const [failed, setFailed] = useState(false);
+  const initial = app.name.charAt(0).toUpperCase();
+
+  if (app.iconPath && !failed) {
+    return (
+      <span className="javis-app-icon has-image">
+        <img
+          alt=""
+          aria-hidden="true"
+          onError={() => setFailed(true)}
+          src={app.iconPath}
+        />
+      </span>
+    );
+  }
+
+  return <span className="javis-app-icon">{initial}</span>;
 }

@@ -1,7 +1,9 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 #[allow(unused_imports)]
 use std::{
+    collections::HashMap,
     env, fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -29,6 +31,7 @@ mod scan;
 mod code;
 mod browser;
 mod file_write;
+mod computer;
 
 // Re-import from extracted modules
 use code::{normalize_optional_config_value, create_chat_completions_endpoint, CodeProposeEditRequest, default_model_for_locale, default_provider_for_locale, infer_provider_id_from_model, normalize_openai_compatible_model_name, FileContentHash};
@@ -149,6 +152,94 @@ fn check_model_api_key_secret(
         exists: path.exists(),
     })
 }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FetchProviderModelsRequest {
+    key_reference: String,
+    base_url: String,
+    /// "openai-compatible" or "anthropic-messages"
+    api_type: String,
+    /// "openai", "anthropic", or "unsupported"
+    model_list_mode: Option<String>,
+}
+
+#[derive(Serialize)]
+struct FetchProviderModelsResponse {
+    models: Vec<String>,
+    error: Option<String>,
+}
+
+#[tauri::command]
+fn fetch_provider_models(
+    app: AppHandle,
+    request: FetchProviderModelsRequest,
+) -> Result<FetchProviderModelsResponse, String> {
+    let key = load_model_api_key_secret_for_app(&app, &request.key_reference).unwrap_or_default();
+    let base = request.base_url.trim_end_matches('/');
+    let model_list_mode = request.model_list_mode.as_deref().unwrap_or_else(|| {
+        if request.api_type == "anthropic-messages" {
+            "anthropic"
+        } else {
+            "openai"
+        }
+    });
+    if model_list_mode == "unsupported" {
+        return Ok(FetchProviderModelsResponse {
+            models: vec![],
+            error: Some("This provider does not support automatic model fetch yet. Enter the model ID manually.".to_string()),
+        });
+    }
+
+    let url = if model_list_mode == "anthropic" {
+        format!("{base}/v1/models?limit=1000")
+    } else {
+        format!("{base}/models")
+    };
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut req = client.get(&url).header("Content-Type", "application/json");
+    if !key.is_empty() {
+        if model_list_mode == "anthropic" {
+            req = req.header("x-api-key", &key).header("anthropic-version", "2023-06-01");
+        } else {
+            req = req.header("Authorization", &format!("Bearer {key}"));
+        }
+    }
+
+    let response = req.send().map_err(|e| format!("Request failed: {e}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        return Ok(FetchProviderModelsResponse {
+            models: vec![],
+            error: Some(format!("HTTP {status}: {body}").chars().take(300).collect()),
+        });
+    }
+
+    let data: serde_json::Value = response
+        .json()
+        .map_err(|e| format!("Invalid JSON response: {e}"))?;
+
+    let models: Vec<String> = data
+        .get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.get("id").and_then(|id| id.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(FetchProviderModelsResponse {
+        models,
+        error: None,
+    })
+}
+
 #[tauri::command]
 fn complete_model_prompt(
     app: AppHandle,
@@ -243,7 +334,8 @@ pub(crate) fn hydrate_model_api_key_secret(
     else {
         return Ok(());
     };
-    request.api_key = Some(load_model_api_key_secret_for_app(app, &key_reference)?);
+    let provider_id = normalize_optional_config_value(request.provider_id.as_deref()).unwrap_or_else(|| "unknown".to_string());
+    request.api_key = Some(load_model_api_key_secret_with_fallback(app, &key_reference, &provider_id)?);
     Ok(())
 }
 
@@ -258,8 +350,68 @@ pub(crate) fn hydrate_model_completion_api_key_secret(
     else {
         return Ok(());
     };
-    request.api_key = Some(load_model_api_key_secret_for_app(app, &key_reference)?);
+    let provider_id = normalize_optional_config_value(request.provider_id.as_deref())
+        .unwrap_or_else(|| infer_model_completion_provider_id(request));
+    request.api_key = Some(load_model_api_key_secret_with_fallback(app, &key_reference, &provider_id)?);
     Ok(())
+}
+
+/// Try `key_reference` first, then `model.<provider_id>`, then `"default"`.
+/// Returns the resolved secret or a descriptive error listing all attempts.
+fn load_model_api_key_secret_with_fallback(
+    app: &AppHandle,
+    key_reference: &str,
+    provider_id: &str,
+) -> Result<String, String> {
+    let provider_ref = format!("model.{provider_id}");
+    let mut candidates: Vec<&str> = vec![key_reference];
+    if provider_ref != key_reference {
+        candidates.push(&provider_ref);
+    }
+    let default_ref = MODEL_API_KEY_SECRET_REFERENCE;
+    if default_ref != key_reference && default_ref != provider_ref {
+        candidates.push(default_ref);
+    }
+    let mut errors: Vec<String> = Vec::new();
+    for candidate in &candidates {
+        match try_load_model_api_key_secret_for_app(app, candidate) {
+            Some(api_key) => return Ok(api_key),
+            None => {
+                let path = model_api_key_secret_path(app, candidate)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| format!("<path error for {candidate}>"));
+                errors.push(format!("  {candidate} → {path}"));
+            }
+        }
+    }
+    Err(format!(
+        "Could not read model API key secret. Tried these references but none found:\n{}\n\
+         Open Settings → AI, select your model provider, save your API key, \
+         and make sure your model slot (e.g. Primary) is assigned to this provider.",
+        errors.join("\n")
+    ))
+}
+
+#[cfg(windows)]
+fn try_load_model_api_key_secret_for_app(
+    app: &AppHandle,
+    key_reference: &str,
+) -> Option<String> {
+    let key_reference = normalize_model_api_key_reference(key_reference).ok()?;
+    let path = model_api_key_secret_path(app, &key_reference).ok()?;
+    if !path.exists() {
+        return None;
+    }
+    let secret = std::fs::read_to_string(&path).ok()?;
+    unprotect_model_api_key_secret(secret.trim()).ok()
+}
+
+#[cfg(not(windows))]
+fn try_load_model_api_key_secret_for_app(
+    app: &AppHandle,
+    key_reference: &str,
+) -> Option<String> {
+    load_model_api_key_secret_for_app(app, key_reference).ok()
 }
 
 #[cfg(windows)]
@@ -503,14 +655,16 @@ fn delete_model_api_key_secret_with_store(
 fn run_openai_compatible_completion_request(
     request: &ModelCompletionRequest,
 ) -> Result<ModelCompletionResponse, String> {
-    let api_key = normalize_optional_config_value(request.api_key.as_deref())
-        .ok_or_else(|| "Model completion requires an API key.".to_string())?;
     let model = normalize_model_completion_model_name(request)
         .ok_or_else(|| "Model completion requires a model.".to_string())?;
     let provider_id = normalize_optional_config_value(request.provider_id.as_deref())
         .unwrap_or_else(|| infer_model_completion_provider_id(request));
     let base_url = normalize_optional_config_value(request.base_url.as_deref())
         .unwrap_or_else(|| default_openai_compatible_base_url_for_provider(&provider_id));
+    let api_key = normalize_optional_config_value(request.api_key.as_deref());
+    if api_key.is_none() && openai_compatible_request_requires_api_key(&provider_id, &base_url) {
+        return Err("Model completion requires an API key.".to_string());
+    }
     let endpoint = create_chat_completions_endpoint(&base_url);
     let body = create_openai_compatible_completion_body(&model, request);
     let body_text = serde_json::to_string(&body).map_err(|error| error.to_string())?;
@@ -518,15 +672,24 @@ fn run_openai_compatible_completion_request(
         .timeout(OPENCODE_PROPOSAL_TIMEOUT)
         .build()
         .map_err(|error| error.to_string())?;
-    let response_text = client
+    let mut request_builder = client
         .post(&endpoint)
-        .header("Authorization", &format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
-        .body(body_text)
+        .body(body_text);
+    if let Some(api_key) = api_key {
+        request_builder = request_builder.header("Authorization", &format!("Bearer {api_key}"));
+    }
+    let response = request_builder
         .send()
-        .map_err(|error| format!("Model completion request failed: {error}"))?
+        .map_err(|error| classify_http_request_error(error, &endpoint))?;
+    // Classify common HTTP status codes before parsing the body.
+    let status = response.status();
+    let response_text = response
         .text()
         .map_err(|error| format!("Model completion could not read response: {error}"))?;
+    if let Some(message) = classify_http_status_error(status, &response_text, &provider_id) {
+        return Err(message);
+    }
     let value = serde_json::from_str::<serde_json::Value>(&response_text).map_err(|error| {
         format!(
             "Model completion returned invalid JSON: {error}; {}",
@@ -538,12 +701,28 @@ fn run_openai_compatible_completion_request(
             )
         )
     })?;
-    let content_value = value
+    let message = value
         .get("choices")
         .and_then(|choices| choices.as_array())
         .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"));
+        .and_then(|choice| choice.get("message"));
+    let Some(message) = message else {
+        return Err(format!(
+            "Model completion returned no message. {}",
+            create_model_completion_response_diagnostic(
+                &provider_id,
+                &model,
+                &endpoint,
+                &response_text,
+            )
+        ));
+    };
+    // Reasoning models (DeepSeek-R1, Mimo v2.5, etc.) produce
+    // reasoning_content first; content may be empty on short max_tokens.
+    let content_value = message
+        .get("content")
+        .filter(|c| !c.is_null() && c.as_str().map_or(false, |s| !s.trim().is_empty()))
+        .or_else(|| message.get("reasoning_content"));
     let Some(content_value) = content_value else {
         return Err(format!(
             "Model completion returned no message content. {}",
@@ -551,7 +730,7 @@ fn run_openai_compatible_completion_request(
                 &provider_id,
                 &model,
                 &endpoint,
-                &response_text
+                &response_text,
             )
         ));
     };
@@ -725,10 +904,101 @@ pub(crate) fn infer_model_completion_provider_id(request: &ModelCompletionReques
         .unwrap_or_else(|| default_provider_for_locale(request.locale.as_deref()))
 }
 
+static PROVIDER_DEFAULT_BASE_URLS: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
+    HashMap::from([
+        ("baichuan", "https://api.baichuan-ai.com/v1"),
+        ("baidu-cloud", "https://qianfan.baidubce.com/v2"),
+        ("dashscope", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        ("dashscope-coding", "https://coding.dashscope.aliyuncs.com/v1"),
+        ("deepseek", "https://api.deepseek.com"),
+        ("fireworks", "https://api.fireworks.ai/inference/v1"),
+        ("gemini", "https://generativelanguage.googleapis.com/v1beta/openai"),
+        ("groq", "https://api.groq.com/openai/v1"),
+        ("hunyuan", "https://api.hunyuan.cloud.tencent.com/v1"),
+        ("infini", "https://cloud.infini-ai.com/maas/v1"),
+        ("mimo", "https://api.xiaomimimo.com/v1"),
+        ("minimax-token-plan", "https://api.minimax.io/v1"),
+        ("mistral", "https://api.mistral.ai/v1"),
+        ("modelscope", "https://api-inference.modelscope.cn/v1"),
+        ("moonshot", "https://api.moonshot.cn/v1"),
+        ("ollama", "http://localhost:11434/v1"),
+        ("openrouter", "https://openrouter.ai/api/v1"),
+        ("perplexity", "https://api.perplexity.ai"),
+        ("siliconflow", "https://api.siliconflow.cn/v1"),
+        ("stepfun", "https://api.stepfun.com/v1"),
+        ("together", "https://api.together.xyz/v1"),
+        ("volcengine", "https://ark.cn-beijing.volces.com/api/v3"),
+        ("volcengine-coding", "https://ark.cn-beijing.volces.com/api/coding/v3"),
+        ("xai", "https://api.x.ai/v1"),
+        ("zhipu", "https://open.bigmodel.cn/api/paas/v4"),
+    ])
+});
+
 pub(crate) fn default_openai_compatible_base_url_for_provider(provider_id: &str) -> String {
-    match provider_id {
-        "deepseek" => "https://api.deepseek.com".to_string(),
-        _ => "https://api.openai.com/v1".to_string(),
+    PROVIDER_DEFAULT_BASE_URLS
+        .get(provider_id)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
+}
+
+pub(crate) fn openai_compatible_request_requires_api_key(provider_id: &str, base_url: &str) -> bool {
+    provider_id != "ollama" && !is_local_openai_compatible_base_url(base_url)
+}
+
+fn is_local_openai_compatible_base_url(base_url: &str) -> bool {
+    let lower = base_url.trim().to_ascii_lowercase();
+    lower.starts_with("http://localhost")
+        || lower.starts_with("http://127.")
+        || lower.starts_with("http://[::1]")
+        || lower.starts_with("http://::1")
+}
+
+/// Turn connection-level reqwest errors into actionable messages.
+pub(crate) fn classify_http_request_error(error: reqwest::Error, endpoint: &str) -> String {
+    let host = extract_url_host(endpoint);
+    if error.is_timeout() {
+        format!("连接超时（{host}），请检查网络或 Base URL 是否正确")
+    } else if error.is_connect() {
+        format!("无法连接到 API 服务器（{host}），请检查 Base URL 是否正确")
+    } else {
+        format!("模型请求失败（{host}）：{error}")
+    }
+}
+
+/// Classify HTTP status codes into user-facing error messages.
+/// Returns Some(message) for known error codes, None if the status is OK.
+fn classify_http_status_error(
+    status: reqwest::StatusCode,
+    body: &str,
+    provider_id: &str,
+) -> Option<String> {
+    if status.is_success() {
+        return None;
+    }
+    let detail = summarize_provider_output_for_error(body);
+    let detail = if detail.len() > 200 {
+        format!("{}…", &detail[..200])
+    } else {
+        detail
+    };
+    match status.as_u16() {
+        401 => Some(format!(
+            "API Key 验证失败（{provider_id} 返回 401）。请检查 API Key 是否正确。响应：{detail}"
+        )),
+        403 => Some(format!(
+            "API 访问被拒（{provider_id} 返回 403）。请检查权限或 Base URL。响应：{detail}"
+        )),
+        429 => Some(format!(
+            "API 请求频率超限（{provider_id} 返回 429）。请稍后重试。"
+        )),
+        500..=599 => Some(format!(
+            "API 服务器错误（{provider_id} 返回 {}）。请稍后重试。响应：{detail}",
+            status.as_u16(),
+        )),
+        _ => Some(format!(
+            "API 返回 HTTP {}（{provider_id}）。响应：{detail}",
+            status.as_u16(),
+        )),
     }
 }
 
@@ -2532,6 +2802,32 @@ mod tests {
             )),
             "https://api.deepseek.com/v1/chat/completions"
         );
+        assert_eq!(
+            default_openai_compatible_base_url_for_provider("dashscope"),
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        );
+        assert_eq!(
+            default_openai_compatible_base_url_for_provider("openrouter"),
+            "https://openrouter.ai/api/v1"
+        );
+        assert_eq!(
+            create_chat_completions_endpoint(&default_openai_compatible_base_url_for_provider(
+                "ollama"
+            )),
+            "http://localhost:11434/v1/chat/completions"
+        );
+        assert!(!openai_compatible_request_requires_api_key(
+            "ollama",
+            "http://localhost:11434/v1"
+        ));
+        assert!(!openai_compatible_request_requires_api_key(
+            "custom",
+            "http://127.0.0.1:11434/v1"
+        ));
+        assert!(openai_compatible_request_requires_api_key(
+            "openrouter",
+            "https://openrouter.ai/api/v1"
+        ));
     }
 
     #[test]
@@ -3326,6 +3622,7 @@ mod tests {
 
         // Simulate what execute_scan does with a single root
         let mut entries = Vec::new();
+        let mut current = 0usize;
         collect_files_inner_for_scan(
             tmp.path(),
             &ext_lower,
@@ -3335,6 +3632,10 @@ mod tests {
             0,
             &mut entries,
             &cancelled,
+            None,
+            None,
+            10,
+            &mut current,
         );
 
         assert_eq!(entries.len(), 10);
@@ -3369,6 +3670,7 @@ pub fn run() {
         .manage(Mutex::new(file_write::WriteTextApprovalState::default()))
         .manage(Mutex::new(code::CodePatchApprovalState::default()))
         .manage(browser::BrowserState::new())
+        .manage(Mutex::new(computer::ComputerApprovalState::default()))
         .invoke_handler(tauri::generate_handler![
             pdf::scan_markdown_documents,
             shell::run_read_only_command,
@@ -3378,6 +3680,7 @@ pub fn run() {
             save_model_api_key_secret,
             delete_model_api_key_secret,
             check_model_api_key_secret,
+            fetch_provider_models,
             code::propose_code_edit,
             complete_model_prompt,
             streaming::stream_model_prompt_start,
@@ -3419,7 +3722,17 @@ pub fn run() {
             browser::browser_type,
             browser::browser_evaluate,
             browser::browser_run_test,
-            browser::browser_close
+            browser::browser_close,
+            computer::computer_screenshot,
+            computer::computer_list_windows,
+            computer::computer_wait,
+            computer::computer_approve_action,
+            computer::computer_focus_window,
+            computer::computer_move_mouse,
+            computer::computer_click,
+            computer::computer_type,
+            computer::computer_key_combo,
+            computer::computer_scroll
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

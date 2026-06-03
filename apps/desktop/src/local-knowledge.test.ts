@@ -42,11 +42,13 @@ describe("local knowledge bridge", () => {
       expect(invokeMock).toHaveBeenCalledWith("scan_all_user_files", {
         extensions: [".txt", ".pdf"],
         maxResults: 200,
+        scanId: expect.any(String),
       });
+      const scanId = (invokeMock.mock.calls[0]?.[1] as { scanId: string }).scanId;
 
       // Simulate scan completion event
       for (const cb of handlers["scan-all-files-done"] ?? []) {
-        cb({ event: "scan-all-files-done", id: 1, payload: { scanId: "scan-1", entries: [] } });
+        cb({ event: "scan-all-files-done", id: 1, payload: { scanId, entries: [] } });
       }
       await expect(promise).resolves.toEqual([]);
     });
@@ -61,10 +63,12 @@ describe("local knowledge bridge", () => {
       expect(invokeMock).toHaveBeenCalledWith("scan_all_user_files", {
         extensions: null,
         maxResults: null,
+        scanId: expect.any(String),
       });
+      const scanId = (invokeMock.mock.calls[0]?.[1] as { scanId: string }).scanId;
 
       for (const cb of handlers["scan-all-files-done"] ?? []) {
-        cb({ event: "scan-all-files-done", id: 1, payload: { scanId: "scan-2", entries: [] } });
+        cb({ event: "scan-all-files-done", id: 1, payload: { scanId, entries: [] } });
       }
       await expect(promise).resolves.toEqual([]);
     });
@@ -75,9 +79,10 @@ describe("local knowledge bridge", () => {
 
       const promise = scanAllUserFiles();
       await new Promise((r) => setTimeout(r, 10));
+      const scanId = (invokeMock.mock.calls[0]?.[1] as { scanId: string }).scanId;
 
       for (const cb of handlers["scan-all-files-error"] ?? []) {
-        cb({ event: "scan-all-files-error", id: 1, payload: { scanId: "scan-3", error: "disk full" } });
+        cb({ event: "scan-all-files-error", id: 1, payload: { scanId, error: "disk full" } });
       }
       await expect(promise).rejects.toThrow("disk full");
     });

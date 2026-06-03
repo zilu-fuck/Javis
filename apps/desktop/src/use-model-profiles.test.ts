@@ -75,7 +75,7 @@ describe("useModelProfiles", () => {
     expect(onSaved).toHaveBeenCalledOnce();
   });
 
-  it("deletes api key via Tauri when hasStoredApiKey is true and apiKey is cleared", async () => {
+  it("keeps stored api key when hasStoredApiKey is true and apiKey is empty", async () => {
     const repo = createModelProfileRepo();
     const repoRef = { current: repo } as any;
 
@@ -95,6 +95,39 @@ describe("useModelProfiles", () => {
           apiKeyReference: "model_key_removed",
           baseUrl: "",
           hasStoredApiKey: true,
+          capabilities: { vision: true, code: true, contextTokens: 128000 },
+        } as any,
+      ],
+    });
+
+    await act(async () => {
+      await result.current.handleModelConfigurationChange(config);
+    });
+
+    expect(mockInvoke).not.toHaveBeenCalledWith("delete_model_api_key_secret", expect.anything());
+    expect(result.current.modelConfiguration?.profiles[0]?.hasStoredApiKey).toBe(true);
+  });
+
+  it("deletes api key via Tauri when hasStoredApiKey is explicitly false", async () => {
+    const repo = createModelProfileRepo();
+    const repoRef = { current: repo } as any;
+
+    const { result } = renderHook(() =>
+      useModelProfiles({ modelProfileRepoRef: repoRef } as any),
+    );
+
+    const config = buildConfig({
+      profiles: [
+        {
+          id: "primary",
+          slot: null,
+          displayName: "Primary",
+          provider: "openai",
+          model: "gpt-4o",
+          apiKey: "",
+          apiKeyReference: "model_key_removed",
+          baseUrl: "",
+          hasStoredApiKey: false,
           capabilities: { vision: true, code: true, contextTokens: 128000 },
         } as any,
       ],

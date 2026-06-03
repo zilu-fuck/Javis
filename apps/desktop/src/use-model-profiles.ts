@@ -32,7 +32,9 @@ export function useModelProfiles({
       ).catch((error) => console.error("Failed to save model profiles", error));
     }
 
-    // Update hasStoredApiKey based on OS credential store operations
+    // Update hasStoredApiKey based on OS credential store operations.
+    // An empty apiKey means "keep the stored key" unless the incoming profile
+    // explicitly clears hasStoredApiKey.
     const updatedProfiles = await Promise.all(
       config.profiles.map(async (profile) => {
         try {
@@ -44,8 +46,7 @@ export function useModelProfiles({
               },
             });
             return { ...profile, apiKey: "", hasStoredApiKey: true };
-          } else if (profile.hasStoredApiKey) {
-            // User explicitly cleared a previously-saved key
+          } else if (profile.hasStoredApiKey === false) {
             await invoke("delete_model_api_key_secret", {
               keyReference: profile.apiKeyReference,
             });

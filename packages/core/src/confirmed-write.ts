@@ -5,9 +5,9 @@ import type {
 import {
   createPendingPermissionRequest,
   resolvePermissionRequest,
+  type PermissionDecision,
 } from "./permission-state";
 
-export type PermissionDecision = "approved" | "denied";
 export type PendingPermissionHandler = (
   decision: PermissionDecision,
 ) => void | Promise<void>;
@@ -26,7 +26,10 @@ interface ConfirmedWriteApprovalOptions {
     handler: PendingPermissionHandler | undefined,
   ): void;
   onDenied(resolvedRequest: ToolPermissionRequest): void | Promise<void>;
-  onApproved(resolvedRequest: ToolPermissionRequest): void | Promise<void>;
+  onApproved(
+    resolvedRequest: ToolPermissionRequest,
+    options?: { alwaysAllow: boolean },
+  ): void | Promise<void>;
 }
 
 interface ConfirmedWriteApproval {
@@ -57,7 +60,7 @@ export function createConfirmedWriteApproval({
           return;
         }
 
-        await onApproved(resolvedRequest);
+        await onApproved(resolvedRequest, { alwaysAllow: decision === "approved_always" });
       });
     },
   };

@@ -14,6 +14,7 @@ interface NewChatProps {
   onDeleteRecentWorkspacePath?: (path: string) => void;
   onDraftGoalChange: (nextGoal: string) => void;
   onSubmit: FormEventHandler<HTMLFormElement>;
+  onSubmitWithAttachments?: (goal: string, attachments: File[]) => void;
   onUseWorkspacePath?: (path: string) => void;
   onWorkspacePathChange?: (path: string) => void;
 }
@@ -30,6 +31,7 @@ export function NewChat({
   onDeleteRecentWorkspacePath,
   onDraftGoalChange,
   onSubmit,
+  onSubmitWithAttachments,
   onUseWorkspacePath,
   onWorkspacePathChange,
 }: NewChatProps) {
@@ -48,6 +50,7 @@ export function NewChat({
         onDeleteRecentWorkspacePath={onDeleteRecentWorkspacePath}
         onDraftGoalChange={onDraftGoalChange}
         onSubmit={onSubmit}
+        onSubmitWithAttachments={onSubmitWithAttachments}
         onUseWorkspacePath={onUseWorkspacePath}
         onWorkspacePathChange={onWorkspacePathChange}
         recentWorkspacePaths={recentWorkspacePaths}

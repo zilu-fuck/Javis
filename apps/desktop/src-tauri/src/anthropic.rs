@@ -8,6 +8,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use tauri::{AppHandle, Emitter};
 
 use crate::{
+    classify_http_request_error,
     infer_model_completion_provider_id,
     normalize_model_completion_model_name,
     ModelCompletionRequest,
@@ -199,12 +200,22 @@ pub(crate) fn run_anthropic_completion_request(
         req_builder = req_builder.header(&key, &value);
     }
 
-    let response_text = req_builder
+    let response = req_builder
         .body(body_text)
         .send()
-        .map_err(|error| format!("Anthropic completion request failed: {error}"))?
+        .map_err(|error| classify_http_request_error(error, &endpoint))?;
+    let status = response.status();
+    let response_text = response
         .text()
         .map_err(|error| format!("Anthropic completion could not read response: {error}"))?;
+    if !status.is_success() {
+        let detail: String = response_text.chars().take(300).collect();
+        return Err(match status.as_u16() {
+            401 => format!("Anthropic API Key 验证失败（{provider_id} 返回 401）。请检查 API Key 是否正确。响应：{detail}"),
+            403 => format!("Anthropic API 访问被拒（{provider_id} 返回 403）。请检查权限或 Base URL。响应：{detail}"),
+            _ => format!("Anthropic API 返回 HTTP {}（{provider_id}）。响应：{detail}", status.as_u16()),
+        });
+    }
 
     let value = serde_json::from_str::<serde_json::Value>(&response_text).map_err(|error| {
         format!("Anthropic completion returned invalid JSON: {error}; response: {}", truncate(&response_text, 500))

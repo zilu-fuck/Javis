@@ -231,6 +231,40 @@ describe("JavisWorkbench permission cards", () => {
     expect(deniedHtml).toContain("No write operation executed");
   });
 
+  it("renders Computer Use action approvals as desktop actions", () => {
+    const html = renderWorkbench({
+      ...createTaskWithPermission("pending"),
+      title: "Computer Use action approval needed",
+      commanderMessage: "Computer Use wants to click a desktop control.",
+      permissionRequest: {
+        id: "computer-permission-1",
+        level: "confirmed_write",
+        title: "Computer Use action approval needed",
+        reason: "Click left at (640, 420).",
+        status: "pending",
+        dryRun: {
+          operation: "computer.click",
+          affectedPaths: [
+            {
+              source: "desktop",
+              target: "computer.click @ (640, 420)",
+              action: "modify",
+            },
+          ],
+          riskSummary: "Click left at (640, 420).",
+          reversible: false,
+        },
+      },
+    });
+
+    expect(html).toContain("Computer Use action approval needed");
+    expect(html).toContain("Click left at (640, 420).");
+    expect(html).toContain("computer.click @ (640, 420)");
+    expect(html).toContain("<button type=\"button\">Approve</button>");
+    expect(html).toContain("<button type=\"button\">Always Allow</button>");
+    expect(html).toContain("<button type=\"button\">Deny</button>");
+  });
+
   it("renders research source provider metadata", () => {
     const html = renderWorkbench({
       title: "Research sources collected",

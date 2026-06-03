@@ -1,6 +1,6 @@
 import type { DryRunSummary, PermissionRequest } from "@javis/tools";
 
-export type PermissionDecision = "approved" | "denied";
+export type PermissionDecision = "approved" | "approved_always" | "denied";
 export type PermissionCloseStatus = "cancelled" | "expired";
 export type ApprovablePermissionLevel = Exclude<PermissionRequest["level"], "dangerous">;
 export const DEFAULT_PERMISSION_TTL_MS = 10 * 60 * 1000;
@@ -43,7 +43,7 @@ export function resolvePermissionRequest(
 
   return {
     ...request,
-    status: decision,
+    status: decision === "approved_always" ? "approved" : decision,
     resolvedAt: now(),
   };
 }

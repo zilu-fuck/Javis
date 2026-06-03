@@ -550,6 +550,28 @@ export function createJavisRuntime({
             extension: entry.extension,
           }));
       },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      screenshot: async (..._args: any[]) => ({}),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      listWindows: async (..._args: any[]) => ({}),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      focusWindow: async (..._args: any[]) => ({}),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      moveMouse: async (..._args: any[]) => ({}),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      click: async (..._args: any[]) => ({}),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      type: async (..._args: any[]) => ({}),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      keyCombo: async (..._args: any[]) => ({}),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      scroll: async (..._args: any[]) => ({}),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      wait: async (..._args: any[]) => ({}),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      openPath: async (..._args: any[]) => ({}),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      approveAction: async (..._args: any[]) => ({} as { approvalId: string; taskId?: string }),
     },
     visionTool: {
       analyze: async (request: VisionAnalyzeRequest) => {
@@ -1585,4 +1607,16 @@ function proposeCodeEditWithModelProvider(
       locale: "zh-CN",
     },
   });
+}
+
+// ── Trusted Computer Apps (stub) ──────────────────────────────────────
+
+import type { TrustedComputerApp } from "@javis/tools";
+
+export function loadTrustedComputerApps(): TrustedComputerApp[] {
+  return [];
+}
+
+export function removeTrustedComputerApp(_title: string): TrustedComputerApp[] {
+  return [];
 }

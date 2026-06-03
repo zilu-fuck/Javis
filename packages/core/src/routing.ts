@@ -10,7 +10,8 @@ export type RouteKind =
   | "spring-boot"
   | "local-document"
   | "schedule"
-  | "browser";
+  | "browser"
+  | "computer-use";
 
 export interface RouteScore {
   route: RouteKind;
@@ -54,6 +55,10 @@ export function isBrowserGoal(userGoal: string): boolean {
   return getTopRoute(userGoal)?.route === "browser";
 }
 
+export function isComputerUseGoal(userGoal: string): boolean {
+  return getTopRoute(userGoal)?.route === "computer-use";
+}
+
 export function scoreRoutes(
   userGoal: string,
   context: RouteScoringContext = {},
@@ -69,6 +74,7 @@ export function scoreRoutes(
     createProjectRouteScore(userGoal, context),
     createFileScanRouteScore(userGoal, context),
     createBrowserRouteScore(userGoal, urls),
+    createComputerUseRouteScore(userGoal),
   ];
 
   return routeScores.sort((left, right) => right.score - left.score);
@@ -149,6 +155,8 @@ function routeToWorkflowId(
       return "code-review";
     case "file-scan":
       return "scan-workspace-documents";
+    case "computer-use":
+      return "computer-use";
     default:
       return undefined;
   }
@@ -339,4 +347,32 @@ function createBrowserRouteScore(userGoal: string, urls: string[]): RouteScore {
   }
 
   return { route: "browser", score, signals };
+}
+
+function createComputerUseRouteScore(userGoal: string): RouteScore {
+  const signals: string[] = [];
+  let score = 0;
+
+  // Layer 1 — Desktop automation verbs (+4)
+  if (/操控桌面|操作电脑|控制桌面|桌面自动化|操作\s*GUI|desktop\s*automation|control\s*(?:my\s*)?computer|use\s*(?:my\s*)?computer/i.test(userGoal)) {
+    signals.push("desktop-automation-verb");
+    score += 4;
+  }
+
+  // Layer 2 — App name + action word combo (+4)
+  // Requires BOTH an app name AND an action word to avoid false positives
+  const appNames = /VS\s*Code|Excel|Word|Chrome|Edge|Firefox|计算器|记事本|画图|文件资源管理器|Notion|PowerPoint|Outlook|浏览器|设置|Settings|Calculator|Notepad|Paint|File\s*Explorer/i;
+  const actionWords = /打开|启动|点击|输入|填写|配置|open|launch|click|type|fill|configure/i;
+  if (appNames.test(userGoal) && actionWords.test(userGoal)) {
+    signals.push("app-name-with-action");
+    score += 4;
+  }
+
+  // Layer 3 — Desktop/window keywords (+2)
+  if (/桌面|窗口|屏幕|任务栏|开始菜单|系统托盘|desktop|window|screen|taskbar|start\s*menu|system\s*tray/i.test(userGoal)) {
+    signals.push("desktop-keyword");
+    score += 2;
+  }
+
+  return { route: "computer-use", score, signals };
 }
