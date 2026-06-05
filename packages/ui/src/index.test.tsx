@@ -9,6 +9,34 @@ import { normalizeWorkspacePath } from "./utils";
 import type { WorkbenchTask } from "./index";
 
 describe("JavisWorkbench permission cards", () => {
+  it("renders multiple workspace tool tabs for multi-open tools", () => {
+    const html = renderWorkbench(
+      {
+        id: "task-idle",
+        title: "Ready",
+        userGoal: "Waiting for a task",
+        status: "created",
+        commanderMessage: "Ready",
+        plan: [],
+        agents: [],
+        logs: [],
+      },
+      undefined,
+      {
+        currentWorkspacePath: "E:/Javis",
+        initialIsInspectorOpen: true,
+        workspaceToolTabs: [
+          { id: "browser-1", tool: "browser", title: "Browser" },
+          { id: "browser-2", tool: "browser", title: "Browser 2" },
+        ],
+      },
+    );
+
+    expect(html).toContain("Browser");
+    expect(html).toContain("Browser 2");
+    expect(html).toContain("javis-tool-tab-add");
+  });
+
   it("renders the zh-CN locale pack for static workbench labels", () => {
     const html = renderToStaticMarkup(
       <JavisWorkbench
@@ -41,7 +69,7 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).toContain("发送");
   });
 
-  it("keeps the agent inspector collapsed by default", () => {
+  it("keeps the agent inspector and activity log collapsed by default and renders workspace controls", () => {
     const html = renderToStaticMarkup(
       <JavisWorkbench
         draftGoal="Inspect project"
@@ -69,8 +97,59 @@ describe("JavisWorkbench permission cards", () => {
     );
 
     expect(html).toContain("inspector-collapsed");
+    expect(html).toContain("activity-collapsed");
+    expect(html).toContain("Workspace controls");
+    expect(html).toContain("Collapse sidebar");
+    expect(html).toContain("Expand activity log");
     expect(html).toContain("Expand inspector");
     expect(html).not.toContain("Task planning and orchestration");
+  });
+
+  it("renders profile-backed new chat recommendations when provided", () => {
+    const html = renderToStaticMarkup(
+      <JavisWorkbench
+        draftGoal=""
+        newChatRecommendations={{
+          primary: [
+            {
+              id: "profile-memory",
+              label: "Refine memory profile",
+              prompt: "Refine profile memory from history.",
+              reason: "The user often asks for memory recommendations.",
+              source: "profile",
+              evidence: [{ title: "History", snippet: "Asked for profile memory." }],
+            },
+          ],
+          secondary: [
+            {
+              id: "audit-recommendations",
+              label: "Audit recommendation quality",
+              prompt: "Audit the recommendations.",
+              source: "profile",
+            },
+          ],
+        }}
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={{
+          id: "task-idle",
+          title: "Ready",
+          userGoal: "Waiting for a task",
+          status: "created",
+          commanderMessage: "Ready",
+          plan: [],
+          agents: [],
+          logs: [],
+        }}
+      />,
+    );
+
+    expect(html).toContain("Refine memory profile");
+    expect(html).toContain("Audit recommendation quality");
+    expect(html).toContain("aria-label=\"Refine memory profile。The user often asks for memory recommendations.\"");
+    expect(html).toContain(">Profile<");
+    expect(html).toContain(">1 refs<");
+    expect(html).not.toContain("Create task");
   });
 
   it("renders a draggable sidebar resize separator", () => {
@@ -176,7 +255,7 @@ describe("JavisWorkbench permission cards", () => {
       id: "task-streaming-with-plan",
       title: "Inspecting project",
       userGoal: "Inspect project",
-      status: "running",
+      status: "failed",
       commanderMessage: "Commander is coordinating a project inspection.",
       plan: [
         {
@@ -192,22 +271,28 @@ describe("JavisWorkbench permission cards", () => {
       isStreaming: true,
     });
 
+    // Streaming text still appears inline
     expect(html).toContain("Shell Agent is checking package metadata");
-    expect(html).toContain("Plan");
-    expect(html).toContain("Inspect package scripts");
+    // Failed status triggers inline recovery prompt
+    expect(html).toContain("Recovery");
+    // Plan steps moved to right sidebar (AgentDetailSections in InspectorPanel),
+    // no longer rendered inline in the main thread
+    expect(html).not.toContain("Inspect package scripts");
   });
 
-  it("renders the confirmed-write dry-run and keeps activity log collapsed by default", () => {
-    const html = renderWorkbench(createTaskWithPermission("pending"));
+  it("renders the confirmed-write dry-run when the activity log is expanded", () => {
+    const html = renderWorkbench(createTaskWithPermission("pending"), undefined, {
+      initialIsActivityOpen: true,
+    });
 
     expect(html).toContain("Approve PDF move plan");
     expect(html).toContain("Moving files changes the local filesystem");
     expect(html).toContain("Organize PDF files by filename topic");
     expect(html).toContain("C:/Users/example/Downloads/paper.pdf");
     expect(html).toContain("C:/Users/example/Downloads/Research/paper.pdf");
-    expect(html).toContain("aria-expanded=\"false\"");
-    expect(html).toContain("Expand activity log");
-    expect(html).not.toContain("1 planned path operation(s) require confirmed_write");
+    expect(html).toContain("aria-expanded=\"true\"");
+    expect(html).toContain("Collapse activity log");
+    expect(html).toContain("1 planned path operation(s) require confirmed_write");
   });
 
   it("keeps confirmation actions enabled only while permission is pending", () => {
@@ -234,42 +319,42 @@ describe("JavisWorkbench permission cards", () => {
   it("renders Computer Use action approvals as desktop actions", () => {
     const html = renderWorkbench({
       ...createTaskWithPermission("pending"),
-      title: "Computer Use action approval needed",
-      commanderMessage: "Computer Use wants to click a desktop control.",
+      title: "需要确认桌面操作",
+      commanderMessage: "需要你确认：点击屏幕坐标 (640, 420)。",
       permissionRequest: {
         id: "computer-permission-1",
         level: "confirmed_write",
-        title: "Computer Use action approval needed",
-        reason: "Click left at (640, 420).",
+        title: "需要确认桌面操作",
+        reason: "Javis 准备点击屏幕坐标 (640, 420)。",
         status: "pending",
         dryRun: {
           operation: "computer.click",
           affectedPaths: [
             {
-              source: "desktop",
-              target: "computer.click @ (640, 420)",
+              source: "本机桌面",
+              target: "点击屏幕坐标 (640, 420)",
               action: "modify",
             },
           ],
-          riskSummary: "Click left at (640, 420).",
+          riskSummary: "该操作会影响当前桌面或目标应用，请确认后再执行。",
           reversible: false,
         },
       },
     });
 
-    expect(html).toContain("Computer Use action approval needed");
-    expect(html).toContain("Click left at (640, 420).");
-    expect(html).toContain("computer.click @ (640, 420)");
+    expect(html).toContain("需要确认桌面操作");
+    expect(html).toContain("Javis 准备点击屏幕坐标 (640, 420)。");
+    expect(html).toContain("点击屏幕坐标 (640, 420)");
     expect(html).toContain("<button type=\"button\">Approve</button>");
     expect(html).toContain("<button type=\"button\">Always Allow</button>");
     expect(html).toContain("<button type=\"button\">Deny</button>");
   });
 
-  it("renders research source provider metadata", () => {
+  it("renders research source provider metadata in inspector panel", () => {
     const html = renderWorkbench({
       title: "Research sources collected",
       userGoal: "Research Javis search integration",
-      status: "running",
+      status: "failed",
       commanderMessage: "Research Agent produced a source-backed report.",
       plan: [],
       agents: [],
@@ -285,12 +370,15 @@ describe("JavisWorkbench permission cards", () => {
       ],
     });
 
-    expect(html).toContain("opencode-intellisearch");
-    expect(html).toContain("github-cli");
-    expect(html).toContain("Deep research plugin for OpenCode.");
+    // Commander message is still rendered inline in the main thread
+    expect(html).toContain("Research Agent produced a source-backed report.");
+    // Source metadata now lives in AgentDetailSections (InspectorPanel right sidebar).
+    // Opened via clicking an agent card; tested separately in InspectorPanel tests.
+    // The inline failed recovery prompt should appear
+    expect(html).toContain("Recovery");
   });
 
-  it("collapses completed process details behind a user-controlled toggle", () => {
+  it("shows commander conclusion and agent summary cards instead of inline process toggle", () => {
     const html = renderWorkbench({
       id: "task-completed-process-collapse",
       title: "Project inspected",
@@ -314,13 +402,15 @@ describe("JavisWorkbench permission cards", () => {
       },
     });
 
+    // Commander conclusion is visible in the chat
     expect(html).toContain("Final conclusion: the project can be started with pnpm dev.");
-    expect(html).toContain("Show process");
+    // Inline process toggle has been removed — details now live in right sidebar
+    expect(html).not.toContain("Show process");
+    // Detailed steps are only in the right sidebar, not inline
     expect(html).not.toContain("Hidden intermediate package inspection");
-    expect(html).not.toContain("Project Inspection");
   });
 
-  it("renders code review diff preview", () => {
+  it("renders code review diff preview in inspector panel", () => {
     const html = renderWorkbench({
       title: "Code review preview ready",
       userGoal: "Review code changes",
@@ -350,10 +440,13 @@ describe("JavisWorkbench permission cards", () => {
       },
     });
 
-    expect(html).toContain("Code Review");
-    expect(html).toContain("Changed files");
-    expect(html).toContain("packages/core/src/index.ts");
+    // Permission request stays inline in the main chat
+    expect(html).toContain("Approve code review continuation");
     expect(html).toContain("git diff --check");
+    // Commander message still inline
+    expect(html).toContain("Diff preview is ready.");
+    // Code review diff moved to AgentDetailSections in right sidebar inspector
+    expect(html).not.toContain("Code Review");
   });
 
   it("renders a retry action only for failed tasks", () => {
@@ -480,7 +573,7 @@ describe("JavisWorkbench permission cards", () => {
     const html = renderWorkbench({
       title: "Code Agent patch applied",
       userGoal: "Review code changes",
-      status: "running",
+      status: "failed",
       commanderMessage: "Approved patch was applied.",
       plan: [],
       agents: [],
@@ -501,11 +594,12 @@ describe("JavisWorkbench permission cards", () => {
       },
     });
 
-    expect(html).toContain("Code Agent patch proposal");
-    expect(html).toContain("Tighten the code review completion message.");
-    expect(html).toContain("diff --git");
-    expect(html).toContain("Code Agent apply result");
-    expect(html).toContain("Applied patch in test.");
+    // Code review details moved to AgentDetailSections (right sidebar InspectorPanel).
+    // Commander message and failed recovery prompt stay inline in the main thread.
+    expect(html).toContain("Approved patch was applied.");
+    expect(html).toContain("Recovery");
+    // Patch content is in the sidebar, not inline
+    expect(html).not.toContain("diff --git");
   });
 
   it("renders Code Agent patch approval dry-run details", () => {
@@ -924,6 +1018,7 @@ describe("JavisWorkbench permission cards", () => {
 function renderWorkbench(
   task: WorkbenchTask,
   modelConfiguration?: Parameters<typeof JavisWorkbench>[0]["modelConfiguration"],
+  props: Partial<Parameters<typeof JavisWorkbench>[0]> = {},
 ): string {
   return renderToStaticMarkup(
     <JavisWorkbench
@@ -933,6 +1028,7 @@ function renderWorkbench(
       onSubmitGoal={vi.fn()}
       modelConfiguration={modelConfiguration}
       task={task}
+      {...props}
     />,
   );
 }

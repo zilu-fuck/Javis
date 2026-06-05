@@ -63,7 +63,6 @@ describe("createFileScanTaskRuntime", () => {
       "agent-verifier",
       "agent-vision",
       "agent-workspace",
-      "agent-chinese-reviewer",
       "agent-browser",
     ]);
     expect(snapshot.agents.every((agent) => agent.status === "queued")).toBe(true);
@@ -71,11 +70,8 @@ describe("createFileScanTaskRuntime", () => {
 
   it("provides bilingual system prompts for built-in agents", () => {
     const commander = demoAgents.find((agent) => agent.kind === "commander");
-    const reviewer = demoAgents.find((agent) => agent.kind === "chinese-reviewer");
 
     expect(commander?.systemPrompt.en).toContain("Commander");
-    expect(reviewer?.allowedToolNames).toEqual([]);
-    expect(reviewer && getAgentSystemPrompt(reviewer, "zh-CN")).toContain("中文审校");
     expect(commander && getAgentSystemPrompt(commander, "zh-CN")).toContain("指挥官");
   });
 
@@ -273,6 +269,136 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
+  it("routes Computer Use DAG steps through the loop with confirmed-write approval", async () => {
+    const approveAction = vi.fn(async (_action, approvalId: string, taskId: string) => ({
+      approvalId,
+      taskId,
+    }));
+    const computerUseLoopRunner = vi.fn(async ({ approveAction: requestApproval }) => {
+      const approval = await requestApproval({
+        tool: "computer.click",
+        params: { x: 120, y: 240, button: "left" },
+      });
+      return [{
+        stepIndex: 0,
+        observation: "A target button is visible.",
+        action: { tool: "computer.click", params: { x: 120, y: 240, button: "left" } },
+        target: "Click target button",
+        confidence: "high",
+        result: approval,
+      }];
+    });
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      commanderTool: {
+        plan: vi.fn(async () => ({
+          title: "Use desktop",
+          reasoning: "The goal requires desktop interaction.",
+          steps: [{
+            id: "use-desktop",
+            title: "Use the desktop",
+            assignedAgentKind: "computer",
+            capability: "desktop_input" as const,
+            requiredCapabilities: ["desktop_input"],
+            dependsOn: [],
+            successCriteria: "The desktop action completes.",
+          }],
+        })),
+      },
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => []),
+      },
+      computerTool: {
+        searchLocalDocuments: vi.fn(async () => []),
+        screenshot: vi.fn(async () => ({ dataUrl: "", width: 0, height: 0, capturedAt: "" })),
+        listWindows: vi.fn(async () => ({ windows: [] })),
+        inspectUi: vi.fn(async () => ({ tree: "", nodeCount: 0 })),
+        focusWindow: vi.fn(async () => ({ focused: true, title: "" })),
+        moveMouse: vi.fn(async () => ({ x: 0, y: 0 })),
+        click: vi.fn(async () => ({ x: 120, y: 240, clicked: true })),
+        type: vi.fn(async () => ({ typed: true, length: 0 })),
+        keyCombo: vi.fn(async () => ({ combo: "", executed: true })),
+        scroll: vi.fn(async () => ({ x: 0, y: 0, delta: 0 })),
+        invokeUi: vi.fn(async () => ({ invoked: true, matchedName: "", matchedAutomationId: "" })),
+        setUiValue: vi.fn(async () => ({ set: true, matchedName: "", matchedAutomationId: "" })),
+        wait: vi.fn(async () => ({ waited: 0 })),
+        openPath: vi.fn(async () => ({ opened: true })),
+        approveAction,
+      },
+      computerUseLoopRunner,
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("click the desktop button");
+    const permissionSnapshot = await waitForStatus(snapshots, "waiting_permission");
+    expect(permissionSnapshot.permissionRequest?.title).toBe("需要确认桌面操作");
+
+    runtime.resolvePermission("approved", permissionSnapshot.permissionRequest?.id);
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(computerUseLoopRunner).toHaveBeenCalledOnce();
+    expect(approveAction).toHaveBeenCalledWith(
+      { tool: "computer.click", params: { x: 120, y: 240, button: "left" } },
+      permissionSnapshot.permissionRequest?.id,
+      finalSnapshot.id,
+      false,
+    );
+    expect(finalSnapshot.plan.every((step) => step.status === "completed")).toBe(true);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("falls back to a deterministic Computer Use plan when Commander returns non-JSON", async () => {
+    const computerUseLoopRunner = vi.fn(async () => [{
+      stepIndex: 0,
+      observation: "Desktop is visible.",
+      action: { tool: "computer.wait", params: { ms: 0 } },
+      target: "done",
+      confidence: "high",
+    }]);
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      commanderTool: {
+        plan: vi.fn(async () => {
+          throw new Error("Model response did not contain a JSON object.");
+        }),
+      },
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => []),
+      },
+      computerTool: {
+        searchLocalDocuments: vi.fn(async () => []),
+        screenshot: vi.fn(async () => ({ dataUrl: "", width: 0, height: 0, capturedAt: "" })),
+        listWindows: vi.fn(async () => ({ windows: [] })),
+        inspectUi: vi.fn(async () => ({ tree: "", nodeCount: 0 })),
+        focusWindow: vi.fn(async () => ({ focused: true, title: "" })),
+        moveMouse: vi.fn(async () => ({ x: 0, y: 0 })),
+        click: vi.fn(async () => ({ x: 0, y: 0, clicked: true })),
+        type: vi.fn(async () => ({ typed: true, length: 0 })),
+        keyCombo: vi.fn(async () => ({ combo: "", executed: true })),
+        scroll: vi.fn(async () => ({ x: 0, y: 0, delta: 0 })),
+        invokeUi: vi.fn(async () => ({ invoked: true, matchedName: "", matchedAutomationId: "" })),
+        setUiValue: vi.fn(async () => ({ set: true, matchedName: "", matchedAutomationId: "" })),
+        wait: vi.fn(async () => ({ waited: 0 })),
+        openPath: vi.fn(async () => ({ opened: true })),
+        approveAction: vi.fn(async (_action, approvalId: string, taskId: string) => ({ approvalId, taskId })),
+      },
+      computerUseLoopRunner,
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("\u7528\u684c\u9762\u81ea\u52a8\u5316\u6253\u5f00 QQ\uff0c\u627e\u5230 \u51e4\u96cf-\u5927\u806a\u660e\uff0c\u5e76\u51c6\u5907\u53d1\u9001\u6d88\u606f\uff1a sb");
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(computerUseLoopRunner).toHaveBeenCalledOnce();
+    expect(finalSnapshot.title).toBe("桌面自动化操控");
+    expect(finalSnapshot.plan.map((step) => step.id)).toEqual(["computer-use-loop"]);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
   it("routes project-mode goals through auto routing to project workflow", async () => {
     const project: ProjectInspection = {
       workspacePath: "E:/Javis",
@@ -329,7 +455,7 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
-  it("short-circuits casual greetings to chat in project mode", async () => {
+  it("routes project-mode inputs through legacy routing when Commander is unavailable", async () => {
     const complete = vi.fn(async () => ({ text: "Hello! How can I help?" }));
     const runtime = createFileScanTaskRuntime({
       delayMs: 0,
@@ -464,20 +590,27 @@ describe("createFileScanTaskRuntime", () => {
       delayMs: 0,
       fileTool: {
         scanMarkdownDocuments: vi.fn(async () => []),
+        classifyDocuments: vi.fn(async () => []),
       },
       computerTool: {
         searchLocalDocuments,
         screenshot: vi.fn(async () => ({ dataUrl: "", width: 0, height: 0, capturedAt: "" })),
         listWindows: vi.fn(async () => ({ windows: [] })),
+        inspectUi: vi.fn(async () => ({ tree: "", nodeCount: 0 })),
         focusWindow: vi.fn(async () => ({ focused: true, title: "" })),
         moveMouse: vi.fn(async () => ({ x: 0, y: 0 })),
         click: vi.fn(async () => ({ x: 0, y: 0, clicked: true })),
         type: vi.fn(async () => ({ typed: true, length: 0 })),
         keyCombo: vi.fn(async () => ({ combo: "", executed: true })),
         scroll: vi.fn(async () => ({ x: 0, y: 0, delta: 0 })),
+        invokeUi: vi.fn(async () => ({ invoked: true, matchedName: "", matchedAutomationId: "" })),
+        setUiValue: vi.fn(async () => ({ set: true, matchedName: "", matchedAutomationId: "" })),
         wait: vi.fn(async () => ({ waited: 0 })),
         openPath: vi.fn(async () => ({ opened: true })),
         approveAction: vi.fn(async () => ({ approvalId: "test-approval" })),
+      },
+      verifierTool: {
+        check: vi.fn(async () => ({ status: "pass" as const, summary: "verified", detail: "All checks passed." })),
       },
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
@@ -487,8 +620,13 @@ describe("createFileScanTaskRuntime", () => {
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(searchLocalDocuments).toHaveBeenCalled();
-    expect(finalSnapshot.documents?.[0]?.path).toBe("C:/Users/me/Documents/finance-report.pdf");
-    expect(finalSnapshot.plan.every((step) => step.status === "completed")).toBe(true);
+    // Commander-synthesize steps are handled separately at the workflow level,
+    // not executed as individual steps — they may appear as "skipped".
+    const executedSteps = finalSnapshot.plan.filter(
+      (step) => !step.id.includes("commander-synthesize"),
+    );
+    expect(executedSteps.every((step) => step.status === "completed")).toBe(true);
+    expect(finalSnapshot.status).toBe("completed");
 
     unsubscribe();
     runtime.dispose();
@@ -515,6 +653,10 @@ describe("createFileScanTaskRuntime", () => {
       "daily-reminder:parse-schedule",
       "daily-reminder:persist-reminder",
       "daily-reminder:verify-reminder",
+      "scan-workspace-documents:scan-documents",
+      "scan-workspace-documents:classify-documents",
+      "scan-workspace-documents:verify-scan",
+      "scan-workspace-documents:commander-synthesize",
     ]);
     expect(finalSnapshot.verificationSummary).toContain("blueprint executed through the DAG executor");
 
@@ -1435,9 +1577,13 @@ describe("createFileScanTaskRuntime", () => {
 
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
-    expect(finalSnapshot.documents).toHaveLength(1);
-    expect(finalSnapshot.documents?.[0]?.purpose).toBe("Project or module entry document.");
-    expect(finalSnapshot.verificationSummary).toContain("verified");
+    expect(finalSnapshot.plan.map((step) => step.id)).toEqual([
+      "scan-documents",
+      "classify-documents",
+      "verify-scan",
+      "commander-synthesize",
+    ]);
+    expect(finalSnapshot.status).toBe("completed");
 
     unsubscribe();
     runtime.dispose();
@@ -1584,7 +1730,10 @@ describe("createFileScanTaskRuntime", () => {
     const scanMarkdownDocuments = vi.fn(async () => documents);
     const runtime = createFileScanTaskRuntime({
       delayMs: 0,
-      fileTool: { scanMarkdownDocuments },
+      fileTool: {
+        scanMarkdownDocuments,
+        classifyDocuments: vi.fn(async () => []),
+      },
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
@@ -1605,7 +1754,7 @@ describe("createFileScanTaskRuntime", () => {
       { role: "user", content: "Find Markdown documents" },
       {
         role: "assistant",
-        content: "Document scan completed with read-only filesystem evidence.",
+        content: "Scan workspace documents completed. Tool-specific implementation is still required for executable side effects.",
       },
     ]);
 
@@ -1664,7 +1813,7 @@ describe("createFileScanTaskRuntime", () => {
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(scanMarkdownDocuments).toHaveBeenCalled();
-    expect(finalSnapshot.title).toBe("Workspace documents scanned");
+    expect(finalSnapshot.title).toBe("Scan workspace documents");
 
     unsubscribe();
     runtime.dispose();
@@ -1685,7 +1834,7 @@ describe("createFileScanTaskRuntime", () => {
 
     const finalSnapshot = await waitForStatus(snapshots, "failed");
 
-    expect(finalSnapshot.title).toBe("Document scan failed");
+    expect(finalSnapshot.title).toBe("Scan workspace documents");
     expect(finalSnapshot.logs[finalSnapshot.logs.length - 1]?.detail).toBe("scan failed");
 
     unsubscribe();

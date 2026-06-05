@@ -114,7 +114,6 @@ function defaultProfileForSlot(slot: ModelSlot, locale = "en"): ModelProfile {
 export const DEFAULT_AGENT_SLOT: Record<string, ModelSlot> = {
   commander: "primary",
   code: "primary",
-  "chinese-reviewer": "primary",
   verifier: "secondary",
   scheduler: "secondary",
   research: "secondary",

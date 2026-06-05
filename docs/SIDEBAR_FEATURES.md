@@ -12,14 +12,14 @@ Javis (brand)
 
 --- Primary ---
 + 新建对话 (New Chat)              — implemented
-● 自动任务 (Automated Tasks)       — placeholder
-# 技能广场 (Skill Market)          — placeholder
+● 自动任务 (Automated Tasks)       — implemented
+# 技能广场 (Skill Market)          — implemented
 
 --- 本地知识库 (Local Knowledge Base) ---
-▦ 应用 (Apps)                     — placeholder
-▣ 文档 (Documents)                — placeholder
-□ 图库 (Gallery)                  — placeholder
-▰ 此电脑 (This Computer)          — placeholder
+▦ 应用 (Apps)                     — implemented
+▣ 文档 (Documents)                — implemented
+□ 图库 (Gallery)                  — implemented
+▰ 此电脑 (This Computer)          — implemented
 
 --- 历史 (History) ---
 ◒ <task entries>                  — implemented

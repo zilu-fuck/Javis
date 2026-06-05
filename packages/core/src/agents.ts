@@ -72,21 +72,26 @@ export const demoAgents: Agent[] = [
     id: "agent-computer",
     kind: "computer",
     displayName: "Computer Agent",
-    description: "Desktop Computer Use — screenshot the desktop, understand UI visually, and interact with any Windows application via mouse and keyboard.",
+    description: "桌面自动化操控：截取桌面或窗口画面，读取控件结构，并通过鼠标、键盘或 UIA 控件调用完成 Windows 应用操作。",
     allowedToolNames: [
       // Original file browsing (preserved)
       "file.listDirectory",
       "computer.openPath",
       "file.scanUserImages",
+      "file.scanInstalledApps",
+      "computer.searchLocalDocuments",
       // Computer Use capabilities
       "computer.screenshot",
       "computer.listWindows",
+      "computer.inspectUi",
       "computer.focusWindow",
       "computer.moveMouse",
       "computer.click",
       "computer.type",
       "computer.keyCombo",
       "computer.scroll",
+      "computer.invokeUi",
+      "computer.setUiValue",
       "computer.wait",
     ],
     modelRequirements: { prefersVision: true, prefersCode: false, minContextTokens: 16000 },
@@ -146,7 +151,7 @@ RULES:
     kind: "scheduler",
     displayName: "Scheduler Agent",
     description: "Local reminders and scheduled task coordination",
-    allowedToolNames: ["scheduler.createTask", "scheduler.updateTask", "scheduler.deleteTask"],
+    allowedToolNames: ["scheduler.createTask"],
     modelRequirements: { prefersVision: false, prefersCode: false, minContextTokens: 8000 },
     systemPrompt: {
       en: "You are the Scheduler Agent. Parse reminder intent, create or update durable local schedules only with visible confirmation, and report next run time.",
@@ -187,18 +192,6 @@ RULES:
     systemPrompt: {
       en: "You are the Workspace Agent. Manage workspace definitions: list installed workspaces, scaffold new definitions from descriptions, create and delete workspace configuration files. All write operations require confirmed-write approval.",
       zhCN: "你是 Javis 的工作区代理。管理工作区定义：列出已安装的工作区、根据自然语言描述生成工作区配置、创建和删除工作区定义文件。所有写操作需要 confirmed-write 审批。",
-    },
-  },
-  {
-    id: "agent-chinese-reviewer",
-    kind: "chinese-reviewer",
-    displayName: "中文审校",
-    description: "输出中文自然度审校",
-    allowedToolNames: [],
-    modelRequirements: { prefersVision: false, prefersCode: false, minContextTokens: 8000 },
-    systemPrompt: {
-      en: "You are Javis ChineseReviewer. Lightly review Chinese output for natural wording, terminology consistency, and constraint preservation without adding facts.",
-      zhCN: "你是 Javis 的中文审校模块。只做轻度修改：去掉模板化表达，减少机械句式，保留原意，不新增事实；技术术语保持英文原文，首次出现时可给出中文解释；只返回审校后的完整文本。",
     },
   },
   {

@@ -19,16 +19,28 @@ import { ScheduledTasksView } from "./components/ScheduledTasksView";
 import { Sidebar } from "./components/Sidebar";
 import { SkillMarketView } from "./components/SkillMarketView";
 import { defaultWorkbenchLocale } from "./locale";
-import type { ActiveView, JavisWorkbenchProps, WorkbenchDetailItem, WorkbenchSkillPage } from "./types";
+import type {
+  ActiveView,
+  JavisWorkbenchProps,
+  WorkbenchDetailItem,
+  WorkbenchAgentSessionContext,
+  WorkbenchSkillPage,
+  WorkbenchWorkspaceToolTab,
+  WorkbenchWorkspaceToolAction,
+} from "./types";
 
 const SIDEBAR_MIN_WIDTH = 188;
 const SIDEBAR_MAX_WIDTH = 360;
+const ACTIVITY_MIN_HEIGHT = 104;
+const ACTIVITY_MAX_HEIGHT = 360;
 const CHAT_MAIN_MIN_WIDTH = 420;
 const RESOURCE_MAIN_MIN_WIDTH = 760;
 const RESOURCE_WITH_DETAILS_MAIN_MIN_WIDTH = 560;
 const SIDEBAR_KEYBOARD_STEP = 16;
+const ACTIVITY_KEYBOARD_STEP = 16;
 const CHAT_DEFAULT_SIDEBAR_WIDTH = 220;
-const RESOURCE_DEFAULT_SIDEBAR_WIDTH = 238;
+const RESOURCE_DEFAULT_SIDEBAR_WIDTH = 248;
+const ACTIVITY_DEFAULT_HEIGHT = 188;
 
 export function JavisWorkbench({
   task,
@@ -38,6 +50,8 @@ export function JavisWorkbench({
   locale = defaultWorkbenchLocale,
   modelSettings,
   modelConfiguration,
+  newChatRecommendations,
+  userProfileMemorySummary,
   recentWorkspacePaths = [],
   activeView: activeViewProp,
   activeHistoryEntryId,
@@ -82,10 +96,14 @@ export function JavisWorkbench({
   onModelSettingsChange,
   onTestModelConnection,
   onModelConfigurationChange,
+  onRebuildUserProfileMemory,
+  onClearUserProfileMemory,
   onSaveProviderApiKey,
   onFetchProviderModels,
   providerCatalog,
   getProviderCapabilities,
+  terminalService,
+  fileService,
   onSelectHistoryEntry,
   onUseWorkspacePath,
   onWorkspacePathChange,
@@ -97,6 +115,7 @@ export function JavisWorkbench({
   onTranslateSkillsToChinese,
   onSearchSkillMarket,
   onOpenDetail,
+  onOpenWorkspaceTool,
   onChangeActiveView,
   onSelectComposeMode,
   activeComposeMode,
@@ -111,11 +130,23 @@ export function JavisWorkbench({
   onRemoveTrustedComputerApp,
   onSidebarWidthChange,
   onActiveViewChange,
+  onSidebarOpenChange,
   onActivityOpenChange,
+  onActivityHeightChange,
   onInspectorOpenChange,
   initialSidebarWidth,
+  initialActivityHeight,
+  initialIsSidebarOpen,
   initialIsActivityOpen,
   initialIsInspectorOpen,
+  systemResources,
+  openTabs: openTabsProp,
+  workspaceToolTabs: workspaceToolTabsProp,
+  onActiveToolChange,
+  onQuickActionBrowser,
+  onQuickActionReview,
+  onQuickActionTerminal,
+  onQuickActionSideChat,
   sidebarNavItems,
 }: JavisWorkbenchProps) {
   const effectiveLocale = useMemo(
@@ -131,14 +162,23 @@ export function JavisWorkbench({
   const labels = effectiveLocale.labels;
   const [isActivityOpen, setIsActivityOpen] = useState(initialIsActivityOpen ?? false);
   const [isInspectorOpen, setIsInspectorOpen] = useState(initialIsInspectorOpen ?? false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(initialIsSidebarOpen ?? true);
   const [sidebarSearchQuery, setSidebarSearchQuery] = useState("");
   const [sidebarWidth, setSidebarWidth] = useState<number | undefined>(initialSidebarWidth);
+  const [activityHeight, setActivityHeight] = useState<number | undefined>(initialActivityHeight);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const [internalActiveView, setInternalActiveView] =
     useState<ActiveView>("chat");
   const [activeSkillPage, setActiveSkillPage] = useState<WorkbenchSkillPage>("mine");
   const [detailItem, setDetailItem] = useState<WorkbenchDetailItem | null>(null);
+  const [selectedAgentId, setSelectedAgentId] = useState<string | undefined>(undefined);
+  const [openTabs, setOpenTabs] = useState<WorkbenchWorkspaceToolTab[]>(
+    workspaceToolTabsProp ?? (openTabsProp ?? []).map((tool) => createWorkspaceToolTab(tool, 0)),
+  );
   const activeView = activeViewProp ?? internalActiveView;
+  const [activeToolTabId, setActiveToolTabId] = useState<string | null>(openTabs[openTabs.length - 1]?.id ?? null);
+  const activeToolTab = openTabs.find((tab) => tab.id === activeToolTabId) ?? openTabs[openTabs.length - 1] ?? null;
+  const activeTool = activeToolTab?.tool ?? null;
 
   const effectiveModelSettings = modelSettings ?? {
     provider: "openai",
@@ -149,6 +189,30 @@ export function JavisWorkbench({
   };
   const activityCount = task.logs.length + (task.permissionRequest ? 1 : 0) + (task.askUserQuestion ? 1 : 0);
   const isChatView = activeView === "chat";
+  const agentSession = useMemo<WorkbenchAgentSessionContext>(
+    () => ({
+      sessionId: `${activeHistoryEntryId ?? "live"}:${task.id ?? "idle"}`,
+      threadId: activeHistoryEntryId ?? task.id ?? "live",
+      taskId: task.id,
+      workspaceRoot: currentWorkspacePath || task.workspacePath || computerPath || "",
+      permissionMode: task.permissionRequest ? "confirmed_write" : "full_access",
+      activeModel: modelSettings?.model || modelConfiguration?.profiles[0]?.model || "",
+      activeTool,
+      selectedAgentId,
+    }),
+    [
+      activeHistoryEntryId,
+      task.id,
+      task.workspacePath,
+      task.permissionRequest,
+      currentWorkspacePath,
+      computerPath,
+      modelSettings?.model,
+      modelConfiguration?.profiles,
+      activeTool,
+      selectedAgentId,
+    ],
+  );
 
   useEffect(() => {
     if (sidebarWidth == null) {
@@ -196,6 +260,87 @@ export function JavisWorkbench({
     onOpenDetail?.(detail);
     setIsInspectorOpen(true);
     onInspectorOpenChange?.(true);
+  }
+
+  function handleSelectAgent(agentId: string) {
+    setSelectedAgentId(agentId);
+    setInspectorOpenState(true);
+  }
+
+  function handleWorkspaceToolAction(action: WorkbenchWorkspaceToolAction) {
+    onOpenWorkspaceTool?.(action);
+    if (
+      action === "files" || action === "sideChat" ||
+      action === "browser" || action === "review" || action === "terminal"
+    ) {
+      setOpenTabs((prev) => {
+        const shouldReuse = action === "files" || action === "review";
+        const existing = shouldReuse ? prev.find((tab) => tab.tool === action) : undefined;
+        if (existing) {
+          setActiveToolTabId(existing.id);
+          return prev;
+        }
+        const nextTab = createWorkspaceToolTab(action, prev.filter((tab) => tab.tool === action).length);
+        setActiveToolTabId(nextTab.id);
+        return [...prev, nextTab];
+      });
+      onActiveToolChange?.(action);
+      setInspectorOpenState(true);
+      return;
+    }
+  }
+
+  function handleCloseToolTab(tabId: string) {
+    setOpenTabs((prev) => {
+      const next = prev.filter((tab) => tab.id !== tabId);
+      if (activeToolTabId === tabId) {
+        const fallback = next[next.length - 1] ?? null;
+        setActiveToolTabId(fallback?.id ?? null);
+        onActiveToolChange?.(fallback?.tool ?? null);
+      }
+      return next;
+    });
+  }
+
+  function handleSelectToolTab(tabId: string) {
+    const tab = openTabs.find((item) => item.id === tabId);
+    setActiveToolTabId(tabId);
+    onActiveToolChange?.(tab?.tool ?? null);
+  }
+
+  function handleNewToolTab(tool: WorkbenchWorkspaceToolAction) {
+    const nextTab = createWorkspaceToolTab(tool, openTabs.filter((tab) => tab.tool === tool).length);
+    setOpenTabs((prev) => [...prev, nextTab]);
+    setActiveToolTabId(nextTab.id);
+    onActiveToolChange?.(tool);
+  }
+
+  function setSidebarOpenState(open: boolean) {
+    setIsSidebarOpen(open);
+    onSidebarOpenChange?.(open);
+  }
+
+  function setActivityOpenState(open: boolean) {
+    setIsActivityOpen(open);
+    onActivityOpenChange?.(open);
+  }
+
+  function setInspectorOpenState(open: boolean) {
+    if (!open) {
+      setSelectedAgentId(undefined);
+    }
+    setIsInspectorOpen(open);
+    onInspectorOpenChange?.(open);
+  }
+
+  function applyLayoutPreset(preset: "expanded" | "focus" | "chat") {
+    const nextSidebarOpen = preset === "expanded" || preset === "chat";
+    const nextInspectorOpen = preset === "expanded";
+    const nextActivityOpen = preset === "expanded";
+
+    setSidebarOpenState(nextSidebarOpen);
+    setInspectorOpenState(nextInspectorOpen);
+    setActivityOpenState(nextActivityOpen);
   }
 
   function handleSidebarResizeStart(event: ReactPointerEvent<HTMLDivElement>) {
@@ -281,6 +426,89 @@ export function JavisWorkbench({
     onSidebarWidthChange?.(newWidth);
   }
 
+  function handleActivityResizeStart(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) {
+      return;
+    }
+
+    const shell = event.currentTarget.closest<HTMLElement>(".javis-shell");
+    if (!shell) {
+      return;
+    }
+
+    event.preventDefault();
+
+    const startY = event.clientY;
+    const startHeight = getActivityTrackHeight(shell);
+    const maxHeight = getActivityMaxHeight(shell);
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+
+    function updateHeight(clientY: number) {
+      const newHeight = clampActivityHeight(startHeight + startY - clientY, maxHeight);
+      setActivityHeight(newHeight);
+      onActivityHeightChange?.(newHeight);
+    }
+
+    function stopListening() {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopListening);
+      window.removeEventListener("pointercancel", stopListening);
+    }
+
+    function handlePointerMove(moveEvent: PointerEvent) {
+      updateHeight(moveEvent.clientY);
+    }
+
+    updateHeight(event.clientY);
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopListening);
+    window.addEventListener("pointercancel", stopListening);
+  }
+
+  function handleActivityResizeKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (
+      event.key !== "ArrowUp" &&
+      event.key !== "ArrowDown" &&
+      event.key !== "Home" &&
+      event.key !== "End"
+    ) {
+      return;
+    }
+
+    const shell = event.currentTarget.closest<HTMLElement>(".javis-shell");
+    if (!shell) {
+      return;
+    }
+
+    event.preventDefault();
+
+    const currentHeight = getActivityTrackHeight(shell);
+    const maxHeight = getActivityMaxHeight(shell);
+
+    if (event.key === "Home") {
+      setActivityHeight(ACTIVITY_MIN_HEIGHT);
+      onActivityHeightChange?.(ACTIVITY_MIN_HEIGHT);
+      return;
+    }
+
+    if (event.key === "End") {
+      setActivityHeight(maxHeight);
+      onActivityHeightChange?.(maxHeight);
+      return;
+    }
+
+    const direction = event.key === "ArrowUp" ? 1 : -1;
+    const newHeight = clampActivityHeight(currentHeight + direction * ACTIVITY_KEYBOARD_STEP, maxHeight);
+    setActivityHeight(newHeight);
+    onActivityHeightChange?.(newHeight);
+  }
+
   const renderChatView = useCallback(
     () => (
       <ChatView
@@ -293,9 +521,12 @@ export function JavisWorkbench({
         onPermissionDecision={onPermissionDecision}
         onAskUserAnswer={onAskUserAnswer}
         modelConfiguration={modelConfiguration}
+        newChatRecommendations={newChatRecommendations}
         activeComposeMode={activeComposeMode}
         onRetryTask={onRetryTask}
         onStopTask={onStopTask}
+        onSelectAgent={handleSelectAgent}
+        selectedAgentId={selectedAgentId}
         onSubmitGoal={onSubmitGoal}
         onUseWorkspacePath={onUseWorkspacePath}
         onWorkspacePathChange={onWorkspacePathChange}
@@ -309,7 +540,7 @@ export function JavisWorkbench({
       onAskUserAnswer, onBrowseWorkspacePath, onDeleteRecentWorkspacePath, onDraftGoalChange,
       onPermissionDecision, modelConfiguration, onRetryTask, onStopTask,
       onSubmitGoal, onUseWorkspacePath, onWorkspacePathChange,
-      recentWorkspacePaths, task, userDocuments,
+      recentWorkspacePaths, task, userDocuments, selectedAgentId, newChatRecommendations,
     ],
   );
   const renderAutomatedView = useCallback(
@@ -471,14 +702,13 @@ export function JavisWorkbench({
     return renderer();
   }
 
-  const shellStyle =
-    sidebarWidth == null
-      ? undefined
-      : ({
-          "--javis-sidebar-width": `${sidebarWidth}px`,
-        } as CSSProperties);
+  const shellStyle = {
+    ...(sidebarWidth == null ? {} : { "--javis-sidebar-width": `${sidebarWidth}px` }),
+    ...(activityHeight == null ? {} : { "--javis-activity-height": `${activityHeight}px` }),
+  } as CSSProperties;
   const sidebarResizeValue =
     sidebarWidth ?? (isChatView ? CHAT_DEFAULT_SIDEBAR_WIDTH : RESOURCE_DEFAULT_SIDEBAR_WIDTH);
+  const activityResizeValue = activityHeight ?? ACTIVITY_DEFAULT_HEIGHT;
 
   return (
     <div
@@ -486,11 +716,67 @@ export function JavisWorkbench({
       className={[
         "javis-shell",
         isChatView ? "mode-chat" : "mode-resource",
+        isSidebarOpen ? "sidebar-open" : "sidebar-collapsed",
         isActivityOpen ? "activity-open" : "activity-collapsed",
         isInspectorOpen ? "inspector-open" : "inspector-collapsed",
       ].join(" ")}
       style={shellStyle}
     >
+      <div className="javis-workspace-controls" aria-label={labels.workspaceControls}>
+        <details className="javis-workspace-preset-menu">
+          <summary
+            aria-label={labels.layoutPresets}
+            className="javis-workspace-control control-presets"
+            title={labels.layoutPresets}
+          >
+            <span aria-hidden="true" />
+          </summary>
+          <div className="javis-workspace-preset-popover">
+            <button onClick={() => applyLayoutPreset("expanded")} type="button">
+              {labels.layoutPresetExpanded}
+            </button>
+            <button onClick={() => applyLayoutPreset("focus")} type="button">
+              {labels.layoutPresetFocus}
+            </button>
+            <button onClick={() => applyLayoutPreset("chat")} type="button">
+              {labels.layoutPresetChat}
+            </button>
+          </div>
+        </details>
+        <button
+          aria-label={isSidebarOpen ? labels.collapseSidebar : labels.expandSidebar}
+          aria-pressed={isSidebarOpen}
+          className="javis-workspace-control control-sidebar"
+          onClick={() => setSidebarOpenState(!isSidebarOpen)}
+          title={isSidebarOpen ? labels.collapseSidebar : labels.expandSidebar}
+          type="button"
+        >
+          <span aria-hidden="true" />
+        </button>
+        <button
+          aria-label={isInspectorOpen ? labels.collapseInspector : labels.expandInspector}
+          aria-pressed={isInspectorOpen}
+          className="javis-workspace-control control-inspector"
+          onClick={() => setInspectorOpenState(!isInspectorOpen)}
+          title={isInspectorOpen ? labels.collapseInspector : labels.expandInspector}
+          type="button"
+        >
+          <span aria-hidden="true" />
+        </button>
+        {isChatView ? (
+          <button
+            aria-label={isActivityOpen ? labels.collapseActivityLog : labels.expandActivityLog}
+            aria-pressed={isActivityOpen}
+            className="javis-workspace-control control-activity"
+            onClick={() => setActivityOpenState(!isActivityOpen)}
+            title={isActivityOpen ? labels.collapseActivityLog : labels.expandActivityLog}
+            type="button"
+          >
+            <span aria-hidden="true" />
+          </button>
+        ) : null}
+      </div>
+
       <Sidebar
         activeView={activeView}
         activeHistoryEntryId={activeHistoryEntryId}
@@ -501,6 +787,7 @@ export function JavisWorkbench({
         locale={effectiveLocale}
         modelSettings={effectiveModelSettings}
         modelConfiguration={modelConfiguration}
+        userProfileMemorySummary={userProfileMemorySummary}
         mountRoots={mountRoots}
         recentWorkspacePaths={recentWorkspacePaths}
         onChangeActiveView={handleChangeActiveView}
@@ -508,6 +795,8 @@ export function JavisWorkbench({
         onModelSettingsChange={onModelSettingsChange}
         onTestModelConnection={onTestModelConnection}
         onModelConfigurationChange={onModelConfigurationChange}
+        onRebuildUserProfileMemory={onRebuildUserProfileMemory}
+        onClearUserProfileMemory={onClearUserProfileMemory}
         onSaveProviderApiKey={onSaveProviderApiKey}
         onFetchProviderModels={onFetchProviderModels}
         providerCatalog={providerCatalog}
@@ -539,11 +828,29 @@ export function JavisWorkbench({
         isInspectorOpen={isInspectorOpen}
         labels={labels}
         locale={effectiveLocale}
-        onToggle={() => setIsInspectorOpen((current) => {
-          const next = !current;
-          onInspectorOpenChange?.(next);
-          return next;
-        })}
+        selectedAgentId={selectedAgentId}
+        systemResources={systemResources}
+        openTabs={openTabs}
+        activeToolTabId={activeToolTab?.id}
+        session={agentSession}
+        terminalService={terminalService}
+        fileService={fileService}
+        onQuickAction={handleWorkspaceToolAction}
+        onSelectAgent={handleSelectAgent}
+        onToggle={() => {
+          setInspectorOpenState(!isInspectorOpen);
+        }}
+        onCloseToolTab={handleCloseToolTab}
+        onSelectToolTab={handleSelectToolTab}
+        onNewToolTab={handleNewToolTab}
+        computerEntries={computerEntries}
+        computerPath={computerPath}
+        onNavigateDirectory={onNavigateDirectory}
+        onOpenFile={onOpenFile}
+        onSideChatSend={onQuickActionSideChat}
+        onQuickActionBrowser={onQuickActionBrowser}
+        onQuickActionReview={onQuickActionReview}
+        onQuickActionTerminal={onQuickActionTerminal}
         task={task}
       />
 
@@ -554,13 +861,14 @@ export function JavisWorkbench({
             isActivityOpen={isActivityOpen}
             labels={labels}
             locale={effectiveLocale}
+            onResizeKeyDown={handleActivityResizeKeyDown}
+            onResizeStart={handleActivityResizeStart}
             onPermissionDecision={onPermissionDecision}
             onAskUserAnswer={onAskUserAnswer}
-            onToggle={() => setIsActivityOpen((current) => {
-              const next = !current;
-              onActivityOpenChange?.(next);
-              return next;
-            })}
+            onToggle={() => setActivityOpenState(!isActivityOpen)}
+            resizeMax={ACTIVITY_MAX_HEIGHT}
+            resizeMin={ACTIVITY_MIN_HEIGHT}
+            resizeValue={activityResizeValue}
             task={task}
           />
         </>
@@ -571,6 +879,14 @@ export function JavisWorkbench({
 
 function clampSidebarWidth(width: number, maxWidth: number): number {
   return Math.round(Math.min(Math.max(width, SIDEBAR_MIN_WIDTH), maxWidth));
+}
+
+function createWorkspaceToolTab(tool: WorkbenchWorkspaceToolAction, index: number): WorkbenchWorkspaceToolTab {
+  return {
+    id: `${tool}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    tool,
+    title: index > 0 ? `${tool} ${index + 1}` : undefined,
+  };
 }
 
 function getSidebarTrackWidth(shell: HTMLElement): number {
@@ -602,4 +918,29 @@ function getGridColumnWidths(shell: HTMLElement): number[] {
 function parseCssPixelValue(value: string): number {
   const parsed = Number.parseFloat(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function clampActivityHeight(height: number, maxHeight: number): number {
+  return Math.round(Math.min(Math.max(height, ACTIVITY_MIN_HEIGHT), maxHeight));
+}
+
+function getActivityTrackHeight(shell: HTMLElement): number {
+  const rows = getGridRowHeights(shell);
+  return rows[1] ?? ACTIVITY_DEFAULT_HEIGHT;
+}
+
+function getActivityMaxHeight(shell: HTMLElement): number {
+  const style = window.getComputedStyle(shell);
+  const contentHeight =
+    shell.clientHeight - parseCssPixelValue(style.paddingTop) - parseCssPixelValue(style.paddingBottom);
+  const availableHeight = contentHeight - CHAT_MAIN_MIN_WIDTH / 2;
+  return Math.max(ACTIVITY_MIN_HEIGHT, Math.min(ACTIVITY_MAX_HEIGHT, availableHeight));
+}
+
+function getGridRowHeights(shell: HTMLElement): number[] {
+  return window
+    .getComputedStyle(shell)
+    .gridTemplateRows.split(" ")
+    .map((row) => Number.parseFloat(row))
+    .filter((height) => Number.isFinite(height));
 }

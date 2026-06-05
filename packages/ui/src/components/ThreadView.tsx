@@ -9,6 +9,8 @@ import type {
 } from "../types";
 import { useSmoothStream } from "../use-smooth-stream";
 import { stripVisionContextMarkers, translateWorkbenchText } from "../utils";
+import { AgentDetailSections } from "./AgentDetailSections";
+import { AgentSummaryList } from "./AgentSummaryList";
 import { ChatComposer } from "./ChatComposer";
 import { ContextRing } from "./ContextRing";
 import { ContextStats } from "./ContextStats";
@@ -35,6 +37,8 @@ interface ThreadViewProps {
   onStopTask?: () => void;
   onSubmit: FormEventHandler<HTMLFormElement>;
   onSubmitWithAttachments?: (goal: string, attachments: File[]) => void;
+  onSelectAgent?: (agentId: string) => void;
+  selectedAgentId?: string;
   onUseWorkspacePath?: (path: string) => void;
   onWorkspacePathChange?: (path: string) => void;
 }
@@ -58,19 +62,18 @@ export function ThreadView({
   onStopTask,
   onSubmit,
   onSubmitWithAttachments,
+  onSelectAgent,
+  selectedAgentId,
   onUseWorkspacePath,
   onWorkspacePathChange,
 }: ThreadViewProps) {
   const streaming = useRenderedStreamingText(task);
   const showStreaming = streaming.isVisible;
   const scrollAnchorRef = useRef<HTMLDivElement | null>(null);
-  const processKey = task.id ?? task.userGoal;
-  const [expandedProcessKey, setExpandedProcessKey] = useState<string | null>(null);
-  const isConclusionReady = task.status === "completed" && !showStreaming;
-  const hasProcessDetails = hasTaskProcessDetails(task);
-  const isProcessExpanded = expandedProcessKey === processKey;
-  const shouldShowProcessDetails =
-    hasProcessDetails && (!isConclusionReady || isProcessExpanded);
+  const [commanderExpanded, setCommanderExpanded] = useState(false);
+  const hasInlinePrompts = Boolean(
+    task.status === "failed" || task.permissionRequest || task.askUserQuestion,
+  );
   const conversationMessages = task.conversationMessages ?? [];
   const hasConversationMessages = conversationMessages.length > 0;
 
@@ -79,14 +82,15 @@ export function ThreadView({
       behavior: "smooth",
       block: "end",
     });
-  }, [isProcessExpanded, showStreaming, streaming.text, task]);
+  }, [showStreaming, streaming.text, task]);
 
   return (
     <>
       <header className="javis-thread-header">
-        <div>
-          <p className="javis-eyebrow">{labels.mainThread}</p>
+        <div className="javis-thread-title-group">
           <h1 className="javis-title">{translateWorkbenchText(task.title, locale)}</h1>
+          <span className={`javis-task-status-dot status-${task.status}`} aria-hidden="true" />
+          <span className="javis-task-status-inline">{translateWorkbenchText(task.status, locale)}</span>
         </div>
         <div className="javis-thread-header-actions">
           {task.status === "failed" ? (
@@ -98,7 +102,6 @@ export function ThreadView({
               {labels.retryTask}
             </button>
           ) : null}
-          <span className="javis-task-status">{translateWorkbenchText(task.status, locale)}</span>
         </div>
       </header>
 
@@ -124,6 +127,9 @@ export function ThreadView({
                 text={translateWorkbenchText(displayContent, locale)}
               />
               {message.role === "assistant" && index === conversationMessages.length - 1 ? (
+                <ArtifactCards task={task} locale={locale} />
+              ) : null}
+              {message.role === "assistant" && index === conversationMessages.length - 1 ? (
                 <ContextStats task={task} labels={labels} />
               ) : null}
             </article>
@@ -143,31 +149,35 @@ export function ThreadView({
           />
         ) : !hasConversationMessages ? (
           <article className="javis-message">
-            <p className="javis-message-title">{labels.commander}</p>
+            <button
+              className="javis-message-title javis-expandable-title"
+              onClick={() => setCommanderExpanded((prev) => !prev)}
+              type="button"
+              aria-expanded={commanderExpanded}
+            >
+              <span>{labels.commander}</span>
+              <span className="javis-expand-arrow">{commanderExpanded ? "▾" : "▸"}</span>
+            </button>
             <Markdown className="javis-message-body" text={translateWorkbenchText(task.commanderMessage, locale)} />
+            <ArtifactCards task={task} locale={locale} />
             <ContextStats task={task} labels={labels} />
+            {commanderExpanded ? (
+              <AgentDetailSections labels={labels} locale={locale} task={task} />
+            ) : null}
           </article>
         ) : null}
 
-        {isConclusionReady && hasProcessDetails ? (
-          <button
-            aria-expanded={isProcessExpanded}
-            className="javis-process-toggle"
-            onClick={() =>
-              setExpandedProcessKey((current) =>
-                current === processKey ? null : processKey,
-              )
-            }
-            type="button"
-          >
-            <span>{labels.processDetails}</span>
-            <strong>
-              {isProcessExpanded ? labels.hideProcessDetails : labels.showProcessDetails}
-            </strong>
-          </button>
-        ) : null}
+        {/* Agent summary cards — click to open right sidebar with details */}
+        <AgentSummaryList
+          agents={task.agents}
+          task={task}
+          selectedAgentId={selectedAgentId}
+          locale={locale}
+          onSelectAgent={(id) => onSelectAgent?.(id)}
+        />
 
-        {shouldShowProcessDetails ? (
+        {/* Inline interactive prompts (permission & ask-user) — only these stay in the chat */}
+        {hasInlinePrompts ? (
           <TaskSections
             labels={labels}
             locale={locale}
@@ -210,23 +220,42 @@ export function ThreadView({
   );
 }
 
-function hasTaskProcessDetails(task: WorkbenchTask): boolean {
-  return Boolean(
-    task.status === "failed" ||
-      task.plan.length > 0 ||
-      task.documents?.length ||
-      task.commands?.length ||
-      task.codeReviewPreview ||
-      task.codeProposedEdit ||
-      task.codeApplyResult ||
-      task.fileOrganizationExecution ||
-      task.permissionRequest ||
-      task.askUserQuestion ||
-      task.project ||
-      task.researchReport ||
-      task.sources?.length ||
-      task.verificationSummary,
+function ArtifactCards({ task, locale }: { task: WorkbenchTask; locale: WorkbenchLocale }) {
+  const artifacts = buildArtifacts(task);
+  if (artifacts.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="javis-artifact-list" aria-label="Artifacts">
+      {artifacts.map((artifact) => (
+        <article className="javis-artifact-card" key={`${artifact.kind}-${artifact.title}`}>
+          <span className={`javis-artifact-icon artifact-${artifact.kind}`}>{artifact.ext}</span>
+          <span>
+            <strong>{translateWorkbenchText(artifact.title, locale)}</strong>
+            <small>{artifact.ext}</small>
+          </span>
+        </article>
+      ))}
+    </div>
   );
+}
+
+function buildArtifacts(task: WorkbenchTask): Array<{ kind: string; title: string; ext: string }> {
+  const artifacts: Array<{ kind: string; title: string; ext: string }> = [];
+  if (task.documents?.length) {
+    artifacts.push({ kind: "doc", title: task.documents[0].heading || "需求说明", ext: "DOCX" });
+  }
+  if (task.researchReport) {
+    artifacts.push({ kind: "md", title: task.researchReport.title || "研究报告", ext: "MD" });
+  }
+  if (task.codeProposedEdit || task.codeReviewPreview || task.codeApplyResult) {
+    artifacts.push({ kind: "code", title: "代码建议", ext: "TS" });
+  }
+  if (task.commands?.length) {
+    artifacts.push({ kind: "cmd", title: "执行计划", ext: "SH" });
+  }
+  return artifacts.slice(0, 4);
 }
 
 function useRenderedStreamingText(task: WorkbenchTask): {

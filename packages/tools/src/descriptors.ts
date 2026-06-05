@@ -65,6 +65,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "file.executePdfOrganization",
     permissionLevel: "confirmed_write",
+    writeRiskLevel: "risky",
     summary: "Move PDF files exactly as listed in an approved dry-run plan.",
     capabilityTags: ["file_execute"],
     ownerAgentKinds: ["file"],
@@ -81,6 +82,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "file.writeText",
     permissionLevel: "confirmed_write",
+    writeRiskLevel: "safe",
     summary: "Write approved text content to a target file.",
     capabilityTags: ["file_execute"],
     ownerAgentKinds: ["file"],
@@ -91,15 +93,6 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Run an allowlisted read-only shell command in the workspace.",
     capabilityTags: ["shell_readonly"],
     ownerAgentKinds: ["shell", "code"],
-  },
-
-  // ── Project ────────────────────────────────────────────────────────────
-  {
-    name: "project.inspect",
-    permissionLevel: "read",
-    summary: "Inspect package scripts and recommend start/test commands.",
-    capabilityTags: ["shell_readonly"],
-    ownerAgentKinds: ["shell", "file"],
   },
 
   // ── Code ───────────────────────────────────────────────────────────────
@@ -120,6 +113,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "code.applyProposedEdit",
     permissionLevel: "confirmed_write",
+    writeRiskLevel: "risky",
     summary: "Apply only the approved Code Agent patch proposal.",
     capabilityTags: ["code_apply"],
     ownerAgentKinds: ["code"],
@@ -157,6 +151,13 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     ownerAgentKinds: ["computer"],
   },
   {
+    name: "computer.searchLocalDocuments",
+    permissionLevel: "read",
+    summary: "Search indexed local files by name, keyword, and metadata.",
+    capabilityTags: ["local_search"],
+    ownerAgentKinds: ["computer"],
+  },
+  {
     name: "file.listDirectory",
     permissionLevel: "read",
     summary: "List direct children of a directory for file explorer browsing.",
@@ -185,8 +186,16 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     ownerAgentKinds: ["computer"],
   },
   {
+    name: "computer.inspectUi",
+    permissionLevel: "read",
+    summary: "Inspect a window's UI Automation control tree without moving the mouse.",
+    capabilityTags: ["desktop_ui_tree"],
+    ownerAgentKinds: ["computer"],
+  },
+  {
     name: "computer.focusWindow",
     permissionLevel: "confirmed_write",
+    writeRiskLevel: "safe",
     summary: "Bring a specific window to the foreground by handle. Requires user approval.",
     capabilityTags: ["desktop_focus"],
     ownerAgentKinds: ["computer"],
@@ -194,6 +203,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "computer.moveMouse",
     permissionLevel: "confirmed_write",
+    writeRiskLevel: "safe",
     summary: "Move the mouse cursor to absolute screen coordinates. Requires user approval.",
     capabilityTags: ["desktop_input"],
     ownerAgentKinds: ["computer"],
@@ -201,6 +211,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "computer.click",
     permissionLevel: "confirmed_write",
+    writeRiskLevel: "dangerous",
     summary: "Click at absolute screen coordinates. Requires user approval.",
     capabilityTags: ["desktop_input"],
     ownerAgentKinds: ["computer"],
@@ -208,6 +219,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "computer.type",
     permissionLevel: "confirmed_write",
+    writeRiskLevel: "dangerous",
     summary: "Type text via keyboard input simulation. Requires user approval.",
     capabilityTags: ["desktop_input"],
     ownerAgentKinds: ["computer"],
@@ -215,6 +227,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "computer.keyCombo",
     permissionLevel: "confirmed_write",
+    writeRiskLevel: "dangerous",
     summary: "Press a key combination (e.g. Ctrl+C). Requires user approval and allowlist check.",
     capabilityTags: ["desktop_input"],
     ownerAgentKinds: ["computer"],
@@ -222,8 +235,25 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "computer.scroll",
     permissionLevel: "confirmed_write",
+    writeRiskLevel: "safe",
     summary: "Scroll at absolute screen coordinates. Requires user approval.",
     capabilityTags: ["desktop_input"],
+    ownerAgentKinds: ["computer"],
+  },
+  {
+    name: "computer.invokeUi",
+    permissionLevel: "confirmed_write",
+    writeRiskLevel: "risky",
+    summary: "Invoke a UI Automation control by selector without moving the physical mouse. Requires user approval.",
+    capabilityTags: ["desktop_ui_input"],
+    ownerAgentKinds: ["computer"],
+  },
+  {
+    name: "computer.setUiValue",
+    permissionLevel: "confirmed_write",
+    writeRiskLevel: "risky",
+    summary: "Set a UI Automation value by selector without moving the physical mouse. Requires user approval.",
+    capabilityTags: ["desktop_ui_input"],
     ownerAgentKinds: ["computer"],
   },
   {
@@ -238,25 +268,11 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "scheduler.createTask",
     permissionLevel: "confirmed_write",
+    writeRiskLevel: "safe",
     summary: "Create a durable local scheduled task or reminder.",
     capabilityTags: ["schedule_create"],
     ownerAgentKinds: ["scheduler"],
   },
-  {
-    name: "scheduler.updateTask",
-    permissionLevel: "confirmed_write",
-    summary: "Update a previously created local scheduled task.",
-    capabilityTags: ["schedule_update"],
-    ownerAgentKinds: ["scheduler"],
-  },
-  {
-    name: "scheduler.deleteTask",
-    permissionLevel: "confirmed_write",
-    summary: "Delete a previously created local scheduled task.",
-    capabilityTags: ["schedule_delete"],
-    ownerAgentKinds: ["scheduler"],
-  },
-
   // ── Workspace ─────────────────────────────────────────────────────────
   {
     name: "workspace.list",
@@ -275,6 +291,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "workspace.create",
     permissionLevel: "confirmed_write",
+    writeRiskLevel: "safe",
     summary: "Save a new workspace definition to disk.",
     capabilityTags: ["workspace_create"],
     ownerAgentKinds: ["workspace"],
@@ -282,6 +299,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "workspace.delete",
     permissionLevel: "confirmed_write",
+    writeRiskLevel: "risky",
     summary: "Remove a workspace definition from disk.",
     capabilityTags: ["workspace_delete"],
     ownerAgentKinds: ["workspace"],
@@ -312,6 +330,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "browser.click",
     permissionLevel: "confirmed_write",
+    writeRiskLevel: "risky",
     summary: "Click an element on the page. Requires user approval.",
     capabilityTags: ["browser_interact"],
     ownerAgentKinds: ["browser"],
@@ -319,6 +338,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "browser.type",
     permissionLevel: "confirmed_write",
+    writeRiskLevel: "risky",
     summary: "Type text into an input field. Requires user approval.",
     capabilityTags: ["browser_interact"],
     ownerAgentKinds: ["browser"],
@@ -326,6 +346,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "browser.evaluate",
     permissionLevel: "confirmed_write",
+    writeRiskLevel: "dangerous",
     summary: "Execute JavaScript in the page context. Requires user approval.",
     capabilityTags: ["browser_interact"],
     ownerAgentKinds: ["browser"],
@@ -333,6 +354,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "browser.runTest",
     permissionLevel: "confirmed_write",
+    writeRiskLevel: "risky",
     summary: "Run a Playwright test script and return pass/fail results. Requires approval — script may contain page interactions.",
     capabilityTags: ["browser_test"],
     ownerAgentKinds: ["browser"],
@@ -347,6 +369,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "browser.upload",
     permissionLevel: "confirmed_write",
+    writeRiskLevel: "risky",
     summary: "Upload local file(s) to a file input element on the page. Requires user approval.",
     capabilityTags: ["browser_interact"],
     ownerAgentKinds: ["browser"],

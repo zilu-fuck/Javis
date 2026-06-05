@@ -106,6 +106,12 @@ describe("routing", () => {
     expect(getRecommendedWorkflowIds("打开计算器")).toEqual(["computer-use"]);
   });
 
+  it("routes desktop messaging app automation to computer-use", () => {
+    const goal = "\u7528\u684c\u9762\u81ea\u52a8\u5316\u6253\u5f00 QQ\uff0c\u627e\u5230 \u51e4\u96cf-\u5927\u806a\u660e\uff0c\u5e76\u51c6\u5907\u53d1\u9001\u6d88\u606f\uff1a sb";
+    expect(isComputerUseGoal(goal)).toBe(true);
+    expect(getRecommendedWorkflowIds(goal)[0]).toBe("computer-use");
+  });
+
   it("scores computer-use route correctly for strong signals", () => {
     const routes = scoreRoutes("操控桌面打开 Chrome 并截图");
     const cuRoute = routes.find((r) => r.route === "computer-use");
@@ -113,6 +119,74 @@ describe("routing", () => {
     expect(cuRoute!.score).toBeGreaterThanOrEqual(4);
     expect(cuRoute!.signals).toContain("desktop-automation-verb");
     expect(cuRoute!.signals).toContain("app-name-with-action");
-    expect(cuRoute!.signals).toContain("desktop-keyword");
+  });
+
+  // ── Layer 2: Natural-language desktop task patterns ──────────────────────
+
+  it("routes natural-language desktop task patterns to computer-use", () => {
+    expect(isComputerUseGoal("帮我在电脑上打开 Chrome")).toBe(true);
+    expect(isComputerUseGoal("帮我操作桌面打开 QQ")).toBe(true);
+    expect(isComputerUseGoal("帮我用桌面打开记事本")).toBe(true);
+    expect(isComputerUseGoal("在电脑上帮我找文件")).toBe(true);
+    expect(isComputerUseGoal("用桌面自动化打开 VS Code")).toBe(true);
+    expect(isComputerUseGoal("通过桌面操作微信")).toBe(true);
+  });
+
+  it("does not route non-desktop natural language to computer-use", () => {
+    expect(isComputerUseGoal("帮我写一篇文章")).toBe(false);
+    expect(isComputerUseGoal("帮我查一下天气")).toBe(false);
+    expect(isComputerUseGoal("帮我分析代码")).toBe(false);
+  });
+
+  // ── Layer 4: Messaging/IM app automation ─────────────────────────────────
+
+  it("routes QQ automation goals to computer-use", () => {
+    expect(isComputerUseGoal("打开 QQ 找到凤雏-大聪明并准备发送消息")).toBe(true);
+    expect(isComputerUseGoal("用 QQ 给张三发消息")).toBe(true);
+    expect(isComputerUseGoal("launch QQ and send message to contact")).toBe(true);
+  });
+
+  it("routes WeChat/DingTalk automation to computer-use", () => {
+    expect(isComputerUseGoal("打开微信找到联系人")).toBe(true);
+    expect(isComputerUseGoal("用钉钉发送消息")).toBe(true);
+    expect(isComputerUseGoal("打开企业微信准备发送通知")).toBe(true);
+    expect(isComputerUseGoal("用飞书联系张三")).toBe(true);
+  });
+
+  it("routes messaging app with action to computer-use", () => {
+    expect(isComputerUseGoal("在 QQ 里找到王五的聊天记录")).toBe(true);
+    expect(isComputerUseGoal("用微信给群里发消息")).toBe(true);
+  });
+
+  // ── Layer 5: Desktop UI keywords with action context ─────────────────────
+
+  it("routes desktop UI keywords with action context to computer-use", () => {
+    expect(isComputerUseGoal("在桌面上找到文件并打开")).toBe(true);
+    expect(isComputerUseGoal("点击桌面上的计算器图标")).toBe(true);
+    expect(isComputerUseGoal("打开窗口中的设置")).toBe(true);
+    expect(isComputerUseGoal("切换到任务栏的 Chrome")).toBe(true);
+    expect(isComputerUseGoal("用桌面搜索框查找文件")).toBe(true);
+  });
+
+  it("does not route desktop keywords without action context", () => {
+    // "desktop" or "window" alone without an action verb is not enough
+    expect(isComputerUseGoal("看看我的桌面")).toBe(false);
+    expect(isComputerUseGoal("窗口太小了")).toBe(false);
+    expect(isComputerUseGoal("这个桌面背景很好看")).toBe(false);
+  });
+
+  // ── Edge cases: ComputerUse vs local-document disambiguation ───────────
+
+  it("does not route local file search to computer-use", () => {
+    // "在电脑上找文件" has no desktop-action context, only file search
+    expect(isComputerUseGoal("在电脑上找文件")).toBe(false);
+    // "在电脑上查一下文档" also file search intent
+    expect(isComputerUseGoal("在电脑上查一下文档")).toBe(false);
+  });
+
+  it("routes desktop-app actions on computer to computer-use", () => {
+    // "在电脑上打开Chrome" is app launch, which Layer 3 catches
+    expect(isComputerUseGoal("在电脑上打开Chrome")).toBe(true);
+    expect(isComputerUseGoal("在电脑上打开VS Code")).toBe(true);
   });
 });

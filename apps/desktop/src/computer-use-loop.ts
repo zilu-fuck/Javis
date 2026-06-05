@@ -31,8 +31,14 @@ export interface ComputerUseLoopOptions {
   computerTool: ComputerTool;
   userGoal: string;
   config?: Partial<ComputerUseLoopConfig>;
-  /** Supplies a confirmed-write approval binding for write actions. */
-  approveAction?: (action: ComputerUseAction) => Promise<{ approvalId: string; taskId?: string }>;
+  /** Supplies a confirmed-write approval binding for write actions.
+   *  Called for each write action unless sessionApproval is set.
+   *  When sessionWide is true in the result, subsequent actions skip approval. */
+  approveAction?: (action: ComputerUseAction) => Promise<{ approvalId: string; taskId?: string; sessionWide?: boolean }>;
+  /** Pre-approved session token. When set, all write actions skip approveAction
+   *  and reuse this binding. The first action must have been approved before
+   *  starting the loop via a session-wide approve call. */
+  sessionApproval?: { approvalId: string; taskId?: string };
   /** Called after each step is recorded, for real-time UI progress updates. */
   onStep?: (step: ComputerUseStep) => void;
 }
@@ -55,13 +61,20 @@ export async function runComputerUseLoop(
 
   const steps: ComputerUseStep[] = [];
   let correctionHint = "";
+  let lastActionSignature = "";
+  let repeatedActionCount = 0;
+  let sessionApproval = options.sessionApproval;
+  const lockedScreenshotMethods = new Map<number, "bitblt" | "printWindow">();
 
   for (let i = 0; i < config.maxSteps; i++) {
     // 1. Take screenshot
     const screenshot = await computerTool.screenshot({});
 
     // 2. Build prompt
-    const prompt = buildPrompt(userGoal, steps, config.historySteps, correctionHint);
+    const prompt = buildPrompt(userGoal, steps, config.historySteps, correctionHint, {
+      width: screenshot.width,
+      height: screenshot.height,
+    });
     correctionHint = "";
 
     // 3. Call vision model
@@ -86,11 +99,11 @@ export async function runComputerUseLoop(
         const errorStep: ComputerUseStep = {
           stepIndex: i,
           screenshotDataUrl: screenshot.dataUrl,
-          observation: "Model output could not be parsed as valid JSON.",
+          observation: "模型没有返回可执行的 JSON 指令。",
           action: { tool: "computer.wait", params: { ms: 500 } },
-          target: "skip unparsable step",
+          target: "跳过本次无法解析的输出",
           confidence: "low",
-          error: "JSON parse failed after retry",
+          error: "模型输出连续解析失败",
         };
         steps.push(errorStep);
         onStep?.(errorStep);
@@ -105,9 +118,9 @@ export async function runComputerUseLoop(
       const completionStep: ComputerUseStep = {
         stepIndex: i,
         screenshotDataUrl: screenshot.dataUrl,
-        observation: rawOutput?.observation ?? "Goal achieved",
+        observation: rawOutput?.observation ?? "目标已完成",
         action: { tool: "computer.wait", params: { ms: 0 } },
-        target: rawOutput?.target ?? "done",
+        target: rawOutput?.target ?? "完成",
         confidence: "high",
       };
       steps.push(completionStep);
@@ -119,10 +132,63 @@ export async function runComputerUseLoop(
     const rawOutput = tryParseOutput(rawResponse.text);
     let result: unknown;
     let error: string | undefined;
+    const executedAction = lockScreenshotMethod(action, lockedScreenshotMethods);
+
+    if (isWriteAction(executedAction) && !approveAction && !sessionApproval) {
+      const missingApprovalStep: ComputerUseStep = {
+        stepIndex: i,
+        screenshotDataUrl: screenshot.dataUrl,
+        observation: rawOutput?.observation ?? "",
+        action: executedAction,
+        target: rawOutput?.target ?? "",
+        confidence: rawOutput?.confidence ?? "low",
+        error: `${action.tool} 需要 confirmed_write 审批，但当前循环没有提供审批处理器。`,
+      };
+      steps.push(missingApprovalStep);
+      onStep?.(missingApprovalStep);
+      break;
+    }
+
+    const actionSignature = createActionSignature(executedAction);
+    if (actionSignature === lastActionSignature) {
+      repeatedActionCount += 1;
+    } else {
+      lastActionSignature = actionSignature;
+      repeatedActionCount = 1;
+    }
+
+    if (repeatedActionCount >= 3) {
+      const repeatStep: ComputerUseStep = {
+        stepIndex: i,
+        screenshotDataUrl: screenshot.dataUrl,
+        observation: rawOutput?.observation ?? "",
+        action: executedAction,
+        target: rawOutput?.target ?? "",
+        confidence: rawOutput?.confidence ?? "low",
+        error: `连续 ${repeatedActionCount} 次重复执行 ${action.tool}，已停止以避免循环。`,
+      };
+      steps.push(repeatStep);
+      onStep?.(repeatStep);
+      break;
+    }
 
     try {
-      const approval = isWriteAction(action) ? await approveAction?.(action) : undefined;
-      result = await dispatchAction(computerTool, action, approval);
+      let approval: { approvalId: string; taskId?: string } | undefined;
+      if (isWriteAction(executedAction)) {
+        if (sessionApproval) {
+          approval = sessionApproval;
+        } else {
+          const result = await approveAction?.(executedAction);
+          if (result) {
+            approval = { approvalId: result.approvalId, taskId: result.taskId };
+            if (result.sessionWide) {
+              sessionApproval = approval;
+            }
+          }
+        }
+      }
+      result = await dispatchAction(computerTool, executedAction, approval);
+      rememberScreenshotMethod(executedAction, result, lockedScreenshotMethods);
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     }
@@ -132,7 +198,7 @@ export async function runComputerUseLoop(
       stepIndex: i,
       screenshotDataUrl: screenshot.dataUrl,
       observation: rawOutput?.observation ?? "",
-      action,
+      action: executedAction,
       target: rawOutput?.target ?? "",
       confidence: rawOutput?.confidence ?? "medium",
       result,
@@ -143,6 +209,9 @@ export async function runComputerUseLoop(
 
     // Add correction hint so the model can adapt instead of repeating the failure.
     if (error) {
+      if (/denied by user|permission denied/i.test(error)) {
+        break;
+      }
       correctionHint = `Your last action (${action.tool}) failed: ${error}. Try a different approach or a different target.`;
     }
   }
@@ -185,10 +254,12 @@ function buildPrompt(
   steps: ComputerUseStep[],
   historySteps: number,
   correctionHint: string,
+  screenshot: { width: number; height: number },
 ): string {
   const parts: string[] = [
     COMPUTER_USE_SYSTEM_PROMPT.en,
     `USER GOAL: ${userGoal}`,
+    `SCREENSHOT: ${screenshot.width}x${screenshot.height}. Coordinates start at (0,0) in the top-left corner; x increases right, y increases down.`,
   ];
 
   const history = formatStepHistory(steps, historySteps);
@@ -230,7 +301,10 @@ async function dispatchAction(
 ): Promise<unknown> {
   switch (action.tool) {
     case "computer.screenshot":
-      return computerTool.screenshot({});
+      return computerTool.screenshot(action.params);
+
+    case "computer.inspectUi":
+      return computerTool.inspectUi(action.params);
 
     case "computer.wait":
       return computerTool.wait(action.params);
@@ -253,8 +327,14 @@ async function dispatchAction(
     case "computer.focusWindow":
       return computerTool.focusWindow({ ...action.params, ...requireApproval(action, approval) });
 
+    case "computer.invokeUi":
+      return computerTool.invokeUi({ ...action.params, ...requireApproval(action, approval) });
+
+    case "computer.setUiValue":
+      return computerTool.setUiValue({ ...action.params, ...requireApproval(action, approval) });
+
     default:
-      throw new Error(`Unknown computer action: ${(action as { tool: string }).tool}`);
+      return assertNever(action);
   }
 }
 
@@ -265,6 +345,8 @@ const WRITE_ACTIONS = new Set([
   "computer.keyCombo",
   "computer.scroll",
   "computer.focusWindow",
+  "computer.invokeUi",
+  "computer.setUiValue",
 ]);
 
 function isWriteAction(action: ComputerUseAction): boolean {
@@ -279,4 +361,62 @@ function requireApproval(
     throw new Error(`${action.tool} requires confirmed_write approval`);
   }
   return approval;
+}
+
+function lockScreenshotMethod(
+  action: ComputerUseAction,
+  lockedMethods: Map<number, "bitblt" | "printWindow">,
+): ComputerUseAction {
+  if (action.tool !== "computer.screenshot" || action.params.windowHandle === undefined) {
+    return action;
+  }
+  const lockedMethod = lockedMethods.get(action.params.windowHandle);
+  if (!lockedMethod || action.params.method === "bitblt" || action.params.method === "printWindow") {
+    return action;
+  }
+  return {
+    ...action,
+    params: {
+      ...action.params,
+      method: lockedMethod,
+    },
+  };
+}
+
+function rememberScreenshotMethod(
+  action: ComputerUseAction,
+  result: unknown,
+  lockedMethods: Map<number, "bitblt" | "printWindow">,
+): void {
+  if (action.tool !== "computer.screenshot" || action.params.windowHandle === undefined) {
+    return;
+  }
+  if (!result || typeof result !== "object" || !("methodUsed" in result)) {
+    return;
+  }
+  const methodUsed = (result as { methodUsed?: unknown }).methodUsed;
+  if (methodUsed === "bitblt" || methodUsed === "printWindow") {
+    lockedMethods.set(action.params.windowHandle, methodUsed);
+  }
+}
+
+function assertNever(action: never): never {
+  throw new Error(`Unknown computer action: ${JSON.stringify(action)}`);
+}
+
+function createActionSignature(action: ComputerUseAction): string {
+  return `${action.tool}:${stableStringify(action.params)}`;
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
 }

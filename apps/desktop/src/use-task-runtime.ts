@@ -6,8 +6,10 @@ import type { ScheduledTask } from "./scheduled-tasks";
 import type { createScheduledTasksRepository } from "./scheduled-tasks-persistence";
 import type { createJavisRuntime } from "./app-runtime";
 
-const TASK_SNAPSHOT_REVEAL_DELAY_MS = 120;
-const STREAMING_SNAPSHOT_REVEAL_DELAY_MS = 16;
+// Deliberately lower than the raw event rate — human eyes perceive ~20 fps as fluid
+// while higher rates (60+ fps) waste React render budget on invisible deltas.
+const TASK_SNAPSHOT_REVEAL_DELAY_MS = 60;
+const STREAMING_SNAPSHOT_REVEAL_DELAY_MS = 50;
 
 export type TaskHistoryRepositoryLike = ReturnType<typeof createTaskHistoryRepository> | null;
 export type ScheduledTasksRepositoryLike = ReturnType<typeof createScheduledTasksRepository> | null;
@@ -89,11 +91,16 @@ export function useTaskRuntime({
       }
       setTask(nextTask);
 
+      // If multiple snapshots piled up (e.g. parallel DAG steps completing),
+      // drain the backlog rapidly so the user sees each state transition
+      // without artificial pauses between them.
       if (taskQueueRef.current.length > 0) {
         scheduleQueuedTaskSnapshot(
-          isStreamingTaskSnapshot(nextTask)
-            ? STREAMING_SNAPSHOT_REVEAL_DELAY_MS
-            : TASK_SNAPSHOT_REVEAL_DELAY_MS,
+          taskQueueRef.current.length > 2
+            ? 0
+            : isStreamingTaskSnapshot(nextTask)
+              ? STREAMING_SNAPSHOT_REVEAL_DELAY_MS
+              : TASK_SNAPSHOT_REVEAL_DELAY_MS,
         );
       }
     }, delayMs);

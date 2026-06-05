@@ -1,6 +1,6 @@
 # Product Readiness
 
-Last updated: 2026-05-31
+Last updated: 2026-06-05
 
 This document defines the current target for Javis: a complete usable desktop
 product, not only an MVP build.
@@ -59,18 +59,21 @@ Do not call Javis a complete usable product while any of these are true:
 The project has a verified MVP foundation with Chinese optimization complete and
 streaming UI consumption fully implemented (Rust SSE → Tauri events →
 delta-reducer → ThreadView StreamingMessage → useSmoothStream typewriter
-animation with cancel). The next stage is product completion:
+animation with cancel). SQLite migration complete (9 migration sets, all
+localStorage consumers migrated). Browser Agent complete (6-phase Playwright
+integration with SSRF hardening, crash recovery, 1183 lines Rust).
+VisionBridge complete (image paste → multimodal analysis → Commander injection).
+Chinese Reviewer extracted from Agent system to pipeline module.
+The next stage is product completion:
 
 1. Debug reqwest HTTP request construction for DeepSeek API calls (fix the gap
    between Rust and the working Python verification script).
-2. Complete migration verification for task history, approval records, and
-   workspaces from localStorage into the existing SQLite database.
-3. Run the complete-product workflow QA matrix in `docs/qa/PRODUCT_WORKFLOWS.md`
+2. Run the complete-product workflow QA matrix in `docs/qa/PRODUCT_WORKFLOWS.md`
    and close any strict gate blockers.
-4. Add release signing/versioning/rollback documentation.
-5. Wire LLM vision API backend calls for the Vision Agent.
-6. Integrate Browser Agent, Workspace Agent, and File Write tools into
-   complete-product workflow QA.
+3. Add release signing/versioning/rollback documentation.
+4. Integrate Workspace Agent, Computer Use, and File Write tools
+   into complete-product workflow QA.
+5. Add confirmed-write risk classification (safe / risky / dangerous).
 
 `docs/MVP_STATUS.md` remains useful as a baseline acceptance record, but it is
 not the current finish line.

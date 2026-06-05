@@ -13,6 +13,7 @@ import type {
   WorkbenchLocale,
   WorkbenchModelConfiguration,
   WorkbenchModelSettings,
+  WorkbenchUserProfileMemorySummary,
 } from "../types";
 import {
   filterWorkbenchHistoryEntries,
@@ -29,6 +30,7 @@ interface SidebarProps {
   locale: WorkbenchLocale;
   modelSettings: WorkbenchModelSettings;
   modelConfiguration?: WorkbenchModelConfiguration;
+  userProfileMemorySummary?: WorkbenchUserProfileMemorySummary | null;
   historyEntries: WorkbenchHistoryEntry[];
   currentWorkspacePath?: string;
   recentWorkspacePaths?: string[];
@@ -48,6 +50,8 @@ interface SidebarProps {
   onModelSettingsChange?: (settings: WorkbenchModelSettings) => void;
   onTestModelConnection?: (settings: WorkbenchModelSettings) => Promise<string | void>;
   onModelConfigurationChange?: (config: WorkbenchModelConfiguration) => void;
+  onRebuildUserProfileMemory?: () => void;
+  onClearUserProfileMemory?: () => void;
   onSaveProviderApiKey?: (keyReference: string, apiKey: string) => Promise<void>;
   onFetchProviderModels?: (params: {
     provider: string;
@@ -78,6 +82,7 @@ export function Sidebar({
   locale,
   modelSettings,
   modelConfiguration,
+  userProfileMemorySummary,
   historyEntries,
   currentWorkspacePath,
   recentWorkspacePaths = [],
@@ -96,6 +101,8 @@ export function Sidebar({
   onModelSettingsChange,
   onTestModelConnection,
   onModelConfigurationChange,
+  onRebuildUserProfileMemory,
+  onClearUserProfileMemory,
   onSaveProviderApiKey,
   onFetchProviderModels,
   providerCatalog,
@@ -352,11 +359,15 @@ export function Sidebar({
           placeholder={labels.searchPlaceholder}
           value={sidebarSearchQuery}
         />
+        <kbd>⌘K</kbd>
       </label>
       <nav className="javis-nav" aria-label={labels.workspaceNavigation}>
         {renderNavGroups()}
         <div className="javis-nav-group">
-          <p className="javis-nav-section">{labels.projects}</p>
+          <div className="javis-nav-section-row">
+            <p className="javis-nav-section">{labels.projects}</p>
+            <button aria-label={labels.projects} type="button">+</button>
+          </div>
           {workspaceGroups.length > 0 ? (
             workspaceGroups.map((group) => {
               const hasPreview = group.entries.length > HISTORY_PREVIEW_COUNT;
@@ -423,7 +434,7 @@ export function Sidebar({
                             title={labels.deleteHistoryEntry}
                             type="button"
                           >
-                            x
+                            ...
                           </button>
                         </div>
                         );
@@ -462,9 +473,12 @@ export function Sidebar({
         labels={labels}
         modelSettings={modelSettings}
         modelConfiguration={modelConfiguration}
+        userProfileMemorySummary={userProfileMemorySummary}
         onModelSettingsChange={onModelSettingsChange}
         onTestModelConnection={onTestModelConnection}
         onModelConfigurationChange={onModelConfigurationChange}
+        onRebuildUserProfileMemory={onRebuildUserProfileMemory}
+        onClearUserProfileMemory={onClearUserProfileMemory}
         onSaveProviderApiKey={onSaveProviderApiKey}
         onFetchProviderModels={onFetchProviderModels}
         providerCatalog={providerCatalog}

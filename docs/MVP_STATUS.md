@@ -1,6 +1,6 @@
 # MVP Status
 
-Last updated: 2026-05-31
+Last updated: 2026-06-05
 
 This document maps the current implementation against the MVP scenarios in
 `docs/MVP.md`.
@@ -20,7 +20,7 @@ This file remains the baseline record for what the verified MVP already covers.
 | High-risk file dry-run and confirmation | Implemented | PDF organization creates a dry-run, asks for approval, executes approved matching moves with a one-time approval id, skips conflicts, and reports moved/skipped/failed results. |
 | Code Agent / opencode backend | Implemented | Core routes code review goals to Code Agent: lists changed files, shows diff preview, requests opencode-backed JSON patch proposal using desktop-managed model/provider settings, and applies approved patches through confirmed-write + native guard. Fixture QA covers proposal denial and approved patch application. Agent optimization: 11/13 issues resolved (safePlanWorkflow dynamic, commander.synthesize, PDF tools→File Agent, etc). Live provider smoke QA in progress. |
 | Persistent task history | Implemented | Completed, failed, and cancelled task snapshots persist locally with sidebar restore/delete. Durable approval records cover PDF and Code Patch pending/resolved audit records. Packaged restart QA verifies PDF and Code Patch approve/apply, deny, and expiry recovery paths. SQLite migration complete: all 9 migration sets deployed, model-settings migrated; task history/approval/workspaces migration verification in progress. |
-| Core runtime tests | Implemented for MVP | Route selection, permission state changes, research reporting, selected failure paths, file-scan failure, PDF no-op/preview/execution failures, and native PDF safety boundaries have focused coverage. 555 total tests (430 Vitest + 125 Rust). |
+| Core runtime tests | Implemented for MVP | Route selection, permission state changes, research reporting, selected failure paths, file-scan failure, PDF no-op/preview/execution failures, and native PDF safety boundaries have focused coverage. 740 total tests (564 Vitest + 176 Rust). |
 
 ## Scenario Details
 
@@ -145,4 +145,4 @@ for a complete product release:
 - Expanded QA from MVP scenarios to complete-product workflows.
 - ~~Streaming UI consumption (Rust SSE backend done, frontend in progress).~~ (completed: delta-reducer + ThreadView StreamingMessage + useSmoothStream typewriter animation + cancel)
 - ChineseReviewer quantitative A/B evaluation.
-- Vision Agent: agent definition and 3 tool descriptors exist in packages; LLM vision API backend calls not yet wired.
+- Vision Agent: agent definition, 3 tool descriptors, and LLM vision API backend calls fully implemented.

@@ -1,5 +1,9 @@
 import type { WorkbenchHistoryEntry, WorkbenchLocale, WorkbenchTask } from "./types";
 
+export function isChineseLocale(locale: WorkbenchLocale): boolean {
+  return locale.labels.aiModeSettings === "AI 模式";
+}
+
 export function formatSize(sizeBytes: number) {
   if (sizeBytes < 1024) {
     return `${sizeBytes} B`;

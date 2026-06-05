@@ -28,8 +28,18 @@ export type ComputerUseAction =
   | { tool: "computer.keyCombo"; params: { keys: string[] } }
   | { tool: "computer.scroll"; params: { x: number; y: number; delta: number; direction?: "vertical" | "horizontal" } }
   | { tool: "computer.focusWindow"; params: { handle: number } }
-  | { tool: "computer.screenshot"; params: Record<string, never> }
+  | { tool: "computer.inspectUi"; params: { windowHandle: number; maxDepth?: number; maxNodes?: number } }
+  | { tool: "computer.invokeUi"; params: { selector: UiElementSelector } }
+  | { tool: "computer.setUiValue"; params: { selector: UiElementSelector; value: string } }
+  | { tool: "computer.screenshot"; params: { windowHandle?: number; method?: "auto" | "bitblt" | "printWindow" } }
   | { tool: "computer.wait"; params: { ms: number } };
+
+export interface UiElementSelector {
+  windowHandle: number;
+  automationId?: string;
+  name?: string;
+  controlType?: string;
+}
 
 const ALLOWED_TOOLS = new Set([
   "computer.moveMouse",
@@ -38,6 +48,9 @@ const ALLOWED_TOOLS = new Set([
   "computer.keyCombo",
   "computer.scroll",
   "computer.focusWindow",
+  "computer.inspectUi",
+  "computer.invokeUi",
+  "computer.setUiValue",
   "computer.screenshot",
   "computer.wait",
 ]);
@@ -78,7 +91,7 @@ export function parseModelAction(raw: string): ComputerUseAction | null {
     throw new Error(`Tool "${parsed.action.tool}" not in allowed list: ${[...ALLOWED_TOOLS].join(", ")}`);
   }
 
-  return validateActionParams(parsed.action.tool, parsed.action.params ?? {});
+  return validateActionParams(parsed.action.tool, normalizeActionParams(parsed.action.tool, parsed.action.params ?? {}));
 }
 
 /**
@@ -152,13 +165,106 @@ function validateActionParams(
     }
     case "computer.focusWindow":
       return { tool, params: { handle: numberParam(params.handle, "handle") } };
+    case "computer.inspectUi":
+      return {
+        tool,
+        params: {
+          windowHandle: numberParam(params.windowHandle, "windowHandle"),
+          ...(params.maxDepth === undefined ? {} : { maxDepth: numberParam(params.maxDepth, "maxDepth") }),
+          ...(params.maxNodes === undefined ? {} : { maxNodes: numberParam(params.maxNodes, "maxNodes") }),
+        },
+      };
+    case "computer.invokeUi":
+      return { tool, params: { selector: uiSelectorParam(params.selector, "selector") } };
+    case "computer.setUiValue":
+      return {
+        tool,
+        params: {
+          selector: uiSelectorParam(params.selector, "selector"),
+          value: stringParam(params.value, "value"),
+        },
+      };
     case "computer.screenshot":
-      return { tool, params: {} };
+      return {
+        tool,
+        params: {
+          ...(params.windowHandle === undefined ? {} : { windowHandle: numberParam(params.windowHandle, "windowHandle") }),
+          ...(params.method === undefined ? {} : { method: optionalEnum(params.method, ["auto", "bitblt", "printWindow"], "method") }),
+        },
+      };
     case "computer.wait":
       return { tool, params: { ms: numberParam(params.ms, "ms") } };
     default:
       throw new Error(`Tool "${tool}" not in allowed list: ${[...ALLOWED_TOOLS].join(", ")}`);
   }
+}
+
+const PARAM_ALIASES: Record<string, Record<string, string[]>> = {
+  "computer.moveMouse": {
+    x: ["left", "screenX"],
+    y: ["top", "screenY"],
+    durationMs: ["duration", "duration_ms"],
+  },
+  "computer.click": {
+    x: ["left", "screenX"],
+    y: ["top", "screenY"],
+    clickCount: ["count", "clicks"],
+  },
+  "computer.type": {
+    text: ["value", "input", "content"],
+    clearBefore: ["clear", "replace"],
+  },
+  "computer.keyCombo": {
+    keys: ["key", "combo"],
+  },
+  "computer.scroll": {
+    x: ["left", "screenX"],
+    y: ["top", "screenY"],
+    delta: ["amount", "scrollDelta"],
+  },
+  "computer.focusWindow": {
+    handle: ["windowHandle", "hwnd"],
+  },
+  "computer.inspectUi": {
+    windowHandle: ["handle", "hwnd"],
+    maxDepth: ["depth"],
+    maxNodes: ["limit"],
+  },
+  "computer.invokeUi": {},
+  "computer.setUiValue": {
+    value: ["text", "input", "content"],
+  },
+  "computer.screenshot": {
+    windowHandle: ["handle", "hwnd"],
+  },
+  "computer.wait": {
+    ms: ["milliseconds", "delayMs", "durationMs"],
+  },
+};
+
+function normalizeActionParams(
+  tool: string,
+  params: Record<string, unknown>,
+): Record<string, unknown> {
+  const aliases = PARAM_ALIASES[tool];
+  if (!aliases) return params;
+
+  const normalized: Record<string, unknown> = { ...params };
+  for (const [canonicalName, aliasNames] of Object.entries(aliases)) {
+    let canonicalValue = normalized[canonicalName];
+    for (const aliasName of aliasNames) {
+      if (normalized[aliasName] === undefined) continue;
+      if (canonicalValue === undefined) {
+        canonicalValue = normalized[aliasName];
+      }
+      delete normalized[aliasName];
+    }
+    if (canonicalValue !== undefined) {
+      normalized[canonicalName] = canonicalValue;
+    }
+  }
+
+  return normalized;
 }
 
 function numberParam(value: unknown, name: string): number {
@@ -187,6 +293,30 @@ function stringArrayParam(value: unknown, name: string): string[] {
     throw new Error(`Invalid ${name}: expected string array`);
   }
   return value;
+}
+
+function uiSelectorParam(value: unknown, name: string): UiElementSelector {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Invalid ${name}: expected object`);
+  }
+  const record = value as Record<string, unknown>;
+  const selector: UiElementSelector = {
+    windowHandle: numberParam(record.windowHandle ?? record.handle ?? record.hwnd, `${name}.windowHandle`),
+  };
+  const automationId = record.automationId ?? record.automation_id;
+  if (automationId !== undefined) {
+    selector.automationId = stringParam(automationId, `${name}.automationId`);
+  }
+  if (record.name !== undefined) {
+    selector.name = stringParam(record.name, `${name}.name`);
+  }
+  if (record.controlType !== undefined) {
+    selector.controlType = stringParam(record.controlType, `${name}.controlType`);
+  }
+  if (!selector.automationId && !selector.name) {
+    throw new Error(`Invalid ${name}: expected automationId or name`);
+  }
+  return selector;
 }
 
 function optionalEnum<const T extends readonly (string | number)[]>(

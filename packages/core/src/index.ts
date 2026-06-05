@@ -37,7 +37,6 @@ import {
   demoAgents,
 } from "./agents";
 import { runCodeReviewTask } from "./code-review-flow";
-import { runFileScanTask } from "./file-scan-flow";
 import { runPdfOrganizationPreviewTask } from "./pdf-organization-flow";
 import { isTextWriteGoal, runTextWriteTask } from "./text-write-flow";
 import { isVisionGoal, runVisionTask } from "./vision-flow";
@@ -53,7 +52,6 @@ import type { WorkbenchWorkflowId } from "./workflows";
 import {
   extractUrls,
   isCodeReviewGoal,
-  isDocumentScanGoal,
   isPdfOrganizationGoal,
   isProjectInspectionGoal,
   isResearchGoal,
@@ -266,8 +264,7 @@ export type AgentKind =
   | "code"
   | "verifier"
   | "workspace"
-  | "vision"
-  | "chinese-reviewer";
+  | "vision";
 
 export type AgentRunStatus =
   | "queued"
@@ -493,6 +490,30 @@ export interface TaskSnapshot {
   streamingAgentKind?: AgentKind;
   /** Whether an agent is currently generating streaming output. */
   isStreaming?: boolean;
+  /** Structured execution trace — per-step wall-clock time and token usage. */
+  executionTrace?: ExecutionTrace;
+}
+
+/** Per-step timing and resource data for performance analysis. */
+export interface ExecutionTrace {
+  taskId: ID;
+  startedAt: ISODateTime;
+  completedAt?: ISODateTime;
+  totalWallTimeMs: number;
+  steps: StepTrace[];
+  /** Step IDs on the critical path (longest dependency chain). */
+  criticalPath?: ID[];
+}
+
+export interface StepTrace {
+  stepId: ID;
+  agentKind: string;
+  toolName?: string;
+  startedAt: string;
+  completedAt: string;
+  wallTimeMs: number;
+  tokenUsage?: { input: number; output: number };
+  status: "completed" | "failed" | "skipped";
 }
 
 export type { ModelUsage, TokenUsageSummary };
@@ -552,7 +573,7 @@ export interface FileScanRuntimeOptions {
   computerUseLoopRunner?: (options: {
     userGoal: string;
     computerTool: import("@javis/tools").ComputerTool;
-    approveAction: (action: { tool: string; params: Record<string, unknown> }) => Promise<{ approvalId: string; taskId?: string }>;
+    approveAction: (action: { tool: string; params: Record<string, unknown> }) => Promise<{ approvalId: string; taskId?: string; sessionWide?: boolean }>;
     onStep?: (step: unknown) => void;
   }) => Promise<unknown[]>;
 }
@@ -782,18 +803,9 @@ export function createFileScanTaskRuntime({
         runClarificationTask(taskId, userGoal);
         return;
       }
-      if (startMode === "project") {
-        // Only short-circuit for clearly casual inputs (greetings, small talk).
-        // Everything else falls through to Commander DAG (primary path).
-        const isCasual = /^(hi|hello|hey|sup|yo|test|你好|嗨|喂|在吗|测试)$/i.test(
-          userGoal.trim(),
-        );
-        if (isCasual && chatTool) {
-          void runChatTask(taskId, userGoal, chatTool, options.priorMessages ?? [], options.displayGoal, options.displayAttachments);
-          return;
-        }
-        // Fall through to auto routing
-      }
+      // Project/Agent mode: ALL inputs go to Commander DAG.
+      // No weak-rule pre-filtering — Commander (LLM) decides the routing.
+      // Casual greetings in Agent mode still produce a valid (1-step) DAG.
 
       // ═══════════════════════════════════════════════════════════════════
       // Vision — check BEFORE Commander DAG so multimodal model is used.
@@ -906,7 +918,6 @@ export function createFileScanTaskRuntime({
         const dedicatedWorkflowIds = new Set([
           "pdf-organization",
           "code-review",
-          "scan-workspace-documents",
         ]);
         const executableWorkflowIds = recommendedWorkflowIds.filter(
           (workflowId): workflowId is Exclude<WorkbenchWorkflowId, "read-current-project"> =>
@@ -967,17 +978,6 @@ export function createFileScanTaskRuntime({
         });
         return;
       }
-      if (isDocumentScanGoal(userGoal)) {
-        void runFileScanTask(
-          controller,
-          fileTool,
-          taskId,
-          userGoal,
-          commanderTool,
-        );
-        return;
-      }
-
       if (chatTool) {
         void runChatTask(taskId, userGoal, chatTool, options.priorMessages ?? [], options.displayGoal, options.displayAttachments);
         return;

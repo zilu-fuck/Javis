@@ -112,7 +112,7 @@ echo "self-contained prompt" | bash ~/.claude/scripts/mimo-agent.sh
 - opencode/Code Agent: proposal only, never writes files directly
 - PDF operations: Downloads-scoped, move-only, one-time approval
 
-## Current State (2026-05-30)
+## Current State (2026-06-05)
 
 - Desktop workbench: implemented and packaged (Windows MSI/NSIS), custom titlebar with drag regions
 - File scan, project inspection, research, PDF organization: implemented
@@ -125,16 +125,20 @@ echo "self-contained prompt" | bash ~/.claude/scripts/mimo-agent.sh
 - Multi-agent workflow executor: implemented (DAG with parallel step support via Promise.allSettled)
 - Agent Capability Model: capability tags per agent kind, ModelRequirements (prefersVision, prefersCode, minContextTokens)
 - Model Profile system: 3 configurable slots (primary/secondary/tertiary), capability-aware profile scoring
-- ProviderAdapter: abstracted provider protocol (OpenAI, DeepSeek, Anthropic adapters)
+- ProviderAdapter: abstracted provider protocol (OpenAI, DeepSeek, Anthropic adapters) + adapter-registry.ts factory from provider-definitions.ts (28 providers)
 - Custom workspace registration: workspace definitions (JSON) with agents, workflows, routes, dynamic sidebar nav
-- Architecture analysis: AGENT_ARCHITECTURE_ANALYSIS.md — Plan 1/5, Multi-Agent 4/5, HITL 2/5
+- Architecture analysis: AGENT_ARCHITECTURE_ANALYSIS.md — Plan 3/5, Multi-Agent 4/5, HITL 3/5
 - SQLite infrastructure: database.rs with rusqlite, Tauri commands, migration system, 9 migration sets
 - HTTP client: reqwest 0.12 with native-tls
-- **5.29**: lib.rs module split (42 files, +6332/-4269), JavisError enum + module-level tests, P0-1 streaming UI consumption + integration tests + eventBus leak fix
+- Browser Agent: 6-phase Playwright integration complete — type definitions, sidecar, Rust backend (browser.rs, ~1183 lines), runtime wiring, routing + workflows, tests; SSRF hardening, crash auto-recovery, stale browser detection
+- VisionBridge: image paste → base64 → multimodal model analysis → `<vision-context>` inject into Commander prompt; max 5 images, max 10MB each
+- commander.askUser: fully implemented — descriptor, DAG handler, UI confirmation card, persistence
+- Async pattern: await executeWorkflow + onIteration (not .then() fire-and-forget)
+- **5.29**: lib.rs module split (21 files, ~13,800 lines), JavisError enum + module-level tests, P0-1 streaming UI consumption + integration tests + eventBus leak fix
 - **5.30**: quality hardening sprint — complete
-  - P0-1: Hook test coverage — 4 files, 28 tests (use-scanned-data 12, use-task-runtime 6, use-scheduled-tasks 5, use-model-profiles 4)
-  - P0-2: Manual QA — 8 scenarios validated via Tauri dev app + CDP, 6 screenshots, evidence in `docs/qa/2026-05-30/`
-  - P0-3: Docs updated — CLAUDE.md current state, task plan, QA report
-  - P1-1: JavisError migration — code.rs 20 functions + `require_native_approval_binding` → Permission variant
-  - P1-2: Dead code + clippy — 14 warnings fixed (scan/pdf/lib/workspace/web/code), 2 remaining (scan.rs too-many-args)
-  - Final: 430 Vitest + 125 Rust = 555 total tests, pnpm check green
+  - P0-1: Hook test coverage — 4 files, 28 tests
+  - P0-2: Manual QA — 8 scenarios validated via Tauri dev app + CDP, 6 screenshots
+  - P1-1: JavisError migration — code.rs 20 functions + require_native_approval_binding → Permission variant
+  - P1-2: Dead code + clippy — 14 warnings fixed, 2 remaining (scan.rs too-many-args)
+- **6.03**: data layer refactor — provider-definitions.ts single source of truth, adapter-registry.ts factory, VisionBridge complete, API key save fix (Rust 3-level fallback), model test improvement, async pattern settled
+- Final: 564 Vitest (240 core + 253 desktop + 71 ui) + 176 Rust = 740 total tests, pnpm check green

@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
+use windows_sys::Win32::Storage::Xps::PrintWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -16,6 +17,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 pub struct ComputerScreenshotRequest {
     pub window_handle: Option<u64>,
     pub region: Option<ScreenRegion>,
+    pub method: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +35,7 @@ pub struct ComputerScreenshotResult {
     pub width: u32,
     pub height: u32,
     pub captured_at: String,
+    pub method_used: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -167,19 +170,82 @@ pub struct ComputerWaitResult {
     pub waited: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiElementSelector {
+    pub window_handle: u64,
+    pub automation_id: Option<String>,
+    pub name: Option<String>,
+    pub control_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerInspectUiRequest {
+    pub window_handle: u64,
+    pub max_depth: Option<u8>,
+    pub max_nodes: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerInspectUiResult {
+    pub tree: String,
+    pub node_count: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerInvokeUiRequest {
+    pub selector: UiElementSelector,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerInvokeUiResult {
+    pub invoked: bool,
+    pub matched_name: String,
+    pub matched_automation_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerSetUiValueRequest {
+    pub selector: UiElementSelector,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComputerSetUiValueResult {
+    pub set: bool,
+    pub matched_name: String,
+    pub matched_automation_id: String,
+}
+
 // ── Approval state (follows code.rs pattern) ────────────────────────────────
 
 #[derive(Debug, Default)]
 pub(crate) struct ComputerApprovalState {
     pub(crate) pending: Option<PendingComputerApproval>,
+    pub(crate) last_write_at: Option<SystemTime>,
+    /// When set, all write actions for this task skip per-action approval.
+    /// The user approved the whole Computer Use session once.
+    pub(crate) session_task_id: Option<String>,
+    pub(crate) session_created_at: Option<SystemTime>,
 }
 
 #[derive(Debug)]
 pub(crate) struct PendingComputerApproval {
     pub(crate) binding: NativeApprovalBinding,
+    pub(crate) created_at: SystemTime,
 }
 
 // ── Safety guards ───────────────────────────────────────────────────────────
+
+const COMPUTER_APPROVAL_TTL: Duration = Duration::from_secs(5 * 60);
+const SESSION_APPROVAL_TTL: Duration = Duration::from_secs(30 * 60);
+const COMPUTER_WRITE_MIN_INTERVAL: Duration = Duration::from_millis(50);
 
 const DENIED_WINDOW_PATTERNS: &[&str] = &[
     "Task Manager",
@@ -217,6 +283,19 @@ fn validate_window_title(title: &str) -> Result<(), JavisError> {
     Ok(())
 }
 
+fn validate_pending_computer_approval(pending: &PendingComputerApproval) -> Result<(), JavisError> {
+    let age = pending
+        .created_at
+        .elapsed()
+        .map_err(|_| JavisError::Permission("Computer Use approval timestamp is invalid.".into()))?;
+    if age > COMPUTER_APPROVAL_TTL {
+        return Err(JavisError::Permission(
+            "Computer Use approval expired; please approve the action again.".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn window_title(hwnd: HWND) -> String {
     let mut title_buf = [0u16; 512];
     let title_len = unsafe { GetWindowTextW(hwnd, title_buf.as_mut_ptr(), title_buf.len() as i32) };
@@ -231,6 +310,16 @@ fn validate_window_handle_title(handle: u64) -> Result<(), JavisError> {
     validate_window_title(&window_title(hwnd))
 }
 
+fn validate_window_not_minimized(handle: u64) -> Result<(), JavisError> {
+    let hwnd = handle as HWND;
+    if unsafe { IsIconic(hwnd) } != 0 {
+        return Err(JavisError::Validation(format!(
+            "Window {handle} is minimized; focus or restore the window before taking a screenshot."
+        )));
+    }
+    Ok(())
+}
+
 fn validate_foreground_window() -> Result<(), JavisError> {
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.is_null() {
@@ -241,7 +330,20 @@ fn validate_foreground_window() -> Result<(), JavisError> {
 
 fn validate_window_at_point(x: i32, y: i32) -> Result<(), JavisError> {
     validate_screen_coordinates(x, y)?;
-    let hwnd = unsafe { WindowFromPoint(POINT { x, y }) };
+    let point = POINT { x, y };
+    let hwnd = unsafe {
+        let desktop = GetDesktopWindow();
+        let child = ChildWindowFromPointEx(
+            desktop,
+            point,
+            CWP_SKIPINVISIBLE | CWP_SKIPTRANSPARENT,
+        );
+        if child.is_null() {
+            WindowFromPoint(point)
+        } else {
+            child
+        }
+    };
     if hwnd.is_null() {
         return Ok(());
     }
@@ -278,17 +380,19 @@ fn validate_key_combo(keys: &[String]) -> Result<(), JavisError> {
 }
 
 fn validate_screen_coordinates(x: i32, y: i32) -> Result<(), JavisError> {
-    if x < 0 || y < 0 {
-        return Err(JavisError::Validation(format!(
-            "Coordinates ({x}, {y}) must be non-negative"
-        )));
-    }
     unsafe {
-        let sw = GetSystemMetrics(SM_CXSCREEN);
-        let sh = GetSystemMetrics(SM_CYSCREEN);
-        if x >= sw || y >= sh {
+        // Use virtual screen to support multi-monitor setups.
+        // Coordinates can be negative when a secondary monitor is
+        // positioned to the left of or above the primary.
+        let x_origin = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let y_origin = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if x < x_origin || x >= x_origin + vw || y < y_origin || y >= y_origin + vh {
             return Err(JavisError::Validation(format!(
-                "Coordinates ({x}, {y}) exceed screen size ({sw}, {sh})"
+                "Coordinates ({x}, {y}) outside virtual screen bounds [({x_origin},{y_origin})–({},{})]",
+                x_origin + vw,
+                y_origin + vh,
             )));
         }
     }
@@ -307,17 +411,34 @@ fn hash_action_params(tool: &str, params: &serde_json::Value) -> String {
 }
 
 fn current_timestamp_iso() -> String {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| {
-            let secs = d.as_secs();
-            let days = secs / 86400;
-            let y = 1970 + days / 365;
-            let m = (days % 365) / 30 + 1;
-            let day = (days % 365) % 30 + 1;
-            format!("{y:04}-{m:02}-{day:02}T00:00:00Z")
-        })
-        .unwrap_or_default()
+    let Ok(duration) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) else {
+        return "unknown".to_string();
+    };
+    timestamp_secs_to_iso(duration.as_secs())
+}
+
+fn timestamp_secs_to_iso(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let seconds_of_day = secs % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+fn civil_from_days(days_since_unix_epoch: i64) -> (i64, u32, u32) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if m <= 2 { 1 } else { 0 };
+    (year, m as u32, d as u32)
 }
 
 // ── Virtual key code mapping ────────────────────────────────────────────────
@@ -385,6 +506,21 @@ fn key_to_vk(key: &str) -> Option<u16> {
             let ch = k.chars().next().unwrap();
             if ch.is_ascii_digit() {
                 Some(0x30 + ch as u16 - '0' as u16)
+            } else if ch.is_ascii() {
+                match ch {
+                    ';' | ':' => Some(VK_OEM_1),
+                    '=' | '+' => Some(VK_OEM_PLUS),
+                    ',' | '<' => Some(VK_OEM_COMMA),
+                    '-' | '_' => Some(VK_OEM_MINUS),
+                    '.' | '>' => Some(VK_OEM_PERIOD),
+                    '/' | '?' => Some(VK_OEM_2),
+                    '`' | '~' => Some(VK_OEM_3),
+                    '[' | '{' => Some(VK_OEM_4),
+                    '\\' | '|' => Some(VK_OEM_5),
+                    ']' | '}' => Some(VK_OEM_6),
+                    '\'' | '"' => Some(VK_OEM_7),
+                    _ => None,
+                }
             } else {
                 None
             }
@@ -400,12 +536,31 @@ fn key_to_vk(key: &str) -> Option<u16> {
 pub(crate) fn capture_screenshot(
     request: &ComputerScreenshotRequest,
 ) -> Result<ComputerScreenshotResult, JavisError> {
-    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    if let Some(wh) = request.window_handle {
+        match request.method.as_deref().unwrap_or("auto") {
+            "printWindow" => {
+                return capture_window_printwindow(wh, request.region.as_ref());
+            }
+            "auto" => {
+                if let Ok(result) = capture_window_printwindow(wh, request.region.as_ref()) {
+                    return Ok(result);
+                }
+            }
+            "bitblt" => {}
+            other => {
+                return Err(JavisError::Validation(format!(
+                    "Unsupported screenshot method: {other}"
+                )));
+            }
+        }
+    }
 
     unsafe {
         let null_hwnd: HWND = std::ptr::null_mut();
         let (hdc_src, width, height, release_fn): (HDC, i32, i32, Box<dyn Fn()>) =
             if let Some(wh) = request.window_handle {
+                validate_window_handle_title(wh)?;
+                validate_window_not_minimized(wh)?;
                 let hwnd = wh as HWND;
                 let hdc = GetWindowDC(hwnd);
                 if hdc.is_null() {
@@ -428,8 +583,10 @@ pub(crate) fn capture_screenshot(
                 if hdc.is_null() {
                     return Err(JavisError::Internal("GetDC(0) failed".to_string()));
                 }
-                let sw = GetSystemMetrics(SM_CXSCREEN);
-                let sh = GetSystemMetrics(SM_CYSCREEN);
+                // Use virtual screen dimensions to capture all monitors,
+                // not just the primary. GetDC(NULL) covers the full virtual desktop.
+                let sw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+                let sh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
                 (hdc, sw, sh, Box::new(move || { ReleaseDC(null_hwnd, hdc); }))
             };
 
@@ -440,34 +597,14 @@ pub(crate) fn capture_screenshot(
             )));
         }
 
-        let (crop_x, crop_y, crop_w, crop_h) = if let Some(ref r) = request.region {
-            if r.width <= 0 || r.height <= 0 {
-                release_fn();
-                return Err(JavisError::Validation(
-                    "Screenshot region width and height must be positive".to_string(),
-                ));
-            }
-            if r.x >= width || r.y >= height {
-                release_fn();
-                return Err(JavisError::Validation(format!(
-                    "Screenshot region origin ({}, {}) is outside capture bounds ({width}, {height})",
-                    r.x, r.y
-                )));
-            }
-            let cx = r.x.max(0);
-            let cy = r.y.max(0);
-            let cw = r.width.min(width - cx);
-            let ch = r.height.min(height - cy);
-            if cw <= 0 || ch <= 0 {
-                release_fn();
-                return Err(JavisError::Validation(
-                    "Screenshot region does not overlap the capture bounds".to_string(),
-                ));
-            }
-            (cx, cy, cw, ch)
-        } else {
-            (0, 0, width, height)
-        };
+        let (crop_x, crop_y, crop_w, crop_h) =
+            match crop_bounds(request.region.as_ref(), width, height) {
+                Ok(bounds) => bounds,
+                Err(err) => {
+                    release_fn();
+                    return Err(err);
+                }
+            };
 
         let mem_dc = CreateCompatibleDC(hdc_src);
         if mem_dc.is_null() {
@@ -483,8 +620,14 @@ pub(crate) fn capture_screenshot(
             ));
         }
         let old_bmp = SelectObject(mem_dc, hbmp as HGDIOBJ);
+        if old_bmp.is_null() {
+            DeleteObject(hbmp as HGDIOBJ);
+            DeleteDC(mem_dc);
+            release_fn();
+            return Err(JavisError::Internal("SelectObject failed".to_string()));
+        }
 
-        BitBlt(
+        let blt_ok = BitBlt(
             mem_dc,
             0,
             0,
@@ -495,6 +638,13 @@ pub(crate) fn capture_screenshot(
             crop_y,
             SRCCOPY,
         );
+        if blt_ok == 0 {
+            SelectObject(mem_dc, old_bmp);
+            DeleteObject(hbmp as HGDIOBJ);
+            DeleteDC(mem_dc);
+            release_fn();
+            return Err(JavisError::Internal("BitBlt failed".to_string()));
+        }
 
         let bmp_size = (crop_w as usize)
             .checked_mul(crop_h as usize)
@@ -523,7 +673,7 @@ pub(crate) fn capture_screenshot(
             }; 1],
         };
 
-        GetDIBits(
+        let dib_lines = GetDIBits(
             mem_dc,
             hbmp,
             0,
@@ -532,39 +682,233 @@ pub(crate) fn capture_screenshot(
             &mut bmi,
             DIB_RGB_COLORS,
         );
+        // Cleanup GDI before checking result
+        SelectObject(mem_dc, old_bmp);
+        DeleteObject(hbmp as HGDIOBJ);
+        DeleteDC(mem_dc);
+        release_fn();
+
+        if dib_lines == 0 {
+            return Err(JavisError::Internal("GetDIBits failed".to_string()));
+        }
 
         // BGRA → RGBA
         for chunk in pixels.chunks_exact_mut(4) {
             chunk.swap(0, 2);
         }
 
-        // Cleanup GDI
-        SelectObject(mem_dc, old_bmp);
-        DeleteObject(hbmp as HGDIOBJ);
-        DeleteDC(mem_dc);
-        release_fn();
-
-        // Encode to PNG
-        let img = image::RgbaImage::from_raw(crop_w as u32, crop_h as u32, pixels)
-            .ok_or_else(|| JavisError::Internal("Failed to create RgbaImage".to_string()))?;
-        let mut png_buf: Vec<u8> = Vec::new();
-        image::ImageEncoder::write_image(
-            image::codecs::png::PngEncoder::new(&mut png_buf),
-            img.as_raw(),
-            crop_w as u32,
-            crop_h as u32,
-            image::ExtendedColorType::Rgba8,
-        )
-        .map_err(|e| JavisError::Internal(format!("PNG encode error: {e}")))?;
-
-        let b64 = BASE64.encode(&png_buf);
-        let data_url = format!("data:image/png;base64,{b64}");
+        let data_url = encode_rgba_png_data_url(crop_w as u32, crop_h as u32, pixels)?;
 
         Ok(ComputerScreenshotResult {
             data_url,
             width: crop_w as u32,
             height: crop_h as u32,
             captured_at: current_timestamp_iso(),
+            method_used: "bitblt".to_string(),
+        })
+    }
+}
+
+fn crop_bounds(
+    region: Option<&ScreenRegion>,
+    width: i32,
+    height: i32,
+) -> Result<(i32, i32, i32, i32), JavisError> {
+    if let Some(r) = region {
+        if r.width <= 0 || r.height <= 0 {
+            return Err(JavisError::Validation(
+                "Screenshot region width and height must be positive".to_string(),
+            ));
+        }
+        if r.x >= width || r.y >= height {
+            return Err(JavisError::Validation(format!(
+                "Screenshot region origin ({}, {}) is outside capture bounds ({width}, {height})",
+                r.x, r.y
+            )));
+        }
+        let cx = r.x.max(0);
+        let cy = r.y.max(0);
+        let cw = r.width.min(width - cx);
+        let ch = r.height.min(height - cy);
+        if cw <= 0 || ch <= 0 {
+            return Err(JavisError::Validation(
+                "Screenshot region does not overlap the capture bounds".to_string(),
+            ));
+        }
+        Ok((cx, cy, cw, ch))
+    } else {
+        Ok((0, 0, width, height))
+    }
+}
+
+fn encode_rgba_png_data_url(
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+) -> Result<String, JavisError> {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+    let img = image::RgbaImage::from_raw(width, height, pixels)
+        .ok_or_else(|| JavisError::Internal("Failed to create RgbaImage".to_string()))?;
+    let mut png_buf: Vec<u8> = Vec::new();
+    image::ImageEncoder::write_image(
+        image::codecs::png::PngEncoder::new(&mut png_buf),
+        img.as_raw(),
+        width,
+        height,
+        image::ExtendedColorType::Rgba8,
+    )
+    .map_err(|e| JavisError::Internal(format!("PNG encode error: {e}")))?;
+
+    Ok(format!("data:image/png;base64,{}", BASE64.encode(&png_buf)))
+}
+
+fn crop_rgba(
+    pixels: &[u8],
+    width: i32,
+    crop_x: i32,
+    crop_y: i32,
+    crop_w: i32,
+    crop_h: i32,
+) -> Vec<u8> {
+    let mut cropped = vec![0u8; crop_w as usize * crop_h as usize * 4];
+    let source_stride = width as usize * 4;
+    let crop_stride = crop_w as usize * 4;
+    for row in 0..crop_h as usize {
+        let source_start = (crop_y as usize + row) * source_stride + crop_x as usize * 4;
+        let target_start = row * crop_stride;
+        cropped[target_start..target_start + crop_stride]
+            .copy_from_slice(&pixels[source_start..source_start + crop_stride]);
+    }
+    cropped
+}
+
+fn capture_window_printwindow(
+    handle: u64,
+    region: Option<&ScreenRegion>,
+) -> Result<ComputerScreenshotResult, JavisError> {
+    unsafe {
+        validate_window_handle_title(handle)?;
+        validate_window_not_minimized(handle)?;
+        let hwnd = handle as HWND;
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        GetWindowRect(hwnd, &mut rect);
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        if width <= 0 || height <= 0 {
+            return Err(JavisError::Validation(format!(
+                "Capture bounds must be positive, got ({width}, {height})"
+            )));
+        }
+
+        let null_hwnd: HWND = std::ptr::null_mut();
+        let screen_dc = GetDC(null_hwnd);
+        if screen_dc.is_null() {
+            return Err(JavisError::Internal("GetDC(0) failed".to_string()));
+        }
+
+        let mem_dc = CreateCompatibleDC(screen_dc);
+        if mem_dc.is_null() {
+            ReleaseDC(null_hwnd, screen_dc);
+            return Err(JavisError::Internal("CreateCompatibleDC failed".to_string()));
+        }
+
+        let hbmp = CreateCompatibleBitmap(screen_dc, width, height);
+        if hbmp.is_null() {
+            DeleteDC(mem_dc);
+            ReleaseDC(null_hwnd, screen_dc);
+            return Err(JavisError::Internal(
+                "CreateCompatibleBitmap failed".to_string(),
+            ));
+        }
+        let old_bmp = SelectObject(mem_dc, hbmp as HGDIOBJ);
+        if old_bmp.is_null() {
+            DeleteObject(hbmp as HGDIOBJ);
+            DeleteDC(mem_dc);
+            ReleaseDC(null_hwnd, screen_dc);
+            return Err(JavisError::Internal("SelectObject failed in PrintWindow path".to_string()));
+        }
+        let printed = PrintWindow(hwnd, mem_dc, PW_RENDERFULLCONTENT);
+
+        if printed == 0 {
+            SelectObject(mem_dc, old_bmp);
+            DeleteObject(hbmp as HGDIOBJ);
+            DeleteDC(mem_dc);
+            ReleaseDC(null_hwnd, screen_dc);
+            return Err(JavisError::Internal(format!(
+                "PrintWindow failed for handle {handle}"
+            )));
+        }
+
+        let bmp_size = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|px| px.checked_mul(4))
+            .ok_or_else(|| JavisError::Validation("Screenshot region is too large".to_string()))?;
+        let mut pixels: Vec<u8> = vec![0u8; bmp_size];
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: 0,
+                biSizeImage: bmp_size as u32,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+            bmiColors: [RGBQUAD {
+                rgbBlue: 0,
+                rgbGreen: 0,
+                rgbRed: 0,
+                rgbReserved: 0,
+            }; 1],
+        };
+
+        let dib_lines = GetDIBits(
+            mem_dc,
+            hbmp,
+            0,
+            height as u32,
+            pixels.as_mut_ptr() as *mut _,
+            &mut bmi,
+            DIB_RGB_COLORS,
+        );
+
+        SelectObject(mem_dc, old_bmp);
+        DeleteObject(hbmp as HGDIOBJ);
+        DeleteDC(mem_dc);
+        ReleaseDC(null_hwnd, screen_dc);
+
+        if dib_lines == 0 {
+            return Err(JavisError::Internal("GetDIBits failed in PrintWindow path".to_string()));
+        }
+
+        for chunk in pixels.chunks_exact_mut(4) {
+            chunk.swap(0, 2);
+        }
+
+        let (crop_x, crop_y, crop_w, crop_h) = crop_bounds(region, width, height)?;
+        let cropped = if crop_x == 0 && crop_y == 0 && crop_w == width && crop_h == height {
+            pixels
+        } else {
+            crop_rgba(&pixels, width, crop_x, crop_y, crop_w, crop_h)
+        };
+        let data_url = encode_rgba_png_data_url(crop_w as u32, crop_h as u32, cropped)?;
+
+        Ok(ComputerScreenshotResult {
+            data_url,
+            width: crop_w as u32,
+            height: crop_h as u32,
+            captured_at: current_timestamp_iso(),
+            method_used: "printWindow".to_string(),
         })
     }
 }
@@ -588,6 +932,9 @@ pub(crate) fn list_windows() -> Result<ComputerListWindowsResult, JavisError> {
         let title = String::from_utf16_lossy(&title_buf[..title_len as usize]);
 
         if title.is_empty() {
+            return 1;
+        }
+        if validate_window_title(&title).is_err() {
             return 1;
         }
 
@@ -641,6 +988,9 @@ pub(crate) fn focus_window(
     request: &ComputerFocusWindowRequest,
 ) -> Result<ComputerFocusWindowResult, JavisError> {
     let hwnd = request.handle as HWND;
+    if hwnd.is_null() || unsafe { IsWindow(hwnd) } == 0 {
+        return Err(JavisError::Validation(format!("Invalid window handle: {}", request.handle)));
+    }
 
     // Get title for validation
     let mut title_buf = [0u16; 512];
@@ -650,7 +1000,16 @@ pub(crate) fn focus_window(
     validate_window_title(&title)?;
 
     unsafe {
-        SetForegroundWindow(hwnd);
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        if SetForegroundWindow(hwnd) == 0 && IsIconic(hwnd) != 0 {
+            return Err(JavisError::Validation(format!(
+                "Window {} is minimized and could not be restored before focusing.",
+                request.handle
+            )));
+        }
     }
     std::thread::sleep(Duration::from_millis(200));
 
@@ -743,9 +1102,7 @@ pub(crate) fn execute_click(
                 },
             },
         ];
-        unsafe {
-            SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
-        }
+        send_input(&inputs).map_err(|e| JavisError::Internal(format!("click failed: {e}")))?;
         std::thread::sleep(Duration::from_millis(50));
     }
 
@@ -765,7 +1122,8 @@ pub(crate) fn type_text(
 
     // Clear before if requested
     if request.clear_before.unwrap_or(false) {
-        // Ctrl+A
+        // Ctrl+A — validate against deny list
+        validate_key_combo(&["Ctrl".into(), "a".into()])?;
         send_key_combo_internal(&["Ctrl", "a"])?;
         std::thread::sleep(Duration::from_millis(50));
         // Delete
@@ -785,20 +1143,30 @@ pub(crate) fn type_text(
 }
 
 fn send_char(ch: char) -> Result<(), JavisError> {
-    if ch.is_ascii() && ch.is_alphanumeric() {
+    if let Some(vk) = vk_scan_char(ch) {
         // Simple ASCII — use VkKeyScanW
-        let vk = unsafe { VkKeyScanW(ch as u16) };
-        if vk == -1 {
-            return Err(JavisError::Internal(format!("VkKeyScanW failed for '{ch}'")));
-        }
         let vk_code = (vk & 0xFF) as u16;
         let shift_needed = (vk >> 8) & 1 != 0;
+        let ctrl_needed = (vk >> 8) & 2 != 0;
+        let alt_needed = (vk >> 8) & 4 != 0;
 
         if shift_needed {
             press_key(VK_SHIFT)?;
         }
+        if ctrl_needed {
+            press_key(VK_CONTROL)?;
+        }
+        if alt_needed {
+            press_key(VK_MENU)?;
+        }
         press_key(vk_code)?;
         release_key(vk_code)?;
+        if alt_needed {
+            release_key(VK_MENU)?;
+        }
+        if ctrl_needed {
+            release_key(VK_CONTROL)?;
+        }
         if shift_needed {
             release_key(VK_SHIFT)?;
         }
@@ -833,16 +1201,35 @@ fn send_char(ch: char) -> Result<(), JavisError> {
                     },
                 },
             ];
-            unsafe {
-                SendInput(
-                    inputs.len() as u32,
-                    inputs.as_ptr(),
-                    std::mem::size_of::<INPUT>() as i32,
-                );
-            }
+            send_input(&inputs)?;
         }
     }
     Ok(())
+}
+
+fn vk_scan_char(ch: char) -> Option<i16> {
+    let vk = unsafe { VkKeyScanW(ch as u16) };
+    if vk == -1 {
+        None
+    } else {
+        Some(vk)
+    }
+}
+
+fn send_input(events: &[INPUT]) -> Result<u32, JavisError> {
+    let count = events.len() as u32;
+    let inserted = unsafe {
+        SendInput(count, events.as_ptr(), std::mem::size_of::<INPUT>() as i32)
+    };
+    if inserted == 0 {
+        Err(JavisError::Internal("SendInput failed — the injected events were blocked (UIPI or driver issue).".to_string()))
+    } else if inserted < count {
+        Err(JavisError::Internal(format!(
+            "SendInput partial failure — only {inserted} of {count} events inserted; input state may be inconsistent."
+        )))
+    } else {
+        Ok(inserted)
+    }
 }
 
 fn press_key(vk: u16) -> Result<(), JavisError> {
@@ -858,13 +1245,7 @@ fn press_key(vk: u16) -> Result<(), JavisError> {
             },
         },
     }];
-    unsafe {
-        SendInput(
-            inputs.len() as u32,
-            inputs.as_ptr(),
-            std::mem::size_of::<INPUT>() as i32,
-        );
-    }
+    send_input(&inputs)?;
     Ok(())
 }
 
@@ -881,13 +1262,7 @@ fn release_key(vk: u16) -> Result<(), JavisError> {
             },
         },
     }];
-    unsafe {
-        SendInput(
-            inputs.len() as u32,
-            inputs.as_ptr(),
-            std::mem::size_of::<INPUT>() as i32,
-        );
-    }
+    send_input(&inputs)?;
     Ok(())
 }
 
@@ -916,15 +1291,45 @@ fn send_key_combo_internal(keys: &[&str]) -> Result<(), JavisError> {
         .map(|k| key_to_vk(k).ok_or_else(|| JavisError::Validation(format!("Unknown key: {k}"))))
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Press all keys in order
-    for &vk in &vks {
-        press_key(vk)?;
-        std::thread::sleep(Duration::from_millis(10));
+    // Press all keys in order. Track how many were pressed so we can
+    // roll back on failure — a stuck modifier key (Ctrl/Alt/Shift/Win)
+    // corrupts the user's keyboard state.
+    let mut pressed: usize = 0;
+    let press_result = (|| {
+        for &vk in &vks {
+            press_key(vk)?;
+            std::thread::sleep(Duration::from_millis(10));
+            pressed += 1;
+        }
+        Ok(())
+    })();
+
+    if let Err(err) = press_result {
+        // Release keys already pressed, in reverse order
+        for &vk in vks[..pressed].iter().rev() {
+            let _ = release_key(vk);
+        }
+        return Err(err);
     }
+
     // Release in reverse order
-    for &vk in vks.iter().rev() {
-        release_key(vk)?;
-        std::thread::sleep(Duration::from_millis(10));
+    let mut released: usize = 0;
+    let release_result = (|| {
+        for &vk in vks.iter().rev() {
+            release_key(vk)?;
+            std::thread::sleep(Duration::from_millis(10));
+            released += 1;
+        }
+        Ok(())
+    })();
+
+    if let Err(err) = release_result {
+        // Try to release remaining keys
+        let remaining = vks.len() - released;
+        for &vk in vks[..remaining].iter() {
+            let _ = release_key(vk);
+        }
+        return Err(err);
     }
 
     Ok(())
@@ -965,13 +1370,7 @@ pub(crate) fn execute_scroll(
         },
     }];
 
-    unsafe {
-        SendInput(
-            inputs.len() as u32,
-            inputs.as_ptr(),
-            std::mem::size_of::<INPUT>() as i32,
-        );
-    }
+    send_input(&inputs)?;
 
     Ok(ComputerScrollResult {
         x: request.x,
@@ -985,6 +1384,397 @@ pub(crate) fn wait(request: &ComputerWaitRequest) -> Result<ComputerWaitResult, 
     let clamped = request.ms.min(10000);
     std::thread::sleep(Duration::from_millis(clamped));
     Ok(ComputerWaitResult { waited: clamped })
+}
+
+#[cfg(windows)]
+mod uia {
+    use super::*;
+    use windows::core::{BSTR, Result as WindowsResult};
+    use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
+        IUIAutomationTreeWalker, IUIAutomationValuePattern, UIA_InvokePatternId,
+        UIA_ValuePatternId,
+    };
+
+    const DEFAULT_MAX_DEPTH: u8 = 4;
+    const DEFAULT_MAX_NODES: u16 = 120;
+
+    struct ComApartment {
+        should_uninitialize: bool,
+    }
+
+    impl ComApartment {
+        fn init() -> Result<Self, JavisError> {
+            let result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            if result == RPC_E_CHANGED_MODE {
+                return Ok(Self {
+                    should_uninitialize: false,
+                });
+            }
+            result
+                .ok()
+                .map_err(|e| JavisError::Internal(format!("CoInitializeEx failed: {e}")))?;
+            Ok(Self {
+                should_uninitialize: true,
+            })
+        }
+    }
+
+    impl Drop for ComApartment {
+        fn drop(&mut self) {
+            if self.should_uninitialize {
+                unsafe {
+                    CoUninitialize();
+                }
+            }
+        }
+    }
+
+    struct UiNode {
+        element: IUIAutomationElement,
+        name: String,
+        automation_id: String,
+        control_type: String,
+        control_type_id: i32,
+    }
+
+    pub(super) fn inspect_ui(
+        request: &ComputerInspectUiRequest,
+    ) -> Result<ComputerInspectUiResult, JavisError> {
+        validate_window_handle_title(request.window_handle)?;
+        let _com = ComApartment::init()?;
+        let automation = automation()?;
+        let root = root_element(&automation, request.window_handle)?;
+        let walker = unsafe {
+            automation
+                .ControlViewWalker()
+                .map_err(|e| JavisError::Internal(format!("ControlViewWalker failed: {e}")))?
+        };
+        let max_depth = request.max_depth.unwrap_or(DEFAULT_MAX_DEPTH).min(8);
+        let max_nodes = request.max_nodes.unwrap_or(DEFAULT_MAX_NODES).min(500);
+        let mut lines = Vec::new();
+        let mut count = 0u16;
+        write_tree(&walker, &root, 0, max_depth, max_nodes, &mut count, &mut lines)?;
+        Ok(ComputerInspectUiResult {
+            tree: lines.join("\n"),
+            node_count: count,
+        })
+    }
+
+    pub(super) fn invoke_ui(
+        request: &ComputerInvokeUiRequest,
+    ) -> Result<ComputerInvokeUiResult, JavisError> {
+        let node = find_selected_node(&request.selector)?;
+        let pattern: IUIAutomationInvokePattern = unsafe {
+            node.element
+                .GetCurrentPatternAs(UIA_InvokePatternId)
+                .map_err(|e| JavisError::Validation(format!("Matched UI element does not support InvokePattern: {e}")))?
+        };
+        unsafe {
+            pattern
+                .Invoke()
+                .map_err(|e| JavisError::Internal(format!("InvokePattern.Invoke failed: {e}")))?;
+        }
+        Ok(ComputerInvokeUiResult {
+            invoked: true,
+            matched_name: node.name,
+            matched_automation_id: node.automation_id,
+        })
+    }
+
+    pub(super) fn set_ui_value(
+        request: &ComputerSetUiValueRequest,
+    ) -> Result<ComputerSetUiValueResult, JavisError> {
+        let node = find_selected_node(&request.selector)?;
+        let pattern: IUIAutomationValuePattern = unsafe {
+            node.element
+                .GetCurrentPatternAs(UIA_ValuePatternId)
+                .map_err(|e| JavisError::Validation(format!("Matched UI element does not support ValuePattern: {e}")))?
+        };
+        let value = BSTR::from(request.value.as_str());
+        unsafe {
+            pattern
+                .SetValue(&value)
+                .map_err(|e| JavisError::Internal(format!("ValuePattern.SetValue failed: {e}")))?;
+        }
+        Ok(ComputerSetUiValueResult {
+            set: true,
+            matched_name: node.name,
+            matched_automation_id: node.automation_id,
+        })
+    }
+
+    fn automation() -> Result<IUIAutomation, JavisError> {
+        unsafe {
+            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+                .map_err(|e| JavisError::Internal(format!("CoCreateInstance(CUIAutomation) failed: {e}")))
+        }
+    }
+
+    fn root_element(
+        automation: &IUIAutomation,
+        handle: u64,
+    ) -> Result<IUIAutomationElement, JavisError> {
+        let hwnd = windows::Win32::Foundation::HWND(handle as *mut core::ffi::c_void);
+        unsafe {
+            automation
+                .ElementFromHandle(hwnd)
+                .map_err(|e| JavisError::Validation(format!("ElementFromHandle failed for {handle}: {e}")))
+        }
+    }
+
+    fn find_selected_node(selector: &UiElementSelector) -> Result<UiNode, JavisError> {
+        validate_ui_selector(selector)?;
+        validate_window_handle_title(selector.window_handle)?;
+        let _com = ComApartment::init()?;
+        let automation = automation()?;
+        let root = root_element(&automation, selector.window_handle)?;
+        let walker = unsafe {
+            automation
+                .ControlViewWalker()
+                .map_err(|e| JavisError::Internal(format!("ControlViewWalker failed: {e}")))?
+        };
+        find_matching_node(&walker, &root, selector, 0, 12, 0, 1000)?
+            .ok_or_else(|| JavisError::Validation("No matching UI Automation element found".to_string()))
+    }
+
+    fn write_tree(
+        walker: &IUIAutomationTreeWalker,
+        element: &IUIAutomationElement,
+        depth: u8,
+        max_depth: u8,
+        max_nodes: u16,
+        count: &mut u16,
+        lines: &mut Vec<String>,
+    ) -> Result<(), JavisError> {
+        if *count >= max_nodes {
+            return Ok(());
+        }
+        let node = read_node(element)?;
+        lines.push(format!(
+            "{}<{} name=\"{}\" automationId=\"{}\">",
+            "  ".repeat(depth as usize),
+            node.control_type,
+            escape_ui_text(&node.name),
+            escape_ui_text(&node.automation_id),
+        ));
+        *count += 1;
+        if depth >= max_depth {
+            return Ok(());
+        }
+        for child in child_elements(walker, element)? {
+            write_tree(walker, &child, depth + 1, max_depth, max_nodes, count, lines)?;
+            if *count >= max_nodes {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn find_matching_node(
+        walker: &IUIAutomationTreeWalker,
+        element: &IUIAutomationElement,
+        selector: &UiElementSelector,
+        depth: u8,
+        max_depth: u8,
+        visited: u16,
+        max_nodes: u16,
+    ) -> Result<Option<UiNode>, JavisError> {
+        if visited >= max_nodes {
+            return Ok(None);
+        }
+        let node = read_node(element)?;
+        if selector_matches(&node, selector) {
+            return Ok(Some(node));
+        }
+        if depth >= max_depth {
+            return Ok(None);
+        }
+        let mut seen = visited + 1;
+        for child in child_elements(walker, element)? {
+            if let Some(found) =
+                find_matching_node(walker, &child, selector, depth + 1, max_depth, seen, max_nodes)?
+            {
+                return Ok(Some(found));
+            }
+            seen += 1;
+            if seen >= max_nodes {
+                break;
+            }
+        }
+        Ok(None)
+    }
+
+    fn child_elements(
+        walker: &IUIAutomationTreeWalker,
+        element: &IUIAutomationElement,
+    ) -> Result<Vec<IUIAutomationElement>, JavisError> {
+        let mut children = Vec::new();
+        let mut next: WindowsResult<IUIAutomationElement> =
+            unsafe { walker.GetFirstChildElement(element) };
+        while let Ok(child) = next {
+            next = unsafe { walker.GetNextSiblingElement(&child) };
+            children.push(child);
+        }
+        Ok(children)
+    }
+
+    fn read_node(element: &IUIAutomationElement) -> Result<UiNode, JavisError> {
+        let name = unsafe { element.CurrentName().map(|v| v.to_string()).unwrap_or_default() };
+        let automation_id =
+            unsafe { element.CurrentAutomationId().map(|v| v.to_string()).unwrap_or_default() };
+        let control_type_id = unsafe { element.CurrentControlType().map(|v| v.0).unwrap_or_default() };
+        let control_type = control_type_name(control_type_id).to_string();
+        Ok(UiNode {
+            element: element.clone(),
+            name,
+            automation_id,
+            control_type,
+            control_type_id,
+        })
+    }
+
+    fn selector_matches(node: &UiNode, selector: &UiElementSelector) -> bool {
+        selector
+            .automation_id
+            .as_ref()
+            .map(|value| node.automation_id == *value)
+            .unwrap_or(true)
+            && selector
+                .name
+                .as_ref()
+                .map(|value| node.name.contains(value))
+                .unwrap_or(true)
+            && selector
+                .control_type
+                .as_ref()
+                .map(|value| control_type_matches(node, value))
+                .unwrap_or(true)
+    }
+
+    fn control_type_matches(node: &UiNode, value: &str) -> bool {
+        node.control_type.eq_ignore_ascii_case(value)
+            || value
+                .strip_prefix("controlType")
+                .and_then(|id| id.parse::<i32>().ok())
+                .map(|id| id == node.control_type_id)
+                .unwrap_or(false)
+            || value.parse::<i32>().map(|id| id == node.control_type_id).unwrap_or(false)
+    }
+
+    pub(super) fn control_type_name(control_type_id: i32) -> &'static str {
+        match control_type_id {
+            50000 => "Button",
+            50001 => "Calendar",
+            50002 => "CheckBox",
+            50003 => "ComboBox",
+            50004 => "Edit",
+            50005 => "Hyperlink",
+            50006 => "Image",
+            50007 => "ListItem",
+            50008 => "List",
+            50009 => "Menu",
+            50010 => "MenuBar",
+            50011 => "MenuItem",
+            50012 => "ProgressBar",
+            50013 => "RadioButton",
+            50014 => "ScrollBar",
+            50015 => "Slider",
+            50016 => "Spinner",
+            50017 => "StatusBar",
+            50018 => "Tab",
+            50019 => "TabItem",
+            50020 => "Text",
+            50021 => "ToolBar",
+            50022 => "ToolTip",
+            50023 => "Tree",
+            50024 => "TreeItem",
+            50025 => "Custom",
+            50026 => "Group",
+            50027 => "Thumb",
+            50028 => "DataGrid",
+            50029 => "DataItem",
+            50030 => "Document",
+            50031 => "SplitButton",
+            50032 => "Window",
+            50033 => "Pane",
+            50034 => "Header",
+            50035 => "HeaderItem",
+            50036 => "Table",
+            50037 => "TitleBar",
+            50038 => "Separator",
+            50039 => "SemanticZoom",
+            50040 => "AppBar",
+            _ => "Control",
+        }
+    }
+
+    fn validate_ui_selector(selector: &UiElementSelector) -> Result<(), JavisError> {
+        if selector.automation_id.as_deref().unwrap_or("").trim().is_empty()
+            && selector.name.as_deref().unwrap_or("").trim().is_empty()
+        {
+            return Err(JavisError::Validation(
+                "UI Automation selector requires automationId or name".to_string(),
+            ));
+        }
+        for value in [
+            selector.automation_id.as_deref(),
+            selector.name.as_deref(),
+            selector.control_type.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if value.len() > 200 {
+                return Err(JavisError::Validation(
+                    "UI Automation selector fields must be at most 200 characters".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn escape_ui_text(value: &str) -> String {
+        value
+            .replace('&', "&amp;")
+            .replace('"', "&quot;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    }
+}
+
+#[cfg(not(windows))]
+mod uia {
+    use super::*;
+
+    pub(super) fn inspect_ui(
+        _request: &ComputerInspectUiRequest,
+    ) -> Result<ComputerInspectUiResult, JavisError> {
+        Err(JavisError::Validation(
+            "UI Automation is only available on Windows".to_string(),
+        ))
+    }
+
+    pub(super) fn invoke_ui(
+        _request: &ComputerInvokeUiRequest,
+    ) -> Result<ComputerInvokeUiResult, JavisError> {
+        Err(JavisError::Validation(
+            "UI Automation is only available on Windows".to_string(),
+        ))
+    }
+
+    pub(super) fn set_ui_value(
+        _request: &ComputerSetUiValueRequest,
+    ) -> Result<ComputerSetUiValueResult, JavisError> {
+        Err(JavisError::Validation(
+            "UI Automation is only available on Windows".to_string(),
+        ))
+    }
 }
 
 // ── Tauri commands ──────────────────────────────────────────────────────────
@@ -1010,17 +1800,46 @@ pub(crate) fn computer_wait(request: ComputerWaitRequest) -> Result<ComputerWait
 }
 
 #[tauri::command]
+pub(crate) fn computer_inspect_ui(
+    request: ComputerInspectUiRequest,
+) -> Result<ComputerInspectUiResult, String> {
+    uia::inspect_ui(&request).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub(crate) fn computer_approve_action(
     state: tauri::State<'_, Mutex<ComputerApprovalState>>,
     approval_id: String,
     task_id: String,
     tool_name: String,
     params_json: String,
+    #[allow(unused_variables)]
+    session_wide: Option<bool>,
 ) -> Result<(), String> {
-    let params: serde_json::Value =
+    validate_approval_id(&approval_id).map_err(|e| e.to_string())?;
+    validate_task_id(&task_id).map_err(|e| e.to_string())?;
+    let raw_params: serde_json::Value =
         serde_json::from_str(&params_json).map_err(|e| format!("Invalid params JSON: {e}"))?;
-    validate_computer_action_params(&tool_name, &params).map_err(|e| e.to_string())?;
-    let preview_hash = hash_action_params(&tool_name, &params);
+
+    let mut guard = state.lock().map_err(|e| format!("Lock error: {e}"))?;
+
+    if session_wide.unwrap_or(false) {
+        // Session-wide approval — all subsequent write actions for this task
+        // skip per-action approval until TTL expires. The first action's params
+        // are still validated to ensure the request is well-formed.
+        validate_computer_action_params(&tool_name, &raw_params).map_err(|e| e.to_string())?;
+        guard.session_task_id = Some(task_id);
+        guard.session_created_at = Some(SystemTime::now());
+        // Clear any stale one-shot pending approval
+        guard.pending = None;
+        return Ok(());
+    }
+
+    // Per-action approval — normalized params → hash → one-shot binding
+    validate_computer_action_params(&tool_name, &raw_params).map_err(|e| e.to_string())?;
+    let normalized = normalize_computer_params(&tool_name, &raw_params)
+        .map_err(|e| format!("Invalid params: {e}"))?;
+    let preview_hash = hash_action_params(&tool_name, &normalized);
 
     let binding = crate::create_native_approval_binding(
         approval_id,
@@ -1030,9 +1849,62 @@ pub(crate) fn computer_approve_action(
         true, // approved
     );
 
-    let mut guard = state.lock().map_err(|e| format!("Lock error: {e}"))?;
-    guard.pending = Some(PendingComputerApproval { binding });
+    guard.pending = Some(PendingComputerApproval {
+        binding,
+        created_at: SystemTime::now(),
+    });
     Ok(())
+}
+
+fn normalize_computer_params(
+    tool_name: &str,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, JavisError> {
+    match tool_name {
+        "computer.focusWindow" => {
+            let req: ComputerFocusWindowRequest = serde_json::from_value(params.clone())
+                .map_err(|e| JavisError::Validation(format!("Invalid focusWindow params: {e}")))?;
+            Ok(serde_json::to_value(&req).unwrap_or_default())
+        }
+        "computer.moveMouse" => {
+            let req: ComputerMoveMouseRequest = serde_json::from_value(params.clone())
+                .map_err(|e| JavisError::Validation(format!("Invalid moveMouse params: {e}")))?;
+            Ok(serde_json::to_value(&req).unwrap_or_default())
+        }
+        "computer.click" => {
+            let req: ComputerClickRequest = serde_json::from_value(params.clone())
+                .map_err(|e| JavisError::Validation(format!("Invalid click params: {e}")))?;
+            Ok(serde_json::to_value(&req).unwrap_or_default())
+        }
+        "computer.type" => {
+            let req: ComputerTypeRequest = serde_json::from_value(params.clone())
+                .map_err(|e| JavisError::Validation(format!("Invalid type params: {e}")))?;
+            Ok(serde_json::to_value(&req).unwrap_or_default())
+        }
+        "computer.keyCombo" => {
+            let req: ComputerKeyComboRequest = serde_json::from_value(params.clone())
+                .map_err(|e| JavisError::Validation(format!("Invalid keyCombo params: {e}")))?;
+            Ok(serde_json::to_value(&req).unwrap_or_default())
+        }
+        "computer.scroll" => {
+            let req: ComputerScrollRequest = serde_json::from_value(params.clone())
+                .map_err(|e| JavisError::Validation(format!("Invalid scroll params: {e}")))?;
+            Ok(serde_json::to_value(&req).unwrap_or_default())
+        }
+        "computer.invokeUi" => {
+            let req: ComputerInvokeUiRequest = serde_json::from_value(params.clone())
+                .map_err(|e| JavisError::Validation(format!("Invalid invokeUi params: {e}")))?;
+            Ok(serde_json::to_value(&req).unwrap_or_default())
+        }
+        "computer.setUiValue" => {
+            let req: ComputerSetUiValueRequest = serde_json::from_value(params.clone())
+                .map_err(|e| JavisError::Validation(format!("Invalid setUiValue params: {e}")))?;
+            Ok(serde_json::to_value(&req).unwrap_or_default())
+        }
+        _ => Err(JavisError::Validation(format!(
+            "Unsupported computer action approval tool: {tool_name}"
+        ))),
+    }
 }
 
 fn validate_computer_action_params(
@@ -1070,6 +1942,16 @@ fn validate_computer_action_params(
                 .map_err(|e| JavisError::Validation(format!("Invalid scroll params: {e}")))?;
             validate_scroll_request(&request)
         }
+        "computer.invokeUi" => {
+            let request: ComputerInvokeUiRequest = serde_json::from_value(params.clone())
+                .map_err(|e| JavisError::Validation(format!("Invalid invokeUi params: {e}")))?;
+            validate_invoke_ui_request(&request)
+        }
+        "computer.setUiValue" => {
+            let request: ComputerSetUiValueRequest = serde_json::from_value(params.clone())
+                .map_err(|e| JavisError::Validation(format!("Invalid setUiValue params: {e}")))?;
+            validate_set_ui_value_request(&request)
+        }
         _ => Err(JavisError::Validation(format!(
             "Unsupported computer action approval tool: {tool_name}"
         ))),
@@ -1085,6 +1967,9 @@ macro_rules! impl_computer_write_command {
             task_id: String,
             request: $request_type,
         ) -> Result<$result_type, String> {
+            validate_approval_id(&approval_id).map_err(|e| e.to_string())?;
+            validate_task_id(&task_id).map_err(|e| e.to_string())?;
+
             // Run domain-specific validation
             ($validate_fn)(&request).map_err(|e: JavisError| e.to_string())?;
 
@@ -1093,22 +1978,46 @@ macro_rules! impl_computer_write_command {
             let params_json = serde_json::to_value(&request).unwrap_or_default();
             let preview_hash = hash_action_params(&tool_name, &params_json);
 
-            // Validate approval
+            // Validate approval — try one-shot first, then session-wide
             let mut guard = state.lock().map_err(|e| format!("Lock error: {e}"))?;
-            let pending = guard
-                .pending
-                .take()
-                .ok_or("No pending computer approval")?;
-            require_native_approval_binding(
-                &pending.binding,
-                &approval_id,
-                &tool_name,
-                Some(&task_id),
-                &preview_hash,
-                "Approval hash mismatch — operation params differ from approved action.",
-                "Computer Use action requires confirmed-write approval.",
-            )
-            .map_err(|e| e.to_string())?;
+            validate_computer_write_rate_limit(&guard).map_err(|e| e.to_string())?;
+            if let Some(pending) = guard.pending.take() {
+                // Per-action approval — strict hash check
+                validate_pending_computer_approval(&pending).map_err(|e| e.to_string())?;
+                require_native_approval_binding(
+                    &pending.binding,
+                    &approval_id,
+                    &tool_name,
+                    Some(&task_id),
+                    &preview_hash,
+                    "Approval hash mismatch — operation params differ from approved action.",
+                    "Computer Use action requires confirmed-write approval.",
+                )
+                .map_err(|e| e.to_string())?;
+            } else {
+                // Session-wide approval — user approved the whole session once.
+                // Skip per-action hash check; only validate task match + TTL.
+                let session_task = guard
+                    .session_task_id
+                    .as_deref()
+                    .ok_or("No pending or session computer approval — call computer_approve_action first.")?;
+                if session_task != task_id {
+                    return Err(format!(
+                        "Session approval task mismatch: expected {session_task}, got {task_id}"
+                    ));
+                }
+                let session_age = guard
+                    .session_created_at
+                    .and_then(|t| t.elapsed().ok())
+                    .ok_or("Session approval timestamp is invalid.")?;
+                if session_age > SESSION_APPROVAL_TTL {
+                    // Clear expired session so the next attempt gives a clear error
+                    guard.session_task_id = None;
+                    guard.session_created_at = None;
+                    return Err("Session approval expired (30 min) — re-approve to continue.".to_string());
+                }
+            }
+            guard.last_write_at = Some(SystemTime::now());
             drop(guard);
 
             // Execute
@@ -1174,6 +2083,73 @@ fn validate_scroll_request(req: &ComputerScrollRequest) -> Result<(), JavisError
     }
 }
 
+fn validate_ui_selector_request(selector: &UiElementSelector) -> Result<(), JavisError> {
+    validate_window_handle_title(selector.window_handle)?;
+    if selector.automation_id.as_deref().unwrap_or("").trim().is_empty()
+        && selector.name.as_deref().unwrap_or("").trim().is_empty()
+    {
+        return Err(JavisError::Validation(
+            "UI Automation selector requires automationId or name".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_task_id(task_id: &str) -> Result<(), JavisError> {
+    validate_binding_id("task_id", task_id)
+}
+
+fn validate_approval_id(approval_id: &str) -> Result<(), JavisError> {
+    validate_binding_id("approval_id", approval_id)
+}
+
+fn validate_binding_id(name: &str, value: &str) -> Result<(), JavisError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 {
+        return Err(JavisError::Validation(format!(
+            "Computer Use {name} must be non-empty and at most 128 characters."
+        )));
+    }
+    if !trimmed
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b':' | b'.'))
+    {
+        return Err(JavisError::Validation(format!(
+            "Computer Use {name} contains unsupported characters."
+        )));
+    }
+    Ok(())
+}
+
+fn validate_computer_write_rate_limit(state: &ComputerApprovalState) -> Result<(), JavisError> {
+    let Some(last_write_at) = state.last_write_at else {
+        return Ok(());
+    };
+    let elapsed = last_write_at
+        .elapsed()
+        .map_err(|_| JavisError::Permission("Computer Use write timestamp is invalid.".into()))?;
+    if elapsed < COMPUTER_WRITE_MIN_INTERVAL {
+        return Err(JavisError::Permission(
+            "Computer Use write actions are being sent too quickly.".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_invoke_ui_request(req: &ComputerInvokeUiRequest) -> Result<(), JavisError> {
+    validate_ui_selector_request(&req.selector)
+}
+
+fn validate_set_ui_value_request(req: &ComputerSetUiValueRequest) -> Result<(), JavisError> {
+    validate_ui_selector_request(&req.selector)?;
+    if req.value.chars().count() > 10_000 {
+        return Err(JavisError::Validation(
+            "UI Automation value must be at most 10000 characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 impl_computer_write_command!(
     computer_focus_window,
     ComputerFocusWindowRequest,
@@ -1226,6 +2202,24 @@ impl_computer_write_command!(
     "scroll",
     validate_scroll_request,
     execute_scroll
+);
+
+impl_computer_write_command!(
+    computer_invoke_ui,
+    ComputerInvokeUiRequest,
+    ComputerInvokeUiResult,
+    "invokeUi",
+    validate_invoke_ui_request,
+    uia::invoke_ui
+);
+
+impl_computer_write_command!(
+    computer_set_ui_value,
+    ComputerSetUiValueRequest,
+    ComputerSetUiValueResult,
+    "setUiValue",
+    validate_set_ui_value_request,
+    uia::set_ui_value
 );
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -1282,7 +2276,25 @@ mod tests {
         assert_eq!(key_to_vk("a"), Some(0x41));
         assert_eq!(key_to_vk("enter"), Some(VK_RETURN));
         assert_eq!(key_to_vk("1"), Some(0x31));
+        assert_eq!(key_to_vk("]"), Some(VK_OEM_6));
+        assert_eq!(key_to_vk("?"), Some(VK_OEM_2));
         assert_eq!(key_to_vk("unknown_key"), None);
+    }
+
+    #[test]
+    fn test_vk_scan_char_supports_ascii_punctuation() {
+        assert!(vk_scan_char('.').is_some());
+        assert!(vk_scan_char('@').is_some());
+        assert!(vk_scan_char('-').is_some());
+        assert!(vk_scan_char(' ').is_some());
+    }
+
+    #[test]
+    fn test_uia_control_type_names_are_stable_english() {
+        assert_eq!(uia::control_type_name(50000), "Button");
+        assert_eq!(uia::control_type_name(50004), "Edit");
+        assert_eq!(uia::control_type_name(50032), "Window");
+        assert_eq!(uia::control_type_name(59999), "Control");
     }
 
     #[test]
@@ -1300,6 +2312,106 @@ mod tests {
         let h1 = hash_action_params("computer.click", &params);
         let h2 = hash_action_params("computer.moveMouse", &params);
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_timestamp_secs_to_iso_uses_real_calendar() {
+        assert_eq!(timestamp_secs_to_iso(0), "1970-01-01T00:00:00Z");
+        assert_eq!(timestamp_secs_to_iso(1_704_067_199), "2023-12-31T23:59:59Z");
+        assert_eq!(timestamp_secs_to_iso(1_704_067_200), "2024-01-01T00:00:00Z");
+        assert_eq!(timestamp_secs_to_iso(1_709_164_800), "2024-02-29T00:00:00Z");
+    }
+
+    #[test]
+    fn test_validate_task_id() {
+        assert!(validate_task_id("task-1704067200000").is_ok());
+        assert!(validate_task_id("task:desktop_1.2").is_ok());
+        assert!(validate_task_id("").is_err());
+        assert!(validate_task_id("../task").is_err());
+    }
+
+    #[test]
+    fn test_validate_approval_id() {
+        assert!(validate_approval_id("approval-1704067200000").is_ok());
+        assert!(validate_approval_id("approval:desktop_1.2").is_ok());
+        assert!(validate_approval_id("").is_err());
+        assert!(validate_approval_id("../approval").is_err());
+    }
+
+    #[test]
+    fn test_normalized_approval_hash_matches_execute_hash_shape() {
+        let raw_params = serde_json::json!({
+            "x": 100,
+            "y": 200,
+            "button": "left",
+            "clickCount": 1,
+            "ignoredExtra": true
+        });
+        let normalized = normalize_computer_params("computer.click", &raw_params).unwrap();
+        let execute_request = ComputerClickRequest {
+            x: 100,
+            y: 200,
+            button: Some("left".to_string()),
+            click_count: Some(1),
+        };
+        let execute_params = serde_json::to_value(&execute_request).unwrap();
+
+        assert_eq!(normalized, execute_params);
+        assert_eq!(
+            hash_action_params("computer.click", &normalized),
+            hash_action_params("computer.click", &execute_params)
+        );
+    }
+
+    #[test]
+    fn test_computer_write_rate_limit_blocks_fast_repeats() {
+        let state = ComputerApprovalState {
+            pending: None,
+            last_write_at: Some(SystemTime::now()),
+            session_task_id: None,
+            session_created_at: None,
+        };
+        assert!(validate_computer_write_rate_limit(&state).is_err());
+
+        let state = ComputerApprovalState {
+            pending: None,
+            last_write_at: Some(SystemTime::now() - COMPUTER_WRITE_MIN_INTERVAL - Duration::from_millis(1)),
+            session_task_id: None,
+            session_created_at: None,
+        };
+        assert!(validate_computer_write_rate_limit(&state).is_ok());
+    }
+
+    #[test]
+    fn test_pending_approval_allows_fresh_binding() {
+        let pending = PendingComputerApproval {
+            binding: crate::create_native_approval_binding(
+                "approval-1".to_string(),
+                "computer.click",
+                "task-1".to_string(),
+                "hash-1".to_string(),
+                true,
+            ),
+            created_at: SystemTime::now(),
+        };
+
+        assert!(validate_pending_computer_approval(&pending).is_ok());
+    }
+
+    #[test]
+    fn test_pending_approval_expires_after_ttl() {
+        let pending = PendingComputerApproval {
+            binding: crate::create_native_approval_binding(
+                "approval-1".to_string(),
+                "computer.click",
+                "task-1".to_string(),
+                "hash-1".to_string(),
+                true,
+            ),
+            created_at: SystemTime::now() - COMPUTER_APPROVAL_TTL - Duration::from_secs(1),
+        };
+
+        assert!(validate_pending_computer_approval(&pending).is_err());
     }
 
     #[test]

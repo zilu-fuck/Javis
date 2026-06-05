@@ -29,4 +29,34 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  // Use project-local cache to avoid monorepo cross-contamination
+  cacheDir: "node_modules/.vite-desktop",
+  // Prevent monorepo package symlinks from being pre-bundled
+  optimizeDeps: {
+    exclude: ["@javis/core", "@javis/ui", "@javis/tools"],
+  },
+  resolve: {
+    // Ensure workspace packages resolve to source (not stale dist)
+    conditions: ["development", "browser"],
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules/react") || id.includes("node_modules/react-dom")) {
+            return "vendor-react";
+          }
+          if (id.includes("node_modules")) {
+            return "vendor";
+          }
+          if (id.includes("/packages/core/src/") || id.includes("\\packages\\core\\src\\")) {
+            return "javis-core";
+          }
+          if (id.includes("/packages/ui/src/") || id.includes("\\packages\\ui\\src\\")) {
+            return "javis-ui";
+          }
+        },
+      },
+    },
+  },
 }));

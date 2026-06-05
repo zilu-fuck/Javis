@@ -146,7 +146,7 @@ Status: partially complete (2026-05-31).
 - Add telemetry-free diagnostics export for local debugging.
 - Add signed builds, version strategy, artifact checksums, release notes, and
   rollback notes. (not yet done)
-- Expand manual QA from MVP scenarios to complete-product workflows. QA evidence at docs/qa/2026-05-30/. 555 total tests (430 Vitest + 125 Rust).
+- Expand manual QA from MVP scenarios to complete-product workflows. QA evidence at docs/qa/2026-05-30/. 740 total tests (564 Vitest + 176 Rust).
 
 ## Explicit Non-Goals Until Product-Ready Core Is Complete
 

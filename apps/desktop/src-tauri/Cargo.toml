@@ -30,6 +30,9 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 once_cell = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 sha2 = "0.10"
+ignore = "0.4"
+notify = "6"
+portable-pty = "0.8"
 
 [target.'cfg(not(windows))'.dependencies]
 keyring = "3"
@@ -38,11 +41,18 @@ keyring = "3"
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
+windows = { version = "0.61.3", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_UI_Accessibility",
+] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security_Cryptography",
     "Win32_System_Memory",
+    "Win32_System_Threading",
     "Win32_Storage_FileSystem",
+    "Win32_Storage_Xps",
     "Win32_Graphics_Gdi",
     "Win32_UI_Controls",
     "Win32_UI_Shell",

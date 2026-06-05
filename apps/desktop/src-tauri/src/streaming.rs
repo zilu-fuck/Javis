@@ -26,6 +26,13 @@ use crate::{
 use crate::code::{create_chat_completions_endpoint, normalize_optional_config_value};
 
 const STREAMING_READ_TIMEOUT: Duration = Duration::from_secs(120);
+/// Minimum characters to accumulate before emitting a chunk event.
+/// Emitting on every token (~1-3 chars) floods the IPC channel;
+/// batching reduces Tauri events by ~5x while keeping the UI responsive.
+const STREAMING_CHUNK_CHAR_THRESHOLD: usize = 20;
+/// Fallback: emit after this many raw SSE chunks even if char threshold
+/// isn't met (handles short tokens like punctuation or whitespace).
+const STREAMING_CHUNK_COUNT_THRESHOLD: u32 = 5;
 
 static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -185,13 +192,17 @@ fn execute_streaming_request(
     let response = request_builder
         .send()
         .map_err(|error| format!("Model stream request failed: {error}"))?;
-    let buf_reader = BufReader::new(response);
+    let buf_reader = BufReader::with_capacity(65536, response);
     let mut total_chunks: u32 = 0;
     let mut token_usage: Option<ModelUsage> = None;
 
+    // Batch accumulator: reduces IPC events by emitting fewer, larger chunks
+    // instead of one Tauri event per token.
+    let mut batch_text = String::with_capacity(64);
+    let mut batch_chunks: u32 = 0;
+
     for line in buf_reader.lines() {
         if cancelled.load(Ordering::Relaxed) {
-            // Drain remaining data before returning
             break;
         }
         let line = line.map_err(|error| format!("Stream read error: {error}"))?;
@@ -210,18 +221,40 @@ fn execute_streaming_request(
             token_usage = Some(usage);
         }
         if let Some(text) = extract_openai_compatible_stream_text(&value) {
-            let _ = app.emit(
-                "stream-model-chunk",
-                StreamChunkPayload {
-                    stream_id: stream_id.to_string(),
-                    text,
-                    model: Some(model.clone()),
-                    provider: Some(provider_id.clone()),
-                    index: total_chunks,
-                },
-            );
+            batch_text.push_str(&text);
+            batch_chunks += 1;
             total_chunks += 1;
+
+            if batch_text.len() >= STREAMING_CHUNK_CHAR_THRESHOLD
+                || batch_chunks >= STREAMING_CHUNK_COUNT_THRESHOLD
+            {
+                let _ = app.emit(
+                    "stream-model-chunk",
+                    StreamChunkPayload {
+                        stream_id: stream_id.to_string(),
+                        text: std::mem::take(&mut batch_text),
+                        model: Some(model.clone()),
+                        provider: Some(provider_id.clone()),
+                        index: total_chunks,
+                    },
+                );
+                batch_chunks = 0;
+            }
         }
+    }
+
+    // Flush any remaining batched text
+    if !batch_text.is_empty() {
+        let _ = app.emit(
+            "stream-model-chunk",
+            StreamChunkPayload {
+                stream_id: stream_id.to_string(),
+                text: batch_text,
+                model: Some(model.clone()),
+                provider: Some(provider_id.clone()),
+                index: total_chunks,
+            },
+        );
     }
 
     if total_chunks == 0 && !cancelled.load(Ordering::Relaxed) {

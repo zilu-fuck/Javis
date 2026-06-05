@@ -8,6 +8,7 @@ export const DEFAULT_PERMISSION_TTL_MS = 10 * 60 * 1000;
 export interface PendingPermissionRequestInput {
   id: string;
   level: ApprovablePermissionLevel;
+  writeRiskLevel?: "safe" | "risky" | "dangerous";
   title: string;
   reason: string;
   dryRun: DryRunSummary;
@@ -24,6 +25,7 @@ export function createPendingPermissionRequest(
   return {
     id: input.id,
     level: input.level,
+    writeRiskLevel: input.writeRiskLevel,
     title: input.title,
     reason: input.reason,
     dryRun: input.dryRun,

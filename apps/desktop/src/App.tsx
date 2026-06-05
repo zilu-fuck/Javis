@@ -10,6 +10,7 @@ import {
 } from "@javis/core";
 import { bridgeVisionIfNeeded } from "./vision-bridge";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openPath } from "@tauri-apps/plugin-opener";
 import type {
@@ -22,6 +23,12 @@ import type {
   WorkbenchSkillSearchKind,
   WorkbenchSkillSearchResult,
   WorkbenchSkillSearchSource,
+  WorkbenchNewChatRecommendations,
+  WorkbenchSystemResources,
+  WorkbenchAgentSessionContext,
+  WorkbenchFileService,
+  WorkbenchFileSearchResult,
+  WorkbenchTerminalService,
 } from "@javis/ui";
 import { JavisWorkbench, zhCNWorkbenchLocale, defaultWorkbenchLocale } from "@javis/ui";
 import {
@@ -157,6 +164,18 @@ import {
   registerWorkspaceWorkflows,
   registerWorkspaceRoutes,
 } from "./workspace-loader";
+import {
+  createNewChatRecommendations,
+  createUserProfileMemoryRepository,
+  createUserProfileMemory,
+  updateUserProfileMemory,
+  clearUserProfileMemory,
+  loadUserProfileMemory,
+  saveUserProfileMemory,
+  USER_PROFILE_MEMORY_MIGRATIONS,
+  type UserProfileMemory,
+  type UserProfileMemoryRepository,
+} from "./user-profile-memory";
 import { getBuiltinSidebarNavItems, mergeSidebarNavItems } from "@javis/ui";
 import appIconUrl from "./assets/app-icon.png";
 import "./App.css";
@@ -272,6 +291,7 @@ function App() {
   const workspaceSessionRepoRef = useRef<WorkspaceSessionRepository | null>(null);
   const approvalRecordsRepoRef = useRef<ReturnType<typeof createApprovalRecordsRepository> | null>(null);
   const modelSettingsRepoRef = useRef<ModelSettingsRepository | null>(null);
+  const userProfileMemoryRepoRef = useRef<UserProfileMemoryRepository | null>(null);
   const scheduledTasksRepoRef = useRef<ScheduledTasksRepositoryLike>(null);
   const preferencesRepoRef = useRef<UserPreferencesRepository | null>(null);
   const agentRegistryRef = useRef<AgentRegistry>(createDefaultAgentRegistry());
@@ -391,8 +411,40 @@ function App() {
     }
   }
   const [prefSidebarWidth, setPrefSidebarWidth] = useState<number | undefined>();
+  const [prefActivityHeight, setPrefActivityHeight] = useState<number | undefined>();
+  const [prefIsSidebarOpen, setPrefIsSidebarOpen] = useState<boolean | undefined>();
   const [prefIsActivityOpen, setPrefIsActivityOpen] = useState<boolean | undefined>();
   const [prefIsInspectorOpen, setPrefIsInspectorOpen] = useState<boolean | undefined>();
+  const [systemResources, setSystemResources] = useState<WorkbenchSystemResources | undefined>();
+  const [userProfileMemory, setUserProfileMemory] = useState<UserProfileMemory | null>(() =>
+    loadUserProfileMemory(window.localStorage),
+  );
+  useEffect(() => {
+    if (!currentWindow) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function refreshSystemResources() {
+      try {
+        const snapshot = await invoke<WorkbenchSystemResources>("get_system_resource_snapshot");
+        if (!cancelled) {
+          setSystemResources(snapshot);
+        }
+      } catch (error) {
+        logNonFatalError("Failed to read system resources", error);
+      }
+    }
+
+    void refreshSystemResources();
+    const intervalId = window.setInterval(refreshSystemResources, 2000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, []);
   // ── Scheduled tasks state ─────────────────────────────────────────
   const {
     task,
@@ -661,6 +713,7 @@ function App() {
       await runDesktopDatabaseMigrations(database, USER_PREFERENCES_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, JSONL_LOG_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, FILE_CLASSIFICATION_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, USER_PROFILE_MEMORY_MIGRATIONS);
 
       // One-time import from localStorage
       const taskHistoryRepo = createTaskHistoryRepository(database);
@@ -668,12 +721,14 @@ function App() {
       const approvalRecordsRepo = createApprovalRecordsRepository(database);
       const modelSettingsRepo = createModelSettingsRepository(database);
       const modelProfileRepo = createModelProfileRepository(database);
+      const userProfileMemoryRepo = createUserProfileMemoryRepository(database);
 
       taskHistoryRepoRef.current = taskHistoryRepo;
       workspaceSessionRepoRef.current = workspaceSessionRepo;
       approvalRecordsRepoRef.current = approvalRecordsRepo;
       modelSettingsRepoRef.current = modelSettingsRepo;
       modelProfileRepoRef.current = modelProfileRepo;
+      userProfileMemoryRepoRef.current = userProfileMemoryRepo;
 
       // Load saved model configuration so chat/commands work on first launch
       try {
@@ -708,6 +763,7 @@ function App() {
         window.localStorage,
       );
       const legacySettings = await modelSettingsRepo.importFromLocalStorage(window.localStorage);
+      const importedUserProfileMemory = await userProfileMemoryRepo.importFromLocalStorage(window.localStorage);
       const loadedConfig = await modelProfileRepo.importFromLegacySettings(legacySettings);
       const cleanOverrides: Record<string, string> = {};
       for (const [key, value] of Object.entries(loadedConfig.agentOverrides)) {
@@ -737,6 +793,7 @@ function App() {
       if (workspaceSessionCurrentRef.current === workspaceSessionInitialRef.current) {
         replaceWorkspaceSession(importedWorkspaceSession);
       }
+      setUserProfileMemory(importedUserProfileMemory);
       if (approvalRecordsCurrentRef.current === approvalRecordsInitialRef.current) {
         setApprovalRecords(importedApprovalRecords);
       }
@@ -757,6 +814,8 @@ function App() {
       }
       if (importedPrefs[PREF_KEYS.LOCALE]) setLocalePreference(importedPrefs[PREF_KEYS.LOCALE]);
       if (importedPrefs[PREF_KEYS.SIDEBAR_WIDTH]) setPrefSidebarWidth(Number(importedPrefs[PREF_KEYS.SIDEBAR_WIDTH]));
+      if (importedPrefs[PREF_KEYS.ACTIVITY_HEIGHT]) setPrefActivityHeight(Number(importedPrefs[PREF_KEYS.ACTIVITY_HEIGHT]));
+      if (importedPrefs[PREF_KEYS.IS_SIDEBAR_OPEN]) setPrefIsSidebarOpen(importedPrefs[PREF_KEYS.IS_SIDEBAR_OPEN] === "true");
       if (importedPrefs[PREF_KEYS.IS_ACTIVITY_OPEN]) setPrefIsActivityOpen(importedPrefs[PREF_KEYS.IS_ACTIVITY_OPEN] === "true");
       if (importedPrefs[PREF_KEYS.IS_INSPECTOR_OPEN]) setPrefIsInspectorOpen(importedPrefs[PREF_KEYS.IS_INSPECTOR_OPEN] === "true");
       if (importedPrefs[PREF_KEYS.SKILL_TRANSLATIONS_ZH]) {
@@ -1177,8 +1236,99 @@ function App() {
   }
 
   const effectiveLocale = localePreference === "en" ? defaultWorkbenchLocale : zhCNWorkbenchLocale;
+  const newChatRecommendations: WorkbenchNewChatRecommendations = useMemo(
+    () => createNewChatRecommendations(userProfileMemory, localePreference === "en" ? "en" : "zh"),
+    [localePreference, userProfileMemory],
+  );
+  const userProfileMemorySummary = useMemo(
+    () => userProfileMemory
+      ? {
+          factCount: userProfileMemory.facts.length,
+          topTags: userProfileMemory.summary.topTags,
+          updatedAt: userProfileMemory.updatedAt,
+          facts: userProfileMemory.facts.slice(0, 8).map((fact) => ({
+            id: fact.id,
+            text: fact.text,
+            tags: fact.tags,
+            source: fact.source,
+            confidence: fact.confidence,
+            hitCount: fact.hitCount,
+            evidence: fact.evidence.map((item) => ({
+              title: item.title,
+              snippet: item.snippet,
+              observedAt: item.observedAt,
+              matchedKeywords: item.matchedKeywords,
+            })),
+          })),
+        }
+      : null,
+    [userProfileMemory],
+  );
+
+  useEffect(() => {
+    setUserProfileMemory((previous) => {
+      const result = updateUserProfileMemory({
+        history,
+        currentWorkspacePath: workspacePath,
+        recentWorkspacePaths,
+        previous,
+      });
+      if (!result.changed) {
+        return previous;
+      }
+      const next = result.memory;
+      const repository = userProfileMemoryRepoRef.current;
+      if (repository) {
+        void repository.save(next).catch((error) =>
+          logNonFatalError("Failed to save user profile memory", error),
+        );
+      } else {
+        saveUserProfileMemory(window.localStorage, next);
+      }
+      return next;
+    });
+  }, [history, recentWorkspacePaths, workspacePath]);
+
+  function persistUserProfileMemory(memory: UserProfileMemory | null): void {
+    const repository = userProfileMemoryRepoRef.current;
+    if (repository) {
+      if (memory) {
+        void repository.save(memory).catch((error) =>
+          logNonFatalError("Failed to save user profile memory", error),
+        );
+      } else {
+        void repository.clear().catch((error) =>
+          logNonFatalError("Failed to clear user profile memory", error),
+        );
+      }
+      return;
+    }
+
+    if (memory) {
+      saveUserProfileMemory(window.localStorage, memory);
+    } else {
+      clearUserProfileMemory(window.localStorage);
+    }
+  }
+
+  function handleRebuildUserProfileMemory() {
+    const next = createUserProfileMemory({
+      history,
+      currentWorkspacePath: workspacePath,
+      recentWorkspacePaths,
+      previous: null,
+    });
+    setUserProfileMemory(next);
+    persistUserProfileMemory(next);
+  }
+
+  function handleClearUserProfileMemory() {
+    setUserProfileMemory(null);
+    persistUserProfileMemory(null);
+  }
 
   const sidebarWidthTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activityHeightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   function persistPreference(key: string, value: string) {
     const repo = preferencesRepoRef.current;
@@ -1193,6 +1343,115 @@ function App() {
     }
     persistPendingPreferenceToLocalStorage(key, value);
   }
+
+  const terminalService = useMemo<WorkbenchTerminalService>(
+    () => ({
+      async create(session: WorkbenchAgentSessionContext, cols: number, rows: number, terminalId?: string) {
+        return await invoke("terminal_create", {
+          request: {
+            sessionId: session.sessionId,
+            workspaceRoot: session.workspaceRoot,
+            terminalId,
+            permissionMode: session.permissionMode,
+            cols,
+            rows,
+          },
+        });
+      },
+      async input(terminalId: string, data: string) {
+        await invoke("terminal_input", { request: { terminalId, data, permissionMode: "full_access" } });
+      },
+      async resize(terminalId: string, cols: number, rows: number) {
+        await invoke("terminal_resize", { request: { terminalId, cols, rows } });
+      },
+      async kill(terminalId: string) {
+        await invoke("terminal_kill", { request: { terminalId } });
+      },
+      subscribe(terminalId, handlers) {
+        const unlisteners: Array<() => void> = [];
+        let disposed = false;
+        void listen<{ terminalId: string; data: string }>("terminal://output", (event) => {
+          if (event.payload.terminalId === terminalId) {
+            handlers.onOutput(event.payload.data);
+          }
+        }).then((unlisten) => {
+          if (disposed) {
+            unlisten();
+          } else {
+            unlisteners.push(unlisten);
+          }
+        });
+        void listen<{ terminalId: string; exitCode: number | null }>("terminal://exit", (event) => {
+          if (event.payload.terminalId === terminalId) {
+            handlers.onExit?.(event.payload.exitCode);
+          }
+        }).then((unlisten) => {
+          if (disposed) {
+            unlisten();
+          } else {
+            unlisteners.push(unlisten);
+          }
+        });
+        return () => {
+          disposed = true;
+          for (const unlisten of unlisteners.splice(0)) {
+            unlisten();
+          }
+        };
+      },
+    }),
+    [],
+  );
+
+  const fileService = useMemo<WorkbenchFileService>(
+    () => ({
+      async list(session: WorkbenchAgentSessionContext, path?: string) {
+        return await invoke("list_directory", { path: path || session.workspaceRoot });
+      },
+      async search(session: WorkbenchAgentSessionContext, query: string) {
+        return await invoke<WorkbenchFileSearchResult[]>("files_search", {
+          request: {
+            sessionId: session.sessionId,
+            workspaceRoot: session.workspaceRoot,
+            query,
+            maxResults: 80,
+          },
+        });
+      },
+      async watchStart(session: WorkbenchAgentSessionContext) {
+        await invoke("files_watch_start", {
+          request: { sessionId: session.sessionId, workspaceRoot: session.workspaceRoot },
+        });
+      },
+      async watchStop(session: WorkbenchAgentSessionContext) {
+        await invoke("files_watch_stop", {
+          request: { sessionId: session.sessionId, workspaceRoot: session.workspaceRoot },
+        });
+      },
+      subscribeChanged(session: WorkbenchAgentSessionContext, handler: (paths: string[]) => void) {
+        const unlisteners: Array<() => void> = [];
+        let disposed = false;
+        void listen<{ sessionId: string; paths: string[] }>("files://changed", (event) => {
+          if (event.payload.sessionId === session.sessionId) {
+            handler(event.payload.paths);
+          }
+        }).then((unlisten) => {
+          if (disposed) {
+            unlisten();
+          } else {
+            unlisteners.push(unlisten);
+          }
+        });
+        return () => {
+          disposed = true;
+          for (const unlisten of unlisteners.splice(0)) {
+            unlisten();
+          }
+        };
+      },
+    }),
+    [],
+  );
 
   return (
     <div className="javis-desktop-frame">
@@ -1244,13 +1503,17 @@ function App() {
         imagesError={imagesError}
         imagesLoading={imagesLoading}
         imagesProgress={imagesProgress}
+        initialActivityHeight={prefActivityHeight}
         initialIsActivityOpen={prefIsActivityOpen}
         initialIsInspectorOpen={prefIsInspectorOpen}
+        initialIsSidebarOpen={prefIsSidebarOpen}
         initialSidebarWidth={prefSidebarWidth}
         installedApps={installedApps}
         isTaskActive={isTaskActive}
         locale={effectiveLocale}
         modelSettings={modelSettings}
+        newChatRecommendations={newChatRecommendations}
+        userProfileMemorySummary={userProfileMemorySummary}
         onBrowseWorkspacePath={browseWorkspacePath}
         onChangeActiveView={handleChangeActiveView}
         onSelectComposeMode={setComposeMode}
@@ -1266,6 +1529,8 @@ function App() {
         onTestModelConnection={testModelConnection}
         modelConfiguration={modelConfiguration}
         onModelConfigurationChange={handleModelConfigurationChange}
+        onRebuildUserProfileMemory={handleRebuildUserProfileMemory}
+        onClearUserProfileMemory={handleClearUserProfileMemory}
         onSaveProviderApiKey={async (keyReference, apiKey) => {
           await invoke("save_model_api_key_secret", {
             request: { keyReference, apiKey },
@@ -1333,8 +1598,19 @@ function App() {
             persistPreference(PREF_KEYS.SIDEBAR_WIDTH, String(width));
           }, 300);
         }}
+        onActivityHeightChange={(height) => {
+          setPrefActivityHeight(height);
+          if (activityHeightTimerRef.current) clearTimeout(activityHeightTimerRef.current);
+          activityHeightTimerRef.current = setTimeout(() => {
+            persistPreference(PREF_KEYS.ACTIVITY_HEIGHT, String(height));
+          }, 300);
+        }}
         onActiveViewChange={(view) => {
           persistPreference(PREF_KEYS.ACTIVE_VIEW, view);
+        }}
+        onSidebarOpenChange={(open) => {
+          setPrefIsSidebarOpen(open);
+          persistPreference(PREF_KEYS.IS_SIDEBAR_OPEN, String(open));
         }}
         onActivityOpenChange={(open) => {
           setPrefIsActivityOpen(open);
@@ -1357,6 +1633,7 @@ function App() {
         onTranslateSkillsToChinese={handleTranslateSkillsToChinese}
         onSearchSkillMarket={handleSearchSkillMarket}
         sidebarNavItems={sidebarNavItems}
+        systemResources={systemResources}
         task={task}
         userDocuments={userDocuments}
         userImages={userImages}
@@ -1371,6 +1648,92 @@ function App() {
         onCancelClassify={handleCancelClassify}
         trustedComputerApps={trustedComputerApps}
         onRemoveTrustedComputerApp={handleRemoveTrustedComputerApp}
+        terminalService={terminalService}
+        fileService={fileService}
+        onQuickActionBrowser={async (url: string) => {
+          const navResult = await invoke<{ url: string; title?: string }>("browser_navigate", {
+            request: { url, sessionId: activeHistoryEntryId ?? task.id, allowLocalhost: true },
+          });
+          const [screenshot, content] = await Promise.all([
+            invoke<{ dataUrl: string }>("browser_screenshot", { request: { fullPage: false } }),
+            invoke<{ content: string; title?: string }>("browser_get_content", {
+              request: { format: "text", maxLength: 2000 },
+            }),
+          ]);
+          return {
+            url: navResult.url,
+            title: navResult.title ?? content.title,
+            content: content.content,
+            screenshotDataUrl: screenshot.dataUrl,
+          };
+        }}
+        onQuickActionReview={async () => {
+          const root = workspacePath || computerPath;
+          const sessionId = `${activeHistoryEntryId ?? "live"}:${task.id ?? "idle"}`;
+          const [status, diff] = await Promise.all([
+            invoke<{
+              files: Array<{ path: string }>;
+              diffStat: string;
+              workspaceRoot: string;
+              branch?: string;
+            }>("git_status", {
+              request: { sessionId, workspaceRoot: root },
+            }),
+            invoke<{ diff: string }>("git_diff", {
+              request: { sessionId, workspaceRoot: root },
+            }),
+          ]);
+          return {
+            changedFiles: status.files.map((file) => file.path),
+            diffStat: status.diffStat,
+            diff: diff.diff.slice(0, 4000),
+            workspacePath: status.workspaceRoot,
+            branch: status.branch,
+          };
+        }}
+        onQuickActionSideChat={async (message: string) => {
+          const sessionPrompt = [
+            "Javis side chat context:",
+            `workspaceRoot: ${workspacePath || computerPath || "(none)"}`,
+            `threadId: ${activeHistoryEntryId ?? task.id ?? "live"}`,
+            "",
+            message,
+          ].join("\n");
+          const result = await invoke<{ text: string }>("complete_model_prompt", {
+            request: {
+              prompt: sessionPrompt,
+              providerId: modelSettings.provider,
+              model: modelSettings.model,
+              apiKey: modelSettings.apiKey,
+              apiKeyReference: modelSettings.apiKeyReference,
+              baseUrl: modelSettings.baseUrl,
+              maxTokens: 800,
+              temperature: 0.7,
+              locale: "zh-CN",
+            },
+          });
+          return result.text;
+        }}
+        onQuickActionTerminal={async (command: string) => {
+          const parts = command.trim().split(/\s+/);
+          const program = parts[0];
+          const args = parts.slice(1);
+          const result = await invoke<{
+            stdout: string;
+            stderr: string;
+            exitCode: number;
+            cwd: string;
+          }>("run_read_only_command", {
+            request: { program, args, workspacePath: workspacePath || computerPath },
+          });
+          return {
+            command,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            exitCode: result.exitCode,
+            cwd: result.cwd,
+          };
+        }}
       />
       </ErrorBoundary>
     </div>

@@ -265,7 +265,7 @@ pub(crate) fn execute_anthropic_streaming_request(
         .send()
         .map_err(|error| format!("Anthropic stream request failed: {error}"))?;
 
-    let buf_reader = BufReader::new(response);
+    let buf_reader = BufReader::with_capacity(65536, response);
     let mut total_chunks: u32 = 0;
     let mut token_usage: Option<ModelUsage> = None;
 

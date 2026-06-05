@@ -119,6 +119,49 @@ describe("ModelSettings", () => {
     expect(getByText("Google Gemini")).toBeTruthy();
   });
 
+  it("renders profile memory controls in privacy settings", () => {
+    const onRebuildUserProfileMemory = vi.fn();
+    const onClearUserProfileMemory = vi.fn();
+    const { container, getByText } = render(
+      <ModelSettings
+        labels={labels}
+        modelSettings={{ provider: "openai", model: "gpt-4.1", apiKey: "", apiKeyReference: "default", baseUrl: "" }}
+        userProfileMemorySummary={{
+          factCount: 3,
+          topTags: ["memory", "ui"],
+          updatedAt: "2026-06-05T10:00:00.000Z",
+          facts: [{
+            id: "history:memory",
+            text: "UserProfileMemory preference",
+            tags: ["memory"],
+            source: "history",
+            confidence: 0.82,
+            hitCount: 2,
+            evidence: [{
+              title: "Profile task",
+              snippet: "The user asked to refine profile memory.",
+            }],
+          }],
+        }}
+        onRebuildUserProfileMemory={onRebuildUserProfileMemory}
+        onClearUserProfileMemory={onClearUserProfileMemory}
+      />,
+    );
+
+    fireEvent.click(container.querySelector(".javis-settings-trigger")!);
+    fireEvent.click(getByText(labels.privacySecuritySettings));
+
+    expect(getByText("侧写记忆")).toBeTruthy();
+    expect(getByText("memory / ui")).toBeTruthy();
+    expect(getByText("UserProfileMemory preference")).toBeTruthy();
+    expect(getByText("Profile task")).toBeTruthy();
+    fireEvent.click(getByText("重新提炼"));
+    fireEvent.click(getByText("清空侧写"));
+
+    expect(onRebuildUserProfileMemory).toHaveBeenCalledOnce();
+    expect(onClearUserProfileMemory).toHaveBeenCalledOnce();
+  });
+
   it("runs the API connection test from the AI settings page", async () => {
     const onTestModelConnection = vi.fn().mockResolvedValue("API 连通正常");
     const { container, getByText } = render(

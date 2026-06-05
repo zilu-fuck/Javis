@@ -349,29 +349,70 @@ function createBrowserRouteScore(userGoal: string, urls: string[]): RouteScore {
   return { route: "browser", score, signals };
 }
 
+/**
+ * Score a user goal for Computer Use routing.
+ *
+ * This is used ONLY as a Commander-DAG-failure fallback (in workflow-executor)
+ * and the legacy offline routing path (when commanderTool is unavailable).
+ * It is NOT the primary dispatch mechanism — Commander (LLM) selects the
+ * sub-agent in the normal path. This regex-based check exists solely to
+ * prevent a Commander JSON parse failure from killing an obvious desktop
+ * automation task.
+ */
+const COMPUTER_USE_ACTION_WORDS = /打开|启动|点击|输入|填写|配置|找到|查找|搜索|切换|关闭|open|launch|click|type|fill|configure|find|search|switch|close/i;
+
+/**
+ * Score a user goal for Computer Use routing.
+ *
+ * This is used ONLY as a Commander-DAG-failure fallback (in workflow-executor)
+ * and the legacy offline routing path (when commanderTool is unavailable).
+ * It is NOT the primary dispatch mechanism — Commander (LLM) selects the
+ * sub-agent in the normal path. This regex-based check exists solely to
+ * prevent a Commander JSON parse failure from killing an obvious desktop
+ * automation task.
+ */
 function createComputerUseRouteScore(userGoal: string): RouteScore {
   const signals: string[] = [];
   let score = 0;
 
-  // Layer 1 — Desktop automation verbs (+4)
+  // Layer 1 — Explicit desktop automation verbs (+5, threshold-busting alone)
   if (/操控桌面|操作电脑|控制桌面|桌面自动化|操作\s*GUI|desktop\s*automation|control\s*(?:my\s*)?computer|use\s*(?:my\s*)?computer/i.test(userGoal)) {
     signals.push("desktop-automation-verb");
+    score += 5;
+  }
+
+  // Layer 2 — Natural-language desktop task patterns (+4)
+  // “帮我在电脑上...” / “用桌面打开...” / “在桌面上...”
+  if (/帮我(?:在电脑上|操作桌面|用桌面|打开电脑)|在电脑上帮我|用桌面自动化|通过桌面|在桌面|用桌面(?:搜索|找|打开|点击|启动|操作|切换|输入|发送)/i.test(userGoal)) {
+    signals.push("natural-desktop-task");
     score += 4;
   }
 
-  // Layer 2 — App name + action word combo (+4)
-  // Requires BOTH an app name AND an action word to avoid false positives
-  const appNames = /VS\s*Code|Excel|Word|Chrome|Edge|Firefox|计算器|记事本|画图|文件资源管理器|Notion|PowerPoint|Outlook|浏览器|设置|Settings|Calculator|Notepad|Paint|File\s*Explorer/i;
-  const actionWords = /打开|启动|点击|输入|填写|配置|open|launch|click|type|fill|configure/i;
+  // Layer 3 — App name + action combo (+4)
+  // Requires BOTH an app name AND an action verb to avoid false positives
+  const appNames = /VS\s*Code|Visual\s*Studio|Excel|Word|Chrome|Edge|Firefox|计算器|记事本|画图|文件资源管理器|Notion|PowerPoint|Outlook|浏览器|设置|Settings|Calculator|Notepad|Paint|File\s*Explorer|Explorer|任务管理器|Task\s*Manager|控制面板|Control\s*Panel|命令提示符|cmd|PowerShell|终端|Terminal/i;
+  const actionWords = COMPUTER_USE_ACTION_WORDS;
   if (appNames.test(userGoal) && actionWords.test(userGoal)) {
     signals.push("app-name-with-action");
     score += 4;
   }
 
-  // Layer 3 — Desktop/window keywords (+2)
-  if (/桌面|窗口|屏幕|任务栏|开始菜单|系统托盘|desktop|window|screen|taskbar|start\s*menu|system\s*tray/i.test(userGoal)) {
-    signals.push("desktop-keyword");
-    score += 2;
+  // Layer 4 — Messaging/IM app automation (+4)
+  // QQ/WeChat/DingTalk with send/find/contact intent — common desktop task
+  const messagingApps = /QQ|WeChat|微信|企业微信|钉钉|DingTalk|Telegram|Discord|飞书/i;
+  const messagingActions = /打开|启动|发送|发消息|找到|联系|准备发送|给.*发|聊天|消息|open|launch|send\s+message|find.*contact/i;
+  if (messagingApps.test(userGoal) && messagingActions.test(userGoal)) {
+    signals.push("messaging-app-automation");
+    score += 4;
+  }
+
+  // Layer 5 — Desktop/window UI keywords with action context (+3)
+  // Only fires when paired with an action verb (not just mentioning “window”)
+  const desktopUiKeywords = /桌面|窗口|屏幕|任务栏|开始菜单|系统托盘|desktop|window|screen|taskbar|start\s*menu|system\s*tray/i;
+  const hasActionContext = COMPUTER_USE_ACTION_WORDS;
+  if (desktopUiKeywords.test(userGoal) && hasActionContext.test(userGoal)) {
+    signals.push("desktop-ui-with-action");
+    score += 5;
   }
 
   return { route: "computer-use", score, signals };

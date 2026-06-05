@@ -1011,12 +1011,54 @@ fn encode_bgra_png(bgra: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
         };
         rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], alpha]);
     }
+    let (rgba, width, height) = crop_transparent_rgba(&rgba, width, height);
 
     let mut png = Vec::new();
     image::codecs::png::PngEncoder::new(&mut png)
         .write_image(&rgba, width, height, image::ExtendedColorType::Rgba8)
         .ok()?;
     Some(png)
+}
+
+#[cfg(target_os = "windows")]
+fn crop_transparent_rgba(rgba: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0;
+    let mut max_y = 0;
+    let mut found = false;
+
+    for y in 0..height {
+        for x in 0..width {
+            let alpha_index = ((y * width + x) as usize) * 4 + 3;
+            if rgba.get(alpha_index).copied().unwrap_or(0) > 8 {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+                found = true;
+            }
+        }
+    }
+
+    if !found {
+        return (rgba.to_vec(), width, height);
+    }
+
+    let cropped_width = max_x - min_x + 1;
+    let cropped_height = max_y - min_y + 1;
+    if cropped_width == width && cropped_height == height {
+        return (rgba.to_vec(), width, height);
+    }
+
+    let mut cropped = Vec::with_capacity((cropped_width * cropped_height * 4) as usize);
+    for y in min_y..=max_y {
+        let start = ((y * width + min_x) as usize) * 4;
+        let end = start + (cropped_width as usize) * 4;
+        cropped.extend_from_slice(&rgba[start..end]);
+    }
+
+    (cropped, cropped_width, cropped_height)
 }
 
 #[cfg(target_os = "windows")]

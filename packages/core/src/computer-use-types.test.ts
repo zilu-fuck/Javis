@@ -90,6 +90,59 @@ describe("parseModelAction", () => {
     expect(result).toEqual({ tool: "computer.wait", params: { ms: 1000 } });
   });
 
+  it("normalizes common parameter aliases before validation", () => {
+    const clickRaw = JSON.stringify({
+      observation: "Target button found",
+      action: { tool: "computer.click", params: { left: 100, top: 200 } },
+      target: "Click the target",
+      confidence: "high",
+    });
+    expect(parseModelAction(clickRaw)).toEqual({ tool: "computer.click", params: { x: 100, y: 200 } });
+
+    const focusRaw = JSON.stringify({
+      observation: "Target window found",
+      action: { tool: "computer.focusWindow", params: { windowHandle: 12345 } },
+      target: "Focus the target window",
+      confidence: "high",
+    });
+    expect(parseModelAction(focusRaw)).toEqual({ tool: "computer.focusWindow", params: { handle: 12345 } });
+
+    const waitRaw = JSON.stringify({
+      observation: "Need to pause",
+      action: { tool: "computer.wait", params: { durationMs: 250 } },
+      target: "Wait briefly",
+      confidence: "medium",
+    });
+    expect(parseModelAction(waitRaw)).toEqual({ tool: "computer.wait", params: { ms: 250 } });
+  });
+
+  it("parses UI Automation actions", () => {
+    const inspectRaw = JSON.stringify({
+      observation: "A target window is available",
+      action: { tool: "computer.inspectUi", params: { hwnd: 12345, depth: 3 } },
+      target: "Read UI controls",
+      confidence: "medium",
+    });
+    expect(parseModelAction(inspectRaw)).toEqual({
+      tool: "computer.inspectUi",
+      params: { windowHandle: 12345, maxDepth: 3 },
+    });
+
+    const invokeRaw = JSON.stringify({
+      observation: "A Save button exists in the UI tree",
+      action: {
+        tool: "computer.invokeUi",
+        params: { selector: { windowHandle: 12345, automationId: "saveButton" } },
+      },
+      target: "Invoke Save",
+      confidence: "high",
+    });
+    expect(parseModelAction(invokeRaw)).toEqual({
+      tool: "computer.invokeUi",
+      params: { selector: { windowHandle: 12345, automationId: "saveButton" } },
+    });
+  });
+
   it("returns null on completion signal", () => {
     const raw = JSON.stringify({
       observation: "Goal achieved",

@@ -9,6 +9,20 @@ CAPABILITIES:
 - Capture screenshots of the desktop or specific windows
 - Move the mouse, click, type text, press key combinations, scroll
 - List and focus application windows
+- Inspect UI Automation control trees and invoke/set controls without moving the physical mouse when selectors are available
+
+TOOLS:
+- computer.screenshot({ windowHandle?, method? }) for visual context
+- computer.inspectUi({ windowHandle, maxDepth?, maxNodes? }) for UIA control trees
+- computer.invokeUi({ selector }) for buttons/menu items with automationId or name
+- computer.setUiValue({ selector, value }) for editable controls
+- computer.focusWindow({ handle }) to bring a window forward
+- computer.moveMouse({ x, y }) to move the pointer
+- computer.click({ x, y, button?, clickCount? }) to click a point
+- computer.type({ text, clearBefore? }) to enter text
+- computer.keyCombo({ keys }) to press shortcuts
+- computer.scroll({ x, y, delta, direction? }) to scroll
+- computer.wait({ ms }) to pause or signal completion
 
 WORKFLOW (one step at a time):
 1. Analyze the screenshot: what windows are open? What buttons/inputs/menus are visible?
@@ -31,6 +45,8 @@ RULES:
 - Output exactly ONE action per turn — the loop handles iteration
 - Click on the CENTER of target elements, not edges
 - When typing, first click the target input field, then use computer.type in the next step
+- Prefer computer.inspectUi for a known windowHandle, then computer.invokeUi or computer.setUiValue when the target has a clear automationId/name selector
+- Selector format for invokeUi/setUiValue: { "selector": { "windowHandle": number, "automationId"?: string, "name"?: string, "controlType"?: string } }. Use automationId (most reliable) or name from the inspectUi tree output. Avoid controlType — it is localized and may not match across different Windows languages.
 - Never interact with system dialogs (UAC, Task Manager, Registry Editor, system settings)
 - Never automate browser-internal pages (chrome://, about:, edge://)
 - Never input passwords, credit card numbers, or authentication tokens
@@ -63,6 +79,8 @@ RULES:
 - 每次只输出一步——循环负责迭代
 - 点击目标元素的中心，不点边缘
 - 输入文字前先点击目标输入框，下一步再用 computer.type
+- 优先用 computer.inspectUi 查看已知窗口的 UI 控件树（windowHandle从listWindows获取），当目标有明确的 automationId 或 name 时使用 computer.invokeUi / computer.setUiValue，避免移动物理鼠标
+- invokeUi/setUiValue 的 selector 格式：{ "selector": { "windowHandle": 数值, "automationId"?: 字符串, "name"?: 字符串 } }。优先用 automationId（最可靠）或 name。不要用 controlType——它在不同语言的 Windows 上会本地化导致不匹配
 - 绝不操作系统对话框（UAC、任务管理器、注册表编辑器、系统设置）
 - 绝不操作浏览器内部页面
 - 绝不输入密码、信用卡号或认证令牌
@@ -87,6 +105,9 @@ export const COMPUTER_USE_OUTPUT_SCHEMA = {
             "computer.keyCombo",
             "computer.scroll",
             "computer.focusWindow",
+            "computer.inspectUi",
+            "computer.invokeUi",
+            "computer.setUiValue",
             "computer.screenshot",
             "computer.wait",
           ],

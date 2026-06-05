@@ -1,5 +1,12 @@
 import { type FormEvent, useRef } from "react";
-import type { WorkbenchFileEntry, WorkbenchLocale, WorkbenchModelConfiguration, WorkbenchPermissionDecision, WorkbenchTask } from "../types";
+import type {
+  WorkbenchFileEntry,
+  WorkbenchLocale,
+  WorkbenchModelConfiguration,
+  WorkbenchNewChatRecommendations,
+  WorkbenchPermissionDecision,
+  WorkbenchTask,
+} from "../types";
 import { NewChat } from "./NewChat";
 import { ThreadView } from "./ThreadView";
 
@@ -9,6 +16,7 @@ interface ChatViewProps {
   currentWorkspacePath: string;
   locale: WorkbenchLocale;
   modelConfiguration?: WorkbenchModelConfiguration;
+  newChatRecommendations?: WorkbenchNewChatRecommendations;
   recentWorkspacePaths: string[];
   activeComposeMode?: "chat" | "project";
   userDocuments?: WorkbenchFileEntry[];
@@ -21,6 +29,8 @@ interface ChatViewProps {
   onAskUserAnswer?: (answer: string) => void;
   onRetryTask?: () => void;
   onStopTask?: () => void;
+  onSelectAgent?: (agentId: string) => void;
+  selectedAgentId?: string;
   onSubmitGoal: (goal?: string, workspacePath?: string, scheduledTaskId?: string, attachments?: File[], imageDataUrls?: string[]) => void;
 }
 
@@ -30,6 +40,7 @@ export function ChatView({
   currentWorkspacePath,
   locale,
   modelConfiguration,
+  newChatRecommendations,
   recentWorkspacePaths,
   activeComposeMode,
   userDocuments,
@@ -42,6 +53,8 @@ export function ChatView({
   onAskUserAnswer,
   onRetryTask,
   onStopTask,
+  onSelectAgent,
+  selectedAgentId,
   onSubmitGoal,
 }: ChatViewProps) {
   const labels = locale.labels;
@@ -77,6 +90,7 @@ export function ChatView({
         currentWorkspacePath={currentWorkspacePath}
         draftGoal={draftGoal}
         labels={labels}
+        recommendations={newChatRecommendations}
         onBrowseWorkspacePath={onBrowseWorkspacePath}
         onDeleteRecentWorkspacePath={onDeleteRecentWorkspacePath}
         onDraftGoalChange={onDraftGoalChange}
@@ -105,6 +119,8 @@ export function ChatView({
       onAskUserAnswer={onAskUserAnswer}
       onRetryTask={onRetryTask}
       onStopTask={onStopTask}
+      onSelectAgent={onSelectAgent}
+      selectedAgentId={selectedAgentId}
       onSubmit={handleSubmit}
       onSubmitWithAttachments={handleSubmitWithAttachments}
       onUseWorkspacePath={onUseWorkspacePath}

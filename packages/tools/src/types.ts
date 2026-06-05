@@ -1,5 +1,15 @@
 export type PermissionLevel = "read" | "preview" | "confirmed_write" | "dangerous";
 
+/** Risk classification for confirmed_write operations. */
+export type WriteRiskLevel = "safe" | "risky" | "dangerous";
+
+/** Human-readable risk labels (bilingual). */
+export const WRITE_RISK_LABELS: Record<WriteRiskLevel, { en: string; zhCN: string }> = {
+  safe:       { en: "Safe",       zhCN: "安全" },
+  risky:      { en: "Risky",      zhCN: "需注意" },
+  dangerous:  { en: "Dangerous",  zhCN: "危险" },
+};
+
 export interface MarkdownDocument {
   path: string;
   modifiedAt: string;
@@ -29,6 +39,8 @@ export interface DryRunSummary {
 export interface PermissionRequest {
   id: string;
   level: Exclude<PermissionLevel, "read">;
+  /** Risk classification for confirmed_write operations. */
+  writeRiskLevel?: WriteRiskLevel;
   title: string;
   reason: string;
   dryRun: DryRunSummary;
@@ -489,33 +501,199 @@ export interface TrustedComputerApp {
   trustedAt: string;
 }
 
+export interface ComputerScreenshotRequest {
+  windowHandle?: number;
+  region?: { x: number; y: number; width: number; height: number };
+  method?: "auto" | "bitblt" | "printWindow";
+}
+
+export interface ComputerScreenshotResult {
+  dataUrl: string;
+  width: number;
+  height: number;
+  capturedAt: string;
+  methodUsed?: "bitblt" | "printWindow";
+}
+
+export interface ComputerListWindowsRequest {}
+
+export interface ComputerListWindowsResult {
+  windows: Array<{
+    handle: number;
+    title: string;
+    className: string;
+    rect: { x: number; y: number; width: number; height: number };
+    isVisible: boolean;
+    isForeground: boolean;
+  }>;
+}
+
+export interface ComputerFocusWindowRequest {
+  handle: number;
+  approvalId?: string;
+  taskId?: string;
+}
+
+export interface ComputerFocusWindowResult {
+  focused: boolean;
+  title: string;
+}
+
+export interface ComputerMoveMouseRequest {
+  x: number;
+  y: number;
+  speed?: "instant" | "linear";
+  durationMs?: number;
+  approvalId?: string;
+  taskId?: string;
+}
+
+export interface ComputerMoveMouseResult {
+  x: number;
+  y: number;
+}
+
+export interface ComputerClickRequest {
+  x: number;
+  y: number;
+  button?: "left" | "right" | "middle";
+  clickCount?: 1 | 2;
+  approvalId?: string;
+  taskId?: string;
+}
+
+export interface ComputerClickResult {
+  x: number;
+  y: number;
+  clicked: boolean;
+}
+
+export interface ComputerTypeRequest {
+  text: string;
+  delayMs?: number;
+  clearBefore?: boolean;
+  approvalId?: string;
+  taskId?: string;
+}
+
+export interface ComputerTypeResult {
+  typed: boolean;
+  length: number;
+}
+
+export interface ComputerKeyComboRequest {
+  keys: string[];
+  pressDurationMs?: number;
+  approvalId?: string;
+  taskId?: string;
+}
+
+export interface ComputerKeyComboResult {
+  combo: string;
+  executed: boolean;
+}
+
+export interface ComputerScrollRequest {
+  x: number;
+  y: number;
+  delta: number;
+  direction?: "vertical" | "horizontal";
+  approvalId?: string;
+  taskId?: string;
+}
+
+export interface ComputerScrollResult {
+  x: number;
+  y: number;
+  delta: number;
+}
+
+export interface ComputerWaitRequest {
+  ms: number;
+}
+
+export interface ComputerWaitResult {
+  waited: number;
+}
+
+export interface UiElementSelector {
+  windowHandle: number;
+  automationId?: string;
+  name?: string;
+  controlType?: string;
+}
+
+export interface ComputerInspectUiRequest {
+  windowHandle: number;
+  maxDepth?: number;
+  maxNodes?: number;
+}
+
+export interface ComputerInspectUiResult {
+  tree: string;
+  nodeCount: number;
+}
+
+export interface ComputerInvokeUiRequest {
+  selector: UiElementSelector;
+  approvalId?: string;
+  taskId?: string;
+}
+
+export interface ComputerInvokeUiResult {
+  invoked: boolean;
+  matchedName: string;
+  matchedAutomationId: string;
+}
+
+export interface ComputerSetUiValueRequest {
+  selector: UiElementSelector;
+  value: string;
+  approvalId?: string;
+  taskId?: string;
+}
+
+export interface ComputerSetUiValueResult {
+  set: boolean;
+  matchedName: string;
+  matchedAutomationId: string;
+}
+
+export interface ComputerUseApprovalRequest {
+  tool: string;
+  params: Record<string, unknown>;
+}
+
+export interface ComputerUseApprovalResult {
+  approvalId: string;
+  taskId?: string;
+}
+
 export interface ComputerTool {
   searchLocalDocuments(request: {
     query: string;
     maxResults?: number;
   }): Promise<ComputerFileCandidate[]>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  screenshot(...args: any[]): Promise<any>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  listWindows(...args: any[]): Promise<any>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  focusWindow(...args: any[]): Promise<any>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  moveMouse(...args: any[]): Promise<any>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  click(...args: any[]): Promise<any>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  type(...args: any[]): Promise<any>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  keyCombo(...args: any[]): Promise<any>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  scroll(...args: any[]): Promise<any>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  wait(...args: any[]): Promise<any>;
+  screenshot(request: ComputerScreenshotRequest): Promise<ComputerScreenshotResult>;
+  listWindows(request: ComputerListWindowsRequest): Promise<ComputerListWindowsResult>;
+  inspectUi(request: ComputerInspectUiRequest): Promise<ComputerInspectUiResult>;
+  focusWindow(request: ComputerFocusWindowRequest): Promise<ComputerFocusWindowResult>;
+  moveMouse(request: ComputerMoveMouseRequest): Promise<ComputerMoveMouseResult>;
+  click(request: ComputerClickRequest): Promise<ComputerClickResult>;
+  type(request: ComputerTypeRequest): Promise<ComputerTypeResult>;
+  keyCombo(request: ComputerKeyComboRequest): Promise<ComputerKeyComboResult>;
+  scroll(request: ComputerScrollRequest): Promise<ComputerScrollResult>;
+  invokeUi(request: ComputerInvokeUiRequest): Promise<ComputerInvokeUiResult>;
+  setUiValue(request: ComputerSetUiValueRequest): Promise<ComputerSetUiValueResult>;
+  wait(request: ComputerWaitRequest): Promise<ComputerWaitResult>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   openPath(...args: any[]): Promise<any>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  approveAction?(...args: any[]): Promise<any>;
+  approveAction?(
+    action: ComputerUseApprovalRequest,
+    approvalId: string,
+    taskId: string,
+    sessionWide?: boolean,
+  ): Promise<ComputerUseApprovalResult>;
 }
 
 export interface ScheduledTaskDraft {
@@ -594,6 +772,8 @@ export interface VisionTool {
 export interface ToolDescriptor {
   name: string;
   permissionLevel: PermissionLevel;
+  /** Risk classification for confirmed_write tools. */
+  writeRiskLevel?: WriteRiskLevel;
   summary: string;
   /** Capability tags this tool fulfills. Used for agent dispatch. */
   capabilityTags: string[];

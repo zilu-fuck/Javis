@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { openPath as openNativePath } from "@tauri-apps/plugin-opener";
 import {
   buildCommanderPlanPrompt,
   buildCommanderReplanPrompt,
@@ -43,7 +44,33 @@ import type {
   CodeApplyResult,
   CodeProposedEdit,
   CodeReviewPreview,
+  ComputerClickRequest,
+  ComputerClickResult,
   ComputerFileCandidate,
+  ComputerFocusWindowRequest,
+  ComputerFocusWindowResult,
+  ComputerInspectUiRequest,
+  ComputerInspectUiResult,
+  ComputerInvokeUiRequest,
+  ComputerInvokeUiResult,
+  ComputerKeyComboRequest,
+  ComputerKeyComboResult,
+  ComputerListWindowsRequest,
+  ComputerListWindowsResult,
+  ComputerMoveMouseRequest,
+  ComputerMoveMouseResult,
+  ComputerScreenshotRequest,
+  ComputerScreenshotResult,
+  ComputerScrollRequest,
+  ComputerScrollResult,
+  ComputerSetUiValueRequest,
+  ComputerSetUiValueResult,
+  ComputerTypeRequest,
+  ComputerTypeResult,
+  ComputerUseApprovalRequest,
+  ComputerUseApprovalResult,
+  ComputerWaitRequest,
+  ComputerWaitResult,
   CommanderPlanRequest,
   CommanderPlanResult,
   FileOrganizationExecution,
@@ -85,7 +112,6 @@ import {
   type ModelSettings,
 } from "./model-settings";
 import { scanUserDocuments, classifyDocuments } from "./local-knowledge";
-import { preprocessChineseInput } from "./input-preprocessor";
 import {
   createScheduledTask,
 } from "./scheduled-tasks";
@@ -96,6 +122,7 @@ import {
   deleteWorkspaceDefinition,
 } from "./workspace-loader";
 import type { WorkspaceDefinition } from "@javis/core";
+import { runComputerUseLoop } from "./computer-use-loop";
 
 const WORKSPACE_SCAFFOLD_SCHEMA_JSON = JSON.stringify({
   id: "kebab-case-id",
@@ -351,6 +378,20 @@ function getDefaultAgentModelRequirements(kind: string): ModelRequirements | und
   return _agentRegistryCache.getModelRequirements(kind);
 }
 
+function requireComputerApprovalId(value: string | undefined, toolName: string): string {
+  if (!value) {
+    throw new Error(`${toolName} requires a confirmed Computer Use approval id.`);
+  }
+  return value;
+}
+
+function requireComputerTaskId(value: string | undefined, toolName: string): string {
+  if (!value) {
+    throw new Error(`${toolName} requires a task id for Computer Use approval.`);
+  }
+  return value;
+}
+
 export function createJavisRuntime({
   getWorkspacePath,
   modelSettings,
@@ -550,28 +591,105 @@ export function createJavisRuntime({
             extension: entry.extension,
           }));
       },
+      screenshot: (request: ComputerScreenshotRequest) =>
+        invoke<ComputerScreenshotResult>("computer_screenshot", { request }),
+      listWindows: (request: ComputerListWindowsRequest) =>
+        invoke<ComputerListWindowsResult>("computer_list_windows", { request }),
+      inspectUi: (request: ComputerInspectUiRequest) =>
+        invoke<ComputerInspectUiResult>("computer_inspect_ui", { request }),
+      focusWindow: (request: ComputerFocusWindowRequest) => {
+        const { approvalId, taskId, ...actionRequest } = request;
+        return invoke<ComputerFocusWindowResult>("computer_focus_window", {
+          approvalId: requireComputerApprovalId(approvalId, "computer.focusWindow"),
+          taskId: requireComputerTaskId(taskId, "computer.focusWindow"),
+          request: actionRequest,
+        });
+      },
+      moveMouse: (request: ComputerMoveMouseRequest) => {
+        const { approvalId, taskId, ...actionRequest } = request;
+        return invoke<ComputerMoveMouseResult>("computer_move_mouse", {
+          approvalId: requireComputerApprovalId(approvalId, "computer.moveMouse"),
+          taskId: requireComputerTaskId(taskId, "computer.moveMouse"),
+          request: actionRequest,
+        });
+      },
+      click: (request: ComputerClickRequest) => {
+        const { approvalId, taskId, ...actionRequest } = request;
+        return invoke<ComputerClickResult>("computer_click", {
+          approvalId: requireComputerApprovalId(approvalId, "computer.click"),
+          taskId: requireComputerTaskId(taskId, "computer.click"),
+          request: actionRequest,
+        });
+      },
+      type: (request: ComputerTypeRequest) => {
+        const { approvalId, taskId, ...actionRequest } = request;
+        return invoke<ComputerTypeResult>("computer_type", {
+          approvalId: requireComputerApprovalId(approvalId, "computer.type"),
+          taskId: requireComputerTaskId(taskId, "computer.type"),
+          request: actionRequest,
+        });
+      },
+      keyCombo: (request: ComputerKeyComboRequest) => {
+        const { approvalId, taskId, ...actionRequest } = request;
+        return invoke<ComputerKeyComboResult>("computer_key_combo", {
+          approvalId: requireComputerApprovalId(approvalId, "computer.keyCombo"),
+          taskId: requireComputerTaskId(taskId, "computer.keyCombo"),
+          request: actionRequest,
+        });
+      },
+      scroll: (request: ComputerScrollRequest) => {
+        const { approvalId, taskId, ...actionRequest } = request;
+        return invoke<ComputerScrollResult>("computer_scroll", {
+          approvalId: requireComputerApprovalId(approvalId, "computer.scroll"),
+          taskId: requireComputerTaskId(taskId, "computer.scroll"),
+          request: actionRequest,
+        });
+      },
+      invokeUi: (request: ComputerInvokeUiRequest) => {
+        const { approvalId, taskId, ...actionRequest } = request;
+        return invoke<ComputerInvokeUiResult>("computer_invoke_ui", {
+          approvalId: requireComputerApprovalId(approvalId, "computer.invokeUi"),
+          taskId: requireComputerTaskId(taskId, "computer.invokeUi"),
+          request: actionRequest,
+        });
+      },
+      setUiValue: (request: ComputerSetUiValueRequest) => {
+        const { approvalId, taskId, ...actionRequest } = request;
+        return invoke<ComputerSetUiValueResult>("computer_set_ui_value", {
+          approvalId: requireComputerApprovalId(approvalId, "computer.setUiValue"),
+          taskId: requireComputerTaskId(taskId, "computer.setUiValue"),
+          request: actionRequest,
+        });
+      },
+      wait: (request: ComputerWaitRequest) =>
+        invoke<ComputerWaitResult>("computer_wait", { request }),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      screenshot: async (..._args: any[]) => ({}),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      listWindows: async (..._args: any[]) => ({}),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      focusWindow: async (..._args: any[]) => ({}),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      moveMouse: async (..._args: any[]) => ({}),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      click: async (..._args: any[]) => ({}),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      type: async (..._args: any[]) => ({}),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      keyCombo: async (..._args: any[]) => ({}),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      scroll: async (..._args: any[]) => ({}),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      wait: async (..._args: any[]) => ({}),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      openPath: async (..._args: any[]) => ({}),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      approveAction: async (..._args: any[]) => ({} as { approvalId: string; taskId?: string }),
+      openPath: async (...args: any[]) => {
+        const [first] = args;
+        const path = typeof first === "string"
+          ? first
+          : (first?.path as string | undefined) ?? (first?.targetPath as string | undefined);
+        if (!path) {
+          throw new Error("computer.openPath requires a path.");
+        }
+        await openNativePath(path);
+        return { opened: true, path };
+      },
+      approveAction: async (
+        action: ComputerUseApprovalRequest,
+        approvalId: string,
+        taskId: string,
+        sessionWide?: boolean,
+      ): Promise<ComputerUseApprovalResult> => {
+        await invoke("computer_approve_action", {
+          approvalId,
+          taskId,
+          toolName: action.tool,
+          paramsJson: JSON.stringify(action.params),
+          sessionWide: sessionWide ?? false,
+        });
+        return { approvalId, taskId };
+      },
     },
     visionTool: {
       analyze: async (request: VisionAnalyzeRequest) => {
@@ -717,7 +835,7 @@ export function createJavisRuntime({
           "You are creating a Javis workspace definition. Output valid JSON matching this schema:",
           WORKSPACE_SCAFFOLD_SCHEMA_JSON,
           "",
-          "Available agent kinds: commander, file, shell, browser, computer, scheduler, research, code, verifier, chinese-reviewer",
+          "Available agent kinds: commander, file, shell, browser, computer, scheduler, research, code, verifier",
           "Available built-in view types: chat, automated, skills, apps, documents, gallery, computer",
           "Sidebar groups: primary (top), knowledge (local data), custom (below)",
           "",
@@ -762,11 +880,11 @@ export function createJavisRuntime({
       getContent: (request: BrowserGetContentRequest) =>
         invoke<BrowserGetContentResult>("browser_get_content", { request }),
       click: (request: BrowserClickRequest) =>
-        invoke<BrowserClickResult>("browser_click", { request }),
+        invoke<BrowserClickResult>("browser_click", { request: withBrowserWriteContext(request) }),
       type: (request: BrowserTypeRequest) =>
-        invoke<BrowserTypeResult>("browser_type", { request }),
+        invoke<BrowserTypeResult>("browser_type", { request: withBrowserWriteContext(request) }),
       evaluate: (request: BrowserEvaluateRequest) =>
-        invoke<BrowserEvaluateResult>("browser_evaluate", { request }),
+        invoke<BrowserEvaluateResult>("browser_evaluate", { request: withBrowserWriteContext(request) }),
       runTest: (request: BrowserRunTestRequest) =>
         invoke<BrowserRunTestResult>("browser_run_test", { request }),
       extractLinks: async (request: BrowserExtractLinksRequest): Promise<BrowserExtractLinksResult> => {
@@ -774,7 +892,7 @@ export function createJavisRuntime({
         const safeSelector = JSON.stringify(selector);
         const js = `Array.from(document.querySelectorAll(${safeSelector})).slice(0, ${maxResults}).map(el => ({href: el.href || '', text: (el.textContent || '').trim().slice(0, 200), tag: el.tagName?.toLowerCase(), rel: el.rel || ''}))`;
         const result = await invoke<BrowserEvaluateResult>("browser_evaluate", {
-          request: { expression: js },
+          request: withBrowserWriteContext({ expression: js }),
         });
         if (!result.result) {
           return { links: [], count: 0 };
@@ -801,7 +919,7 @@ export function createJavisRuntime({
         const filesJson = JSON.stringify(files);
         const js = `(async () => { const input = document.querySelector(${safeSelector}); if (!input) return JSON.stringify({success:false,error:'input not found'}); const dt = new DataTransfer(); const files = ${filesJson}; for (const f of files) { const resp = await fetch(f.dataUrl); const blob = await resp.blob(); const file = new File([blob], f.name, {type: blob.type}); dt.items.add(file); } input.files = dt.files; input.dispatchEvent(new Event('change', {bubbles: true})); input.dispatchEvent(new Event('input', {bubbles: true})); return JSON.stringify({success:true,count:files.length}); })()`;
         const result = await invoke<BrowserEvaluateResult>("browser_evaluate", {
-          request: { expression: js },
+          request: withBrowserWriteContext({ expression: js }),
         });
         if (!result.result) {
           return { success: false, uploadedCount: 0, message: "Browser evaluate returned no result" };
@@ -934,7 +1052,6 @@ export function createJavisRuntime({
     ): Promise<CommanderDagPlan> => {
       const registry = createDefaultAgentRegistry();
       const availableAgents = demoAgents
-        .filter((a) => a.kind !== "chinese-reviewer")
         .map((a) => {
           const reg = registry.findByKind(a.kind);
           return {
@@ -983,6 +1100,14 @@ export function createJavisRuntime({
         return { title: "Recovery failed", reasoning: "", steps: [] };
       }
     },
+    computerUseLoopRunner: ({ userGoal, computerTool, approveAction, onStep }) =>
+      runComputerUseLoop({
+        modelProvider: providerFor("computer"),
+        computerTool,
+        userGoal,
+        approveAction,
+        onStep,
+      }),
   });
 
   return {
@@ -1002,18 +1127,9 @@ export function createJavisRuntime({
       providerCache.set("fallback", fallbackProvider);
     },
     start(userGoal: string, options?: Parameters<typeof runtime.start>[1]) {
-      void (async () => {
-        sharedContext.clear();
-        sharedContext.set(sharedContext.resolveKey(CONTEXT_KEYS.USER_GOAL, "zh-CN"), userGoal);
-        const result = await preprocessChineseInput(userGoal, providerFor("commander"));
-        if (result) {
-          sharedContext.set(
-            sharedContext.resolveKey(CONTEXT_KEYS.PREPROCESSED_INPUT, "zh-CN"),
-            result,
-          );
-        }
-        runtime.start(userGoal, options);
-      })();
+      sharedContext.clear();
+      sharedContext.set(sharedContext.resolveKey(CONTEXT_KEYS.USER_GOAL, "zh-CN"), userGoal);
+      runtime.start(userGoal, options);
     },
     stopTask() {
       void invoke("cancel_all_model_streams");
@@ -1587,6 +1703,17 @@ function stringValue(value: unknown, fallback: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function withBrowserWriteContext<T extends object>(request: T): T & {
+  sessionId: string;
+  permissionMode: "full_access";
+} {
+  return {
+    ...request,
+    sessionId: "agent-runtime-browser",
+    permissionMode: "full_access",
+  };
 }
 
 function proposeCodeEditWithModelProvider(

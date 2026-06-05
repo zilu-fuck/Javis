@@ -73,6 +73,8 @@ impl Drop for BrowserState {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrowserNavigateRequest {
     url: String,
+    session_id: Option<String>,
+    allow_localhost: Option<bool>,
     wait_for_selector: Option<String>,
     timeout_ms: Option<u64>,
 }
@@ -97,6 +99,8 @@ pub(crate) struct BrowserGetContentRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrowserClickRequest {
+    session_id: Option<String>,
+    permission_mode: Option<String>,
     selector: String,
     button: Option<String>,
     click_count: Option<u32>,
@@ -106,6 +110,8 @@ pub(crate) struct BrowserClickRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrowserTypeRequest {
+    session_id: Option<String>,
+    permission_mode: Option<String>,
     selector: String,
     text: String,
     delay: Option<u32>,
@@ -116,6 +122,8 @@ pub(crate) struct BrowserTypeRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrowserEvaluateRequest {
+    session_id: Option<String>,
+    permission_mode: Option<String>,
     expression: String,
     timeout_ms: Option<u64>,
 }
@@ -189,6 +197,16 @@ pub(crate) struct BrowserRunTestResult {
     stdout: String,
     stderr: String,
     duration_ms: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserSnapshotResult {
+    url: String,
+    title: String,
+    load_state: String,
+    content: String,
+    screenshot_data_url: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -510,6 +528,10 @@ fn send_request(
 // ---------------------------------------------------------------------------
 
 fn validate_url(url: &str) -> Result<(), JavisError> {
+    validate_url_with_localhost(url, false)
+}
+
+fn validate_url_with_localhost(url: &str, allow_localhost: bool) -> Result<(), JavisError> {
     let lower = url.to_ascii_lowercase();
 
     // Only allow http and https schemes.
@@ -541,13 +563,37 @@ fn validate_url(url: &str) -> Result<(), JavisError> {
     // Percent-decode the host to prevent `http://127%2e0%2e0%2e1`.
     let host = percent_decode_host(raw_host);
 
-    if is_private_host(&host) {
+    if is_private_host(&host) && !(allow_localhost && is_localhost(&host)) {
         return Err(JavisError::Validation(format!(
             "URLs targeting private/loopback addresses are not allowed: {host}"
         )));
     }
 
     Ok(())
+}
+
+fn is_localhost(host: &str) -> bool {
+    matches!(host.to_ascii_lowercase().as_str(), "localhost" | "127.0.0.1" | "::1" | "[::1]")
+}
+
+fn ensure_browser_write_permission(session_id: Option<&str>, permission_mode: Option<&str>) -> Result<(), JavisError> {
+    if session_id.unwrap_or_default().trim().is_empty() {
+        return Err(JavisError::Validation(
+            "Browser write operation requires a session id.".to_string(),
+        ));
+    }
+    match permission_mode {
+        Some("confirmed_write") | Some("full_access") => Ok(()),
+        Some("read_only") => Err(JavisError::Validation(
+            "Browser write operation requires confirmed write permission.".to_string(),
+        )),
+        Some(other) => Err(JavisError::Validation(format!(
+            "Unknown browser permission mode: {other}"
+        ))),
+        None => Err(JavisError::Validation(
+            "Browser write operation requires a permission mode.".to_string(),
+        )),
+    }
 }
 
 /// Simple percent-decoding for the host portion (handles %2E → '.', etc.).
@@ -629,7 +675,12 @@ pub(crate) fn browser_navigate(
     state: tauri::State<'_, BrowserState>,
     request: BrowserNavigateRequest,
 ) -> Result<BrowserNavigateResult, String> {
-    validate_url(&request.url).map_err(|e| e.to_string())?;
+    let _ = request.session_id.as_deref();
+    if request.allow_localhost.unwrap_or(false) {
+        validate_url_with_localhost(&request.url, true).map_err(|e| e.to_string())?;
+    } else {
+        validate_url(&request.url).map_err(|e| e.to_string())?;
+    }
 
     let params = serde_json::json!({
         "url": request.url,
@@ -659,6 +710,55 @@ pub(crate) fn browser_navigate(
             .or_else(|| result.get("load_state"))
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
+            .to_string(),
+    })
+}
+
+#[tauri::command]
+pub(crate) fn browser_snapshot(
+    state: tauri::State<'_, BrowserState>,
+) -> Result<BrowserSnapshotResult, String> {
+    let content_result = send_request(
+        &state,
+        "getContent",
+        serde_json::json!({
+            "selector": serde_json::Value::Null,
+            "format": "text",
+            "maxLength": 4000,
+        }),
+    )
+    .map_err(|e| e.to_string())?;
+    let screenshot_result = send_request(
+        &state,
+        "screenshot",
+        serde_json::json!({
+            "selector": serde_json::Value::Null,
+            "fullPage": false,
+        }),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(BrowserSnapshotResult {
+        url: content_result
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        title: content_result
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        load_state: "snapshot".to_string(),
+        content: content_result
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        screenshot_data_url: screenshot_result
+            .get("dataUrl")
+            .or_else(|| screenshot_result.get("data_url"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
             .to_string(),
     })
 }
@@ -736,6 +836,8 @@ pub(crate) fn browser_click(
     state: tauri::State<'_, BrowserState>,
     request: BrowserClickRequest,
 ) -> Result<BrowserClickResult, String> {
+    ensure_browser_write_permission(request.session_id.as_deref(), request.permission_mode.as_deref())
+        .map_err(|e| e.to_string())?;
     let params = serde_json::json!({
         "selector": request.selector,
         "button": request.button,
@@ -768,6 +870,8 @@ pub(crate) fn browser_type(
     state: tauri::State<'_, BrowserState>,
     request: BrowserTypeRequest,
 ) -> Result<BrowserTypeResult, String> {
+    ensure_browser_write_permission(request.session_id.as_deref(), request.permission_mode.as_deref())
+        .map_err(|e| e.to_string())?;
     let params = serde_json::json!({
         "selector": request.selector,
         "text": request.text,
@@ -801,6 +905,8 @@ pub(crate) fn browser_evaluate(
     state: tauri::State<'_, BrowserState>,
     request: BrowserEvaluateRequest,
 ) -> Result<BrowserEvaluateResult, String> {
+    ensure_browser_write_permission(request.session_id.as_deref(), request.permission_mode.as_deref())
+        .map_err(|e| e.to_string())?;
     let params = serde_json::json!({
         "expression": request.expression,
         "timeoutMs": request.timeout_ms,
@@ -954,6 +1060,13 @@ mod tests {
     fn validate_url_rejects_localhost() {
         assert!(validate_url("http://localhost").is_err());
         assert!(validate_url("http://localhost:3000").is_err());
+    }
+
+    #[test]
+    fn validate_url_allows_localhost_only_with_explicit_flag() {
+        assert!(validate_url_with_localhost("http://localhost:3000", true).is_ok());
+        assert!(validate_url_with_localhost("http://127.0.0.1:1421", true).is_ok());
+        assert!(validate_url_with_localhost("http://192.168.1.1", true).is_err());
     }
 
     #[test]

@@ -45,7 +45,7 @@ import {
   type WorkbenchWorkflowId,
   type WorkbenchWorkflowStep,
 } from "./workflows";
-import { extractUrls } from "./routing";
+import { extractUrls, isComputerUseGoal } from "./routing";
 import type { CommanderDagStep, CommanderDagPlan } from "./commander-plan-schema";
 import type { AgentCapabilityTag } from "./agent-capability";
 import {
@@ -56,6 +56,12 @@ import {
 import { runAgentReActLoop, type AgentReActDecision, type AgentReActTool } from "./agent-react-loop";
 import type { ReActDecisionRequest } from "./agent-react-decider";
 import { createAskUserRequest } from "./ask-user";
+import {
+  createPendingPermissionRequest,
+  resolvePermissionRequest,
+  type PermissionDecision,
+} from "./permission-state";
+import type { ComputerUseStep } from "./computer-use-types";
 
 interface ReadCurrentProjectWorkflowOptions {
   controller: FlowController;
@@ -1297,6 +1303,85 @@ async function dispatchToolByName(
         maxResults: (input.maxResults as number) ?? 20,
       });
     }
+    case "computer.openPath": {
+      if (!tools.computerTool) throw new Error("computer.openPath tool not available");
+      return tools.computerTool.openPath(input);
+    }
+    case "computer.screenshot": {
+      if (!tools.computerTool) throw new Error("computer.screenshot tool not available");
+      return tools.computerTool.screenshot({
+        windowHandle: input.windowHandle as number | undefined,
+        region: input.region as { x: number; y: number; width: number; height: number } | undefined,
+      });
+    }
+    case "computer.listWindows": {
+      if (!tools.computerTool) throw new Error("computer.listWindows tool not available");
+      return tools.computerTool.listWindows({});
+    }
+    case "computer.wait": {
+      if (!tools.computerTool) throw new Error("computer.wait tool not available");
+      return tools.computerTool.wait({ ms: (input.ms as number) ?? 500 });
+    }
+    case "computer.focusWindow": {
+      if (!tools.computerTool) throw new Error("computer.focusWindow tool not available");
+      return tools.computerTool.focusWindow({
+        handle: input.handle as number,
+        approvalId: input.approvalId as string | undefined,
+        taskId: input.taskId as string | undefined,
+      });
+    }
+    case "computer.moveMouse": {
+      if (!tools.computerTool) throw new Error("computer.moveMouse tool not available");
+      return tools.computerTool.moveMouse({
+        x: input.x as number,
+        y: input.y as number,
+        speed: input.speed as "instant" | "linear" | undefined,
+        durationMs: input.durationMs as number | undefined,
+        approvalId: input.approvalId as string | undefined,
+        taskId: input.taskId as string | undefined,
+      });
+    }
+    case "computer.click": {
+      if (!tools.computerTool) throw new Error("computer.click tool not available");
+      return tools.computerTool.click({
+        x: input.x as number,
+        y: input.y as number,
+        button: input.button as "left" | "right" | "middle" | undefined,
+        clickCount: input.clickCount as 1 | 2 | undefined,
+        approvalId: input.approvalId as string | undefined,
+        taskId: input.taskId as string | undefined,
+      });
+    }
+    case "computer.type": {
+      if (!tools.computerTool) throw new Error("computer.type tool not available");
+      return tools.computerTool.type({
+        text: input.text as string,
+        delayMs: input.delayMs as number | undefined,
+        clearBefore: input.clearBefore as boolean | undefined,
+        approvalId: input.approvalId as string | undefined,
+        taskId: input.taskId as string | undefined,
+      });
+    }
+    case "computer.keyCombo": {
+      if (!tools.computerTool) throw new Error("computer.keyCombo tool not available");
+      return tools.computerTool.keyCombo({
+        keys: input.keys as string[],
+        pressDurationMs: input.pressDurationMs as number | undefined,
+        approvalId: input.approvalId as string | undefined,
+        taskId: input.taskId as string | undefined,
+      });
+    }
+    case "computer.scroll": {
+      if (!tools.computerTool) throw new Error("computer.scroll tool not available");
+      return tools.computerTool.scroll({
+        x: input.x as number,
+        y: input.y as number,
+        delta: input.delta as number,
+        direction: input.direction as "vertical" | "horizontal" | undefined,
+        approvalId: input.approvalId as string | undefined,
+        taskId: input.taskId as string | undefined,
+      });
+    }
     // ── Scheduler tools ───────────────────────────────────────────────────
     case "scheduler.createTask": {
       if (!tools.schedulerTool) throw new Error("scheduler.createTask tool not available");
@@ -1356,6 +1441,229 @@ export async function executeCapabilityStep(
   return { output, toolName: descriptor.name };
 }
 
+const COMPUTER_USE_CAPABILITIES = new Set([
+  "desktop_screenshot",
+  "desktop_list_windows",
+  "desktop_focus",
+  "desktop_input",
+]);
+
+function isComputerUseCapability(capability: string | undefined): boolean {
+  return capability !== undefined && COMPUTER_USE_CAPABILITIES.has(capability);
+}
+
+function isComputerUseDagStep(step: {
+  assignedAgentKind: string;
+  toolName?: string;
+  capability?: string;
+  requiredCapabilities?: string[];
+}): boolean {
+  return step.assignedAgentKind === "computer" &&
+    (
+      step.toolName?.startsWith("computer.") ||
+      isComputerUseCapability(step.capability) ||
+      (step.requiredCapabilities ?? []).some(isComputerUseCapability)
+    );
+}
+
+function getComputerUseStepIndex(step: unknown): number {
+  if (
+    step &&
+    typeof step === "object" &&
+    "stepIndex" in step &&
+    typeof (step as { stepIndex?: unknown }).stepIndex === "number"
+  ) {
+    return (step as { stepIndex: number }).stepIndex;
+  }
+  return 0;
+}
+
+function summarizeComputerUseAction(action: { tool: string; params: object }): string {
+  const params = action.params as Record<string, unknown>;
+  switch (action.tool) {
+    case "computer.screenshot":
+      return typeof params.windowHandle === "string"
+        ? `截取窗口 ${params.windowHandle} 的画面`
+        : "截取当前桌面画面";
+    case "computer.inspectUi":
+      return typeof params.windowHandle === "string"
+        ? `读取窗口 ${params.windowHandle} 的控件结构`
+        : "读取当前窗口的控件结构";
+    case "computer.wait":
+      return `等待 ${typeof params.ms === "number" ? params.ms : 0} 毫秒`;
+    case "computer.focusWindow":
+      return `聚焦窗口 ${String(params.handle ?? params.windowHandle ?? "目标窗口")}`;
+    case "computer.moveMouse":
+      return `移动鼠标到 (${String(params.x ?? "?")}, ${String(params.y ?? "?")})`;
+    case "computer.click":
+      return `点击屏幕坐标 (${String(params.x ?? "?")}, ${String(params.y ?? "?")})`;
+    case "computer.type": {
+      const text = typeof params.text === "string" ? params.text : "";
+      return `输入 ${text.length} 个字符`;
+    }
+    case "computer.keyCombo": {
+      const keys = Array.isArray(params.keys) ? params.keys.map(String).join(" + ") : String(params.keys ?? "快捷键");
+      return `按下组合键 ${keys}`;
+    }
+    case "computer.scroll":
+      return `在 (${String(params.x ?? "?")}, ${String(params.y ?? "?")}) 滚动 ${String(params.delta ?? params.deltaY ?? "?")}`;
+    case "computer.invokeUi":
+      return `调用控件${formatComputerUseSelector(params.selector)}`;
+    case "computer.setUiValue":
+      return `设置控件${formatComputerUseSelector(params.selector)}的文本`;
+    default:
+      return `执行桌面操作 ${action.tool}`;
+  }
+}
+
+function formatComputerUseSelector(selector: unknown): string {
+  if (!selector || typeof selector !== "object") return "";
+  const record = selector as Record<string, unknown>;
+  const label = record.name ?? record.automationId ?? record.text ?? record.controlType;
+  return label ? `“${String(label)}”` : "";
+}
+
+function summarizeComputerUseStep(step: ComputerUseStep): string {
+  const index = getComputerUseStepIndex(step) + 1;
+  const actionSummary = summarizeComputerUseAction(step.action);
+  const target = step.target?.trim() ? `目标：${step.target.trim()}。` : "";
+  const observation = step.observation?.trim() ? `观察：${step.observation.trim()}。` : "";
+  const error = step.error?.trim() ? `结果：${step.error.trim()}` : "结果：已执行。";
+  return `第 ${index} 步：${actionSummary}。${target}${observation}${error}`;
+}
+
+function createFallbackComputerUseDagPlan(
+  userGoal: string,
+  failureReason: string,
+): CommanderDagPlan {
+  return {
+    title: "桌面自动化操控",
+    reasoning: `动态计划解析失败（${failureReason}），改用稳定的桌面自动化流程完成目标。`,
+    steps: [{
+      id: "computer-use-loop",
+      title: "观察桌面并逐步完成用户目标",
+      assignedAgentKind: "computer",
+      capability: "desktop_input",
+      requiredCapabilities: ["desktop_screenshot", "desktop_input"],
+      dependsOn: [],
+      inputContextKeys: ["userGoal"],
+      outputContextKey: "computerUseSteps",
+      successCriteria: `桌面自动化流程完成用户请求：${userGoal}`,
+    }],
+  };
+}
+
+function normalizeCommanderDagPlan(plan: CommanderPlanResult): CommanderDagPlan {
+  return {
+    title: plan.title,
+    reasoning: plan.reasoning,
+    steps: plan.steps.map((step) => ({
+      ...step,
+      capability: (step as CommanderDagStep).capability,
+      requiredCapabilities: step.requiredCapabilities ?? [],
+      dependsOn: step.dependsOn ?? [],
+    })),
+  };
+}
+
+async function requestComputerUseApproval(options: {
+  action: { tool: string; params: Record<string, unknown> };
+  stepId: string;
+  taskId: string;
+  computerTool: ComputerTool;
+  getSnapshot: () => TaskSnapshot;
+  emitSnapshot: (snapshot: TaskSnapshot) => void;
+  emitEvent: (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number];
+  agentTracker: ReturnType<typeof createAgentStateTracker>;
+  setPendingPermissionHandler: (
+    requestId: string,
+    handler: ((decision: string) => void | Promise<void>) | undefined,
+  ) => void;
+}): Promise<{ approvalId: string; taskId?: string; sessionWide?: boolean }> {
+  const {
+    action,
+    stepId,
+    taskId,
+    computerTool,
+    getSnapshot,
+    emitSnapshot,
+    emitEvent,
+    agentTracker,
+    setPendingPermissionHandler,
+  } = options;
+
+  if (!computerTool.approveAction) {
+    throw new Error("Computer Use native approval bridge is not available.");
+  }
+
+  const actionSummary = summarizeComputerUseAction(action);
+  const permissionRequest = createPendingPermissionRequest({
+    id: `${taskId}-${stepId}-${action.tool.replace(/[^a-z0-9]+/gi, "-")}-approval-${Date.now()}`,
+    level: "confirmed_write",
+    title: "需要确认桌面操作",
+    reason: `Javis 准备${actionSummary}。`,
+    dryRun: {
+      operation: action.tool,
+      affectedPaths: [{
+        source: "本机桌面",
+        target: actionSummary,
+        action: "modify",
+      }],
+      riskSummary: "该操作会影响当前桌面或目标应用，请确认后再执行。",
+      reversible: false,
+    },
+  });
+
+  return new Promise((resolve, reject) => {
+    emitSnapshot({
+      ...getSnapshot(),
+      status: "waiting_permission",
+      commanderMessage: `需要你确认：${actionSummary}。`,
+      permissionRequest,
+      agents: agentTracker.getSnapshots(),
+      logs: appendLog(getSnapshot(), emitEvent({
+        kind: "permission.requested",
+        taskId,
+        request: permissionRequest,
+      })),
+    });
+
+    setPendingPermissionHandler(permissionRequest.id, async (decision) => {
+      try {
+        const resolvedRequest = resolvePermissionRequest(permissionRequest, decision as PermissionDecision);
+        setPendingPermissionHandler(permissionRequest.id, undefined);
+
+        emitSnapshot({
+          ...getSnapshot(),
+          permissionRequest: resolvedRequest,
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "permission.resolved",
+            taskId,
+            requestId: permissionRequest.id,
+            decision: decision === "denied" ? "denied" : "approved",
+          })),
+        });
+
+        if (decision === "denied") {
+          reject(new Error("用户已拒绝桌面操作。"));
+          return;
+        }
+
+        const sessionWide = decision === "approved_always";
+        const approval = await computerTool.approveAction!(
+          action,
+          permissionRequest.id,
+          taskId,
+          sessionWide,
+        );
+        resolve({ ...approval, sessionWide });
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
+}
+
 const COMMANDER_DAG_WORKFLOW_ID = "commander-dag";
 
 // ── Commander DAG Task Executor ────────────────────────────────────────────
@@ -1399,7 +1707,7 @@ interface CommanderDagTaskOptions {
   computerUseLoopRunner?: (options: {
     userGoal: string;
     computerTool: ComputerTool;
-    approveAction: (action: { tool: string; params: Record<string, unknown> }) => Promise<{ approvalId: string; taskId?: string }>;
+    approveAction: (action: { tool: string; params: Record<string, unknown> }) => Promise<{ approvalId: string; taskId?: string; sessionWide?: boolean }>;
     onStep?: (step: unknown) => void;
   }) => Promise<unknown[]>;
 }
@@ -1426,6 +1734,7 @@ export async function runCommanderDagTask({
   userGoal,
   reactDecideNext,
   replanDag,
+  computerUseLoopRunner,
 }: CommanderDagTaskOptions) {
   const { emit, getSnapshot, wait } = controller;
   const context = createSharedTaskContext({ userGoal, taskId });
@@ -1434,7 +1743,7 @@ export async function runCommanderDagTask({
     if (imagePath) context.set("imagePath", imagePath);
   }
   const agentTracker = createAgentStateTracker(
-    demoAgents.filter((a) => a.kind !== "chinese-reviewer"),
+    demoAgents,
   );
   const taskEventBus = createTaskEventBus();
   const eventLogs: TaskSnapshot["logs"] = [];
@@ -1446,6 +1755,8 @@ export async function runCommanderDagTask({
     taskEventBus.emit(event);
     return eventLogs[eventLogs.length - 1] as TaskSnapshot["logs"][number];
   }
+
+  const taskStartedAt = Date.now();
 
   const createdLog = emitEvent({ kind: "task.created", taskId });
   agentTracker.setState("agent-commander", {
@@ -1464,6 +1775,12 @@ export async function runCommanderDagTask({
     agents: agentTracker.getSnapshots(),
     tokenUsage: createEmptyTokenUsageSummary(),
     logs: [createdLog],
+    executionTrace: {
+      taskId,
+      startedAt: new Date(taskStartedAt).toISOString(),
+      totalWallTimeMs: 0,
+      steps: [],
+    },
   });
 
   await wait();
@@ -1471,30 +1788,56 @@ export async function runCommanderDagTask({
   try {
     // Phase 1: Commander generates DAG plan
     const availableAgents = getAvailableAgentsForPlanning();
-    const dagPlan = await commanderTool.plan({
-      userGoal,
-      availableAgents,
-      availableTools: initialToolDescriptors.map((td) => ({
+    const availableTools = initialToolDescriptors.map((td) => ({
         name: td.name,
         permissionLevel: td.permissionLevel,
         summary: td.summary,
         capabilityTags: [...td.capabilityTags],
         ownerAgentKinds: [...td.ownerAgentKinds],
-      })),
-      workflowId: COMMANDER_DAG_WORKFLOW_ID,
-    });
+    }));
+    let dagPlan: CommanderDagPlan;
+    try {
+      dagPlan = normalizeCommanderDagPlan(await commanderTool.plan({
+        userGoal,
+        availableAgents,
+        availableTools,
+        workflowId: COMMANDER_DAG_WORKFLOW_ID,
+      }));
+    } catch (planError) {
+      // Commander JSON parse failure fallback: only kick in when the goal
+      // clearly looks like desktop automation. This regex-based check is
+      // NOT the primary dispatch — Commander (LLM) normally selects the
+      // sub-agent. This exists so a malformed JSON response doesn't kill
+      // an obvious desktop-automation task.
+      if (!isComputerUseGoal(userGoal)) {
+        throw planError;
+      }
+      const detail = planError instanceof Error ? planError.message : String(planError);
+      dagPlan = createFallbackComputerUseDagPlan(userGoal, detail);
+      emitSnapshot({
+        ...getSnapshot(),
+        commanderMessage: dagPlan.reasoning,
+        logs: appendLog(getSnapshot(), emitEvent({
+          kind: "tool.completed",
+          taskId,
+          toolName: "commander.plan.fallback",
+          detail: `Commander JSON plan failed; using Computer Use fallback plan. ${detail}`,
+        })),
+      });
+    }
 
     if (!dagPlan.steps || dagPlan.steps.length === 0) {
       throw new Error("Commander plan returned no steps.");
     }
 
     // Only proceed with capability dispatch if at least one step has
-    // a capability or requiredCapabilities tag. Otherwise fall through
-    // to the legacy hardcoded routing in start().
+    // a capability tag, requiredCapabilities, or is assigned to a
+    // non-Commander agent (who executes tools with implicit capabilities).
     const hasCapabilitySteps = dagPlan.steps.some(
       (s) => (s as CommanderDagStep).capability ||
            (s.requiredCapabilities?.length ?? 0) > 0 ||
-           s.toolName === "commander.askUser",
+           s.toolName === "commander.askUser" ||
+           s.assignedAgentKind !== "commander",
     );
     if (!hasCapabilitySteps) {
       throw new Error(
@@ -1598,6 +1941,7 @@ export async function runCommanderDagTask({
           userGoal: `${userGoal}\n\nUser clarification: ${askResult}`,
           reactDecideNext,
           replanDag,
+          computerUseLoopRunner,
         });
       }
 
@@ -1729,7 +2073,108 @@ export async function runCommanderDagTask({
         return { output: context.get((dagStep as CommanderDagStep).outputContextKey ?? "clarification") };
       }
 
+      const capability = (dagStep as CommanderDagStep).capability
+        ?? (dagStep.requiredCapabilities?.length ? dagStep.requiredCapabilities[0] : undefined);
       const agentId = `agent-${dagStep.assignedAgentKind}`;
+
+      if (isComputerUseDagStep(dagStep) || isComputerUseCapability(capability)) {
+        if (!computerUseLoopRunner) {
+          throw new Error("Computer Use loop runner is not available.");
+        }
+        if (!computerTool) {
+          throw new Error("Computer tool is not available.");
+        }
+        if (!controller.setPendingPermissionHandler) {
+          throw new Error("Computer Use requires a permission handler for confirmed-write actions.");
+        }
+
+        if (agentTracker.getState(agentId)) {
+          agentTracker.setState(agentId, {
+            status: "running",
+            task: dagStep.title,
+            currentStepId: dagStep.id,
+          });
+        }
+
+        emitSnapshot({
+          ...getSnapshot(),
+          plan: markStep(getSnapshot().plan, dagStep.id, "running"),
+          agents: agentTracker.getSnapshots(),
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "tool.planned",
+            taskId,
+            toolName: "computer-use.loop",
+            detail: `步骤 ${dagStep.id}：开始通过截图和控件信息推进桌面操作。`,
+          })),
+        });
+
+        const steps = await computerUseLoopRunner({
+          userGoal,
+          computerTool,
+          approveAction: (action) =>
+            requestComputerUseApproval({
+              action,
+              stepId: dagStep.id,
+              taskId,
+              computerTool,
+              getSnapshot,
+              emitSnapshot,
+              emitEvent,
+              agentTracker,
+              setPendingPermissionHandler: controller.setPendingPermissionHandler!,
+            }),
+          onStep: (step) => {
+            const computerStep = step as ComputerUseStep;
+            context.set((dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`, computerStep);
+            const stepSummary = summarizeComputerUseStep(computerStep);
+            emitSnapshot({
+              ...getSnapshot(),
+              status: "running",
+              commanderMessage: stepSummary,
+              plan: markStep(getSnapshot().plan, dagStep.id, "running"),
+              agents: agentTracker.getSnapshots(),
+              logs: appendLog(getSnapshot(), emitEvent({
+                kind: "tool.completed",
+                taskId,
+                toolName: computerStep.action.tool,
+                detail: stepSummary,
+              })),
+            });
+          },
+        });
+        const deniedStep = steps.find((step) =>
+          step &&
+          typeof step === "object" &&
+          "error" in step &&
+          /denied by user|permission denied/i.test(String((step as { error?: unknown }).error ?? "")),
+        );
+        if (deniedStep) {
+          throw new Error("用户已拒绝桌面操作。");
+        }
+
+        completedSteps.add(dagStep.id);
+        context.set((dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`, steps);
+        if (agentTracker.getState(agentId)) {
+          agentTracker.setState(agentId, {
+            status: "completed",
+            task: `已完成：${dagStep.title}`,
+          });
+        }
+        emitSnapshot({
+          ...getSnapshot(),
+          commanderMessage: `桌面操作流程完成，共执行 ${steps.length} 步。`,
+          plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
+          agents: agentTracker.getSnapshots(),
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "tool.completed",
+            taskId,
+            toolName: "computer-use.loop",
+            detail: `步骤 ${dagStep.id}：桌面操作流程完成，共执行 ${steps.length} 步。`,
+          })),
+        });
+        return { output: steps };
+      }
+
       if (agentTracker.getState(agentId)) {
         agentTracker.setState(agentId, {
           status: "running",
@@ -1737,9 +2182,6 @@ export async function runCommanderDagTask({
           currentStepId: dagStep.id,
         });
       }
-
-      const capability = (dagStep as CommanderDagStep).capability
-        ?? (dagStep.requiredCapabilities?.length ? dagStep.requiredCapabilities[0] : undefined);
 
       emitSnapshot({
         ...getSnapshot(),
@@ -2006,6 +2448,8 @@ export async function runCommanderDagTask({
       task: allCompleted ? "Task conclusion written" : "Some steps failed",
     });
 
+    const now = Date.now();
+    const trace = getSnapshot().executionTrace;
     emitSnapshot({
       ...getSnapshot(),
       title: dagPlan.title || "Task completed",
@@ -2019,6 +2463,20 @@ export async function runCommanderDagTask({
       verificationSummary: allCompleted
         ? `verified: ${execution.completedStepIds.length}/${execution.completedStepIds.length + (execution.abandonedStepIds?.length ?? 0)} steps completed via Commander DAG.`
         : `warn: ${execution.completedStepIds.length}/${execution.completedStepIds.length + (execution.abandonedStepIds?.length ?? 0)} steps completed.`,
+      executionTrace: trace ? {
+        ...trace,
+        completedAt: new Date(now).toISOString(),
+        totalWallTimeMs: now - taskStartedAt,
+        steps: dagPlan.steps.map((s) => ({
+          stepId: s.id,
+          agentKind: s.assignedAgentKind,
+          toolName: s.toolName,
+          startedAt: trace.startedAt,
+          completedAt: new Date(now).toISOString(),
+          wallTimeMs: 0,
+          status: (allCompleted ? "completed" : "failed") as "completed" | "failed" | "skipped",
+        })),
+      } : undefined,
     });
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);

@@ -30,10 +30,7 @@ export type AgentCapabilityTag =
   | "image_scan"         // Scan user image files
   | "directory_list"     // List local directories
   | "schedule_create"    // Create durable local scheduled tasks
-  | "schedule_update"    // Update existing scheduled tasks
-  | "schedule_delete"    // Delete scheduled tasks
   | "evidence_check"     // Check collected evidence against success criteria
-  | "language_review"    // Review output for language naturalness
   | "browser_navigate"   // Navigate to URLs, extract content, take screenshots
   | "browser_interact"   // Click, type, evaluate in page context
   | "browser_test"       // Run Playwright test scripts
@@ -174,8 +171,8 @@ const DEFAULT_MODEL_REQUIREMENTS: ModelRequirements = {
  * Tags are resolved from ToolDescriptor.capabilityTags — the single source
  * of truth is `initialToolDescriptors` in @javis/tools.
  *
- * Agent-kind-based tags are only used for agents without tools
- * (Chinese Reviewer) or for cross-cutting capabilities (Research's synthesis).
+ * Agent-kind-based tags are only used for cross-cutting capabilities
+ * (Research's synthesis tag).
  */
 let _toolCapabilityIndex: Map<string, string[]> | undefined;
 
@@ -201,10 +198,7 @@ function inferCapabilityTags(agent: Agent): AgentCapabilityTag[] {
     }
   }
 
-  // Agents with no tools that still need capability tags
-  if (agent.kind === "chinese-reviewer") {
-    tags.add("language_review");
-  }
+  // Research additionally gets synthesis capability
   if (agent.kind === "research") {
     tags.add("synthesis");
   }

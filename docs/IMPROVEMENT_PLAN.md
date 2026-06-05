@@ -1,6 +1,6 @@
 # Improvement Plan
 
-Last updated: 2026-05-31
+Last updated: 2026-06-05
 
 > **Companion documents**:
 > - [MULTI_AGENT_FIX_PLAN.md](./MULTI_AGENT_FIX_PLAN.md) — ALL 9 FIXES RESOLVED as of 2026-05-26.
@@ -29,7 +29,7 @@ single-task serial role routing than true multi-agent collaboration.
 - Browser Agent: definition + 7 tools + Rust backend (browser.rs) + Playwright sidecar complete. 590 tests green.
 - File Write: file_write.rs + file.planWriteText / file.writeText tools exist; confirmed-write wiring in progress.
 - Agent optimization: 11/13 issues resolved (safePlanWorkflow dynamic, commander.synthesize, PDF tools→File Agent, Verifier planning tag removed, Workspace Agent created, SchedulerTool extended, Computer prefersVision+retool, shell.run removed, minContextTokens→8K, Browser workflow currentSupport→partial).
-- 555 total tests (430 Vitest + 125 Rust).
+- 740 total tests (564 Vitest + 176 Rust).
 
 The goal is not to add parallelism early. The safer path is to first strengthen
 the foundation: modular runtime boundaries, reusable write approval, durable

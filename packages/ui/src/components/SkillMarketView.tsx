@@ -28,11 +28,48 @@ interface SkillMarketViewProps {
 }
 
 const PERMISSION_COLORS: Record<string, string> = {
-  read: "#4ade80",
-  preview: "#facc15",
-  confirmed_write: "#fb923c",
-  dangerous: "#f87171",
+  read: "#2f9b68",
+  preview: "#d89a12",
+  confirmed_write: "#f07d18",
+  dangerous: "#d84f45",
 };
+
+const PERMISSION_LABELS: Record<string, string> = {
+  read: "READ",
+  preview: "PREVIEW",
+  confirmed_write: "CONFIRMED_WRITE",
+  dangerous: "DANGEROUS",
+};
+
+const SKILL_ICON_RULES: Array<[string, string]> = [
+  ["plan", "calendar"],
+  ["askuser", "user"],
+  ["verify", "shield"],
+  ["check", "shield"],
+  ["markdown", "document"],
+  ["scan", "document"],
+  ["classify", "folder"],
+  ["pdf", "document"],
+  ["write", "edit"],
+  ["shell", "terminal"],
+  ["project", "code"],
+  ["inspect", "code"],
+  ["code", "code"],
+  ["web", "link"],
+  ["image", "image"],
+  ["installed", "download"],
+  ["directory", "folder"],
+  ["openpath", "folder"],
+  ["screenshot", "camera"],
+  ["window", "window"],
+  ["mouse", "mouse"],
+  ["click", "mouse"],
+  ["type", "keyboard"],
+  ["keycombo", "keyboard"],
+  ["keyboard", "keyboard"],
+  ["agent", "user"],
+  ["mcp", "server"],
+];
 
 const HOT_SKILLS = [
   { title: "RAG 知识库", description: "文档索引、问答和引用追踪" },
@@ -106,6 +143,7 @@ export function SkillMarketView({
                 onClick={onTranslateToChinese}
                 type="button"
               >
+                <span aria-hidden="true" />
                 {translationStatus === "translating"
                   ? "翻译中..."
                   : translationStatus === "error"
@@ -192,9 +230,12 @@ export function SkillMarketView({
                     })}
                     type="button"
                   >
-                    <div className="javis-skill-card-header">
-                      <span className="javis-skill-name">{result.title}</span>
-                      <span className="javis-skill-owner-chip">{result.source}</span>
+                    <div className="javis-skill-card-top">
+                      <span className="javis-skill-card-icon icon-skills" aria-hidden="true" />
+                      <div className="javis-skill-card-header">
+                        <span className="javis-skill-name">{result.title}</span>
+                        <span className="javis-skill-owner-chip">{result.source}</span>
+                      </div>
                     </div>
                     <p className="javis-skill-desc">{result.description}</p>
                   </button>
@@ -309,8 +350,7 @@ function formatTranslationError(error: string): string {
   if (lower.includes("model") && (lower.includes("not found") || lower.includes("404"))) {
     return "模型不存在，请检查模型名称配置";
   }
-  // Truncate long errors
-  return error.length > 60 ? error.slice(0, 57) + "..." : error;
+  return error.length > 60 ? `${error.slice(0, 57)}...` : error;
 }
 
 function SkillCard({
@@ -321,21 +361,22 @@ function SkillCard({
   labels: WorkbenchLocale["labels"];
 }) {
   const permColor = skill.permissionLevel
-    ? PERMISSION_COLORS[skill.permissionLevel] ?? "#94a3b8"
+    ? PERMISSION_COLORS[skill.permissionLevel] ?? "#6f7d75"
     : undefined;
+  const icon = getSkillIconName(skill);
 
   return (
     <div className="javis-skill-card">
-      <div className="javis-skill-card-header">
-        <span className="javis-skill-name">{skill.name}</span>
-        {skill.permissionLevel && (
-          <span
-            className="javis-skill-perm-chip"
-            style={{ backgroundColor: permColor }}
-          >
-            {skill.permissionLevel}
-          </span>
-        )}
+      <div className="javis-skill-card-top">
+        <span className={`javis-skill-card-icon icon-${icon}`} aria-hidden="true" />
+        <div className="javis-skill-card-header">
+          <span className="javis-skill-name">{skill.name}</span>
+          {skill.permissionLevel && (
+            <span className="javis-skill-perm-chip" style={{ color: permColor }}>
+              {PERMISSION_LABELS[skill.permissionLevel] ?? skill.permissionLevel}
+            </span>
+          )}
+        </div>
       </div>
       <p className="javis-skill-desc">{skill.description}</p>
       {skill.category === "tool" && skill.agentOwners.length > 0 ? (
@@ -355,4 +396,10 @@ function SkillCard({
       ) : null}
     </div>
   );
+}
+
+function getSkillIconName(skill: WorkbenchSkillEntry): string {
+  const haystack = `${skill.id} ${skill.name} ${skill.description} ${skill.category}`.toLowerCase();
+  const match = SKILL_ICON_RULES.find(([keyword]) => haystack.includes(keyword));
+  return match?.[1] ?? (skill.category === "agent" ? "user" : skill.category === "mcp" ? "server" : "skills");
 }

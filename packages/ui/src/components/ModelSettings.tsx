@@ -6,6 +6,7 @@ import type {
   WorkbenchModelProfile,
   WorkbenchModelSettings,
   WorkbenchModelSlot,
+  WorkbenchUserProfileMemorySummary,
 } from "../types";
 import type { ProviderCatalogEntry } from "../types";
 
@@ -19,9 +20,12 @@ interface ModelSettingsProps {
   labels: WorkbenchLocale["labels"];
   modelSettings: WorkbenchModelSettings;
   modelConfiguration?: WorkbenchModelConfiguration;
+  userProfileMemorySummary?: WorkbenchUserProfileMemorySummary | null;
   onModelSettingsChange?: (settings: WorkbenchModelSettings) => void;
   onTestModelConnection?: (settings: WorkbenchModelSettings) => Promise<string | void>;
   onModelConfigurationChange?: (config: WorkbenchModelConfiguration) => void;
+  onRebuildUserProfileMemory?: () => void;
+  onClearUserProfileMemory?: () => void;
   /** Save a per-provider API key to the OS credential store immediately. */
   onSaveProviderApiKey?: (keyReference: string, apiKey: string) => Promise<void>;
   /**
@@ -151,9 +155,12 @@ export function ModelSettings({
   labels,
   modelSettings,
   modelConfiguration,
+  userProfileMemorySummary,
   onModelSettingsChange,
   onTestModelConnection,
   onModelConfigurationChange,
+  onRebuildUserProfileMemory,
+  onClearUserProfileMemory,
   onSaveProviderApiKey,
   onFetchProviderModels,
   providerCatalog,
@@ -1000,6 +1007,14 @@ export function ModelSettings({
                       </div>
                   </>
                 </section>
+              ) : activeTab === "privacy" ? (
+                <ProfileMemorySettings
+                  isZh={isZh}
+                  labels={labels}
+                  summary={userProfileMemorySummary}
+                  onClear={onClearUserProfileMemory}
+                  onRebuild={onRebuildUserProfileMemory}
+                />
               ) : (
                 <SettingsPlaceholder
                   labels={labels}
@@ -1088,6 +1103,102 @@ function SettingsPlaceholder({
       </div>
     </section>
   );
+}
+
+function ProfileMemorySettings({
+  isZh,
+  labels,
+  summary,
+  onClear,
+  onRebuild,
+}: {
+  isZh: boolean;
+  labels: WorkbenchLocale["labels"];
+  summary?: WorkbenchUserProfileMemorySummary | null;
+  onClear?: () => void;
+  onRebuild?: () => void;
+}) {
+  const updatedAt = summary?.updatedAt
+    ? new Date(summary.updatedAt).toLocaleString(isZh ? "zh-CN" : "en-US")
+    : (isZh ? "暂无" : "Not available");
+  const topTags = summary?.topTags.length ? summary.topTags.join(" / ") : (isZh ? "暂无" : "None yet");
+
+  return (
+    <section className="javis-settings-section javis-profile-memory-settings" aria-label={labels.privacySecuritySettings}>
+      <h2>{isZh ? "侧写记忆" : "Profile memory"}</h2>
+      <div className="javis-settings-card">
+        <p>
+          {isZh
+            ? "Javis 会根据历史会话和当前项目生成本地侧写，用来改善新对话推荐。"
+            : "Javis builds a local profile from history and the current workspace to improve new-chat recommendations."}
+        </p>
+        <dl className="javis-profile-memory-stats">
+          <div>
+            <dt>{isZh ? "事实数量" : "Facts"}</dt>
+            <dd>{summary?.factCount ?? 0}</dd>
+          </div>
+          <div>
+            <dt>{isZh ? "主要标签" : "Top tags"}</dt>
+            <dd>{topTags}</dd>
+          </div>
+          <div>
+            <dt>{isZh ? "更新时间" : "Updated"}</dt>
+            <dd>{updatedAt}</dd>
+          </div>
+        </dl>
+        <div className="javis-profile-memory-actions">
+          <button onClick={onRebuild} type="button">
+            {isZh ? "重新提炼" : "Rebuild profile"}
+          </button>
+          <button className="danger" onClick={onClear} type="button">
+            {isZh ? "清空侧写" : "Clear profile"}
+          </button>
+        </div>
+        {summary?.facts?.length ? (
+          <div className="javis-profile-memory-facts">
+            <h3>{isZh ? "侧写事实" : "Profile facts"}</h3>
+            {summary.facts.map((fact) => (
+              <details key={fact.id}>
+                <summary>
+                  <span>{fact.text}</span>
+                  <small>
+                    {profileFactSourceLabel(fact.source, isZh)}
+                    {" · "}
+                    {Math.round(fact.confidence * 100)}
+                    %
+                    {" · "}
+                    {isZh ? `${fact.hitCount} 次` : `${fact.hitCount} hits`}
+                  </small>
+                </summary>
+                <div className="javis-profile-memory-fact-body">
+                  <p>{fact.tags.join(" / ")}</p>
+                  {fact.evidence.length ? (
+                    <ul>
+                      {fact.evidence.map((evidence, index) => (
+                        <li key={`${fact.id}-${index}`}>
+                          <strong>{evidence.title ?? (isZh ? "当前工作区" : "Current workspace")}</strong>
+                          <span>{evidence.snippet}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p>{isZh ? "暂无证据片段" : "No evidence snippets yet."}</p>
+                  )}
+                </div>
+              </details>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function profileFactSourceLabel(source: "history" | "workspace", isZh: boolean): string {
+  if (source === "workspace") {
+    return isZh ? "项目" : "Project";
+  }
+  return isZh ? "历史" : "History";
 }
 
 function buildConfiguredModelOptions(

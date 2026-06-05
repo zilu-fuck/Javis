@@ -98,7 +98,7 @@ describe("AgentRegistry", () => {
     const all = registry.list();
 
     it("has 12 agents registered", () => {
-      expect(all).toHaveLength(12);
+      expect(all).toHaveLength(11);
     });
 
     it("every agent has non-empty capabilityTags", () => {
@@ -129,10 +129,9 @@ describe("AgentRegistry", () => {
   });
 
   describe("capability inference", () => {
-    it("chinese-reviewer has language_review", () => {
+    it("chinese-reviewer has been removed from the agent system", () => {
       const reg = registry.findByKind("chinese-reviewer");
-      expect(reg).toBeDefined();
-      expect(reg!.capabilityTags).toContain("language_review");
+      expect(reg).toBeUndefined();
     });
 
     it("scheduler has schedule_create", () => {

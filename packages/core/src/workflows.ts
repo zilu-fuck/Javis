@@ -585,7 +585,7 @@ export const WORKBENCH_WORKFLOWS: WorkbenchWorkflow[] = [
   },
   {
     id: "computer-use",
-    title: "Desktop Computer Use",
+    title: "桌面自动化操控",
     triggerExamples: [
       "open the calculator",
       "打开计算器",
@@ -593,16 +593,16 @@ export const WORKBENCH_WORKFLOWS: WorkbenchWorkflow[] = [
       "操控桌面打开 Chrome",
       "click the Start menu and search for Notepad",
     ],
-    goal: "Screenshot the desktop, understand the UI visually, and interact with Windows applications via mouse and keyboard to accomplish a user goal.",
+    goal: "通过桌面/窗口截图和控件结构理解界面，并使用鼠标、键盘或 UIA 控件操作完成用户目标。",
     coordinatorAgentKind: "commander",
     participatingAgentKinds: ["commander", "computer", "verifier"],
     currentSupport: "planned",
     safetyNotes: [
-      "All write operations (click, type, keyCombo, scroll, focusWindow) require user approval.",
-      "Dangerous windows (Task Manager, Registry Editor, UAC) are blocked at the Rust layer.",
-      "Dangerous key combos (Win+R, Ctrl+Alt+Del, Alt+F4) are blocked at the Rust layer.",
-      "Screenshot data is kept in memory only — never persisted to disk or logs.",
-      "Approval records expire after 5 minutes to prevent stale approvals.",
+      "所有写入型桌面操作（点击、输入、组合键、滚动、聚焦窗口、调用控件、设置控件值）都需要用户确认。",
+      "危险窗口（任务管理器、注册表编辑器、UAC）会在 Rust 层被拦截。",
+      "危险组合键（Win+R、Ctrl+Alt+Del、Alt+F4）会在 Rust 层被拦截。",
+      "截图数据只保存在内存中，不写入磁盘或日志。",
+      "审批记录 5 分钟后过期，避免旧授权被复用。",
     ],
     steps: [
       createStep(

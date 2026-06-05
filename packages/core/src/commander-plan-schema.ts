@@ -131,7 +131,7 @@ export function buildCommanderPlanPrompt(params: {
     "Rules:",
     "- steps[].id must be kebab-case and unique within the plan.",
     "- steps[].dependsOn lists step IDs this step waits for. Use [] for the first step(s).",
-    "- steps[].capability should be set to the primary capability tag this step fulfills (from the available tools' capabilityTags).",
+    "- steps[].capability MUST be set to the primary capability tag this step fulfills (from the available tools' capabilityTags). Every non-Commander step MUST include capability or requiredCapabilities so the executor can dispatch the correct tool.",
     "- steps[].inputContextKeys lists SharedContext keys this step reads from upstream steps' outputs.",
     "- steps[].outputContextKey is the SharedContext key where this step's result will be stored for downstream steps.",
     "- steps[].assignedAgentKind must match one of the Available agents' kind values.",

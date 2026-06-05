@@ -20,13 +20,13 @@ describe("createSharedTaskContext", () => {
     expect(context.snapshot()).toEqual({});
   });
 
-  it("resolves the preprocessed input context key for later flow consumption", () => {
+  it("resolves a bilingual context key to the zh-CN form", () => {
     const context = createSharedTaskContext();
-    const key = context.resolveKey(CONTEXT_KEYS.PREPROCESSED_INPUT, "zh-CN");
+    const key = context.resolveKey(CONTEXT_KEYS.USER_GOAL, "zh-CN");
 
     context.set(key, { intent: "技术解释" });
 
-    expect(key).toBe("预处理输入");
+    expect(key).toBe("用户目标");
     expect(context.get<{ intent: string }>(key)?.intent).toBe("技术解释");
   });
 });

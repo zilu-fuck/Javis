@@ -51,7 +51,7 @@ export function ChatComposer({
   isStreaming = false,
   labels,
   recentWorkspacePaths,
-  sendButtonClassName,
+  sendButtonClassName = "javis-send-button",
   taskInputPlaceholder,
   showWorkspaceContext = true,
   userDocuments,

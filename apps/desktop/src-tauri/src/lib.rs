@@ -15,6 +15,14 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Manager};
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::FILETIME,
+    System::{
+        SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX},
+        Threading::GetSystemTimes,
+    },
+};
 
 mod streaming;
 mod database;
@@ -30,6 +38,9 @@ mod mcpserv;
 mod scan;
 mod code;
 mod browser;
+mod git;
+mod files;
+mod terminal;
 mod file_write;
 mod computer;
 
@@ -92,6 +103,26 @@ pub(crate) struct ModelUsage {
     total_tokens: u32,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemResourceSnapshot {
+    cpu_percent: f64,
+    memory_percent: f64,
+    memory_used_bytes: u64,
+    memory_total_bytes: u64,
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+struct CpuTimes {
+    idle: u64,
+    kernel: u64,
+    user: u64,
+}
+
+#[cfg(windows)]
+static LAST_CPU_TIMES: Lazy<Mutex<Option<CpuTimes>>> = Lazy::new(|| Mutex::new(None));
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ModelApiKeySecretRequest {
@@ -123,6 +154,86 @@ pub(crate) fn search_with_fixture_file(
     results.truncate(max_results);
     Ok(results)
 }
+
+#[tauri::command]
+fn get_system_resource_snapshot() -> Result<SystemResourceSnapshot, String> {
+    system_resource_snapshot()
+}
+
+#[cfg(windows)]
+fn system_resource_snapshot() -> Result<SystemResourceSnapshot, String> {
+    let mut memory: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    memory.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    if unsafe { GlobalMemoryStatusEx(&mut memory) } == 0 {
+        return Err("Failed to read system memory status".to_string());
+    }
+
+    let mut idle_time: FILETIME = unsafe { std::mem::zeroed() };
+    let mut kernel_time: FILETIME = unsafe { std::mem::zeroed() };
+    let mut user_time: FILETIME = unsafe { std::mem::zeroed() };
+    if unsafe { GetSystemTimes(&mut idle_time, &mut kernel_time, &mut user_time) } == 0 {
+        return Err("Failed to read system CPU times".to_string());
+    }
+
+    let current = CpuTimes {
+        idle: filetime_to_u64(idle_time),
+        kernel: filetime_to_u64(kernel_time),
+        user: filetime_to_u64(user_time),
+    };
+    let cpu_percent = {
+        let mut last = LAST_CPU_TIMES
+            .lock()
+            .map_err(|_| "Failed to lock CPU sampler".to_string())?;
+        let percent = last
+            .map(|previous| {
+                let idle_delta = current.idle.saturating_sub(previous.idle);
+                let kernel_delta = current.kernel.saturating_sub(previous.kernel);
+                let user_delta = current.user.saturating_sub(previous.user);
+                let total_delta = kernel_delta.saturating_add(user_delta);
+                if total_delta == 0 {
+                    0.0
+                } else {
+                    ((total_delta.saturating_sub(idle_delta)) as f64 / total_delta as f64 * 100.0)
+                        .clamp(0.0, 100.0)
+                }
+            })
+            .unwrap_or(0.0);
+        *last = Some(current);
+        percent
+    };
+
+    let memory_total_bytes = memory.ullTotalPhys;
+    let memory_available_bytes = memory.ullAvailPhys;
+    let memory_used_bytes = memory_total_bytes.saturating_sub(memory_available_bytes);
+    let memory_percent = if memory_total_bytes == 0 {
+        0.0
+    } else {
+        (memory_used_bytes as f64 / memory_total_bytes as f64 * 100.0).clamp(0.0, 100.0)
+    };
+
+    Ok(SystemResourceSnapshot {
+        cpu_percent,
+        memory_percent,
+        memory_used_bytes,
+        memory_total_bytes,
+    })
+}
+
+#[cfg(windows)]
+fn filetime_to_u64(value: FILETIME) -> u64 {
+    ((value.dwHighDateTime as u64) << 32) | value.dwLowDateTime as u64
+}
+
+#[cfg(not(windows))]
+fn system_resource_snapshot() -> Result<SystemResourceSnapshot, String> {
+    Ok(SystemResourceSnapshot {
+        cpu_percent: 0.0,
+        memory_percent: 0.0,
+        memory_used_bytes: 0,
+        memory_total_bytes: 0,
+    })
+}
+
 #[tauri::command]
 fn save_model_api_key_secret(
     app: AppHandle,
@@ -3670,6 +3781,8 @@ pub fn run() {
         .manage(Mutex::new(file_write::WriteTextApprovalState::default()))
         .manage(Mutex::new(code::CodePatchApprovalState::default()))
         .manage(browser::BrowserState::new())
+        .manage(files::FileWatchState::default())
+        .manage(terminal::TerminalState::new())
         .manage(Mutex::new(computer::ComputerApprovalState::default()))
         .invoke_handler(tauri::generate_handler![
             pdf::scan_markdown_documents,
@@ -3680,6 +3793,7 @@ pub fn run() {
             save_model_api_key_secret,
             delete_model_api_key_secret,
             check_model_api_key_secret,
+            get_system_resource_snapshot,
             fetch_provider_models,
             code::propose_code_edit,
             complete_model_prompt,
@@ -3715,6 +3829,15 @@ pub fn run() {
             scan::scan_all_user_files,
             scan::list_mount_roots,
             scan::cancel_scan_all_files,
+            git::git_status,
+            git::git_diff,
+            files::files_search,
+            files::files_watch_start,
+            files::files_watch_stop,
+            terminal::terminal_create,
+            terminal::terminal_input,
+            terminal::terminal_resize,
+            terminal::terminal_kill,
             browser::browser_navigate,
             browser::browser_screenshot,
             browser::browser_get_content,
@@ -3722,17 +3845,21 @@ pub fn run() {
             browser::browser_type,
             browser::browser_evaluate,
             browser::browser_run_test,
+            browser::browser_snapshot,
             browser::browser_close,
             computer::computer_screenshot,
             computer::computer_list_windows,
             computer::computer_wait,
+            computer::computer_inspect_ui,
             computer::computer_approve_action,
             computer::computer_focus_window,
             computer::computer_move_mouse,
             computer::computer_click,
             computer::computer_type,
             computer::computer_key_combo,
-            computer::computer_scroll
+            computer::computer_scroll,
+            computer::computer_invoke_ui,
+            computer::computer_set_ui_value
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -3,6 +3,8 @@ import type { DesktopDatabase, DesktopDatabaseMigration } from "./desktop-databa
 export const PREF_KEYS = {
   LOCALE: "locale",
   SIDEBAR_WIDTH: "sidebar_width",
+  ACTIVITY_HEIGHT: "activity_height",
+  IS_SIDEBAR_OPEN: "is_sidebar_open",
   ACTIVE_VIEW: "active_view",
   IS_ACTIVITY_OPEN: "is_activity_open",
   IS_INSPECTOR_OPEN: "is_inspector_open",

@@ -145,10 +145,10 @@ Agent 与人类交互的机制——"不懂就问"。
 
 | 维度 | 多 Agent 模式 | Plan 模式 | 主动澄清模式 |
 |------|:---:|:---:|:---:|
-| **当前评分** | ★★★★☆ | ★☆☆☆☆ | ★★☆☆☆ |
+| **当前评分** | ★★★★☆ | ★★★☆☆ | ★★★☆☆ |
 | **关注点** | Agent 间如何分工协作 | Agent 内部如何思考行动 | Agent 与人类如何交互 |
-| **Javis 现状** | 12 个 Agent + DAG 调度 | Commander LLM 动态 DAG + ReAct 循环 + 失败重规划 | 安全审批完整，`commander.askUser` 澄清已实现 |
-| **最大短板** | 工作流不可动态组合（仅 legacy fallback 为静态） | ReAct 依赖 LLM 决策，legacy 路径无 ReAct | 无风险分级审批（所有 confirmed_write 同级） |
+| **Javis 现状** | 12 个 Agent + DAG 调度 | Commander LLM 动态 DAG + ReAct 循环 + 失败重规划，legacy fallback 仅作降级 | 安全审批完整，`commander.askUser` 澄清已实现 |
+| **最大短板** | 工作流不可动态组合 | ReAct 依赖 LLM 决策，legacy 路径无 ReAct | 无风险分级审批（所有 confirmed_write 同级） |
 | **投产价值** | 已可用 | 核心能力已就位 | 安全 + 澄清均已覆盖 |
 
 ---
