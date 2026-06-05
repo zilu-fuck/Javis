@@ -8,3 +8,4 @@ target/
 production/
 **/production/
 *apikey*.txt
+.codex-tmp/
