@@ -2748,6 +2748,10 @@ describe("createFileScanTaskRuntime", () => {
     expect(planCallCount).toBe(2);
     expect(finalSnapshot.title).toBe("Scan after clarification");
     expect(finalSnapshot.status).toBe("completed");
+    const logs = snapshots.flatMap((snapshot) => snapshot.logs);
+    expect(logs.some((log) => log.title === "waiting_model" && log.detail.includes("commander.plan"))).toBe(true);
+    expect(logs.some((log) => log.title === "waiting_user" && log.detail.includes("askUser"))).toBe(true);
+    expect(logs.some((log) => log.title === "waiting_tool" && log.detail.includes("tool dispatch scan"))).toBe(true);
 
     unsubscribe();
     runtime.dispose();
@@ -2876,6 +2880,8 @@ describe("createFileScanTaskRuntime", () => {
       (l) => l.detail?.includes("Recovery for bad-step"),
     );
     expect(replanLog).toBeDefined();
+    expect(finalSnapshot.logs.some((log) => log.title === "replan_started")).toBe(true);
+    expect(finalSnapshot.logs.some((log) => log.title === "waiting_model" && log.detail.includes("commander.replan"))).toBe(true);
 
     unsubscribe();
     runtime.dispose();

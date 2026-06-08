@@ -58,6 +58,39 @@ describe("taskEventToLogEntry", () => {
   it("identifies the full agent run event family for UI consumers", () => {
     const events: TaskRuntimeEvent[] = [
       { kind: "task.created", taskId: "task-1" },
+      {
+        kind: "task.waiting",
+        taskId: "task-1",
+        phase: "waiting_model",
+        label: "commander.plan",
+        detail: "Waiting for Commander plan.",
+      },
+      {
+        kind: "task.timeout",
+        taskId: "task-1",
+        phase: "waiting_tool",
+        label: "tool dispatch step-1",
+        timeoutMs: 90_000,
+        detail: "Tool dispatch timed out.",
+      },
+      {
+        kind: "task.cancelled",
+        taskId: "task-1",
+        label: "askUser ask-1",
+        detail: "askUser cancelled.",
+      },
+      {
+        kind: "task.replan_started",
+        taskId: "task-1",
+        failedStepId: "step-1",
+        error: "Timed out",
+      },
+      {
+        kind: "task.replan_failed",
+        taskId: "task-1",
+        failedStepId: "step-1",
+        error: "Replan timed out",
+      },
       { kind: "agent.status", taskId: "task-1", agentKind: "commander", status: "running", message: "Planning" },
       { kind: "agent.chunk_start", taskId: "task-1", agentKind: "commander" },
       { kind: "agent.chunk", taskId: "task-1", agentKind: "commander", text: "Hello" },
@@ -104,5 +137,35 @@ describe("taskEventToLogEntry", () => {
 
     expect(AGENT_RUN_EVENT_KINDS).toHaveLength(events.length);
     expect(events.every(isAgentRunEvent)).toBe(true);
+  });
+
+  it("uses stable structured titles for wait diagnostics", () => {
+    expect(taskEventToLogEntry({
+      kind: "task.waiting",
+      taskId: "task-1",
+      phase: "waiting_model",
+      label: "commander.plan",
+      detail: "Waiting for Commander plan.",
+    }).title).toBe("waiting_model");
+    expect(taskEventToLogEntry({
+      kind: "task.timeout",
+      taskId: "task-1",
+      phase: "waiting_tool",
+      label: "tool dispatch scan",
+      timeoutMs: 90_000,
+      detail: "Tool dispatch timed out.",
+    }).title).toBe("timeout");
+    expect(taskEventToLogEntry({
+      kind: "task.replan_started",
+      taskId: "task-1",
+      failedStepId: "scan",
+      error: "scan timed out",
+    }).title).toBe("replan_started");
+    expect(taskEventToLogEntry({
+      kind: "task.replan_failed",
+      taskId: "task-1",
+      failedStepId: "scan",
+      error: "model timed out",
+    }).title).toBe("replan_failed");
   });
 });

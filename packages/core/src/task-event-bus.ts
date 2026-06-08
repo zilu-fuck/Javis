@@ -9,6 +9,47 @@ import type {
 export type TaskRuntimeEvent =
   | { kind: "task.created"; taskId: ID }
   | {
+      kind: "task.waiting";
+      taskId: ID;
+      phase: "waiting_model" | "waiting_tool" | "waiting_user";
+      label: string;
+      detail: string;
+      stepId?: ID;
+      agentKind?: AgentKind;
+      toolName?: string;
+    }
+  | {
+      kind: "task.timeout";
+      taskId: ID;
+      phase: "waiting_model" | "waiting_tool" | "waiting_user";
+      label: string;
+      timeoutMs: number;
+      detail: string;
+      stepId?: ID;
+      agentKind?: AgentKind;
+      toolName?: string;
+    }
+  | {
+      kind: "task.cancelled";
+      taskId: ID;
+      label: string;
+      detail: string;
+      stepId?: ID;
+      agentKind?: AgentKind;
+    }
+  | {
+      kind: "task.replan_started";
+      taskId: ID;
+      failedStepId: ID;
+      error: string;
+    }
+  | {
+      kind: "task.replan_failed";
+      taskId: ID;
+      failedStepId: ID;
+      error: string;
+    }
+  | {
       kind: "agent.status";
       taskId: ID;
       agentKind: AgentKind;
@@ -41,6 +82,11 @@ export type TaskRuntimeEvent =
 
 export const AGENT_RUN_EVENT_KINDS = [
   "task.created",
+  "task.waiting",
+  "task.timeout",
+  "task.cancelled",
+  "task.replan_started",
+  "task.replan_failed",
   "agent.status",
   "agent.chunk_start",
   "agent.chunk",
@@ -124,6 +170,79 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         detail: "Task event bus recorded task creation.",
         userMessage: "任务已创建",
         devDetail: "Task event bus recorded task creation.",
+      };
+    case "task.waiting":
+      return {
+        id: `${event.taskId}-${event.phase}-${toLogIdPart(event.label)}`,
+        kind: "event",
+        title: event.phase,
+        detail: `${event.label}: ${event.detail}`,
+        userMessage: event.detail,
+        devDetail: JSON.stringify({
+          phase: event.phase,
+          label: event.label,
+          detail: event.detail,
+          toolName: event.toolName,
+        }),
+        agentId: event.agentKind ? agentIdFromKind(event.agentKind) : agentIdFromToolName(event.toolName ?? ""),
+        stepId: event.stepId,
+      };
+    case "task.timeout":
+      return {
+        id: `${event.taskId}-timeout-${toLogIdPart(event.label)}`,
+        kind: "tool",
+        title: "timeout",
+        detail: `${event.label} timed out after ${event.timeoutMs}ms. ${event.detail}`,
+        userMessage: `Timed out: ${event.label}`,
+        devDetail: JSON.stringify({
+          phase: event.phase,
+          label: event.label,
+          timeoutMs: event.timeoutMs,
+          detail: event.detail,
+          toolName: event.toolName,
+        }),
+        agentId: event.agentKind ? agentIdFromKind(event.agentKind) : agentIdFromToolName(event.toolName ?? ""),
+        stepId: event.stepId,
+      };
+    case "task.cancelled":
+      return {
+        id: `${event.taskId}-cancelled-${toLogIdPart(event.label)}`,
+        kind: "event",
+        title: "cancelled",
+        detail: `${event.label}: ${event.detail}`,
+        userMessage: event.detail,
+        devDetail: JSON.stringify({
+          label: event.label,
+          detail: event.detail,
+        }),
+        agentId: event.agentKind ? agentIdFromKind(event.agentKind) : undefined,
+        stepId: event.stepId,
+      };
+    case "task.replan_started":
+      return {
+        id: `${event.taskId}-replan-started-${toLogIdPart(event.failedStepId)}`,
+        kind: "event",
+        title: "replan_started",
+        detail: `Replanning after ${event.failedStepId}: ${event.error}`,
+        userMessage: `Replanning after ${event.failedStepId}`,
+        devDetail: JSON.stringify({
+          failedStepId: event.failedStepId,
+          error: event.error,
+        }),
+        stepId: event.failedStepId,
+      };
+    case "task.replan_failed":
+      return {
+        id: `${event.taskId}-replan-failed-${toLogIdPart(event.failedStepId)}`,
+        kind: "tool",
+        title: "replan_failed",
+        detail: `Replan failed after ${event.failedStepId}: ${event.error}`,
+        userMessage: `Replan failed after ${event.failedStepId}`,
+        devDetail: JSON.stringify({
+          failedStepId: event.failedStepId,
+          error: event.error,
+        }),
+        stepId: event.failedStepId,
       };
     case "agent.status":
       return {
@@ -286,6 +405,10 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
 
 function agentIdFromKind(agentKind: AgentKind): string {
   return `agent-${agentKind}`;
+}
+
+function toLogIdPart(value: string): string {
+  return value.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "").toLowerCase() || "event";
 }
 
 function agentIdFromOptionalKind(agentKind: AgentKind | undefined): string | undefined {

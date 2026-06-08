@@ -57,7 +57,7 @@ import {
 } from "./shared-context";
 import { runAgentReActLoop, type AgentReActDecision, type AgentReActTool } from "./agent-react-loop";
 import type { ReActDecisionRequest } from "./agent-react-decider";
-import { isTaskCancelledError, throwIfTaskAborted, withTaskTimeout } from "./task-wait";
+import { isTaskCancelledError, TaskTimeoutError, throwIfTaskAborted, withTaskTimeout } from "./task-wait";
 import { createAskUserRequest } from "./ask-user";
 import {
   createPendingPermissionRequest,
@@ -70,6 +70,106 @@ const COMMANDER_MODEL_TIMEOUT_MS = 90_000;
 const COMMANDER_TOOL_TIMEOUT_MS = 90_000;
 const COMMANDER_USER_WAIT_TIMEOUT_MS = 5 * 60_000;
 const COMMANDER_REPLAN_TIMEOUT_MS = 60_000;
+
+type WaitLogPhase = "waiting_model" | "waiting_tool" | "waiting_user";
+
+function emitStructuredLog(options: {
+  event: TaskRuntimeEvent;
+  getSnapshot: () => TaskSnapshot;
+  emitSnapshot: (snapshot: TaskSnapshot) => void;
+  emitEvent: (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number];
+}): void {
+  const current = options.getSnapshot();
+  options.emitSnapshot({
+    ...current,
+    logs: appendLog(current, options.emitEvent(options.event)),
+  });
+}
+
+function emitWaitingLog(options: {
+  taskId: ID;
+  phase: WaitLogPhase;
+  label: string;
+  detail: string;
+  getSnapshot: () => TaskSnapshot;
+  emitSnapshot: (snapshot: TaskSnapshot) => void;
+  emitEvent: (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number];
+  stepId?: ID;
+  agentKind?: AgentKind;
+  toolName?: string;
+}): void {
+  emitStructuredLog({
+    getSnapshot: options.getSnapshot,
+    emitSnapshot: options.emitSnapshot,
+    emitEvent: options.emitEvent,
+    event: {
+      kind: "task.waiting",
+      taskId: options.taskId,
+      phase: options.phase,
+      label: options.label,
+      detail: options.detail,
+      stepId: options.stepId,
+      agentKind: options.agentKind,
+      toolName: options.toolName,
+    },
+  });
+}
+
+function emitTimeoutLog(options: {
+  taskId: ID;
+  phase: WaitLogPhase;
+  label: string;
+  timeoutMs: number;
+  detail: string;
+  getSnapshot: () => TaskSnapshot;
+  emitSnapshot: (snapshot: TaskSnapshot) => void;
+  emitEvent: (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number];
+  stepId?: ID;
+  agentKind?: AgentKind;
+  toolName?: string;
+}): void {
+  emitStructuredLog({
+    getSnapshot: options.getSnapshot,
+    emitSnapshot: options.emitSnapshot,
+    emitEvent: options.emitEvent,
+    event: {
+      kind: "task.timeout",
+      taskId: options.taskId,
+      phase: options.phase,
+      label: options.label,
+      timeoutMs: options.timeoutMs,
+      detail: options.detail,
+      stepId: options.stepId,
+      agentKind: options.agentKind,
+      toolName: options.toolName,
+    },
+  });
+}
+
+function emitCancelledLog(options: {
+  taskId: ID;
+  label: string;
+  detail: string;
+  getSnapshot: () => TaskSnapshot;
+  emitSnapshot: (snapshot: TaskSnapshot) => void;
+  emitEvent: (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number];
+  stepId?: ID;
+  agentKind?: AgentKind;
+}): void {
+  emitStructuredLog({
+    getSnapshot: options.getSnapshot,
+    emitSnapshot: options.emitSnapshot,
+    emitEvent: options.emitEvent,
+    event: {
+      kind: "task.cancelled",
+      taskId: options.taskId,
+      label: options.label,
+      detail: options.detail,
+      stepId: options.stepId,
+      agentKind: options.agentKind,
+    },
+  });
+}
 
 interface ReadCurrentProjectWorkflowOptions {
   controller: FlowController;
@@ -2079,11 +2179,24 @@ async function requestComputerUseApproval(options: {
       commanderMessage: `需要你确认：${actionSummary}。`,
       permissionRequest,
       agents: agentTracker.getSnapshots(),
-      logs: appendLog(getSnapshot(), emitEvent({
-        kind: "permission.requested",
-        taskId,
-        request: permissionRequest,
-      })),
+      logs: [
+        ...getSnapshot().logs,
+        emitEvent({
+          kind: "permission.requested",
+          taskId,
+          request: permissionRequest,
+        }),
+        emitEvent({
+          kind: "task.waiting",
+          taskId,
+          phase: "waiting_user",
+          label: `Computer Use approval ${permissionRequest.id}`,
+          detail: `Waiting for permission decision: ${actionSummary}`,
+          stepId,
+          agentKind: "computer",
+          toolName: action.tool,
+        }),
+      ],
     });
 
     setPendingPermissionHandler(permissionRequest.id, async (decision) => {
@@ -2131,11 +2244,25 @@ async function requestComputerUseApproval(options: {
         emitSnapshot({
           ...getSnapshot(),
           permissionRequest: undefined,
-          logs: appendLog(getSnapshot(), emitEvent({
-            kind: "task.failed",
-            taskId,
-            error: `Computer Use approval ${permissionRequest.id} timed out.`,
-          })),
+          logs: [
+            ...getSnapshot().logs,
+            emitEvent({
+              kind: "task.timeout",
+              taskId,
+              phase: "waiting_user",
+              label: `Computer Use approval ${permissionRequest.id}`,
+              timeoutMs,
+              detail: "Computer Use approval timed out.",
+              stepId,
+              agentKind: "computer",
+              toolName: action.tool,
+            }),
+            emitEvent({
+              kind: "task.failed",
+              taskId,
+              error: `Computer Use approval ${permissionRequest.id} timed out.`,
+            }),
+          ],
         });
       },
       onAbort: () => {
@@ -2143,6 +2270,14 @@ async function requestComputerUseApproval(options: {
         emitSnapshot({
           ...getSnapshot(),
           permissionRequest: undefined,
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "task.cancelled",
+            taskId,
+            label: `Computer Use approval ${permissionRequest.id}`,
+            detail: "Computer Use approval cancelled.",
+            stepId,
+            agentKind: "computer",
+          })),
         });
       },
     });
@@ -2211,11 +2346,24 @@ async function waitForAskUserAnswer(options: {
       commanderMessage: questionRequest.question,
       askUserQuestion: questionRequest,
       agents: agentTracker.getSnapshots(),
-      logs: appendLog(getSnapshot(), emitEvent({
-        kind: "ask_user.requested",
-        taskId,
-        question: questionRequest,
-      })),
+      logs: [
+        ...getSnapshot().logs,
+        emitEvent({
+          kind: "ask_user.requested",
+          taskId,
+          question: questionRequest,
+        }),
+        emitEvent({
+          kind: "task.waiting",
+          taskId,
+          phase: "waiting_user",
+          label: `askUser ${questionRequest.id}`,
+          detail: "Waiting for user clarification.",
+          stepId,
+          agentKind: "commander",
+          toolName: "commander.askUser",
+        }),
+      ],
     });
 
     listenForAnswer();
@@ -2240,11 +2388,25 @@ async function waitForAskUserAnswer(options: {
                 { ...current.askUserQuestion, status: "expired", resolvedAt: new Date().toISOString() },
               )
             : current.conversationMessages,
-          logs: appendLog(current, emitEvent({
-            kind: "task.failed",
-            taskId,
-            error: `askUser ${requestId || stepId} timed out.`,
-          })),
+          logs: [
+            ...current.logs,
+            emitEvent({
+              kind: "task.timeout",
+              taskId,
+              phase: "waiting_user",
+              label: `askUser ${requestId || stepId}`,
+              timeoutMs,
+              detail: "askUser timed out.",
+              stepId,
+              agentKind: "commander",
+              toolName: "commander.askUser",
+            }),
+            emitEvent({
+              kind: "task.failed",
+              taskId,
+              error: `askUser ${requestId || stepId} timed out.`,
+            }),
+          ],
         });
       },
       onAbort: () => {
@@ -2261,6 +2423,14 @@ async function waitForAskUserAnswer(options: {
                 { ...current.askUserQuestion, status: "cancelled", resolvedAt: new Date().toISOString() },
               )
             : current.conversationMessages,
+          logs: appendLog(current, emitEvent({
+            kind: "task.cancelled",
+            taskId,
+            label: `askUser ${requestId || stepId}`,
+            detail: "askUser cancelled.",
+            stepId,
+            agentKind: "commander",
+          })),
         });
       },
     });
@@ -2425,6 +2595,16 @@ export async function runCommanderDagTask({
     const availableAgents = getAvailableAgentsForPlanning();
     let dagPlan: CommanderDagPlan;
     try {
+      emitWaitingLog({
+        taskId,
+        phase: "waiting_model",
+        label: "commander.plan",
+        detail: "Waiting for Commander to generate a DAG plan.",
+        agentKind: "commander",
+        getSnapshot,
+        emitSnapshot,
+        emitEvent,
+      });
       dagPlan = normalizeCommanderDagPlan(await withTaskTimeout(
         () => commanderTool.plan({
           userGoal,
@@ -2435,16 +2615,26 @@ export async function runCommanderDagTask({
           label: "commander.plan",
           timeoutMs: COMMANDER_MODEL_TIMEOUT_MS,
           signal,
-          onTimeout: () => {
-            emitSnapshot({
-              ...getSnapshot(),
-              logs: appendLog(getSnapshot(), emitEvent({
-                kind: "task.failed",
-                taskId,
-                error: "commander.plan timed out.",
-              })),
-            });
-          },
+          onTimeout: () => emitTimeoutLog({
+            taskId,
+            phase: "waiting_model",
+            label: "commander.plan",
+            timeoutMs: COMMANDER_MODEL_TIMEOUT_MS,
+            detail: "Commander plan timed out.",
+            agentKind: "commander",
+            getSnapshot,
+            emitSnapshot,
+            emitEvent,
+          }),
+          onAbort: () => emitCancelledLog({
+            taskId,
+            label: "commander.plan",
+            detail: "Commander plan cancelled.",
+            agentKind: "commander",
+            getSnapshot,
+            emitSnapshot,
+            emitEvent,
+          }),
         },
       ));
     } catch (planError) {
@@ -2453,7 +2643,7 @@ export async function runCommanderDagTask({
       // NOT the primary dispatch — Commander (LLM) normally selects the
       // sub-agent. This exists so a malformed JSON response doesn't kill
       // an obvious desktop-automation task.
-      if (!isComputerUseGoal(userGoal)) {
+      if (isTaskCancelledError(planError) || planError instanceof TaskTimeoutError || !isComputerUseGoal(userGoal)) {
         throw planError;
       }
       const detail = planError instanceof Error ? planError.message : String(planError);
@@ -2911,24 +3101,32 @@ export async function runCommanderDagTask({
               }),
             }),
           onWaiting: (phase, iteration, detail) => {
-            emitSnapshot({
-              ...getSnapshot(),
-              logs: appendLog(getSnapshot(), emitEvent({
-                kind: "tool.planned",
-                taskId,
-                toolName: `${dagStep.assignedAgentKind}.${phase}`,
-                detail: `Step ${dagStep.id} iteration ${iteration}: ${detail}`,
-              })),
+            emitWaitingLog({
+              taskId,
+              phase,
+              label: `${dagStep.id} iteration ${iteration}`,
+              detail: `Step ${dagStep.id} iteration ${iteration}: ${detail}`,
+              stepId: dagStep.id,
+              agentKind: dagStep.assignedAgentKind as AgentKind,
+              toolName: `${dagStep.assignedAgentKind}.${phase}`,
+              getSnapshot,
+              emitSnapshot,
+              emitEvent,
             });
           },
           onTimeout: (phase, iteration, detail) => {
-            emitSnapshot({
-              ...getSnapshot(),
-              logs: appendLog(getSnapshot(), emitEvent({
-                kind: "task.failed",
-                taskId,
-                error: `Step ${dagStep.id} ${phase} iteration ${iteration}: ${detail}`,
-              })),
+            emitTimeoutLog({
+              taskId,
+              phase,
+              label: `${dagStep.id} iteration ${iteration}`,
+              timeoutMs: phase === "waiting_model" ? COMMANDER_MODEL_TIMEOUT_MS : COMMANDER_TOOL_TIMEOUT_MS,
+              detail: `Step ${dagStep.id} ${phase} iteration ${iteration}: ${detail}`,
+              stepId: dagStep.id,
+              agentKind: dagStep.assignedAgentKind as AgentKind,
+              toolName: `${dagStep.assignedAgentKind}.${phase}`,
+              getSnapshot,
+              emitSnapshot,
+              emitEvent,
             });
           },
         });
@@ -2962,6 +3160,17 @@ export async function runCommanderDagTask({
       }
 
       if (executionMode === "direct_response") {
+        emitWaitingLog({
+          taskId,
+          phase: "waiting_model",
+          label: `commander.synthesize ${dagStep.id}`,
+          detail: `Waiting for Commander synthesis for step ${dagStep.id}.`,
+          stepId: dagStep.id,
+          agentKind: "commander",
+          getSnapshot,
+          emitSnapshot,
+          emitEvent,
+        });
         const synthesis = await withTaskTimeout(
           () => safeSynthesizeConclusion(
             commanderTool,
@@ -2973,6 +3182,28 @@ export async function runCommanderDagTask({
             label: `commander.synthesize ${dagStep.id}`,
             timeoutMs: COMMANDER_MODEL_TIMEOUT_MS,
             signal,
+            onTimeout: () => emitTimeoutLog({
+              taskId,
+              phase: "waiting_model",
+              label: `commander.synthesize ${dagStep.id}`,
+              timeoutMs: COMMANDER_MODEL_TIMEOUT_MS,
+              detail: `Commander synthesis for ${dagStep.id} timed out.`,
+              stepId: dagStep.id,
+              agentKind: "commander",
+              getSnapshot,
+              emitSnapshot,
+              emitEvent,
+            }),
+            onAbort: () => emitCancelledLog({
+              taskId,
+              label: `commander.synthesize ${dagStep.id}`,
+              detail: `Commander synthesis for ${dagStep.id} cancelled.`,
+              stepId: dagStep.id,
+              agentKind: "commander",
+              getSnapshot,
+              emitSnapshot,
+              emitEvent,
+            }),
           },
         );
         const output = synthesis?.message ?? dagStep.title;
@@ -3007,6 +3238,18 @@ export async function runCommanderDagTask({
 
       // Fallback: single-shot capability dispatch
       try {
+        emitWaitingLog({
+          taskId,
+          phase: "waiting_tool",
+          label: `tool dispatch ${dagStep.id}`,
+          detail: `Waiting for tool dispatch for step ${dagStep.id}.`,
+          stepId: dagStep.id,
+          agentKind: dagStep.assignedAgentKind as AgentKind,
+          toolName: `${dagStep.assignedAgentKind}.${dagStep.id}`,
+          getSnapshot,
+          emitSnapshot,
+          emitEvent,
+        });
         const result = await withTaskTimeout(
           () => executeCapabilityStep(
             dagStep as CommanderDagStep,
@@ -3018,16 +3261,29 @@ export async function runCommanderDagTask({
             label: `tool dispatch ${dagStep.id}`,
             timeoutMs: COMMANDER_TOOL_TIMEOUT_MS,
             signal,
-            onTimeout: () => {
-              emitSnapshot({
-                ...getSnapshot(),
-                logs: appendLog(getSnapshot(), emitEvent({
-                  kind: "task.failed",
-                  taskId,
-                  error: `Step ${dagStep.id} tool dispatch timed out.`,
-                })),
-              });
-            },
+            onTimeout: () => emitTimeoutLog({
+              taskId,
+              phase: "waiting_tool",
+              label: `tool dispatch ${dagStep.id}`,
+              timeoutMs: COMMANDER_TOOL_TIMEOUT_MS,
+              detail: `Step ${dagStep.id} tool dispatch timed out.`,
+              stepId: dagStep.id,
+              agentKind: dagStep.assignedAgentKind as AgentKind,
+              toolName: `${dagStep.assignedAgentKind}.${dagStep.id}`,
+              getSnapshot,
+              emitSnapshot,
+              emitEvent,
+            }),
+            onAbort: () => emitCancelledLog({
+              taskId,
+              label: `tool dispatch ${dagStep.id}`,
+              detail: `Step ${dagStep.id} tool dispatch cancelled.`,
+              stepId: dagStep.id,
+              agentKind: dagStep.assignedAgentKind as AgentKind,
+              getSnapshot,
+              emitSnapshot,
+              emitEvent,
+            }),
           },
         );
         completedSteps.add(dagStep.id);
@@ -3095,12 +3351,25 @@ export async function runCommanderDagTask({
       try {
         emitSnapshot({
           ...getSnapshot(),
-          logs: appendLog(getSnapshot(), emitEvent({
-            kind: "tool.planned",
-            taskId,
-            toolName: "commander.replan",
-            detail: `Replanning after ${request.step.id}: ${request.error}`,
-          })),
+          logs: [
+            ...getSnapshot().logs,
+            emitEvent({
+              kind: "task.replan_started",
+              taskId,
+              failedStepId: request.step.id,
+              error: request.error,
+            }),
+            emitEvent({
+              kind: "task.waiting",
+              taskId,
+              phase: "waiting_model",
+              label: `commander.replan ${request.step.id}`,
+              detail: `Waiting for Commander replan after ${request.step.id}.`,
+              stepId: request.step.id,
+              agentKind: "commander",
+              toolName: "commander.replan",
+            }),
+          ],
         });
         const recoveryPlan = await withTaskTimeout(
           () => replanDag(
@@ -3113,16 +3382,29 @@ export async function runCommanderDagTask({
             label: `commander.replan ${request.step.id}`,
             timeoutMs: COMMANDER_REPLAN_TIMEOUT_MS,
             signal,
-            onTimeout: () => {
-              emitSnapshot({
-                ...getSnapshot(),
-                logs: appendLog(getSnapshot(), emitEvent({
-                  kind: "task.failed",
-                  taskId,
-                  error: `commander.replan timed out after ${request.step.id}.`,
-                })),
-              });
-            },
+            onTimeout: () => emitTimeoutLog({
+              taskId,
+              phase: "waiting_model",
+              label: `commander.replan ${request.step.id}`,
+              timeoutMs: COMMANDER_REPLAN_TIMEOUT_MS,
+              detail: `commander.replan timed out after ${request.step.id}.`,
+              stepId: request.step.id,
+              agentKind: "commander",
+              toolName: "commander.replan",
+              getSnapshot,
+              emitSnapshot,
+              emitEvent,
+            }),
+            onAbort: () => emitCancelledLog({
+              taskId,
+              label: `commander.replan ${request.step.id}`,
+              detail: `commander.replan cancelled after ${request.step.id}.`,
+              stepId: request.step.id,
+              agentKind: "commander",
+              getSnapshot,
+              emitSnapshot,
+              emitEvent,
+            }),
           },
         );
 
@@ -3163,7 +3445,17 @@ export async function runCommanderDagTask({
         });
 
         return { abandonFailedStep: true, steps: recoverySteps };
-      } catch {
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        emitSnapshot({
+          ...getSnapshot(),
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "task.replan_failed",
+            taskId,
+            failedStepId: request.step.id,
+            error: errorMsg,
+          })),
+        });
         return undefined;
       }
     }
@@ -3218,11 +3510,24 @@ export async function runCommanderDagTask({
       onStepTimeout: (step, timeoutMs) => {
         emitSnapshot({
           ...getSnapshot(),
-          logs: appendLog(getSnapshot(), emitEvent({
-            kind: "task.failed",
-            taskId,
-            error: `Step ${step.id} timed out after ${timeoutMs}ms.`,
-          })),
+          logs: [
+            ...getSnapshot().logs,
+            emitEvent({
+              kind: "task.timeout",
+              taskId,
+              phase: "waiting_tool",
+              label: `workflow step ${step.id}`,
+              timeoutMs,
+              detail: `Step ${step.id} timed out after ${timeoutMs}ms.`,
+              stepId: step.id,
+              agentKind: step.agentKind,
+            }),
+            emitEvent({
+              kind: "task.failed",
+              taskId,
+              error: `Step ${step.id} timed out after ${timeoutMs}ms.`,
+            }),
+          ],
         });
       },
       onStepFailureReplan: handleStepFailureReplan,
@@ -3254,6 +3559,16 @@ export async function runCommanderDagTask({
     }
 
     // Phase 3: Commander synthesizes conclusion
+    emitWaitingLog({
+      taskId,
+      phase: "waiting_model",
+      label: "commander.synthesize final",
+      detail: "Waiting for Commander final synthesis.",
+      agentKind: "commander",
+      getSnapshot,
+      emitSnapshot,
+      emitEvent,
+    });
     const synthesis = await withTaskTimeout(
       () => safeSynthesizeConclusion(
         commanderTool,
@@ -3265,6 +3580,26 @@ export async function runCommanderDagTask({
         label: "commander.synthesize final",
         timeoutMs: COMMANDER_MODEL_TIMEOUT_MS,
         signal,
+        onTimeout: () => emitTimeoutLog({
+          taskId,
+          phase: "waiting_model",
+          label: "commander.synthesize final",
+          timeoutMs: COMMANDER_MODEL_TIMEOUT_MS,
+          detail: "Commander final synthesis timed out.",
+          agentKind: "commander",
+          getSnapshot,
+          emitSnapshot,
+          emitEvent,
+        }),
+        onAbort: () => emitCancelledLog({
+          taskId,
+          label: "commander.synthesize final",
+          detail: "Commander final synthesis cancelled.",
+          agentKind: "commander",
+          getSnapshot,
+          emitSnapshot,
+          emitEvent,
+        }),
       },
     );
     const conclusion = synthesis?.message
