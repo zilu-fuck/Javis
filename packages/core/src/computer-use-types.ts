@@ -6,6 +6,23 @@ export interface ComputerUseLoopConfig {
   maxSteps: number;
   /** Number of recent steps to include in model context, default 5. */
   historySteps: number;
+  /** Per-step wall-clock deadline in milliseconds. */
+  stepDeadlineMs: number;
+  /** Per-tool timeout budgets in milliseconds. */
+  timeouts: {
+    listWindowsMs: number;
+    inspectUiMs: number;
+    screenshotMs: number;
+    lowRiskWriteMs: number;
+    textWriteMs: number;
+    modelMs: number;
+    approvalMs: number;
+    verificationMs: number;
+  };
+  /** Minimum interval between progress heartbeat events. */
+  heartbeatMs: number;
+  /** Short-lived UIA cache duration in milliseconds. */
+  uiCacheMs: number;
 }
 
 /** A single step in the Computer Use action loop. */
@@ -16,8 +33,68 @@ export interface ComputerUseStep {
   action: ComputerUseAction;
   target: string;
   confidence: "high" | "medium" | "low";
+  phase?: ComputerUsePhase;
+  trace?: ComputerUseStepTrace;
   result?: unknown;
   error?: string;
+}
+
+export type ComputerUsePhase =
+  | "observing"
+  | "planning"
+  | "waiting_model"
+  | "waiting_permission"
+  | "preflight"
+  | "executing"
+  | "verifying"
+  | "recovering"
+  | "failed"
+  | "completed";
+
+export interface ComputerUseStepTrace {
+  startedAt: string;
+  completedAt?: string;
+  freshAt?: string;
+  durationMs?: number;
+  screenshot?: {
+    width: number;
+    height: number;
+    sourceWidth?: number;
+    sourceHeight?: number;
+    sourceOriginX?: number;
+    sourceOriginY?: number;
+    scaleX?: number;
+    scaleY?: number;
+    methodUsed?: string;
+  };
+  windows?: {
+    freshAt: string;
+    count: number;
+    foregroundHandle?: number;
+    titles: string[];
+  };
+  ui?: {
+    freshAt: string;
+    windowHandle: number;
+    title?: string;
+    nodeCount: number;
+    cacheHit?: boolean;
+  };
+  action?: {
+    tool: string;
+    approvalMode?: "none" | "per_action" | "task_lease";
+    originalTool?: string;
+    strategy?: "model" | "uia_preferred";
+    strategyReason?: string;
+  };
+  preflight?: {
+    passed: boolean;
+    reason?: string;
+  };
+  verification?: {
+    passed: boolean;
+    reason?: string;
+  };
 }
 
 /** Discriminated union of all Computer Use actions the model can output. */
@@ -29,7 +106,7 @@ export type ComputerUseAction =
   | { tool: "computer.scroll"; params: { x: number; y: number; delta: number; direction?: "vertical" | "horizontal" } }
   | { tool: "computer.focusWindow"; params: { handle: number } }
   | { tool: "computer.listWindows"; params: Record<string, never> }
-  | { tool: "computer.inspectUi"; params: { windowHandle: number; maxDepth?: number; maxNodes?: number } }
+  | { tool: "computer.inspectUi"; params: { windowHandle: number; maxDepth?: number; maxNodes?: number; includeValues?: boolean } }
   | { tool: "computer.invokeUi"; params: { selector: UiElementSelector } }
   | { tool: "computer.setUiValue"; params: { selector: UiElementSelector; value: string } }
   | { tool: "computer.screenshot"; params: { windowHandle?: number; method?: "auto" | "bitblt" | "printWindow" } }
@@ -176,6 +253,7 @@ function validateActionParams(
           windowHandle: numberParam(params.windowHandle, "windowHandle"),
           ...(params.maxDepth === undefined ? {} : { maxDepth: numberParam(params.maxDepth, "maxDepth") }),
           ...(params.maxNodes === undefined ? {} : { maxNodes: numberParam(params.maxNodes, "maxNodes") }),
+          ...(params.includeValues === undefined ? {} : { includeValues: booleanParam(params.includeValues, "includeValues") }),
         },
       };
     case "computer.invokeUi":

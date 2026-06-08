@@ -145,6 +145,12 @@ pub(crate) struct NativeApprovalBinding {
     created_at: SystemTime,
     approved_at: Option<SystemTime>,
 }
+
+impl NativeApprovalBinding {
+    pub(crate) fn task_id(&self) -> &str {
+        &self.task_id
+    }
+}
 pub(crate) fn env_flag_enabled(name: &str) -> bool {
     env::var(name)
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
@@ -4423,6 +4429,7 @@ pub fn run() {
             computer::computer_wait,
             computer::computer_inspect_ui,
             computer::computer_approve_action,
+            computer::computer_cancel_approvals,
             computer::computer_focus_window,
             computer::computer_move_mouse,
             computer::computer_click,

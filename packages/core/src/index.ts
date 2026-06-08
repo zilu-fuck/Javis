@@ -67,6 +67,8 @@ import {
   type RouteDecision,
   type RouteLog,
 } from "./local-router";
+import { isTaskCancelledError, throwIfTaskAborted, withTaskTimeout } from "./task-wait";
+import { isTerminalTaskStatus } from "./state/task-state";
 
 export {
   createCodeApplyDryRun,
@@ -204,6 +206,8 @@ export { parseModelAction, parseModelOutput } from "./computer-use-types";
 export type {
   ComputerUseLoopConfig,
   ComputerUseStep,
+  ComputerUsePhase,
+  ComputerUseStepTrace,
   ComputerUseAction,
   ComputerUseModelOutput,
 } from "./computer-use-types";
@@ -603,6 +607,7 @@ export interface TaskRuntime {
   ): void;
   resolvePermission(decision: "approved" | "approved_always" | "denied", requestId?: string): void;
   respondToAskUser(answer: string, requestId?: string): void;
+  stopTask(reason?: string): void;
   dispose(): void;
 }
 
@@ -641,6 +646,8 @@ export interface FileScanRuntimeOptions {
     computerTool: import("@javis/tools").ComputerTool;
     approveAction: (action: { tool: string; params: Record<string, unknown> }) => Promise<{ approvalId: string; taskId?: string; sessionWide?: boolean }>;
     onStep?: (step: unknown) => void;
+    onProgress?: (step: unknown) => void;
+    signal?: AbortSignal;
   }) => Promise<unknown[]>;
 }
 
@@ -759,6 +766,7 @@ export function createFileScanTaskRuntime({
     | { taskId: ID; originMode?: "chat" | "project"; workspacePath?: string }
     | undefined;
   let activeRouteLog: { taskId: ID; log: TaskLogEntry } | undefined;
+  let activeAbortController: AbortController | undefined;
   function emit(nextSnapshot: TaskSnapshot) {
     runtimeState.emit(attachConversationMessages(attachRouteLog(attachTaskMetadata(nextSnapshot))));
   }
@@ -880,6 +888,39 @@ export function createFileScanTaskRuntime({
     }
     askUserHandlers.delete(requestId);
   }
+  function stopActiveTask(reason = "Task cancelled.") {
+    const controller = activeAbortController;
+    activeAbortController = undefined;
+    controller?.abort(new Error(reason));
+    permissionHandlers.clear();
+    queuedPermissionDecisions.clear();
+    queuedLegacyPermissionDecision = undefined;
+    askUserHandlers.clear();
+    queuedAskUserAnswers.clear();
+
+    const current = runtimeState.getSnapshot();
+    if (isTerminalTaskStatus(current.status)) {
+      return;
+    }
+    emit({
+      ...current,
+      status: "cancelled",
+      updatedAt: new Date().toISOString(),
+      commanderMessage: reason,
+      askUserQuestion: current.askUserQuestion
+        ? { ...current.askUserQuestion, status: "cancelled", resolvedAt: new Date().toISOString() }
+        : undefined,
+      permissionRequest: current.permissionRequest
+        ? { ...current.permissionRequest, status: "cancelled", resolvedAt: new Date().toISOString() }
+        : undefined,
+      logs: appendLog(current, {
+        id: `${current.id}-cancelled-${Date.now()}`,
+        kind: "event",
+        title: "task.cancelled",
+        detail: reason,
+      }),
+    });
+  }
   const wait = runtimeState.wait;
   const controller = {
     emit,
@@ -957,12 +998,11 @@ export function createFileScanTaskRuntime({
       return runtimeState.subscribe(listener);
     },
     start(userGoal, options = {}) {
+      stopActiveTask("Task replaced by a new request.");
       runtimeState.clearTimers();
-      permissionHandlers.clear();
-      queuedPermissionDecisions.clear();
-      queuedLegacyPermissionDecision = undefined;
-      askUserHandlers.clear();
-      queuedAskUserAnswers.clear();
+      const taskAbortController = new AbortController();
+      activeAbortController = taskAbortController;
+      const signal = taskAbortController.signal;
       const startMode = options.mode ?? "auto";
       const taskId = options.taskId ?? `task-${Date.now()}`;
       activeTaskMetadata = {
@@ -1009,6 +1049,7 @@ export function createFileScanTaskRuntime({
             options.displayAttachments,
             routeDecision,
             routeLog,
+            signal,
           );
           return;
         }
@@ -1030,6 +1071,7 @@ export function createFileScanTaskRuntime({
           options.displayAttachments,
           routeDecision,
           routeLog,
+          signal,
         );
         return;
       }
@@ -1139,6 +1181,7 @@ export function createFileScanTaskRuntime({
             options.displayAttachments,
             routeDecision,
             routeLog,
+            signal,
           );
           return;
         }
@@ -1170,6 +1213,7 @@ export function createFileScanTaskRuntime({
           reactDecideNext,
           replanDag,
           computerUseLoopRunner,
+          signal,
         });
         return;
       }
@@ -1304,6 +1348,7 @@ export function createFileScanTaskRuntime({
           options.displayAttachments,
           routeDecision,
           routeLog,
+          signal,
         );
         return;
       }
@@ -1371,7 +1416,11 @@ export function createFileScanTaskRuntime({
         });
       }
     },
+    stopTask(reason = "Task cancelled.") {
+      stopActiveTask(reason);
+    },
     dispose() {
+      stopActiveTask("Runtime disposed.");
       eventBusUnsubscribe?.();
       runtimeState.dispose();
     },
@@ -1386,6 +1435,7 @@ export function createFileScanTaskRuntime({
     displayAttachments?: string[],
     routeDecision: RouteDecision = routeMessage(userGoal),
     routeLog: RouteLog = createRouteLog(taskId, userGoal, routeDecision),
+    signal?: AbortSignal,
   ) {
     const isChinese = /[\u3400-\u9fff]/u.test(userGoal);
     const displayContent = displayGoal ?? userGoal;
@@ -1437,14 +1487,22 @@ export function createFileScanTaskRuntime({
     });
 
     try {
-      const result = await completeGeneralChat(
-        taskId,
-        createGeneralChatPrompt(userGoal, isChinese, priorMessages),
-        activeChatTool,
+      const result = await withTaskTimeout(
+        () => completeGeneralChat(
+          taskId,
+          createGeneralChatPrompt(userGoal, isChinese, priorMessages),
+          activeChatTool,
+          {
+            maxTokens: 1200,
+            temperature: 0.7,
+            locale: isChinese ? "zh-CN" : "en",
+          },
+          signal,
+        ),
         {
-          maxTokens: 1200,
-          temperature: 0.7,
-          locale: isChinese ? "zh-CN" : "en",
+          label: "chat.complete",
+          timeoutMs: 90_000,
+          signal,
         },
       );
       const usage = result.tokenUsage ?? {
@@ -1487,6 +1545,30 @@ export function createFileScanTaskRuntime({
         }),
       });
     } catch (error) {
+      if (isTaskCancelledError(error)) {
+        const currentSnapshot = runtimeState.getSnapshot();
+        emit({
+          ...currentSnapshot,
+          title: isChinese ? "已取消" : "Cancelled",
+          status: "cancelled",
+          updatedAt: new Date().toISOString(),
+          commanderMessage: "Task cancelled.",
+          agents: demoAgents.map((agent) => ({
+            id: agent.id,
+            name: agent.displayName,
+            role: agent.description,
+            status: agent.kind === "commander" ? "cancelled" : "completed",
+            task: agent.kind === "commander" ? "Task cancelled" : "No workflow task assigned",
+          })),
+          logs: appendLog(currentSnapshot, {
+            id: `${taskId}-cancelled-${Date.now()}`,
+            kind: "event",
+            title: "task.cancelled",
+            detail: "Task cancelled.",
+          }),
+        });
+        return;
+      }
       runModelFailureTask(taskId, userGoal, error);
     }
   }
@@ -1500,6 +1582,7 @@ export function createFileScanTaskRuntime({
     displayAttachments?: string[],
     routeDecision: RouteDecision = routeMessage(userGoal),
     routeLog: RouteLog = createRouteLog(taskId, userGoal, routeDecision),
+    signal?: AbortSignal,
   ) {
     return runChatTask(
       taskId,
@@ -1510,6 +1593,7 @@ export function createFileScanTaskRuntime({
       displayAttachments,
       routeDecision,
       routeLog,
+      signal,
     );
   }
 
@@ -1522,12 +1606,22 @@ export function createFileScanTaskRuntime({
       temperature?: number;
       locale?: string;
     },
+    signal?: AbortSignal,
   ): Promise<{ text: string; tokenUsage?: ModelUsage }> {
+    throwIfTaskAborted(signal, "chat.complete");
     if (!activeChatTool.stream) {
-      return activeChatTool.complete(prompt, options);
+      return withTaskTimeout(() => activeChatTool.complete(prompt, options), {
+        label: "chat.complete",
+        timeoutMs: 90_000,
+        signal,
+      });
     }
     if (!eventBus) {
-      return activeChatTool.complete(prompt, options);
+      return withTaskTimeout(() => activeChatTool.complete(prompt, options), {
+        label: "chat.complete",
+        timeoutMs: 90_000,
+        signal,
+      });
     }
 
     let text = "";
@@ -1541,6 +1635,7 @@ export function createFileScanTaskRuntime({
           tokenUsage = usage;
         },
       })) {
+        throwIfTaskAborted(signal, "chat.stream");
         text += chunk.text;
         eventBus.emit({
           kind: "agent.chunk",
@@ -1559,6 +1654,7 @@ export function createFileScanTaskRuntime({
       });
       return { text, tokenUsage };
     } catch (streamError) {
+      throwIfTaskAborted(signal, "chat.stream");
       console.log("[Javis] stream() threw, falling back to complete():", streamError);
       eventBus.emit({
         kind: "agent.chunk_end",
@@ -1567,7 +1663,11 @@ export function createFileScanTaskRuntime({
         fullText: text,
         error: "stream failed",
       });
-      return activeChatTool.complete(prompt, options);
+      return withTaskTimeout(() => activeChatTool.complete(prompt, options), {
+        label: "chat.complete fallback",
+        timeoutMs: 90_000,
+        signal,
+      });
     }
   }
 

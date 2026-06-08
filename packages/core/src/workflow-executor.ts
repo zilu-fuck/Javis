@@ -57,6 +57,7 @@ import {
 } from "./shared-context";
 import { runAgentReActLoop, type AgentReActDecision, type AgentReActTool } from "./agent-react-loop";
 import type { ReActDecisionRequest } from "./agent-react-decider";
+import { isTaskCancelledError, throwIfTaskAborted, withTaskTimeout } from "./task-wait";
 import { createAskUserRequest } from "./ask-user";
 import {
   createPendingPermissionRequest,
@@ -64,6 +65,11 @@ import {
   type PermissionDecision,
 } from "./permission-state";
 import type { ComputerUseStep } from "./computer-use-types";
+
+const COMMANDER_MODEL_TIMEOUT_MS = 90_000;
+const COMMANDER_TOOL_TIMEOUT_MS = 90_000;
+const COMMANDER_USER_WAIT_TIMEOUT_MS = 5 * 60_000;
+const COMMANDER_REPLAN_TIMEOUT_MS = 60_000;
 
 interface ReadCurrentProjectWorkflowOptions {
   controller: FlowController;
@@ -1783,11 +1789,21 @@ export async function executeCapabilityStep(
   step: CommanderDagStep,
   context: SharedTaskContext,
   tools: AllCapabilityTools,
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<{ output: unknown; toolName: string }> {
+  const { signal, timeoutMs = COMMANDER_TOOL_TIMEOUT_MS } = options;
+  throwIfTaskAborted(signal, `tool ${step.toolName ?? step.capability ?? step.id}`);
   if (step.toolName) {
     assertToolOwnedByAgent(step.toolName, step.assignedAgentKind);
     const input = resolveStepInput(step.inputContextKeys, context);
-    const output = await dispatchToolByName(step.toolName, input, tools);
+    const output = await withTaskTimeout(
+      () => dispatchToolByName(step.toolName!, input, tools),
+      {
+        label: `tool ${step.toolName}`,
+        timeoutMs,
+        signal,
+      },
+    );
     writeStepOutput(step.outputContextKey, output, context);
     return { output, toolName: step.toolName };
   }
@@ -1812,7 +1828,14 @@ export async function executeCapabilityStep(
   }
 
   const input = resolveStepInput(step.inputContextKeys, context);
-  const output = await dispatchToolByName(descriptor.name, input, tools);
+  const output = await withTaskTimeout(
+    () => dispatchToolByName(descriptor.name, input, tools),
+    {
+      label: `tool ${descriptor.name}`,
+      timeoutMs,
+      signal,
+    },
+  );
 
   writeStepOutput(step.outputContextKey, output, context);
 
@@ -2001,6 +2024,8 @@ async function requestComputerUseApproval(options: {
   emitSnapshot: (snapshot: TaskSnapshot) => void;
   emitEvent: (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number];
   agentTracker: ReturnType<typeof createAgentStateTracker>;
+  signal?: AbortSignal;
+  timeoutMs?: number;
   setPendingPermissionHandler: (
     requestId: string,
     handler: ((decision: string) => void | Promise<void>) | undefined,
@@ -2015,6 +2040,8 @@ async function requestComputerUseApproval(options: {
     emitSnapshot,
     emitEvent,
     agentTracker,
+    signal,
+    timeoutMs = COMMANDER_USER_WAIT_TIMEOUT_MS,
     setPendingPermissionHandler,
   } = options;
 
@@ -2045,7 +2072,7 @@ async function requestComputerUseApproval(options: {
     },
   });
 
-  return new Promise((resolve, reject) => {
+  const approvalPromise = new Promise<{ approvalId: string; taskId?: string; sessionWide?: boolean }>((resolve, reject) => {
     emitSnapshot({
       ...getSnapshot(),
       status: "waiting_permission",
@@ -2061,12 +2088,12 @@ async function requestComputerUseApproval(options: {
 
     setPendingPermissionHandler(permissionRequest.id, async (decision) => {
       try {
-        const resolvedRequest = resolvePermissionRequest(permissionRequest, decision as PermissionDecision);
+        resolvePermissionRequest(permissionRequest, decision as PermissionDecision);
         setPendingPermissionHandler(permissionRequest.id, undefined);
 
         emitSnapshot({
           ...getSnapshot(),
-          permissionRequest: resolvedRequest,
+          permissionRequest: undefined,
           logs: appendLog(getSnapshot(), emitEvent({
             kind: "permission.resolved",
             taskId,
@@ -2093,6 +2120,171 @@ async function requestComputerUseApproval(options: {
       }
     });
   });
+
+  try {
+    return await withTaskTimeout(approvalPromise, {
+      label: `Computer Use approval ${permissionRequest.id}`,
+      timeoutMs,
+      signal,
+      onTimeout: () => {
+        setPendingPermissionHandler(permissionRequest.id, undefined);
+        emitSnapshot({
+          ...getSnapshot(),
+          permissionRequest: undefined,
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "task.failed",
+            taskId,
+            error: `Computer Use approval ${permissionRequest.id} timed out.`,
+          })),
+        });
+      },
+      onAbort: () => {
+        setPendingPermissionHandler(permissionRequest.id, undefined);
+        emitSnapshot({
+          ...getSnapshot(),
+          permissionRequest: undefined,
+        });
+      },
+    });
+  } catch (error) {
+    setPendingPermissionHandler(permissionRequest.id, undefined);
+    throw error;
+  }
+}
+
+async function waitForAskUserAnswer(options: {
+  question: string;
+  choices?: CommanderDagStep["choices"];
+  userGoal: string;
+  taskId: string;
+  stepId: string;
+  context: SharedTaskContext;
+  getSnapshot: () => TaskSnapshot;
+  emitSnapshot: (snapshot: TaskSnapshot) => void;
+  emitEvent: (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number];
+  agentTracker: ReturnType<typeof createAgentStateTracker>;
+  setPendingAskUserHandler: NonNullable<CommanderDagTaskOptions["controller"]["setPendingAskUserHandler"]>;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}): Promise<string> {
+  const {
+    question,
+    choices,
+    userGoal,
+    taskId,
+    stepId,
+    context,
+    getSnapshot,
+    emitSnapshot,
+    emitEvent,
+    agentTracker,
+    setPendingAskUserHandler,
+    signal,
+    timeoutMs = COMMANDER_USER_WAIT_TIMEOUT_MS,
+  } = options;
+  const askPrompt = normalizeAskUserPromptForUserLanguage(question, choices, userGoal);
+  let requestId = "";
+  const answerPromise = new Promise<string>((resolve) => {
+    const { questionRequest, listenForAnswer } = createAskUserRequest({
+      question: askPrompt.question,
+      choices: askPrompt.choices,
+      setPendingAskUserHandler,
+      onAnswered: async (resolved) => {
+        context.set(`askUserAnswer:${stepId}`, resolved.answer);
+        context.set("askUserQuestion", resolved.question);
+        emitSnapshot({
+          ...getSnapshot(),
+          askUserQuestion: undefined,
+          conversationMessages: updateAskUserConversation(
+            getSnapshot().conversationMessages,
+            resolved,
+          ),
+        });
+        resolve(resolved.answer ?? "");
+      },
+    });
+    requestId = questionRequest.id;
+
+    emitSnapshot({
+      ...getSnapshot(),
+      status: "waiting_info",
+      commanderMessage: questionRequest.question,
+      askUserQuestion: questionRequest,
+      agents: agentTracker.getSnapshots(),
+      logs: appendLog(getSnapshot(), emitEvent({
+        kind: "ask_user.requested",
+        taskId,
+        question: questionRequest,
+      })),
+    });
+
+    listenForAnswer();
+  });
+
+  try {
+    return await withTaskTimeout(answerPromise, {
+      label: `askUser ${requestId || stepId}`,
+      timeoutMs,
+      signal,
+      onTimeout: () => {
+        if (requestId) {
+          setPendingAskUserHandler(requestId, undefined);
+        }
+        const current = getSnapshot();
+        emitSnapshot({
+          ...current,
+          askUserQuestion: undefined,
+          conversationMessages: current.askUserQuestion
+            ? updateAskUserConversation(
+                current.conversationMessages,
+                { ...current.askUserQuestion, status: "expired", resolvedAt: new Date().toISOString() },
+              )
+            : current.conversationMessages,
+          logs: appendLog(current, emitEvent({
+            kind: "task.failed",
+            taskId,
+            error: `askUser ${requestId || stepId} timed out.`,
+          })),
+        });
+      },
+      onAbort: () => {
+        if (requestId) {
+          setPendingAskUserHandler(requestId, undefined);
+        }
+        const current = getSnapshot();
+        emitSnapshot({
+          ...current,
+          askUserQuestion: undefined,
+          conversationMessages: current.askUserQuestion
+            ? updateAskUserConversation(
+                current.conversationMessages,
+                { ...current.askUserQuestion, status: "cancelled", resolvedAt: new Date().toISOString() },
+              )
+            : current.conversationMessages,
+        });
+      },
+    });
+  } catch (error) {
+    if (requestId) {
+      setPendingAskUserHandler(requestId, undefined);
+    }
+    throw error;
+  }
+}
+
+function updateAskUserConversation(
+  messages: TaskSnapshot["conversationMessages"] | undefined,
+  question: NonNullable<TaskSnapshot["askUserQuestion"]>,
+): TaskSnapshot["conversationMessages"] | undefined {
+  return messages?.map((message) =>
+    message.kind === "ask_user_question" && message.id === question.id
+      ? {
+          ...message,
+          askUserQuestion: question,
+          content: question.question,
+        }
+      : message,
+  );
 }
 
 const COMMANDER_DAG_WORKFLOW_ID = "commander-dag";
@@ -2127,6 +2319,7 @@ interface CommanderDagTaskOptions {
   taskId: string;
   userGoal: string;
   initialLogs?: TaskSnapshot["logs"];
+  signal?: AbortSignal;
   /** LLM-based ReAct decision maker. Called each iteration of the ReAct loop. */
   reactDecideNext?: (
     request: ReActDecisionRequest,
@@ -2143,6 +2336,8 @@ interface CommanderDagTaskOptions {
     computerTool: ComputerTool;
     approveAction: (action: { tool: string; params: Record<string, unknown> }) => Promise<{ approvalId: string; taskId?: string; sessionWide?: boolean }>;
     onStep?: (step: unknown) => void;
+    onProgress?: (step: unknown) => void;
+    signal?: AbortSignal;
   }) => Promise<unknown[]>;
 }
 
@@ -2169,11 +2364,13 @@ export async function runCommanderDagTask({
   taskId,
   userGoal,
   initialLogs = [],
+  signal,
   reactDecideNext,
   replanDag,
   computerUseLoopRunner,
 }: CommanderDagTaskOptions) {
   const { emit, getSnapshot, wait } = controller;
+  throwIfTaskAborted(signal, `Commander DAG task ${taskId}`);
   const context = createSharedTaskContext({ userGoal, taskId });
   if (isVisionGoal(userGoal)) {
     const imagePath = inferImagePath(userGoal);
@@ -2221,17 +2418,35 @@ export async function runCommanderDagTask({
   });
 
   await wait();
+  throwIfTaskAborted(signal, `Commander DAG task ${taskId}`);
 
   try {
     // Phase 1: Commander generates DAG plan
     const availableAgents = getAvailableAgentsForPlanning();
     let dagPlan: CommanderDagPlan;
     try {
-      dagPlan = normalizeCommanderDagPlan(await commanderTool.plan({
-        userGoal,
-        availableAgents,
-        workflowId: COMMANDER_DAG_WORKFLOW_ID,
-      }));
+      dagPlan = normalizeCommanderDagPlan(await withTaskTimeout(
+        () => commanderTool.plan({
+          userGoal,
+          availableAgents,
+          workflowId: COMMANDER_DAG_WORKFLOW_ID,
+        }),
+        {
+          label: "commander.plan",
+          timeoutMs: COMMANDER_MODEL_TIMEOUT_MS,
+          signal,
+          onTimeout: () => {
+            emitSnapshot({
+              ...getSnapshot(),
+              logs: appendLog(getSnapshot(), emitEvent({
+                kind: "task.failed",
+                taskId,
+                error: "commander.plan timed out.",
+              })),
+            });
+          },
+        },
+      ));
     } catch (planError) {
       // Commander JSON parse failure fallback: only kick in when the goal
       // clearly looks like desktop automation. This regex-based check is
@@ -2325,37 +2540,19 @@ export async function runCommanderDagTask({
         ((s as CommanderDagStep).dependsOn ?? []).length === 0,
     );
     if (askUserStep && controller.setPendingAskUserHandler) {
-      const askPrompt = normalizeAskUserPromptForUserLanguage(
-        askUserStep.title || "Please clarify your request.",
-        askUserStep.choices,
+      const askResult = await waitForAskUserAnswer({
+        question: askUserStep.title || "Please clarify your request.",
+        choices: askUserStep.choices,
         userGoal,
-      );
-      const askResult = await new Promise<string>((resolve) => {
-        const { questionRequest, listenForAnswer } = createAskUserRequest({
-          question: askPrompt.question,
-          choices: askPrompt.choices,
-          setPendingAskUserHandler: controller.setPendingAskUserHandler!,
-          onAnswered: async (resolved) => {
-            context.set(`askUserAnswer:${askUserStep.id}`, resolved.answer);
-            context.set("askUserQuestion", resolved.question);
-            resolve(resolved.answer ?? "");
-          },
-        });
-
-        emitSnapshot({
-          ...getSnapshot(),
-          status: "waiting_info",
-          commanderMessage: questionRequest.question,
-          askUserQuestion: questionRequest,
-          agents: agentTracker.getSnapshots(),
-          logs: appendLog(getSnapshot(), emitEvent({
-            kind: "ask_user.requested",
-            taskId,
-            question: questionRequest,
-          })),
-        });
-
-        listenForAnswer();
+        taskId,
+        stepId: askUserStep.id,
+        context,
+        getSnapshot,
+        emitSnapshot,
+        emitEvent,
+        agentTracker,
+        setPendingAskUserHandler: controller.setPendingAskUserHandler,
+        signal,
       });
 
       // If askUser was the only step, recurse with the clarification
@@ -2368,12 +2565,16 @@ export async function runCommanderDagTask({
           codeTool,
           computerTool,
           fileTool,
+          shellTool,
           schedulerTool,
+          workspaceTool,
           webTool,
           browserTool,
           verifierTool,
+          visionTool,
           taskId,
           userGoal: `${userGoal}\n\nUser clarification: ${askResult}`,
+          signal,
           reactDecideNext,
           replanDag,
           computerUseLoopRunner,
@@ -2383,11 +2584,12 @@ export async function runCommanderDagTask({
       // If there are more steps after askUser, store answer and continue
       context.set((askUserStep as CommanderDagStep).outputContextKey ?? "clarification", askResult);
       await wait();
+      throwIfTaskAborted(signal, `askUser ${askUserStep.id}`);
     }
 
     // Phase 2: Execute DAG steps via executeWorkflow for parallel scheduling.
-    // Independent steps (no shared dependsOn) are executed concurrently via
-    // Promise.allSettled inside the DAG executor.
+    // Independent steps (no shared dependsOn) are executed concurrently with
+    // per-step timeout/cancellation so one hung step cannot block the batch.
     const tools: AllCapabilityTools = {
       browserTool, codeTool, computerTool, fileTool,
       shellTool, schedulerTool, workspaceTool, webTool,
@@ -2458,35 +2660,19 @@ export async function runCommanderDagTask({
         }
         // Inline askUser: ask now and wait for answer
         if (controller.setPendingAskUserHandler) {
-          const askPrompt = normalizeAskUserPromptForUserLanguage(
-            dagStep.title || "Please clarify your request.",
-            dagStep.choices,
+          const answer = await waitForAskUserAnswer({
+            question: dagStep.title || "Please clarify your request.",
+            choices: dagStep.choices,
             userGoal,
-          );
-          const answer = await new Promise<string>((resolve) => {
-            const { questionRequest, listenForAnswer } = createAskUserRequest({
-              question: askPrompt.question,
-              choices: askPrompt.choices,
-              setPendingAskUserHandler: controller.setPendingAskUserHandler!,
-              onAnswered: async (resolved) => {
-                context.set(`askUserAnswer:${dagStep.id}`, resolved.answer);
-                context.set("askUserQuestion", resolved.question);
-                resolve(resolved.answer ?? "");
-              },
-            });
-            emitSnapshot({
-              ...getSnapshot(),
-              status: "waiting_info",
-              commanderMessage: questionRequest.question,
-              askUserQuestion: questionRequest,
-              agents: agentTracker.getSnapshots(),
-              logs: appendLog(getSnapshot(), emitEvent({
-                kind: "ask_user.requested",
-                taskId,
-                question: questionRequest,
-              })),
-            });
-            listenForAnswer();
+            taskId,
+            stepId: dagStep.id,
+            context,
+            getSnapshot,
+            emitSnapshot,
+            emitEvent,
+            agentTracker,
+            setPendingAskUserHandler: controller.setPendingAskUserHandler,
+            signal,
           });
           completedSteps.add(dagStep.id);
           context.set((dagStep as CommanderDagStep).outputContextKey ?? "clarification", answer);
@@ -2561,6 +2747,7 @@ export async function runCommanderDagTask({
               emitSnapshot,
               emitEvent,
               agentTracker,
+              signal,
               setPendingPermissionHandler: controller.setPendingPermissionHandler!,
             }),
           onStep: (step) => {
@@ -2581,6 +2768,25 @@ export async function runCommanderDagTask({
               })),
             });
           },
+          onProgress: (step) => {
+            const progressStep = step as ComputerUseStep;
+            const phase = progressStep.phase ?? "executing";
+            if (agentTracker.getState(agentId)) {
+              agentTracker.setState(agentId, {
+                status: phase === "waiting_permission" ? "waiting_permission" : "running",
+                task: progressStep.observation || `Computer Use: ${phase}`,
+                currentStepId: dagStep.id,
+              });
+            }
+            emitSnapshot({
+              ...getSnapshot(),
+              status: phase === "waiting_permission" ? "waiting_permission" : "running",
+              commanderMessage: progressStep.observation || `Computer Use: ${phase}`,
+              plan: markStep(getSnapshot().plan, dagStep.id, "running"),
+              agents: agentTracker.getSnapshots(),
+            });
+          },
+          signal,
         });
         const failedStep = steps.find((step) =>
           step &&
@@ -2658,7 +2864,14 @@ export async function runCommanderDagTask({
               (dagStep as CommanderDagStep).inputContextKeys,
               context,
             );
-            const output = await dispatchToolByName(td.name, stepInput, tools);
+            const output = await withTaskTimeout(
+              () => dispatchToolByName(td.name, stepInput, tools),
+              {
+                label: `ReAct tool ${td.name}`,
+                timeoutMs: COMMANDER_TOOL_TIMEOUT_MS,
+                signal,
+              },
+            );
             writeStepOutput(
               (dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`,
               output,
@@ -2676,6 +2889,9 @@ export async function runCommanderDagTask({
           context,
           tools: reactTools,
           maxIterations: 4,
+          signal,
+          decisionTimeoutMs: COMMANDER_MODEL_TIMEOUT_MS,
+          toolTimeoutMs: COMMANDER_TOOL_TIMEOUT_MS,
           decideNext: (req) =>
             reactDecideNext({
               agentKind: req.agent.kind,
@@ -2694,6 +2910,27 @@ export async function runCommanderDagTask({
                 };
               }),
             }),
+          onWaiting: (phase, iteration, detail) => {
+            emitSnapshot({
+              ...getSnapshot(),
+              logs: appendLog(getSnapshot(), emitEvent({
+                kind: "tool.planned",
+                taskId,
+                toolName: `${dagStep.assignedAgentKind}.${phase}`,
+                detail: `Step ${dagStep.id} iteration ${iteration}: ${detail}`,
+              })),
+            });
+          },
+          onTimeout: (phase, iteration, detail) => {
+            emitSnapshot({
+              ...getSnapshot(),
+              logs: appendLog(getSnapshot(), emitEvent({
+                kind: "task.failed",
+                taskId,
+                error: `Step ${dagStep.id} ${phase} iteration ${iteration}: ${detail}`,
+              })),
+            });
+          },
         });
 
         if (reactResult.status === "completed") {
@@ -2725,11 +2962,18 @@ export async function runCommanderDagTask({
       }
 
       if (executionMode === "direct_response") {
-        const synthesis = await safeSynthesizeConclusion(
-          commanderTool,
-          userGoal,
-          dagStep.title,
-          context.snapshot(),
+        const synthesis = await withTaskTimeout(
+          () => safeSynthesizeConclusion(
+            commanderTool,
+            userGoal,
+            dagStep.title,
+            context.snapshot(),
+          ),
+          {
+            label: `commander.synthesize ${dagStep.id}`,
+            timeoutMs: COMMANDER_MODEL_TIMEOUT_MS,
+            signal,
+          },
         );
         const output = synthesis?.message ?? dagStep.title;
         writeStepOutput(
@@ -2763,10 +3007,28 @@ export async function runCommanderDagTask({
 
       // Fallback: single-shot capability dispatch
       try {
-        const result = await executeCapabilityStep(
-          dagStep as CommanderDagStep,
-          context,
-          tools,
+        const result = await withTaskTimeout(
+          () => executeCapabilityStep(
+            dagStep as CommanderDagStep,
+            context,
+            tools,
+            { signal, timeoutMs: COMMANDER_TOOL_TIMEOUT_MS },
+          ),
+          {
+            label: `tool dispatch ${dagStep.id}`,
+            timeoutMs: COMMANDER_TOOL_TIMEOUT_MS,
+            signal,
+            onTimeout: () => {
+              emitSnapshot({
+                ...getSnapshot(),
+                logs: appendLog(getSnapshot(), emitEvent({
+                  kind: "task.failed",
+                  taskId,
+                  error: `Step ${dagStep.id} tool dispatch timed out.`,
+                })),
+              });
+            },
+          },
         );
         completedSteps.add(dagStep.id);
 
@@ -2831,11 +3093,37 @@ export async function runCommanderDagTask({
       if (!dagStep) return undefined;
 
       try {
-        const recoveryPlan = await replanDag(
-          userGoal,
-          request.context.snapshot(),
-          request.step.id,
-          request.error,
+        emitSnapshot({
+          ...getSnapshot(),
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "tool.planned",
+            taskId,
+            toolName: "commander.replan",
+            detail: `Replanning after ${request.step.id}: ${request.error}`,
+          })),
+        });
+        const recoveryPlan = await withTaskTimeout(
+          () => replanDag(
+            userGoal,
+            request.context.snapshot(),
+            request.step.id,
+            request.error,
+          ),
+          {
+            label: `commander.replan ${request.step.id}`,
+            timeoutMs: COMMANDER_REPLAN_TIMEOUT_MS,
+            signal,
+            onTimeout: () => {
+              emitSnapshot({
+                ...getSnapshot(),
+                logs: appendLog(getSnapshot(), emitEvent({
+                  kind: "task.failed",
+                  taskId,
+                  error: `commander.replan timed out after ${request.step.id}.`,
+                })),
+              });
+            },
+          },
         );
 
         if (!recoveryPlan.steps || recoveryPlan.steps.length === 0) {
@@ -2883,6 +3171,8 @@ export async function runCommanderDagTask({
     const execution = await executeWorkflow({
       workflow: syntheticWorkflow,
       context,
+      signal,
+      stepTimeoutMs: COMMANDER_TOOL_TIMEOUT_MS,
       executeStep: executeStepWithReAct,
       onStepStarted: (step) => {
         emitSnapshot({
@@ -2911,6 +3201,29 @@ export async function runCommanderDagTask({
       },
       onStepFailed: (_step, _error, _ctx) => {
         // Already handled in executeStepWithReAct above
+      },
+      onStepHeartbeat: (step, elapsedMs) => {
+        emitSnapshot({
+          ...getSnapshot(),
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "step.progress",
+            taskId,
+            stepId: step.id,
+            agentKind: step.agentKind,
+            percent: 50,
+            detail: `Still waiting on step ${step.id} after ${Math.round(elapsedMs / 1000)}s.`,
+          })),
+        });
+      },
+      onStepTimeout: (step, timeoutMs) => {
+        emitSnapshot({
+          ...getSnapshot(),
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "task.failed",
+            taskId,
+            error: `Step ${step.id} timed out after ${timeoutMs}ms.`,
+          })),
+        });
       },
       onStepFailureReplan: handleStepFailureReplan,
       onStepReplanned: (step, error, action, _ctx) => {
@@ -2941,11 +3254,18 @@ export async function runCommanderDagTask({
     }
 
     // Phase 3: Commander synthesizes conclusion
-    const synthesis = await safeSynthesizeConclusion(
-      commanderTool,
-      userGoal,
-      dagPlan.title || "Commander DAG task",
-      context.snapshot(),
+    const synthesis = await withTaskTimeout(
+      () => safeSynthesizeConclusion(
+        commanderTool,
+        userGoal,
+        dagPlan.title || "Commander DAG task",
+        context.snapshot(),
+      ),
+      {
+        label: "commander.synthesize final",
+        timeoutMs: COMMANDER_MODEL_TIMEOUT_MS,
+        signal,
+      },
     );
     const conclusion = synthesis?.message
       ?? `Task completed: ${completedSteps.size}/${dagPlan.steps.length} step(s) executed.`;
@@ -2989,29 +3309,32 @@ export async function runCommanderDagTask({
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     const userError = toUserFacingError(errorMsg);
+    const cancelled = isTaskCancelledError(error);
     agentTracker.setState("agent-commander", {
-      status: "failed",
-      task: userError,
+      status: cancelled ? "cancelled" : "failed",
+      task: cancelled ? "Task cancelled" : userError,
     });
+
+    const completionEvent: TaskRuntimeEvent = cancelled
+      ? { kind: "task.completed", taskId, detail: "Task cancelled." }
+      : { kind: "task.failed", taskId, error: errorMsg };
 
     emitSnapshot({
       ...getSnapshot(),
-      title: "Commander DAG plan failed",
-      status: "failed",
-      commanderMessage: userError,
-      userFacingError: userError,
+      title: cancelled ? "Task cancelled" : "Commander DAG plan failed",
+      status: cancelled ? "cancelled" : "failed",
+      commanderMessage: cancelled ? "Task cancelled." : userError,
+      userFacingError: cancelled ? undefined : userError,
+      askUserQuestion: undefined,
+      permissionRequest: undefined,
       plan: snapshot.plan.map((s) => ({
         ...s,
-        status: s.status === "running" ? ("failed" as const)
+        status: s.status === "running" ? (cancelled ? "skipped" as const : "failed" as const)
           : s.status === "pending" ? ("skipped" as const)
           : s.status,
       })),
       agents: agentTracker.getSnapshots(),
-      logs: appendLog(snapshot, emitEvent({
-        kind: "task.failed",
-        taskId,
-        error: errorMsg,
-      })),
+      logs: appendLog(snapshot, emitEvent(completionEvent)),
     });
   }
 }

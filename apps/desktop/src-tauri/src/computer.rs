@@ -192,6 +192,7 @@ pub struct ComputerInspectUiRequest {
     pub window_handle: u64,
     pub max_depth: Option<u8>,
     pub max_nodes: Option<u16>,
+    pub include_values: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -251,6 +252,14 @@ pub(crate) struct ComputerApprovalLease {
     pub(crate) approval_id: String,
     pub(crate) created_at: SystemTime,
     pub(crate) remaining_actions: u16,
+    pub(crate) scope: ComputerApprovalScope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ComputerApprovalScope {
+    pub(crate) window_handle: Option<u64>,
+    pub(crate) window_title: Option<String>,
+    pub(crate) allowed_tools: Vec<String>,
 }
 
 // ── Safety guards ───────────────────────────────────────────────────────────
@@ -326,6 +335,67 @@ fn validate_computer_approval_lease(lease: &ComputerApprovalLease) -> Result<(),
     Ok(())
 }
 
+fn low_risk_computer_lease_tools() -> Vec<String> {
+    [
+        "computer.moveMouse",
+        "computer.click",
+        "computer.scroll",
+        "computer.focusWindow",
+        "computer.invokeUi",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn computer_action_scope(
+    tool_name: &str,
+    params: &serde_json::Value,
+) -> Result<ComputerApprovalScope, JavisError> {
+    let window_handle = action_window_handle(tool_name, params)?;
+    let window_title = window_handle.map(window_title_for_scope).transpose()?;
+    Ok(ComputerApprovalScope {
+        window_handle,
+        window_title,
+        allowed_tools: low_risk_computer_lease_tools(),
+    })
+}
+
+fn validate_computer_lease_scope(
+    lease: &ComputerApprovalLease,
+    tool_name: &str,
+    params: &serde_json::Value,
+) -> Result<(), JavisError> {
+    if !lease.scope.allowed_tools.iter().any(|tool| tool == tool_name) {
+        return Err(JavisError::Permission(format!(
+            "Computer Use task approval does not allow {tool_name}."
+        )));
+    }
+    let action_scope = computer_action_scope(tool_name, params)?;
+    match (lease.scope.window_handle, action_scope.window_handle) {
+        (Some(expected), Some(actual)) if expected != actual => {
+            return Err(JavisError::Permission(
+                "Computer Use task approval cannot be reused across windows.".into(),
+            ));
+        }
+        (Some(_), None) => {
+            return Err(JavisError::Permission(
+                "Computer Use task approval requires actions to stay in the approved window."
+                    .into(),
+            ));
+        }
+        _ => {}
+    }
+    if let (Some(expected), Some(actual)) = (&lease.scope.window_title, &action_scope.window_title) {
+        if expected != actual {
+            return Err(JavisError::Permission(
+                "Computer Use task approval window title changed; please approve again.".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn window_title(hwnd: HWND) -> String {
     let mut title_buf = [0u16; 512];
     let title_len = unsafe { GetWindowTextW(hwnd, title_buf.as_mut_ptr(), title_buf.len() as i32) };
@@ -340,6 +410,69 @@ fn validate_window_handle_title(handle: u64) -> Result<(), JavisError> {
         )));
     }
     validate_window_title(&window_title(hwnd))
+}
+
+fn window_title_for_scope(handle: u64) -> Result<String, JavisError> {
+    let hwnd = handle as HWND;
+    if hwnd.is_null() || unsafe { IsWindow(hwnd) } == 0 {
+        return Err(JavisError::Validation(format!(
+            "Invalid window handle: {handle}"
+        )));
+    }
+    let title = window_title(hwnd);
+    validate_window_title(&title)?;
+    Ok(title)
+}
+
+fn action_window_handle(
+    tool_name: &str,
+    params: &serde_json::Value,
+) -> Result<Option<u64>, JavisError> {
+    match tool_name {
+        "computer.focusWindow" => Ok(params.get("handle").and_then(|value| value.as_u64())),
+        "computer.invokeUi" | "computer.setUiValue" => Ok(params
+            .get("selector")
+            .or_else(|| params.get("Selector"))
+            .and_then(|selector| {
+                selector
+                    .get("windowHandle")
+                    .or_else(|| selector.get("window_handle"))
+                    .and_then(|value| value.as_u64())
+            })),
+        "computer.moveMouse" | "computer.click" | "computer.scroll" => {
+            let Some(x) = params.get("x").and_then(|value| value.as_i64()) else {
+                return Ok(None);
+            };
+            let Some(y) = params.get("y").and_then(|value| value.as_i64()) else {
+                return Ok(None);
+            };
+            Ok(window_handle_at_point(x as i32, y as i32))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn window_handle_at_point(x: i32, y: i32) -> Option<u64> {
+    let point = POINT { x, y };
+    let hwnd = unsafe {
+        let desktop = GetDesktopWindow();
+        let child = ChildWindowFromPointEx(desktop, point, CWP_SKIPINVISIBLE | CWP_SKIPTRANSPARENT);
+        if child.is_null() {
+            WindowFromPoint(point)
+        } else {
+            child
+        }
+    };
+    if hwnd.is_null() {
+        return None;
+    }
+    let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+    let target = if root.is_null() { hwnd } else { root };
+    if target.is_null() {
+        None
+    } else {
+        Some(target as u64)
+    }
 }
 
 fn validate_window_not_minimized(handle: u64) -> Result<(), JavisError> {
@@ -1598,10 +1731,18 @@ mod uia {
         };
         let max_depth = request.max_depth.unwrap_or(DEFAULT_MAX_DEPTH).min(8);
         let max_nodes = request.max_nodes.unwrap_or(DEFAULT_MAX_NODES).min(500);
+        let include_values = request.include_values.unwrap_or(false);
         let mut lines = Vec::new();
         let mut count = 0u16;
         write_tree(
-            &walker, &root, 0, max_depth, max_nodes, &mut count, &mut lines,
+            &walker,
+            &root,
+            0,
+            max_depth,
+            max_nodes,
+            include_values,
+            &mut count,
+            &mut lines,
         )?;
         Ok(ComputerInspectUiResult {
             tree: lines.join("\n"),
@@ -1702,6 +1843,7 @@ mod uia {
         depth: u8,
         max_depth: u8,
         max_nodes: u16,
+        include_values: bool,
         count: &mut u16,
         lines: &mut Vec<String>,
     ) -> Result<(), JavisError> {
@@ -1709,12 +1851,20 @@ mod uia {
             return Ok(());
         }
         let node = read_node(element)?;
+        let value_attr = if include_values {
+            read_value(element)
+                .map(|value| format!(" value=\"{}\"", escape_ui_text(&value)))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         lines.push(format!(
-            "{}<{} name=\"{}\" automationId=\"{}\">",
+            "{}<{} name=\"{}\" automationId=\"{}\"{}>",
             "  ".repeat(depth as usize),
             node.control_type,
             escape_ui_text(&node.name),
             escape_ui_text(&node.automation_id),
+            value_attr,
         ));
         *count += 1;
         if depth >= max_depth {
@@ -1727,6 +1877,7 @@ mod uia {
                 depth + 1,
                 max_depth,
                 max_nodes,
+                include_values,
                 count,
                 lines,
             )?;
@@ -1735,6 +1886,13 @@ mod uia {
             }
         }
         Ok(())
+    }
+
+    fn read_value(element: &IUIAutomationElement) -> Option<String> {
+        let pattern: IUIAutomationValuePattern =
+            unsafe { element.GetCurrentPatternAs(UIA_ValuePatternId).ok()? };
+        let value = unsafe { pattern.CurrentValue().ok()? };
+        Some(value.to_string())
     }
 
     fn find_matching_node(
@@ -1969,30 +2127,41 @@ mod uia {
 // ── Tauri commands ──────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub(crate) fn computer_screenshot(
+pub(crate) async fn computer_screenshot(
     request: ComputerScreenshotRequest,
 ) -> Result<ComputerScreenshotResult, String> {
-    capture_screenshot(&request).map_err(|e| e.to_string())
+    run_blocking_computer_command(move || capture_screenshot(&request)).await
 }
 
 #[tauri::command]
-pub(crate) fn computer_list_windows(
+pub(crate) async fn computer_list_windows(
     request: ComputerListWindowsRequest,
 ) -> Result<ComputerListWindowsResult, String> {
     let _ = request;
-    list_windows().map_err(|e| e.to_string())
+    run_blocking_computer_command(list_windows).await
 }
 
 #[tauri::command]
-pub(crate) fn computer_wait(request: ComputerWaitRequest) -> Result<ComputerWaitResult, String> {
-    wait(&request).map_err(|e| e.to_string())
+pub(crate) async fn computer_wait(request: ComputerWaitRequest) -> Result<ComputerWaitResult, String> {
+    run_blocking_computer_command(move || wait(&request)).await
 }
 
 #[tauri::command]
-pub(crate) fn computer_inspect_ui(
+pub(crate) async fn computer_inspect_ui(
     request: ComputerInspectUiRequest,
 ) -> Result<ComputerInspectUiResult, String> {
-    uia::inspect_ui(&request).map_err(|e| e.to_string())
+    run_blocking_computer_command(move || uia::inspect_ui(&request)).await
+}
+
+async fn run_blocking_computer_command<T, F>(operation: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, JavisError> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(operation)
+        .await
+        .map_err(|e| format!("Computer Use worker failed: {e}"))?
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2012,6 +2181,31 @@ pub(crate) fn computer_approve_action(
         params_json,
         session_wide,
     )
+}
+
+#[tauri::command]
+pub(crate) fn computer_cancel_approvals(
+    state: tauri::State<'_, Mutex<ComputerApprovalState>>,
+    task_id: Option<String>,
+) -> Result<(), String> {
+    computer_cancel_approvals_inner(state.inner(), task_id)
+}
+
+fn computer_cancel_approvals_inner(
+    state: &Mutex<ComputerApprovalState>,
+    task_id: Option<String>,
+) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| format!("Lock error: {e}"))?;
+    if let Some(task_id) = task_id {
+        guard.leases.remove(&task_id);
+        guard
+            .pending
+            .retain(|_, pending| pending.binding.task_id() != task_id.as_str());
+    } else {
+        guard.pending.clear();
+        guard.leases.clear();
+    }
+    Ok(())
 }
 
 fn computer_approve_action_inner(
@@ -2049,6 +2243,7 @@ fn computer_approve_action_inner(
                 approval_id,
                 created_at: SystemTime::now(),
                 remaining_actions: COMPUTER_LEASE_MAX_ACTIONS,
+                scope: computer_action_scope(&tool_name, &normalized).map_err(|e| e.to_string())?,
             },
         );
         return Ok(());
@@ -2176,12 +2371,13 @@ fn validate_computer_action_params(
 macro_rules! impl_computer_write_command {
     ($fn_name:ident, $request_type:ty, $result_type:ty, $tool_suffix:expr, $validate_fn:expr, $execute_fn:expr) => {
         #[tauri::command]
-        pub(crate) fn $fn_name(
+        pub(crate) async fn $fn_name(
             state: tauri::State<'_, Mutex<ComputerApprovalState>>,
             approval_id: String,
             task_id: String,
             request: $request_type,
         ) -> Result<$result_type, String> {
+            {
             validate_approval_id(&approval_id).map_err(|e| e.to_string())?;
             validate_task_id(&task_id).map_err(|e| e.to_string())?;
 
@@ -2221,6 +2417,8 @@ macro_rules! impl_computer_write_command {
                         "This Computer Use action requires a fresh per-action approval.".to_string(),
                     );
                 }
+                validate_computer_lease_scope(lease, &tool_name, &params_json)
+                    .map_err(|e| e.to_string())?;
                 lease.remaining_actions = lease.remaining_actions.saturating_sub(1);
             } else {
                 return Err(
@@ -2229,10 +2427,10 @@ macro_rules! impl_computer_write_command {
                 );
             }
             guard.last_write_at = Some(SystemTime::now());
-            drop(guard);
+            }
 
             // Execute
-            ($execute_fn)(&request).map_err(|e: JavisError| e.to_string())
+            run_blocking_computer_command(move || ($execute_fn)(&request)).await
         }
     };
 }
@@ -2675,7 +2873,76 @@ mod tests {
         let guard = state.lock().unwrap();
         assert!(guard.pending.is_empty());
         assert_eq!(guard.leases.len(), 1);
-        assert_eq!(guard.leases.get("task-1").unwrap().remaining_actions, COMPUTER_LEASE_MAX_ACTIONS);
+        let lease = guard.leases.get("task-1").unwrap();
+        assert_eq!(lease.remaining_actions, COMPUTER_LEASE_MAX_ACTIONS);
+        assert!(lease.scope.allowed_tools.contains(&"computer.click".to_string()));
+        assert!(lease.scope.allowed_tools.contains(&"computer.invokeUi".to_string()));
+        assert!(!lease.scope.allowed_tools.contains(&"computer.type".to_string()));
+    }
+
+    #[test]
+    fn test_non_sensitive_invoke_ui_can_use_task_lease_policy() {
+        let params = serde_json::json!({
+            "selector": {
+                "windowHandle": 42,
+                "automationId": "saveButton",
+                "name": "Save"
+            }
+        });
+
+        assert!(low_risk_computer_lease_tools().contains(&"computer.invokeUi".to_string()));
+        assert!(!requires_per_action_computer_approval("computer.invokeUi", &params));
+    }
+
+    #[test]
+    fn test_sensitive_invoke_ui_still_requires_per_action_policy() {
+        let params = serde_json::json!({
+            "selector": {
+                "windowHandle": 42,
+                "automationId": "passwordButton",
+                "name": "Reveal password"
+            }
+        });
+
+        assert!(requires_per_action_computer_approval("computer.invokeUi", &params));
+    }
+
+    #[test]
+    fn test_task_lease_rejects_cross_window_action() {
+        let lease = ComputerApprovalLease {
+            task_id: "task-1".to_string(),
+            approval_id: "approval-1".to_string(),
+            created_at: SystemTime::now(),
+            remaining_actions: 1,
+            scope: ComputerApprovalScope {
+                window_handle: Some(42),
+                window_title: None,
+                allowed_tools: low_risk_computer_lease_tools(),
+            },
+        };
+        let params = serde_json::json!({ "handle": 99 });
+
+        let result = validate_computer_lease_scope(&lease, "computer.focusWindow", &params);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_task_lease_rejects_unscoped_text_entry() {
+        let lease = ComputerApprovalLease {
+            task_id: "task-1".to_string(),
+            approval_id: "approval-1".to_string(),
+            created_at: SystemTime::now(),
+            remaining_actions: 1,
+            scope: ComputerApprovalScope {
+                window_handle: None,
+                window_title: None,
+                allowed_tools: low_risk_computer_lease_tools(),
+            },
+        };
+        let params = serde_json::json!({ "text": "hello" });
+
+        let result = validate_computer_lease_scope(&lease, "computer.type", &params);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -2714,6 +2981,35 @@ mod tests {
 
         let guard = state.lock().unwrap();
         assert!(guard.pending.contains_key("approval-1"));
+        assert!(guard.pending.contains_key("approval-2"));
+    }
+
+    #[test]
+    fn test_cancel_computer_approvals_for_task() {
+        let state = Mutex::new(ComputerApprovalState::default());
+        computer_approve_action_inner(
+            &state,
+            "approval-1".to_string(),
+            "task-1".to_string(),
+            "computer.click".to_string(),
+            serde_json::json!({ "x": 100, "y": 200, "button": "left", "clickCount": 1 }).to_string(),
+            Some(false),
+        )
+        .unwrap();
+        computer_approve_action_inner(
+            &state,
+            "approval-2".to_string(),
+            "task-2".to_string(),
+            "computer.click".to_string(),
+            serde_json::json!({ "x": 120, "y": 220, "button": "left", "clickCount": 1 }).to_string(),
+            Some(false),
+        )
+        .unwrap();
+
+        computer_cancel_approvals_inner(&state, Some("task-1".to_string())).unwrap();
+
+        let guard = state.lock().unwrap();
+        assert!(!guard.pending.contains_key("approval-1"));
         assert!(guard.pending.contains_key("approval-2"));
     }
 

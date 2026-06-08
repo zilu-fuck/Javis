@@ -466,6 +466,7 @@ export function createJavisRuntime({
   const eventBus = createTaskEventBus();
   const taskIdRef: { current: string | null } = { current: null };
   const streamingAgentRef: { current: AgentKind } = { current: "commander" };
+  let activeComputerUseAbortController: AbortController | undefined;
   const preprocessingByTaskId = new Map<string, Promise<PreprocessedInput | undefined>>();
   let preprocessingForNextTask:
     | { promise: Promise<PreprocessedInput | undefined> }
@@ -1150,14 +1151,32 @@ export function createJavisRuntime({
         return { title: "Recovery failed", reasoning: "", steps: [] };
       }
     },
-    computerUseLoopRunner: ({ userGoal, computerTool, approveAction, onStep }) =>
-      runComputerUseLoop({
-        modelProvider: providerFor("computer"),
-        computerTool,
-        userGoal,
-        approveAction,
-        onStep,
-      }),
+    computerUseLoopRunner: async ({ userGoal, computerTool, approveAction, onStep, onProgress, signal }) => {
+      const controller = new AbortController();
+      activeComputerUseAbortController = controller;
+      const abortFromParent = () => controller.abort(signal?.reason ?? new Error("Computer Use cancelled."));
+      if (signal?.aborted) {
+        abortFromParent();
+      } else {
+        signal?.addEventListener("abort", abortFromParent, { once: true });
+      }
+      try {
+        return await runComputerUseLoop({
+          modelProvider: providerFor("computer"),
+          computerTool,
+          userGoal,
+          approveAction,
+          onStep,
+          onProgress,
+          signal: controller.signal,
+        });
+      } finally {
+        signal?.removeEventListener("abort", abortFromParent);
+        if (activeComputerUseAbortController === controller) {
+          activeComputerUseAbortController = undefined;
+        }
+      }
+    },
   });
 
   return {
@@ -1194,8 +1213,12 @@ export function createJavisRuntime({
       runtime.start(userGoal, options);
     },
     stopTask() {
+      activeComputerUseAbortController?.abort(new Error("Computer Use cancelled by user."));
+      activeComputerUseAbortController = undefined;
+      runtime.stopTask("Task cancelled by user.");
       void invoke("cancel_all_model_streams");
       const taskId = taskIdRef.current;
+      void invoke("computer_cancel_approvals", { taskId: taskId ?? null });
       if (taskId) {
         eventBus.emit({
           kind: "agent.chunk_end",
@@ -1207,7 +1230,10 @@ export function createJavisRuntime({
       }
     },
     dispose() {
+      activeComputerUseAbortController?.abort(new Error("Computer Use runtime disposed."));
+      activeComputerUseAbortController = undefined;
       void invoke("cancel_all_model_streams");
+      void invoke("computer_cancel_approvals", { taskId: null });
       sharedContext.clear();
       runtime.dispose();
     },

@@ -129,4 +129,17 @@ export const COMPUTER_USE_OUTPUT_SCHEMA = {
 export const DEFAULT_COMPUTER_USE_CONFIG = {
   maxSteps: 20,
   historySteps: 5,
+  stepDeadlineMs: 12_000,
+  timeouts: {
+    listWindowsMs: 500,
+    inspectUiMs: 1_200,
+    screenshotMs: 2_500,
+    lowRiskWriteMs: 1_000,
+    textWriteMs: 2_000,
+    modelMs: 60_000,
+    approvalMs: 120_000,
+    verificationMs: 1_000,
+  },
+  heartbeatMs: 400,
+  uiCacheMs: 600,
 };

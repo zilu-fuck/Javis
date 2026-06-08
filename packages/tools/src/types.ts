@@ -667,6 +667,7 @@ export interface ComputerInspectUiRequest {
   windowHandle: number;
   maxDepth?: number;
   maxNodes?: number;
+  includeValues?: boolean;
 }
 
 export interface ComputerInspectUiResult {

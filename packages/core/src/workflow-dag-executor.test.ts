@@ -250,6 +250,37 @@ describe("executeWorkflow", () => {
     expect(result.completedStepIds).toEqual(["summarize"]);
   });
 
+  it("does not let a hung parallel step block completed peers forever", async () => {
+    const completed: string[] = [];
+    const failed: string[] = [];
+    const workflow = createWorkflow([
+      step("fast", [], true),
+      step("hung", [], true),
+      step("summarize", ["fast", "hung"], false),
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      stepTimeoutMs: 10,
+      executeStep: async (workflowStep) => {
+        if (workflowStep.id === "hung") {
+          await new Promise(() => undefined);
+        }
+        return { output: workflowStep.id };
+      },
+      onStepCompleted: (workflowStep) => completed.push(workflowStep.id),
+      onStepFailed: (workflowStep) => failed.push(workflowStep.id),
+      onStepFailureReplan: ({ step: failedStep }) => ({
+        abandonFailedStep: failedStep.id === "hung",
+      }),
+    });
+
+    expect(result.status).toBe("completed");
+    expect(completed).toEqual(["fast", "summarize"]);
+    expect(failed).toEqual(["hung"]);
+    expect(result.abandonedStepIds).toEqual(["hung"]);
+  });
+
   it("returns failed result when replanned steps are invalid", async () => {
     const workflow = createWorkflow([
       step("scan-files", [], false),

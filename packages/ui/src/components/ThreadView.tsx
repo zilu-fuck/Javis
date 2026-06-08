@@ -97,10 +97,12 @@ export function ThreadView({
   const [editingMessageKey, setEditingMessageKey] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState("");
   const [copiedMessageKey, setCopiedMessageKey] = useState<string | null>(null);
+  const hasPendingPermissionRequest = task.permissionRequest?.status === "pending";
+  const hasPendingAskUserQuestion = task.askUserQuestion?.status === "pending";
   const hasInlinePrompts = Boolean(
     task.status === "failed" || task.permissionRequest || task.askUserQuestion,
   );
-  const hasActivePrompt = Boolean(task.permissionRequest || task.askUserQuestion);
+  const hasActivePrompt = hasPendingPermissionRequest || hasPendingAskUserQuestion;
   const showExecutionPanels = !hasActivePrompt;
   const sourceConversationMessages = task.conversationMessages?.length
     ? task.conversationMessages
@@ -204,7 +206,7 @@ export function ThreadView({
         {hasConversationMessages ? (
           conversationMessages.map((message, index) => {
             if (message.kind === "ask_user_question" && message.askUserQuestion) {
-              if (task.askUserQuestion?.id === message.askUserQuestion.id) {
+              if (hasPendingAskUserQuestion && task.askUserQuestion?.id === message.askUserQuestion.id) {
                 return null;
               }
               return (
@@ -215,7 +217,7 @@ export function ThreadView({
               );
             }
             if (message.kind === "permission_request" && message.permissionRequest) {
-              if (task.permissionRequest?.id === message.permissionRequest.id) {
+              if (hasPendingPermissionRequest && task.permissionRequest?.id === message.permissionRequest.id) {
                 return null;
               }
               return (
@@ -416,7 +418,7 @@ export function ThreadView({
         }
         currentWorkspacePath={currentWorkspacePath}
         isStreaming={showStreaming}
-        disabled={Boolean(task.askUserQuestion || task.permissionRequest)}
+        disabled={hasActivePrompt}
         draftGoal={draftGoal}
         labels={labels}
         onBrowseWorkspacePath={onBrowseWorkspacePath}

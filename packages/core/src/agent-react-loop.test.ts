@@ -114,6 +114,40 @@ describe("runAgentReActLoop", () => {
       { toolName: "shell.runReadOnlyCommand", status: "succeeded" },
     ]);
   });
+
+  it("fails when a ReAct decision times out", async () => {
+    await expect(
+      runAgentReActLoop({
+        agent: mustAgent("file"),
+        step: step("file"),
+        context: createSharedTaskContext(),
+        decisionTimeoutMs: 10,
+        tools: [{ name: "file.scanMarkdownDocuments", execute: async () => [] }],
+        decideNext: async () => new Promise(() => undefined),
+      }),
+    ).rejects.toThrow("timed out");
+  });
+
+  it("records timed out tools as failed observations", async () => {
+    const result = await runAgentReActLoop({
+      agent: mustAgent("file"),
+      step: step("file"),
+      context: createSharedTaskContext(),
+      toolTimeoutMs: 10,
+      tools: [{ name: "file.scanMarkdownDocuments", execute: async () => new Promise(() => undefined) }],
+      decideNext: ({ observations }) =>
+        observations.length === 0
+          ? { status: "continue", toolName: "file.scanMarkdownDocuments", reason: "scan" }
+          : { status: "completed", reason: "done" },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.observations[0]).toMatchObject({
+      toolName: "file.scanMarkdownDocuments",
+      status: "failed",
+    });
+    expect(result.observations[0]?.error).toContain("timed out");
+  });
 });
 
 function mustAgent(kind: "code" | "file") {

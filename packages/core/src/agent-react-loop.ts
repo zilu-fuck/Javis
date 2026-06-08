@@ -1,5 +1,6 @@
 import type { Agent, AgentKind } from "./index";
 import type { SharedTaskContext } from "./shared-context";
+import { DEFAULT_TASK_TIMEOUT_MS, throwIfTaskAborted, withTaskTimeout } from "./task-wait";
 import type { WorkbenchWorkflowStep } from "./workflows";
 
 export interface AgentReActObservation {
@@ -33,6 +34,9 @@ export interface AgentReActLoopOptions {
   context: SharedTaskContext;
   tools: ReadonlyArray<AgentReActTool>;
   maxIterations?: number;
+  signal?: AbortSignal;
+  decisionTimeoutMs?: number;
+  toolTimeoutMs?: number;
   decideNext(request: {
     agent: Agent;
     step: WorkbenchWorkflowStep;
@@ -42,6 +46,8 @@ export interface AgentReActLoopOptions {
   }): Promise<AgentReActDecision> | AgentReActDecision;
   /** Called after each ReAct iteration (tool execution) to emit progress snapshots. */
   onIteration?: (iteration: number, observation: AgentReActObservation) => void;
+  onWaiting?: (phase: "waiting_model" | "waiting_tool", iteration: number, detail: string) => void;
+  onTimeout?: (phase: "waiting_model" | "waiting_tool", iteration: number, detail: string) => void;
 }
 
 export interface AgentReActLoopResult {
@@ -60,6 +66,9 @@ export async function runAgentReActLoop(
     context,
     tools,
     maxIterations = 4,
+    signal,
+    decisionTimeoutMs = DEFAULT_TASK_TIMEOUT_MS,
+    toolTimeoutMs = DEFAULT_TASK_TIMEOUT_MS,
     decideNext,
   } = options;
   assertAgentOwnsStep(agent, step.agentKind);
@@ -71,13 +80,23 @@ export async function runAgentReActLoop(
   const observations: AgentReActObservation[] = [];
 
   for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
-    const decision = await decideNext({
-      agent,
-      step,
-      context,
-      observations,
-      availableToolNames,
-    });
+    throwIfTaskAborted(signal, `ReAct ${step.id}`);
+    options.onWaiting?.("waiting_model", iteration, "Waiting for ReAct decision.");
+    const decision = await withTaskTimeout(
+      () => Promise.resolve(decideNext({
+        agent,
+        step,
+        context,
+        observations,
+        availableToolNames,
+      })),
+      {
+        label: `ReAct decision ${step.id} iteration ${iteration}`,
+        timeoutMs: decisionTimeoutMs,
+        signal,
+        onTimeout: () => options.onTimeout?.("waiting_model", iteration, "ReAct decision timed out."),
+      },
+    );
 
     if (decision.status === "completed") {
       return {
@@ -124,12 +143,21 @@ export async function runAgentReActLoop(
 
     let observation: AgentReActObservation;
     try {
-      const output = await tool.execute({
-        agent,
-        step,
-        context,
-        observations,
-      });
+      options.onWaiting?.("waiting_tool", iteration, `Waiting for tool ${decision.toolName}.`);
+      const output = await withTaskTimeout(
+        () => tool.execute({
+          agent,
+          step,
+          context,
+          observations,
+        }),
+        {
+          label: `ReAct tool ${decision.toolName} for ${step.id} iteration ${iteration}`,
+          timeoutMs: toolTimeoutMs,
+          signal,
+          onTimeout: () => options.onTimeout?.("waiting_tool", iteration, `Tool ${decision.toolName} timed out.`),
+        },
+      );
       observation = {
         iteration,
         toolName: decision.toolName,

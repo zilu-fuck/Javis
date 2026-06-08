@@ -1,5 +1,6 @@
 import type { SharedTaskContext } from "./shared-context";
 import { createSharedTaskContext } from "./shared-context";
+import { DEFAULT_TASK_TIMEOUT_MS, throwIfTaskAborted, withTaskTimeout } from "./task-wait";
 import type { WorkbenchWorkflow, WorkbenchWorkflowStep } from "./workflows";
 
 export interface WorkflowStepExecutionResult {
@@ -30,6 +31,8 @@ export interface WorkflowStepFailureReplanAction {
 export interface WorkflowExecutorOptions {
   workflow: WorkbenchWorkflow;
   context?: SharedTaskContext;
+  signal?: AbortSignal;
+  stepTimeoutMs?: number;
   executeStep(
     step: WorkbenchWorkflowStep,
     context: SharedTaskContext,
@@ -58,17 +61,23 @@ export interface WorkflowExecutorOptions {
     action: WorkflowStepFailureReplanAction,
     context: SharedTaskContext,
   ): void;
+  onStepHeartbeat?(step: WorkbenchWorkflowStep, elapsedMs: number, context: SharedTaskContext): void;
+  onStepTimeout?(step: WorkbenchWorkflowStep, timeoutMs: number, context: SharedTaskContext): void;
 }
 
 export async function executeWorkflow({
   workflow,
   context = createSharedTaskContext(),
+  signal,
+  stepTimeoutMs = DEFAULT_TASK_TIMEOUT_MS,
   executeStep,
   onStepStarted,
   onStepCompleted,
   onStepFailed,
   onStepFailureReplan,
   onStepReplanned,
+  onStepHeartbeat,
+  onStepTimeout,
 }: WorkflowExecutorOptions): Promise<WorkflowExecutionResult> {
   const activeWorkflow: WorkbenchWorkflow = {
     ...workflow,
@@ -83,6 +92,7 @@ export async function executeWorkflow({
   const replannedStepIds: string[] = [];
 
   while (completed.size + abandoned.size < activeWorkflow.steps.length) {
+    throwIfTaskAborted(signal, `Workflow ${activeWorkflow.id}`);
     const ready = activeWorkflow.steps.filter(
       (step) =>
         !runningOrFinished.has(step.id) &&
@@ -114,11 +124,15 @@ export async function executeWorkflow({
         results,
         replannedStepIds,
         executeStep,
+        signal,
+        stepTimeoutMs,
         onStepStarted,
         onStepCompleted,
         onStepFailed,
         onStepFailureReplan,
         onStepReplanned,
+        onStepHeartbeat,
+        onStepTimeout,
       );
       if (parallelResult) {
         return parallelResult;
@@ -136,11 +150,15 @@ export async function executeWorkflow({
         results,
         replannedStepIds,
         executeStep,
+        signal,
+        stepTimeoutMs,
         onStepStarted,
         onStepCompleted,
         onStepFailed,
         onStepFailureReplan,
         onStepReplanned,
+        onStepHeartbeat,
+        onStepTimeout,
       );
       if (serialResult) {
         return serialResult;
@@ -179,35 +197,43 @@ async function executeReadySteps(
   results: Map<string, unknown>,
   replannedStepIds: string[],
   executeStep: WorkflowExecutorOptions["executeStep"],
+  signal: AbortSignal | undefined,
+  stepTimeoutMs: number,
   onStepStarted: WorkflowExecutorOptions["onStepStarted"],
   onStepCompleted: WorkflowExecutorOptions["onStepCompleted"],
   onStepFailed: WorkflowExecutorOptions["onStepFailed"],
   onStepFailureReplan: WorkflowExecutorOptions["onStepFailureReplan"],
   onStepReplanned: WorkflowExecutorOptions["onStepReplanned"],
+  onStepHeartbeat: WorkflowExecutorOptions["onStepHeartbeat"],
+  onStepTimeout: WorkflowExecutorOptions["onStepTimeout"],
 ): Promise<WorkflowExecutionResult | undefined> {
-  for (const step of steps) {
-    runningOrFinished.add(step.id);
-    onStepStarted?.(step, context);
-  }
-
-  const settled = await Promise.allSettled(
-    steps.map(async (step) => ({
+  const stepExecutions = steps.map((step) =>
+    executeTrackedStep(
       step,
-      result: await executeStep(step, context),
-    })),
+      context,
+      runningOrFinished,
+      executeStep,
+      signal,
+      stepTimeoutMs,
+      onStepStarted,
+      onStepHeartbeat,
+      onStepTimeout,
+    ),
   );
 
   const failures: Array<{ step: WorkbenchWorkflowStep; error: string }> = [];
-  for (let index = 0; index < settled.length; index += 1) {
-    const item = settled[index];
+  const pending = new Set(stepExecutions);
+  while (pending.size > 0) {
+    throwIfTaskAborted(signal, "Workflow step batch");
+    const item = await Promise.race(pending);
+    pending.delete(item.execution);
     if (item.status === "rejected") {
-      const step = steps[index];
       const error = item.reason instanceof Error ? item.reason.message : String(item.reason);
-      failures.push({ step, error });
+      failures.push({ step: item.step, error });
       continue;
     }
 
-    const { step, result } = item.value;
+    const { step, result } = item;
     results.set(step.id, result.output);
     context.set(`step:${step.id}`, result.output);
     completed.add(step.id);
@@ -277,6 +303,69 @@ async function executeReadySteps(
   }
 
   return undefined;
+}
+
+type TrackedStepExecution = Promise<TrackedStepSettlement>;
+
+type TrackedStepSettlement =
+  | {
+      execution: TrackedStepExecution;
+      status: "fulfilled";
+      step: WorkbenchWorkflowStep;
+      result: WorkflowStepExecutionResult;
+    }
+  | {
+      execution: TrackedStepExecution;
+      status: "rejected";
+      step: WorkbenchWorkflowStep;
+      reason: unknown;
+    };
+
+function executeTrackedStep(
+  step: WorkbenchWorkflowStep,
+  context: SharedTaskContext,
+  runningOrFinished: Set<string>,
+  executeStep: WorkflowExecutorOptions["executeStep"],
+  signal: AbortSignal | undefined,
+  stepTimeoutMs: number,
+  onStepStarted: WorkflowExecutorOptions["onStepStarted"],
+  onStepHeartbeat: WorkflowExecutorOptions["onStepHeartbeat"],
+  onStepTimeout: WorkflowExecutorOptions["onStepTimeout"],
+): TrackedStepExecution {
+  runningOrFinished.add(step.id);
+  const startedAt = Date.now();
+  onStepStarted?.(step, context);
+  const heartbeat = setInterval(() => {
+    onStepHeartbeat?.(step, Date.now() - startedAt, context);
+  }, Math.max(Math.min(stepTimeoutMs / 3, 15_000), 1_000));
+
+  let execution: TrackedStepExecution;
+  execution = withTaskTimeout(
+    () => executeStep(step, context),
+    {
+      label: `workflow step ${step.id}`,
+      timeoutMs: stepTimeoutMs,
+      signal,
+      onTimeout: () => onStepTimeout?.(step, stepTimeoutMs, context),
+    },
+  ).then(
+    (result) => ({
+      execution,
+      status: "fulfilled" as const,
+      step,
+      result,
+    }),
+    (reason) => ({
+      execution,
+      status: "rejected" as const,
+      step,
+      reason,
+    }),
+  ).finally(() => {
+    clearInterval(heartbeat);
+  }) as TrackedStepExecution;
+
+  return execution;
 }
 
 function appendReplannedSteps(
