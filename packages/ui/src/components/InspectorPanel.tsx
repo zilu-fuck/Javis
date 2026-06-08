@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type {
   BrowserQuickResult,
+  BrowserQuickRequest,
   ReviewQuickResult,
   TerminalQuickResult,
   WorkbenchAgentSessionContext,
@@ -16,7 +17,9 @@ import type {
   WorkbenchWorkspaceToolAction,
 } from "../types";
 import { isChineseLocale, translateWorkbenchText } from "../utils";
-import { AgentDetailSections } from "./AgentDetailSections";
+import { AgentDetailPanel } from "./inspector/AgentDetailPanel";
+import { AgentGraphPanel } from "./inspector/AgentGraphPanel";
+import { ResourceStatusPanel } from "./inspector/ResourceStatusPanel";
 import { WorkspaceToolPanels } from "./WorkspaceToolPanels";
 
 interface InspectorPanelProps {
@@ -32,12 +35,13 @@ interface InspectorPanelProps {
   onToggle: () => void;
   onQuickAction?: (action: WorkbenchWorkspaceToolAction) => void;
   onSelectAgent?: (agentId: string) => void;
+  onClearSelectedAgent?: () => void;
   onCloseToolTab?: (tabId: string) => void;
   onSelectToolTab?: (tabId: string) => void;
   onNewToolTab?: (tool: WorkbenchWorkspaceToolAction) => void;
-  onQuickActionBrowser?: (url: string) => Promise<BrowserQuickResult>;
-  onQuickActionReview?: () => Promise<ReviewQuickResult>;
-  onQuickActionTerminal?: (command: string) => Promise<TerminalQuickResult>;
+  onQuickActionBrowser?: (session: WorkbenchAgentSessionContext, request: string | BrowserQuickRequest) => Promise<BrowserQuickResult>;
+  onQuickActionReview?: (session: WorkbenchAgentSessionContext) => Promise<ReviewQuickResult>;
+  onQuickActionTerminal?: (session: WorkbenchAgentSessionContext, command: string) => Promise<TerminalQuickResult>;
   session: WorkbenchAgentSessionContext;
   terminalService?: WorkbenchTerminalService;
   fileService?: WorkbenchFileService;
@@ -45,7 +49,7 @@ interface InspectorPanelProps {
   computerPath?: string;
   onNavigateDirectory?: (path: string) => void;
   onOpenFile?: (path: string) => void;
-  onSideChatSend?: (message: string) => Promise<string>;
+  onSideChatSend?: (session: WorkbenchAgentSessionContext, message: string) => Promise<string>;
 }
 
 const TOOL_LABELS: Record<string, { zh: string; en: string }> = {
@@ -55,6 +59,8 @@ const TOOL_LABELS: Record<string, { zh: string; en: string }> = {
   review:   { zh: "审查", en: "Review" },
   terminal: { zh: "终端", en: "Terminal" },
 };
+
+type InspectorSection = "agents" | "details" | "resources";
 
 export function InspectorPanel({
   detailItem,
@@ -69,6 +75,7 @@ export function InspectorPanel({
   onToggle,
   onQuickAction,
   onSelectAgent,
+  onClearSelectedAgent,
   onCloseToolTab,
   onSelectToolTab,
   onNewToolTab,
@@ -84,13 +91,15 @@ export function InspectorPanel({
   onOpenFile,
   onSideChatSend,
 }: InspectorPanelProps) {
-  const [activeSection, setActiveSection] = useState<"agents" | "details">(
+  const [activeSection, setActiveSection] = useState<InspectorSection>(
     openTabs.length > 0 || detailItem || selectedAgentId ? "details" : "agents",
   );
   const [activeTabIndex, setActiveTabIndex] = useState(0);
+  const [agentTabIds, setAgentTabIds] = useState<string[]>([]);
   const changedFiles = getReviewChangedFiles(task);
   const detailCount = detailItem ? 1 : changedFiles.length;
   const detailsLabel = isChineseLocale(locale) ? "详情" : "Details";
+  const resourcesLabel = isChineseLocale(locale) ? "资源" : "Resources";
 
   // Reset tab index when tabs change
   useEffect(() => {
@@ -106,15 +115,22 @@ export function InspectorPanel({
   }, [detailItem]);
 
   useEffect(() => {
-    if (selectedAgentId) setActiveSection("details");
-  }, [selectedAgentId]);
+    const validAgentIds = new Set(task.agents.map((agent) => agent.id));
+    setAgentTabIds((prev) => prev.filter((agentId) => validAgentIds.has(agentId)));
+  }, [task.agents]);
+
+  useEffect(() => {
+    if (!selectedAgentId || !task.agents.some((agent) => agent.id === selectedAgentId)) return;
+    setAgentTabIds((prev) => prev.includes(selectedAgentId) ? prev : [...prev, selectedAgentId]);
+    setActiveSection("details");
+  }, [selectedAgentId, task.agents]);
 
   // When new tabs open, switch to details
   useEffect(() => {
     if (openTabs.length > 0) setActiveSection("details");
   }, [openTabs.length]);
 
-  function handleSectionToggle(section: "agents" | "details") {
+  function handleSectionToggle(section: InspectorSection) {
     if (isInspectorOpen && activeSection === section) {
       onToggle();
       return;
@@ -123,7 +139,27 @@ export function InspectorPanel({
     if (!isInspectorOpen) onToggle();
   }
 
-  const activeTab = openTabs.find((tab) => tab.id === activeToolTabId) ?? openTabs[activeTabIndex] ?? openTabs[openTabs.length - 1] ?? null;
+  function handleCloseAgentTab(agentId: string) {
+    const nextAgentTabIds = agentTabIds.filter((tabAgentId) => tabAgentId !== agentId);
+    setAgentTabIds(nextAgentTabIds);
+    if (selectedAgentId !== agentId) return;
+
+    const nextAgentId = nextAgentTabIds[nextAgentTabIds.length - 1];
+    if (nextAgentId) {
+      onSelectAgent?.(nextAgentId);
+    } else {
+      onClearSelectedAgent?.();
+    }
+  }
+
+  const selectedAgent = selectedAgentId
+    ? task.agents.find((agent) => agent.id === selectedAgentId)
+    : undefined;
+  const agentTabs = agentTabIds
+    .map((agentId) => task.agents.find((agent) => agent.id === agentId))
+    .filter((agent): agent is WorkbenchAgent => Boolean(agent));
+  const rawActiveTab = openTabs.find((tab) => tab.id === activeToolTabId) ?? openTabs[activeTabIndex] ?? openTabs[openTabs.length - 1] ?? null;
+  const activeTab = selectedAgent ? null : rawActiveTab;
   const activeTool = activeTab?.tool ?? null;
 
   return (
@@ -151,27 +187,68 @@ export function InspectorPanel({
           {detailCount > 0 ? <span className="javis-activity-count">{detailCount}</span> : null}
           <span>{isInspectorOpen && activeSection === "details" ? labels.collapseInspector : labels.expandInspector}</span>
         </button>
+        <button
+          aria-controls="javis-inspector-panel"
+          aria-expanded={isInspectorOpen && activeSection === "resources"}
+          className={`javis-inspector-toggle ${activeSection === "resources" ? "active" : ""}`}
+          onClick={() => handleSectionToggle("resources")}
+          type="button"
+        >
+          <span>{resourcesLabel}</span>
+          <span className="javis-activity-count">{task.logs.length}</span>
+          <span>{isInspectorOpen && activeSection === "resources" ? labels.collapseInspector : labels.expandInspector}</span>
+        </button>
       </div>
       {isInspectorOpen ? (
         <div className="javis-inspector-panel" id="javis-inspector-panel">
           <header className="javis-inspector-header">
             <p className="javis-eyebrow">{labels.agentContextInspector}</p>
-            <h2 className="javis-title">{activeSection === "details" ? detailsLabel : labels.agentGraph}</h2>
+            <h2 className="javis-title">
+              {activeSection === "details"
+                ? detailsLabel
+                : activeSection === "resources"
+                  ? resourcesLabel
+                  : labels.agentGraph}
+            </h2>
           </header>
           {activeSection === "details" ? (
             <section className="javis-inspector-details">
-              {activeTool ? null : <InspectorQuickActions locale={locale} onQuickAction={onQuickAction} />}
+              {activeTool || selectedAgent ? null : <InspectorQuickActions locale={locale} onQuickAction={onQuickAction} />}
               {/* Tab bar */}
-              {openTabs.length > 0 ? (
+              {openTabs.length > 0 || agentTabs.length > 0 ? (
                 <div className="javis-tool-tab-bar" role="tablist">
+                  {agentTabs.map((agent) => {
+                    const isActive = selectedAgentId === agent.id;
+                    return (
+                      <button
+                        key={`agent-${agent.id}`}
+                        className={`javis-tool-tab${isActive ? " active" : ""}`}
+                        onClick={() => onSelectAgent?.(agent.id)}
+                        role="tab"
+                        aria-selected={isActive}
+                        type="button"
+                      >
+                        <span>{translateWorkbenchText(agent.name, locale)}</span>
+                        <span
+                          className="javis-tool-tab-close"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCloseAgentTab(agent.id);
+                          }}
+                          aria-label={isChineseLocale(locale) ? "关闭" : "Close"}
+                        >×</span>
+                      </button>
+                    );
+                  })}
                   {openTabs.map((tab, i) => {
                     const label = TOOL_LABELS[tab.tool] ?? { zh: tab.tool, en: tab.tool };
-                    const isActive = tab.id === activeTab?.id;
+                    const isActive = !selectedAgent && tab.id === activeTab?.id;
                     return (
                       <button
                         key={tab.id}
                         className={`javis-tool-tab${isActive ? " active" : ""}`}
                         onClick={() => {
+                          onClearSelectedAgent?.();
                           setActiveTabIndex(i);
                           onSelectToolTab?.(tab.id);
                         }}
@@ -223,17 +300,18 @@ export function InspectorPanel({
                   onOpenFile={onOpenFile}
                   onSideChatSend={onSideChatSend}
                 />
-              ) : selectedAgentId ? (
-                <>
-                  <SelectedAgentDetail
-                    agent={task.agents.find((agent) => agent.id === selectedAgentId)}
-                    locale={locale}
-                  />
-                  <AgentDetailSections labels={labels} locale={locale} task={task} />
-                </>
-              ) : (
-                <TaskOverview task={task} locale={locale} labels={labels} />
-              )}
+              ) : selectedAgent ? (
+                <AgentDetailPanel
+                  agent={selectedAgent}
+                  labels={labels}
+                  locale={locale}
+                  onQuickAction={(action) => {
+                    onClearSelectedAgent?.();
+                    onQuickAction?.(action);
+                  }}
+                  task={task}
+                />
+              ) : null}
               <DetailInspector
                 detailItem={detailItem}
                 labels={labels}
@@ -243,36 +321,18 @@ export function InspectorPanel({
                 detailsLabel={detailsLabel}
               />
             </section>
+          ) : activeSection === "resources" ? (
+            <ResourceStatusPanel locale={locale} systemResources={systemResources} task={task} />
           ) : (
-            <section className="javis-agent-list" aria-label={labels.agentStates}>
-              <AgentResourceCard locale={locale} systemResources={systemResources} task={task} />
-              {task.agents.map((agent) => (
-                <button
-                  className={`javis-agent status-${normalizeStatus(agent.status)}${selectedAgentId === agent.id ? " active" : ""}`}
-                  key={agent.id}
-                  onClick={() => {
-                    onSelectAgent?.(agent.id);
-                    setActiveSection("details");
-                  }}
-                  type="button"
-                >
-                  <div className="javis-agent-card-main">
-                    <span className={`javis-agent-icon agent-${agentKind(agent)}`}>{agentIcon(agent)}</span>
-                    <span className="javis-agent-name">
-                      {translateWorkbenchText(agent.name, locale)}
-                    </span>
-                    <span className={`javis-agent-status status-${normalizeStatus(agent.status)}`}>
-                      {agentStatusLabel(agent.status, locale)}
-                    </span>
-                  </div>
-                  <p className="javis-agent-task">{translateWorkbenchText(agent.role, locale)}</p>
-                  <p className="javis-agent-task">{translateWorkbenchText(agent.task, locale)}</p>
-                  <div className="javis-agent-progress" aria-hidden="true">
-                    <span style={{ width: `${agentProgress(agent.status)}%` }} />
-                  </div>
-                </button>
-              ))}
-            </section>
+            <AgentGraphPanel
+              locale={locale}
+              selectedAgentId={selectedAgentId}
+              task={task}
+              onSelectAgent={(agentId) => {
+                onSelectAgent?.(agentId);
+                setActiveSection("details");
+              }}
+            />
           )}
         </div>
       ) : null}
@@ -280,7 +340,7 @@ export function InspectorPanel({
   );
 }
 
-// ── Quick Actions ────────────────────────────────────────────────────────
+// Quick actions
 
 function InspectorQuickActions({
   locale,
@@ -294,21 +354,21 @@ function InspectorQuickActions({
     id: WorkbenchWorkspaceToolAction;
     title: string;
     description: string;
-    shortcut?: string;
+
   }> = isChinese
     ? [
-        { id: "files", title: "文件", description: "浏览项目文件", shortcut: "Ctrl+P" },
+        { id: "files", title: "文件", description: "浏览项目文件" },
         { id: "sideChat", title: "侧边聊天", description: "发起侧边对话" },
-        { id: "browser", title: "浏览器", description: "打开网站", shortcut: "Ctrl+T" },
-        { id: "review", title: "审查", description: "查看代码更改", shortcut: "Ctrl+Shift+G" },
-        { id: "terminal", title: "终端", description: "启动交互式 shell", shortcut: "Ctrl+`" },
+        { id: "browser", title: "浏览器", description: "打开网站" },
+        { id: "review", title: "审查", description: "查看代码更改" },
+        { id: "terminal", title: "终端", description: "启动交互式 shell" },
       ]
     : [
-        { id: "files", title: "Files", description: "Browse project files", shortcut: "Ctrl+P" },
+        { id: "files", title: "Files", description: "Browse project files" },
         { id: "sideChat", title: "Side chat", description: "Start a side conversation" },
-        { id: "browser", title: "Browser", description: "Open a website", shortcut: "Ctrl+T" },
-        { id: "review", title: "Review", description: "Inspect code changes", shortcut: "Ctrl+Shift+G" },
-        { id: "terminal", title: "Terminal", description: "Start an interactive shell", shortcut: "Ctrl+`" },
+        { id: "browser", title: "Browser", description: "Open a website" },
+        { id: "review", title: "Review", description: "Inspect code changes" },
+        { id: "terminal", title: "Terminal", description: "Start an interactive shell" },
       ];
 
   return (
@@ -323,195 +383,8 @@ function InspectorQuickActions({
           <span className="javis-inspector-quick-icon" aria-hidden="true" />
           <strong>{item.title}</strong>
           <span>{item.description}</span>
-          {item.shortcut ? <kbd>{item.shortcut}</kbd> : null}
         </button>
       ))}
-    </section>
-  );
-}
-
-// ── Selected Agent Detail ────────────────────────────────────────────────
-
-function SelectedAgentDetail({ agent, locale }: { agent?: WorkbenchAgent; locale: WorkbenchLocale }) {
-  if (!agent) return null;
-  return (
-    <section className="javis-selected-agent-detail" aria-label={translateWorkbenchText(agent.name, locale)}>
-      <div className="javis-agent-card-main">
-        <span className={`javis-agent-icon agent-${agentKind(agent)}`}>{agentIcon(agent)}</span>
-        <span className="javis-agent-name">{translateWorkbenchText(agent.name, locale)}</span>
-        <span className={`javis-agent-status status-${normalizeStatus(agent.status)}`}>
-          {agentStatusLabel(agent.status, locale)}
-        </span>
-      </div>
-      <p>{translateWorkbenchText(agent.role, locale)}</p>
-      <p>{translateWorkbenchText(agent.task, locale)}</p>
-      <div className="javis-agent-progress" aria-hidden="true">
-        <span style={{ width: `${agentProgress(agent.status)}%` }} />
-      </div>
-    </section>
-  );
-}
-
-// ── Agent Resource Card ──────────────────────────────────────────────────
-
-function AgentResourceCard({
-  locale,
-  systemResources,
-  task,
-}: {
-  locale: WorkbenchLocale;
-  systemResources?: WorkbenchSystemResources;
-  task: WorkbenchTask;
-}) {
-  const completedCount = task.agents.filter((agent) => normalizeStatus(agent.status) === "completed").length;
-  const cpu = normalizeMetricPercent(systemResources?.cpuPercent);
-  const memory = normalizeMetricPercent(systemResources?.memoryPercent);
-  return (
-    <article className="javis-agent-resource-card" aria-label="Resource usage">
-      <div className="javis-agent-resource-header">
-        <strong>资源使用</strong>
-        <span>{completedCount}/{task.agents.length}</span>
-      </div>
-      <div className="javis-agent-resource-grid">
-        <Metric label="CPU" value={formatMetricPercent(systemResources?.cpuPercent)} percent={cpu} />
-        <Metric label={isChineseLocale(locale) ? "内存" : "Memory"} value={formatMemoryMetric(systemResources)} percent={memory} />
-      </div>
-    </article>
-  );
-}
-
-function Metric({ label, value, percent }: { label: string; value: string; percent: number }) {
-  return (
-    <div className="javis-agent-resource-metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
-      <i aria-hidden="true"><span style={{ width: `${percent > 0 ? Math.max(4, percent) : 0}%` }} /></i>
-    </div>
-  );
-}
-
-// ── Task Overview ────────────────────────────────────────────────────────
-
-function TaskOverview({
-  task,
-  locale,
-  labels,
-}: {
-  task: WorkbenchTask;
-  locale: WorkbenchLocale;
-  labels: WorkbenchLocale["labels"];
-}) {
-  const isChinese = isChineseLocale(locale);
-  const completedSteps = task.plan.filter((s) => s.status === "completed").length;
-  const totalSteps = task.plan.length;
-  const failedSteps = task.plan.filter((s) => s.status === "failed").length;
-  const progressPct = totalSteps > 0 ? Math.round((completedSteps / totalSteps) * 100) : 0;
-  const trace = task.executionTrace;
-
-  return (
-    <div className="javis-task-overview">
-      {totalSteps > 0 ? (
-        <section className="javis-overview-card" aria-label={labels.plan}>
-          <div className="javis-overview-card-header">
-            <strong>{isChinese ? "任务进度" : "Task Progress"}</strong>
-            <span>{completedSteps}/{totalSteps}</span>
-          </div>
-          <div className="javis-overview-progress-bar" aria-label={`${progressPct}%`}>
-            <span style={{ width: `${progressPct}%` }} />
-          </div>
-          {failedSteps > 0 ? (
-            <p className="javis-overview-warning">
-              {isChinese ? `${failedSteps} 步失败` : `${failedSteps} step(s) failed`}
-            </p>
-          ) : null}
-        </section>
-      ) : null}
-      {task.tokenUsage?.byAgentKind?.length ? (
-        <TokenUsageCard tokenUsage={task.tokenUsage} locale={locale} />
-      ) : null}
-      {trace?.totalWallTimeMs ? (
-        <ExecutionTraceCard trace={trace} locale={locale} />
-      ) : null}
-      <section className="javis-overview-card">
-        <div className="javis-overview-card-header">
-          <strong>{isChinese ? "任务状态" : "Task Status"}</strong>
-          <span className={`javis-badge status-${task.status}`}>{task.status}</span>
-        </div>
-        <div className="javis-overview-stats">
-          <StatRow label={isChinese ? "Agent 数" : "Agents"} value={String(task.agents.length)} />
-          <StatRow label={isChinese ? "日志条数" : "Log entries"} value={String(task.logs.length)} />
-          {task.workspacePath ? (
-            <StatRow label={isChinese ? "工作区" : "Workspace"} value={task.workspacePath} mono />
-          ) : null}
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function TokenUsageCard({
-  tokenUsage,
-  locale,
-}: {
-  tokenUsage: NonNullable<WorkbenchTask["tokenUsage"]>;
-  locale: WorkbenchLocale;
-}) {
-  const isChinese = isChineseLocale(locale);
-  const byKind = tokenUsage.byAgentKind ?? [];
-  return (
-    <section className="javis-overview-card">
-      <div className="javis-overview-card-header">
-        <strong>{isChinese ? "Token 用量" : "Token Usage"}</strong>
-        <span>{tokenUsage.totalTokens}</span>
-      </div>
-      <div className="javis-token-bars">
-        {byKind.map((entry) => {
-          const pct = tokenUsage.totalTokens > 0
-            ? Math.round((entry.totalTokens / tokenUsage.totalTokens) * 100)
-            : 0;
-          return (
-            <div className="javis-token-kind" key={entry.agentKind}>
-              <span className="javis-token-label">{entry.agentKind}</span>
-              <span className="javis-token-bar-bg">
-                <span className="javis-token-bar" style={{ width: `${Math.max(pct, 2)}%` }} />
-              </span>
-              <span className="javis-token-value">{entry.totalTokens}</span>
-            </div>
-          );
-        })}
-      </div>
-      <div className="javis-token-summary">
-        <span>{isChinese ? "输入" : "In"}: {tokenUsage.inputTokens}</span>
-        <span>{isChinese ? "输出" : "Out"}: {tokenUsage.outputTokens}</span>
-        <span>{isChinese ? "调用" : "Calls"}: {tokenUsage.modelCalls}</span>
-      </div>
-    </section>
-  );
-}
-
-function ExecutionTraceCard({
-  trace,
-  locale,
-}: {
-  trace: NonNullable<WorkbenchTask["executionTrace"]>;
-  locale: WorkbenchLocale;
-}) {
-  const isChinese = isChineseLocale(locale);
-  const seconds = (trace.totalWallTimeMs / 1000).toFixed(1);
-  const completedCount = trace.steps.filter((s) => s.status === "completed").length;
-  return (
-    <section className="javis-overview-card">
-      <div className="javis-overview-card-header">
-        <strong>{isChinese ? "执行耗时" : "Wall Time"}</strong>
-        <span>{seconds}s</span>
-      </div>
-      <div className="javis-overview-stats">
-        <StatRow label={isChinese ? "步骤完成" : "Steps done"} value={`${completedCount}/${trace.steps.length}`} />
-        <StatRow label={isChinese ? "开始于" : "Started"} value={formatTraceTime(trace.startedAt)} />
-        {trace.completedAt ? (
-          <StatRow label={isChinese ? "完成于" : "Finished"} value={formatTraceTime(trace.completedAt)} />
-        ) : null}
-      </div>
     </section>
   );
 }
@@ -525,7 +398,7 @@ function StatRow({ label, value, mono }: { label: string; value: string; mono?: 
   );
 }
 
-// ── Detail Inspector ─────────────────────────────────────────────────────
+// Detail inspector
 
 function DetailInspector({
   detailItem,
@@ -586,7 +459,7 @@ function DetailInspector({
         <article className="javis-review-card">
           <div className="javis-review-card-title">
             <strong>{labels.researchReport}</strong>
-            <span>{task.sources!.length}</span>
+            <span>{task.sources?.length ?? task.researchReport?.rows.length ?? 0}</span>
           </div>
           {task.researchReport ? <p>{translateWorkbenchText(task.researchReport.summary, locale)}</p> : null}
         </article>
@@ -635,73 +508,8 @@ function DetailInspector({
   );
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────
+// Helpers
 
-function normalizeMetricPercent(value: number | undefined): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
-  return Math.round(Math.min(100, Math.max(0, value)));
-}
-function formatMetricPercent(value: number | undefined): string {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "--";
-  return `${normalizeMetricPercent(value)}%`;
-}
-function formatMemoryMetric(resources: WorkbenchSystemResources | undefined): string {
-  if (!resources || typeof resources.memoryPercent !== "number" || !Number.isFinite(resources.memoryPercent)) return "--";
-  if (resources.memoryTotalBytes && resources.memoryUsedBytes) {
-    return `${formatBytes(resources.memoryUsedBytes)} / ${formatBytes(resources.memoryTotalBytes)}`;
-  }
-  return `${normalizeMetricPercent(resources.memoryPercent)}%`;
-}
-function formatBytes(value: number): string {
-  const gib = value / 1024 / 1024 / 1024;
-  return `${gib.toFixed(gib >= 10 ? 0 : 1)}GB`;
-}
-function formatTraceTime(iso: string): string {
-  try { return new Date(iso).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
-  catch { return iso; }
-}
-function agentKind(agent: WorkbenchAgent): string {
-  const text = `${agent.name} ${agent.role}`.toLowerCase();
-  if (text.includes("research") || text.includes("search")) return "research";
-  if (text.includes("file") || text.includes("document") || text.includes("write")) return "file";
-  if (text.includes("command") || text.includes("shell")) return "command";
-  if (text.includes("code") || text.includes("program")) return "code";
-  if (text.includes("computer") || text.includes("desktop")) return "computer";
-  if (text.includes("commander") || text.includes("plan")) return "commander";
-  return "agent";
-}
-function agentIcon(agent: WorkbenchAgent): string {
-  switch (agentKind(agent)) {
-    case "research": return "R"; case "file": return "F"; case "command": return ">";
-    case "code": return "</>"; case "computer": return "PC"; case "commander": return "C";
-    default: return "A";
-  }
-}
-function normalizeStatus(status: string): "completed" | "running" | "failed" | "waiting" | "idle" {
-  const text = status.toLowerCase();
-  if (text.includes("complete") || text.includes("done") || text.includes("success")) return "completed";
-  if (text.includes("run") || text.includes("stream")) return "running";
-  if (text.includes("fail") || text.includes("error")) return "failed";
-  if (text.includes("wait") || text.includes("pending") || text.includes("queued")) return "waiting";
-  return "idle";
-}
-function agentStatusLabel(status: string, locale: WorkbenchLocale): string {
-  const isChinese = isChineseLocale(locale);
-  switch (normalizeStatus(status)) {
-    case "completed": return isChinese ? "已完成" : "Completed";
-    case "running": return isChinese ? "运行中" : "Running";
-    case "failed": return isChinese ? "失败" : "Failed";
-    case "waiting": return isChinese ? "等待中" : "Waiting";
-    default: return isChinese ? "空闲中" : "Idle";
-  }
-}
-function agentProgress(status: string): number {
-  switch (normalizeStatus(status)) {
-    case "completed": return 100; case "running": return 68;
-    case "failed": return 100; case "waiting": return 18;
-    default: return 8;
-  }
-}
 function getReviewChangedFiles(task: WorkbenchTask): string[] {
   return Array.from(new Set([
     ...(task.codeReviewPreview?.changedFiles ?? []),

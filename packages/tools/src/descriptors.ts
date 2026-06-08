@@ -158,7 +158,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     ownerAgentKinds: ["computer"],
   },
   {
-    name: "file.listDirectory",
+    name: "computer.listDirectory",
     permissionLevel: "read",
     summary: "List direct children of a directory for file explorer browsing.",
     capabilityTags: ["directory_list"],

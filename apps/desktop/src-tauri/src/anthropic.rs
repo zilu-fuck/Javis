@@ -7,16 +7,13 @@ use std::{
 use base64::{engine::general_purpose::STANDARD, Engine};
 use tauri::{AppHandle, Emitter};
 
-use crate::{
-    classify_http_request_error,
-    infer_model_completion_provider_id,
-    normalize_model_completion_model_name,
-    ModelCompletionRequest,
-    ModelCompletionResponse,
-    ModelUsage,
-    streaming::{StreamChunkPayload, StreamingRequestResult},
-};
 use crate::code::normalize_optional_config_value;
+use crate::{
+    classify_http_request_error, infer_model_completion_provider_id,
+    normalize_model_completion_model_name,
+    streaming::{StreamChunkPayload, StreamingRequestResult},
+    ModelCompletionRequest, ModelCompletionResponse, ModelUsage,
+};
 
 const ANTHROPIC_TIMEOUT: Duration = Duration::from_secs(90);
 const ANTHROPIC_STREAMING_TIMEOUT: Duration = Duration::from_secs(120);
@@ -44,7 +41,10 @@ fn default_anthropic_base_url(provider_id: &str) -> String {
 fn build_anthropic_headers(api_key: &str, provider_id: &str) -> Vec<(String, String)> {
     let mut headers = vec![
         ("x-api-key".to_string(), api_key.to_string()),
-        ("anthropic-version".to_string(), ANTHROPIC_API_VERSION.to_string()),
+        (
+            "anthropic-version".to_string(),
+            ANTHROPIC_API_VERSION.to_string(),
+        ),
         ("content-type".to_string(), "application/json".to_string()),
     ];
     if provider_id == "deepseek" || provider_id == "deepseek-anthropic" {
@@ -53,7 +53,10 @@ fn build_anthropic_headers(api_key: &str, provider_id: &str) -> Vec<(String, Str
     headers
 }
 
-fn build_anthropic_completion_body(model: &str, request: &ModelCompletionRequest) -> Result<serde_json::Value, String> {
+fn build_anthropic_completion_body(
+    model: &str,
+    request: &ModelCompletionRequest,
+) -> Result<serde_json::Value, String> {
     let max_tokens = request.max_tokens.unwrap_or(2048);
     let content = build_anthropic_message_content(request)?;
     let mut body = serde_json::json!({
@@ -78,7 +81,10 @@ fn build_anthropic_completion_body(model: &str, request: &ModelCompletionRequest
     Ok(body)
 }
 
-fn build_anthropic_stream_body(model: &str, request: &ModelCompletionRequest) -> Result<serde_json::Value, String> {
+fn build_anthropic_stream_body(
+    model: &str,
+    request: &ModelCompletionRequest,
+) -> Result<serde_json::Value, String> {
     let max_tokens = request.max_tokens.unwrap_or(2048);
     let content = build_anthropic_message_content(request)?;
     let mut body = serde_json::json!({
@@ -103,14 +109,15 @@ fn build_anthropic_stream_body(model: &str, request: &ModelCompletionRequest) ->
     Ok(body)
 }
 
-fn build_anthropic_message_content(request: &ModelCompletionRequest) -> Result<serde_json::Value, String> {
+fn build_anthropic_message_content(
+    request: &ModelCompletionRequest,
+) -> Result<serde_json::Value, String> {
     let images = crate::build_image_list(request);
     if images.is_empty() {
         return Ok(serde_json::Value::String(request.prompt.clone()));
     }
-    let mut content: Vec<serde_json::Value> = vec![
-        serde_json::json!({ "type": "text", "text": request.prompt }),
-    ];
+    let mut content: Vec<serde_json::Value> =
+        vec![serde_json::json!({ "type": "text", "text": request.prompt })];
     for image_data_url in &images {
         let (media_type, data) = parse_data_url(image_data_url)?;
         content.push(serde_json::json!({
@@ -142,7 +149,12 @@ fn parse_data_url(value: &str) -> Result<(String, String), String> {
         "image/gif" => "image/gif",
         "image/bmp" => "image/bmp",
         "image/tiff" | "image/tif" => "image/tiff",
-        _ => return Err("Unsupported image data URL format. Use PNG, JPEG, WebP, GIF, BMP, or TIFF.".to_string()),
+        _ => {
+            return Err(
+                "Unsupported image data URL format. Use PNG, JPEG, WebP, GIF, BMP, or TIFF."
+                    .to_string(),
+            )
+        }
     };
     if data.is_empty() || STANDARD.decode(data).is_err() {
         return Err("Image data URL must contain a valid non-empty base64 payload.".to_string());
@@ -218,11 +230,18 @@ pub(crate) fn run_anthropic_completion_request(
     }
 
     let value = serde_json::from_str::<serde_json::Value>(&response_text).map_err(|error| {
-        format!("Anthropic completion returned invalid JSON: {error}; response: {}", truncate(&response_text, 500))
+        format!(
+            "Anthropic completion returned invalid JSON: {error}; response: {}",
+            truncate(&response_text, 500)
+        )
     })?;
 
-    let text = extract_anthropic_response_text(&value)
-        .ok_or_else(|| format!("Anthropic completion returned no text content. response: {}", truncate(&response_text, 500)))?;
+    let text = extract_anthropic_response_text(&value).ok_or_else(|| {
+        format!(
+            "Anthropic completion returned no text content. response: {}",
+            truncate(&response_text, 500)
+        )
+    })?;
 
     Ok(ModelCompletionResponse {
         text,
@@ -337,7 +356,10 @@ fn extract_anthropic_stream_usage(value: &serde_json::Value) -> Option<ModelUsag
     // We combine them if available; for simplicity, extract what's in this event
     let usage = value.get("usage")?;
     let output_tokens = usage.get("output_tokens")?.as_u64()? as u32;
-    let input_tokens = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let input_tokens = usage
+        .get("input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
     Some(ModelUsage {
         input_tokens,
         output_tokens,

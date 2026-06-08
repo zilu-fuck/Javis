@@ -1,18 +1,24 @@
 import { memo, useEffect, useRef } from "react";
+import { ThinkingIndicator } from "./ThinkingIndicator";
 
 interface StreamingMessageProps {
   text: string;
   isStreaming: boolean;
   agentLabel: string;
+  thinkingLabel?: string;
+  thinkingMessages?: string[];
 }
 
 export const StreamingMessage = memo(function StreamingMessage({
   text,
   isStreaming,
   agentLabel,
+  thinkingLabel,
+  thinkingMessages,
 }: StreamingMessageProps) {
   const bodyRef = useRef<HTMLParagraphElement>(null);
   const lastScrollRef = useRef(0);
+  const showThinking = isStreaming && text.trim().length === 0;
 
   useEffect(() => {
     const el = bodyRef.current;
@@ -36,8 +42,14 @@ export const StreamingMessage = memo(function StreamingMessage({
     <article className="javis-message streaming">
       <p className="javis-message-title">{agentLabel}</p>
       <p className="javis-message-body" ref={bodyRef}>
-        {text}
-        {isStreaming && <span className="javis-cursor-blink">|</span>}
+        {showThinking ? (
+          <ThinkingIndicator label={thinkingLabel} messages={thinkingMessages} />
+        ) : (
+          <>
+            {text}
+            {isStreaming && <span className="javis-cursor-blink">|</span>}
+          </>
+        )}
       </p>
     </article>
   );

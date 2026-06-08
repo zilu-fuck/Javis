@@ -27,7 +27,7 @@ function buildConfig(
         provider: "openai",
         model: "gpt-4o",
         apiKey: "sk-test-123",
-        apiKeyReference: "model_key_primary",
+        apiKeyReference: "model.openai",
         baseUrl: "",
         capabilities: { vision: true, code: true, contextTokens: 128000 },
       },
@@ -38,7 +38,7 @@ function buildConfig(
         provider: "deepseek",
         model: "deepseek-chat",
         apiKey: "",
-        apiKeyReference: "model_key_secondary",
+        apiKeyReference: "model.deepseek",
         baseUrl: "",
         capabilities: { vision: false, code: true, contextTokens: 128000 },
       },
@@ -70,7 +70,7 @@ describe("useModelProfiles", () => {
 
     expect(repo.save).toHaveBeenCalledOnce();
     expect(mockInvoke).toHaveBeenCalledWith("save_model_api_key_secret", {
-      request: { keyReference: "model_key_primary", apiKey: "sk-test-123" },
+      request: { keyReference: "model.openai", apiKey: "sk-test-123" },
     });
     expect(onSaved).toHaveBeenCalledOnce();
   });
@@ -92,7 +92,7 @@ describe("useModelProfiles", () => {
           provider: "openai",
           model: "gpt-4o",
           apiKey: "",
-          apiKeyReference: "model_key_removed",
+          apiKeyReference: "model.openai",
           baseUrl: "",
           hasStoredApiKey: true,
           capabilities: { vision: true, code: true, contextTokens: 128000 },
@@ -125,7 +125,7 @@ describe("useModelProfiles", () => {
           provider: "openai",
           model: "gpt-4o",
           apiKey: "",
-          apiKeyReference: "model_key_removed",
+          apiKeyReference: "model.openai",
           baseUrl: "",
           hasStoredApiKey: false,
           capabilities: { vision: true, code: true, contextTokens: 128000 },
@@ -138,7 +138,7 @@ describe("useModelProfiles", () => {
     });
 
     expect(mockInvoke).toHaveBeenCalledWith("delete_model_api_key_secret", {
-      keyReference: "model_key_removed",
+      keyReference: "model.openai",
     });
     expect(mockInvoke).not.toHaveBeenCalledWith("save_model_api_key_secret", expect.anything());
   });
@@ -182,5 +182,42 @@ describe("useModelProfiles", () => {
     // Profile without a key should not be marked as stored
     expect(result.current.modelConfiguration?.profiles[1]?.apiKey).toBe("");
     expect(result.current.modelConfiguration?.profiles[1]?.hasStoredApiKey).toBeFalsy();
+  });
+
+  it("does not mark profiles saved when repo persistence fails", async () => {
+    const repo = createModelProfileRepo();
+    repo.save.mockRejectedValueOnce(new Error("db unavailable"));
+    const repoRef = { current: repo } as any;
+    const onSaved = vi.fn();
+
+    const { result } = renderHook(() =>
+      useModelProfiles({ modelProfileRepoRef: repoRef, onSaved } as any),
+    );
+
+    await act(async () => {
+      await expect(result.current.handleModelConfigurationChange(buildConfig())).rejects.toThrow("db unavailable");
+    });
+
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(result.current.modelConfiguration).toBeUndefined();
+  });
+
+  it("does not persist profile config when api key storage fails", async () => {
+    const repo = createModelProfileRepo();
+    const repoRef = { current: repo } as any;
+    const onSaved = vi.fn();
+    mockInvoke.mockRejectedValueOnce(new Error("keyring unavailable"));
+
+    const { result } = renderHook(() =>
+      useModelProfiles({ modelProfileRepoRef: repoRef, onSaved } as any),
+    );
+
+    await act(async () => {
+      await expect(result.current.handleModelConfigurationChange(buildConfig())).rejects.toThrow("keyring unavailable");
+    });
+
+    expect(repo.save).not.toHaveBeenCalled();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(result.current.modelConfiguration).toBeUndefined();
   });
 });

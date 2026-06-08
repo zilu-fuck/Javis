@@ -26,13 +26,49 @@ export interface RouteScoringContext {
 }
 
 const ROUTE_THRESHOLD = 2;
+const MAX_EXTRACTED_URLS = 10;
+const TRAILING_URL_PUNCTUATION = /[.,;:!?，。；：！？、…]+$/u;
+const TRAILING_URL_CLOSERS = /[)\]}）】》」』”’]+$/u;
 
 export function isProjectInspectionGoal(userGoal: string): boolean {
   return getTopRoute(userGoal)?.route === "project";
 }
 
 export function extractUrls(value: string): string[] {
-  return Array.from(value.matchAll(/https?:\/\/[^\s)]+/g), (match) => match[0]);
+  const urls: string[] = [];
+  const seen = new Set<string>();
+  for (const match of value.matchAll(/https?:\/\/[^\s<>"'`]+/g)) {
+    const url = normalizeExtractedUrl(match[0]);
+    if (!url || seen.has(url)) {
+      continue;
+    }
+    seen.add(url);
+    urls.push(url);
+    if (urls.length >= MAX_EXTRACTED_URLS) {
+      break;
+    }
+  }
+  return urls;
+}
+
+function normalizeExtractedUrl(candidate: string): string | undefined {
+  let value = candidate;
+  let previous = "";
+  while (value !== previous) {
+    previous = value;
+    value = value
+      .replace(TRAILING_URL_PUNCTUATION, "")
+      .replace(TRAILING_URL_CLOSERS, "");
+  }
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return undefined;
+    }
+    return value;
+  } catch {
+    return undefined;
+  }
 }
 
 export function isResearchGoal(userGoal: string): boolean {

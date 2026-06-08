@@ -17,8 +17,14 @@ every sensitive action visible and interruptible.
 Tauri currently exposes:
 
 - `scan_markdown_documents`: read-only workspace Markdown scan.
+- `read_file_chunk`: read-only text context injection limited to selected
+  workspace or scanned resource roots, with symlink, sensitive path, and text
+  extension checks.
+- `read_image_data_url`: read-only image loading limited to selected workspace
+  roots, with symlink, sensitive path, supported-image, and size checks.
 - `run_read_only_command`: command execution through a small allowlist.
-- `fetch_web_source`: public HTTP(S) source fetch.
+- `fetch_web_source`: public HTTP(S) source fetch with loopback/private IP,
+  metadata host, redirect, and DNS-resolution private address checks.
 - `inspect_project`: read-only package script inspection.
 - `plan_pdf_organization`: preview-only PDF move plan for `Downloads`.
 - `approve_pdf_organization`: records approval for the current PDF dry-run id.
@@ -43,6 +49,11 @@ The embedded Chrome fallback must:
 - avoid reading cookies, passwords, private keys, browser history, or credential
   stores
 - perform only read-only public source discovery and retrieval
+- reject loopback/private literal hosts and public hostnames that resolve to
+  loopback/private addresses, except explicit localhost navigation in a bound
+  app session
+- keep click, type, evaluate, upload, and test execution disabled until a
+  native approval binding exists
 - log when fallback occurs and which sources came from the fallback path
 
 ## Shell Rules
@@ -51,11 +62,32 @@ Only allowlisted commands can run through the current shell bridge. The
 allowlist is deliberately small:
 
 - version checks
-- `git status --short`
-- selected project check scripts such as `pnpm typecheck`
+- selected read-only git inspection commands such as `git status --short`,
+  `git diff`, and `git log`
 
-Commands that install dependencies, publish, delete, reset git state, force
-push, or run arbitrary scripts are outside the current v1 boundary.
+Project-defined scripts such as `pnpm test`, `pnpm typecheck`, `npm test`, and
+`yarn test` are not read-only because the workspace controls their command
+bodies. Commands that install dependencies, publish, delete, reset git state,
+force push, run arbitrary scripts, or open an interactive terminal are outside
+the current v1 boundary unless they go through a future native approval broker.
+
+## Local Read Rules
+
+Local file context reads are read-only but still scoped:
+
+- `read_file_chunk` requires a non-empty selected workspace or scanned resource
+  root and verifies containment after canonicalization.
+- `read_image_data_url` requires a selected workspace root for local paths.
+- Both commands reject symlinks and sensitive path components such as `.ssh`,
+  `.aws`, browser credential stores, `.env`, private keys, and certificate/key
+  file extensions.
+- Text reads are limited to common text extensions and 64 KB / 200 lines by
+  default.
+- Image reads are limited to supported image extensions and 10 MB.
+
+The current renderer still passes the allowed roots into the native commands.
+The hardened target is a native root registry or scan-result id so renderer
+input can reference, but not mint, read scopes.
 
 ## File Write Rules
 

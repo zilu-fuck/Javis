@@ -2,6 +2,9 @@ import type { SidebarNavItem, WorkbenchLocale } from "./types";
 
 export interface BuiltinNavOptions {
   categoryStats?: { category: string; count: number }[];
+  appCategoryStats?: { category: string; count: number }[];
+  documentCategoryStats?: { category: string; count: number }[];
+  galleryCategoryStats?: { category: string; count: number }[];
   mountRoots?: { name: string; path: string }[];
   categoryLabels?: Record<string, string>;
 }
@@ -13,39 +16,19 @@ export function getBuiltinSidebarNavItems(
   options?: BuiltinNavOptions,
 ): SidebarNavItem[] {
   const categoryLabels = options?.categoryLabels ?? {};
-  const categoryStats = options?.categoryStats ?? [];
+  const legacyCategoryStats = options?.categoryStats ?? [];
+  const appCategoryStats = options?.appCategoryStats ?? [];
+  const documentCategoryStats = options?.documentCategoryStats ?? legacyCategoryStats.filter(
+    (s) => s.category !== "鍥剧墖",
+  );
+  const galleryCategoryStats = options?.galleryCategoryStats ?? legacyCategoryStats.filter(
+    (s) => s.category === "鍥剧墖",
+  );
   const mountRoots = options?.mountRoots;
 
-  const docCategories = categoryStats.filter(
-    (s) => s.category !== "图片",
-  );
-  const imageCategories = categoryStats.filter(
-    (s) => s.category === "图片",
-  );
-
-  const docSubitems = docCategories.length > 0
-    ? docCategories.map((s) => ({
-        label: `${categoryLabels[s.category] ?? s.category}(${s.count})`,
-        viewId: "documents" as const,
-      }))
-    : [
-        { label: labels.kbDocRecognition },
-        { label: labels.kbCourseware },
-        { label: labels.kbBooks },
-        { label: labels.kbPapers },
-      ];
-
-  const gallerySubitems = imageCategories.length > 0
-    ? imageCategories.map((s) => ({
-        label: `${categoryLabels[s.category] ?? s.category}(${s.count})`,
-        viewId: "gallery" as const,
-      }))
-    : [
-        { label: labels.kbImageRecognition },
-        { label: labels.kbPeopleImpressions },
-        { label: labels.kbFootprintLocations },
-        { label: labels.kbTimelineGallery },
-      ];
+  const appSubitems = categorySubitems("apps", appCategoryStats, categoryLabels);
+  const docSubitems = categorySubitems("documents", documentCategoryStats, categoryLabels);
+  const gallerySubitems = categorySubitems("gallery", galleryCategoryStats, categoryLabels);
 
   const computerSubitems = mountRoots && mountRoots.length > 0
     ? mountRoots.map((r) => ({ label: r.name, path: r.path }))
@@ -95,6 +78,8 @@ export function getBuiltinSidebarNavItems(
       label: labels.apps,
       group: "knowledge",
       order: 0,
+      collapsible: appSubitems.length > 0,
+      subitems: appSubitems,
     },
     {
       viewId: "documents",
@@ -102,7 +87,7 @@ export function getBuiltinSidebarNavItems(
       label: labels.documents,
       group: "knowledge",
       order: 1,
-      collapsible: true,
+      collapsible: docSubitems.length > 0,
       subitems: docSubitems,
     },
     {
@@ -111,7 +96,7 @@ export function getBuiltinSidebarNavItems(
       label: labels.gallery,
       group: "knowledge",
       order: 2,
-      collapsible: true,
+      collapsible: gallerySubitems.length > 0,
       subitems: gallerySubitems,
     },
     {
@@ -135,18 +120,29 @@ export function mergeSidebarNavItems(
   for (const item of custom) {
     const idx = merged.findIndex((b) => b.viewId === item.viewId);
     if (idx >= 0) {
-      merged[idx] = item; // workspace overrides built-in
+      merged[idx] = item;
     } else {
       merged.push(item);
     }
   }
-  // Sort by group order, then by order within group
   const groupOrder: Record<string, number> = { primary: 0, knowledge: 1, custom: 2 };
   merged.sort((a, b) => {
-    const ga = groupOrder[a.group] ?? 99;
-    const gb = groupOrder[b.group] ?? 99;
+    const ga = groupOrder[a.group ?? "custom"] ?? 99;
+    const gb = groupOrder[b.group ?? "custom"] ?? 99;
     if (ga !== gb) return ga - gb;
     return a.order - b.order;
   });
   return merged;
+}
+
+function categorySubitems(
+  viewId: "apps" | "documents" | "gallery",
+  stats: { category: string; count: number }[],
+  labels: Record<string, string>,
+) {
+  return stats.map((stat) => ({
+    category: stat.category,
+    label: `${labels[stat.category] ?? stat.category}(${stat.count})`,
+    viewId,
+  }));
 }

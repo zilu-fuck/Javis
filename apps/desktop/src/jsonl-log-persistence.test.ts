@@ -193,6 +193,47 @@ describe("jsonl log persistence", () => {
       expect(parsed.taskId).toBe("task-42");
     });
 
+    it("stores redacted task session snapshots", async () => {
+      const database = createMemoryJsonlLogDatabase();
+      const writer = createSqliteTaskSessionWriter(database);
+      const line = JSON.stringify({
+        kind: "task_session_snapshot",
+        recordedAt: "2026-05-28T12:00:00.000Z",
+        taskId: "task-image",
+        snapshot: {
+          id: "task-image",
+          title: "Image task",
+          userGoal: "Describe data:image/png;base64,AA==",
+          status: "running",
+          commanderMessage: "Saw data:image/png;base64,BB==",
+          plan: [],
+          agents: [],
+          logs: [
+            {
+              id: "log-1",
+              kind: "event",
+              title: "image.received",
+              detail: "detail data:image/png;base64,CC==",
+            },
+          ],
+          conversationMessages: [
+            {
+              role: "user",
+              content: "content data:image/png;base64,DD==",
+              attachments: ["data:image/png;base64,EE=="],
+            },
+          ],
+        },
+      });
+
+      await writer.appendLine(`${line}\n`);
+
+      expect(database.sessionRows[0].snapshot_json).not.toContain("data:image");
+      expect(database.sessionRows[0].snapshot_json).not.toContain("attachments");
+      const parsed = JSON.parse(database.sessionRows[0].snapshot_json);
+      expect(parsed.snapshot.userGoal).toContain("[redacted image data URL]");
+    });
+
     it("inserts multiple lines when the JSONL string contains multiple entries", async () => {
       const database = createMemoryJsonlLogDatabase();
       const writer = createSqliteTaskSessionWriter(database);

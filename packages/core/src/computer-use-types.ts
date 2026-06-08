@@ -28,6 +28,7 @@ export type ComputerUseAction =
   | { tool: "computer.keyCombo"; params: { keys: string[] } }
   | { tool: "computer.scroll"; params: { x: number; y: number; delta: number; direction?: "vertical" | "horizontal" } }
   | { tool: "computer.focusWindow"; params: { handle: number } }
+  | { tool: "computer.listWindows"; params: Record<string, never> }
   | { tool: "computer.inspectUi"; params: { windowHandle: number; maxDepth?: number; maxNodes?: number } }
   | { tool: "computer.invokeUi"; params: { selector: UiElementSelector } }
   | { tool: "computer.setUiValue"; params: { selector: UiElementSelector; value: string } }
@@ -48,6 +49,7 @@ const ALLOWED_TOOLS = new Set([
   "computer.keyCombo",
   "computer.scroll",
   "computer.focusWindow",
+  "computer.listWindows",
   "computer.inspectUi",
   "computer.invokeUi",
   "computer.setUiValue",
@@ -165,6 +167,8 @@ function validateActionParams(
     }
     case "computer.focusWindow":
       return { tool, params: { handle: numberParam(params.handle, "handle") } };
+    case "computer.listWindows":
+      return { tool, params: {} };
     case "computer.inspectUi":
       return {
         tool,
@@ -225,6 +229,7 @@ const PARAM_ALIASES: Record<string, Record<string, string[]>> = {
   "computer.focusWindow": {
     handle: ["windowHandle", "hwnd"],
   },
+  "computer.listWindows": {},
   "computer.inspectUi": {
     windowHandle: ["handle", "hwnd"],
     maxDepth: ["depth"],

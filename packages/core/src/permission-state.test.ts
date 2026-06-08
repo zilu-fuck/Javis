@@ -99,7 +99,11 @@ describe("permission-state", () => {
       },
       () => "2026-05-24T00:00:00.000Z",
     );
-    const resolved = resolvePermissionRequest(request, "denied");
+    const resolved = resolvePermissionRequest(
+      request,
+      "denied",
+      () => "2026-05-24T00:00:01.000Z",
+    );
 
     expect(() => resolvePermissionRequest(resolved, "approved")).toThrow(
       "already denied",
@@ -182,6 +186,33 @@ describe("permission-state", () => {
     expect(expired.resolvedAt).toBe("2026-05-24T00:10:00.000Z");
   });
 
+  it("rejects resolving stale pending permission requests", () => {
+    const request = createPendingPermissionRequest(
+      {
+        id: "permission-1",
+        level: "confirmed_write",
+        title: "Approve write",
+        reason: "Writing needs approval.",
+        dryRun: {
+          operation: "Move file",
+          affectedPaths: [],
+          riskSummary: "Moves one file.",
+          reversible: true,
+        },
+      },
+      () => "2026-05-24T00:00:00.000Z",
+    );
+
+    expect(() =>
+      resolvePermissionRequest(
+        request,
+        "approved",
+        () => "2026-05-24T00:10:00.000Z",
+      ),
+    ).toThrow("Permission request permission-1 is expired.");
+  });
+
+
   it("does not treat terminal or malformed timestamps as stale", () => {
     const request = createPendingPermissionRequest(
       {
@@ -204,6 +235,7 @@ describe("permission-state", () => {
         createdAt: "2026-05-24T00:00:00.000Z",
       },
       "denied",
+      () => "2026-05-24T00:00:01.000Z",
     );
 
     expect(isPermissionRequestStale(request, 1, "2026-05-24T00:10:00.000Z")).toBe(false);

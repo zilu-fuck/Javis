@@ -17,6 +17,7 @@ export type ScheduledTasksRepositoryLike = ReturnType<typeof createScheduledTask
 interface UseTaskRuntimeOptions {
   runtime: ReturnType<typeof createJavisRuntime>;
   setHistory: Dispatch<SetStateAction<TaskSnapshot[]>>;
+  setActiveHistoryEntryId?: Dispatch<SetStateAction<string | undefined>>;
   setScheduledTasks: Dispatch<SetStateAction<ScheduledTask[]>>;
   persistWorkspaceForTask: (status: TaskSnapshot["status"], workspacePath: string) => void;
   persistDurableApprovalRecord: (nextTask: TaskSnapshot) => void;
@@ -42,6 +43,7 @@ export interface TaskRuntimeControls {
 export function useTaskRuntime({
   runtime,
   setHistory,
+  setActiveHistoryEntryId,
   setScheduledTasks,
   persistWorkspaceForTask,
   persistDurableApprovalRecord,
@@ -140,6 +142,7 @@ export function useTaskRuntime({
           if (repository) {
             void repository.upsert(nextTask);
           }
+          setActiveHistoryEntryId?.(nextTask.id);
           return updated;
         });
       }
@@ -195,6 +198,7 @@ export function useTaskRuntime({
   }, [
     runtime,
     scheduledTasksRepoRef,
+    setActiveHistoryEntryId,
     setHistory,
     setScheduledTasks,
     taskHistoryRepoRef,

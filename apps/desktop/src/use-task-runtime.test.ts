@@ -43,7 +43,12 @@ describe("useTaskRuntime", () => {
       },
     };
 
-    const setHistory = vi.fn();
+    const setHistory = vi.fn((updater) => {
+      if (typeof updater === "function") {
+        updater([]);
+      }
+    });
+    const setActiveHistoryEntryId = vi.fn();
     const setScheduledTasks = vi.fn();
     const persistWorkspaceForTask = vi.fn();
     const persistDurableApprovalRecord = vi.fn();
@@ -53,6 +58,7 @@ describe("useTaskRuntime", () => {
       useTaskRuntime({
         runtime,
         setHistory,
+        setActiveHistoryEntryId,
         setScheduledTasks,
         persistWorkspaceForTask,
         persistDurableApprovalRecord,
@@ -63,7 +69,7 @@ describe("useTaskRuntime", () => {
       } as any),
     );
 
-    return { result, runtime, onTaskSnapshot, persistDurableApprovalRecord };
+    return { result, runtime, setActiveHistoryEntryId, onTaskSnapshot, persistDurableApprovalRecord };
   }
 
   it("initializes with isTaskActive false and idle task snapshot", () => {
@@ -143,5 +149,22 @@ describe("useTaskRuntime", () => {
     });
 
     expect(result.current.task.id).toBe("task-idle");
+  });
+
+  it("selects the archived history entry when a task reaches a terminal state", () => {
+    const { runtime, setActiveHistoryEntryId } = setupHook();
+
+    act(() => {
+      runtime.emit(createTaskSnapshot({
+        id: "task-done",
+        status: "completed",
+        conversationMessages: [
+          { role: "user", content: "Build a local wallpaper video browser" },
+          { role: "assistant", content: "Done." },
+        ],
+      }));
+    });
+
+    expect(setActiveHistoryEntryId).toHaveBeenCalledWith("task-done");
   });
 });

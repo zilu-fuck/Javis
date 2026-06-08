@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createAgentRegistry } from "./agent-capability";
+import { initialToolDescriptors } from "@javis/tools";
+import { ALL_CAPABILITY_TAGS, createAgentRegistry } from "./agent-capability";
 import { createDefaultAgentRegistry } from "./agents";
 
 describe("AgentRegistry", () => {
@@ -29,13 +30,29 @@ describe("AgentRegistry", () => {
     expect(reg!.agent.kind).toBe("commander");
   });
 
-  it("finds the Computer Agent by local_search capability", () => {
-    const reg = registry.findByCapabilities(["local_search"]);
-    expect(reg).toBeDefined();
-    expect(reg!.agent.kind).toBe("computer");
-  });
+    it("finds the Computer Agent by local_search capability", () => {
+      const reg = registry.findByCapabilities(["local_search"]);
+      expect(reg).toBeDefined();
+      expect(reg!.agent.kind).toBe("computer");
+    });
 
-  it("returns undefined for unknown capability tag", () => {
+    it("finds the Computer Agent by desktop UI Automation capabilities", () => {
+      expect(registry.findByCapabilities(["desktop_ui_tree"])?.agent.kind).toBe("computer");
+      expect(registry.findByCapabilities(["desktop_ui_input"])?.agent.kind).toBe("computer");
+    });
+
+    it("keeps all descriptor capability tags in the valid capability set", () => {
+      const validTags = new Set<string>(ALL_CAPABILITY_TAGS);
+      const invalid = initialToolDescriptors.flatMap((descriptor) =>
+        descriptor.capabilityTags
+          .filter((tag) => !validTags.has(tag))
+          .map((tag) => `${descriptor.name}:${tag}`),
+      );
+
+      expect(invalid).toEqual([]);
+    });
+
+    it("returns undefined for unknown capability tag", () => {
     const unknownCapability = "nonexistent_tag" as never;
     const reg = registry.findByCapabilities([unknownCapability]);
     expect(reg).toBeUndefined();

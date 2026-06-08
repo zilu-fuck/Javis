@@ -16,6 +16,7 @@ export interface ModelProfile {
   model: string;
   apiKeyReference: string;
   baseUrl: string;
+  contextTokens?: number;
   capabilities: {
     vision: boolean;
     code: boolean;
@@ -30,6 +31,11 @@ export type AgentModelOverrides = Partial<Record<string, string>>;
 export interface ModelConfiguration {
   profiles: ModelProfile[];
   agentOverrides: AgentModelOverrides;
+}
+
+export interface ModelProviderConnectionDefinition {
+  id: string;
+  defaultBaseUrl: string;
 }
 
 // --- Legacy single-model settings (kept for migration) ---
@@ -136,6 +142,38 @@ export function createDefaultModelConfiguration(locale = "en"): ModelConfigurati
   };
 }
 
+export function normalizeModelConfigurationConnections(
+  config: ModelConfiguration,
+  providers: readonly ModelProviderConnectionDefinition[] = [],
+): ModelConfiguration {
+  const providerDefaultBaseUrls = new Map(
+    providers.map((provider) => [provider.id, normalizeBaseUrl(provider.defaultBaseUrl)]),
+  );
+  const defaultBaseUrlOwners = new Map(
+    providers.map((provider) => [normalizeBaseUrl(provider.defaultBaseUrl), provider.id]),
+  );
+  const providerProfiles = new Map<string, ModelProfile>();
+
+  for (const profile of config.profiles) {
+    if (!profile.provider || profile.slot !== null) continue;
+    if (!providerProfiles.has(profile.provider)) {
+      providerProfiles.set(profile.provider, profile);
+    }
+  }
+
+  return {
+    ...config,
+    profiles: config.profiles.map((profile) =>
+      normalizeModelProfileConnection(
+        profile,
+        providerProfiles.get(profile.provider),
+        providerDefaultBaseUrls,
+        defaultBaseUrlOwners,
+      ),
+    ),
+  };
+}
+
 export function loadModelSettings(storage: ModelSettingsStorage): ModelSettings {
   const rawValue = storage.getItem(MODEL_SETTINGS_STORAGE_KEY);
   if (!rawValue) {
@@ -193,6 +231,53 @@ function toPersistedModelSettings(settings: ModelSettings): PersistedModelSettin
 
 function sanitizeText(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeModelProfileConnection(
+  profile: ModelProfile,
+  providerProfile: ModelProfile | undefined,
+  providerDefaultBaseUrls: Map<string, string>,
+  defaultBaseUrlOwners: Map<string, string>,
+): ModelProfile {
+  const provider = profile.provider.trim();
+  if (!provider) return { ...profile };
+
+  if (providerProfile && providerProfile.id !== profile.id) {
+    return {
+      ...profile,
+      apiKeyReference: providerProfile.apiKeyReference || providerApiKeyReference(provider),
+      baseUrl: providerProfile.baseUrl || providerDefaultBaseUrls.get(provider) || profile.baseUrl,
+    };
+  }
+
+  const keyOwner = providerFromApiKeyReference(profile.apiKeyReference);
+  const baseUrlOwner = defaultBaseUrlOwners.get(normalizeBaseUrl(profile.baseUrl));
+  return {
+    ...profile,
+    apiKeyReference:
+      !keyOwner || keyOwner !== provider
+        ? providerApiKeyReference(provider)
+        : profile.apiKeyReference,
+    baseUrl:
+      !profile.baseUrl || (baseUrlOwner && baseUrlOwner !== provider)
+        ? providerDefaultBaseUrls.get(provider) || profile.baseUrl
+        : profile.baseUrl,
+  };
+}
+
+function providerFromApiKeyReference(value: string): string | null {
+  const trimmed = value.trim();
+  if (trimmed === "default") return null;
+  const match = trimmed.match(/^model\.(.+)$/);
+  return match?.[1] || null;
+}
+
+function providerApiKeyReference(provider: string): string {
+  return `model.${provider}`;
+}
+
+function normalizeBaseUrl(value: string): string {
+  return value.trim().replace(/\/+$/, "");
 }
 
 function sanitizeModelApiKeyReference(value: unknown): string {

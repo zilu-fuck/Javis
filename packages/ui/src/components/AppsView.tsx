@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { WorkbenchAppEntry, WorkbenchLocale, WorkbenchProgress } from "../types";
 import { ProgressBar } from "./ProgressBar";
 import { createCountLabel, ResourceIconButton, ResourceShell } from "./ResourceShell";
+
+const CONTEXT_MENU_WIDTH = 220;
 
 interface AppsViewProps {
   apps: WorkbenchAppEntry[];
@@ -9,7 +11,14 @@ interface AppsViewProps {
   loading?: boolean;
   progress?: WorkbenchProgress;
   error?: string;
+  classifying?: boolean;
+  classifyProgress?: WorkbenchProgress & { completed?: number };
+  categoryStats?: { category: string; count: number }[];
+  selectedCategory?: string | null;
   onRefresh?: () => void;
+  onClassifyApps?: () => void;
+  onCancelClassifyApps?: () => void;
+  onUpdateAppCategory?: (path: string, category: string) => void;
   onOpen?: (path: string) => void;
 }
 
@@ -19,29 +28,103 @@ export function AppsView({
   loading,
   progress,
   error,
+  classifying,
+  classifyProgress,
+  categoryStats = [],
+  selectedCategory,
   onRefresh,
+  onClassifyApps,
+  onCancelClassifyApps,
+  onUpdateAppCategory,
   onOpen,
 }: AppsViewProps) {
   const labels = locale.labels;
+  const categoryLabels = locale.categoryLabels ?? {};
   const [query, setQuery] = useState("");
+  const [activeCategory, setActiveCategory] = useState<string | null>(null);
+  const [menuAppPath, setMenuAppPath] = useState<string | null>(null);
+  const [menuSide, setMenuSide] = useState<"left" | "right">("right");
+  const [customCategory, setCustomCategory] = useState("");
 
-  const filtered = apps.filter((app) =>
-    app.name.toLowerCase().includes(query.toLowerCase()),
-  );
+  useEffect(() => {
+    if (selectedCategory !== undefined) {
+      setActiveCategory(selectedCategory);
+    }
+  }, [selectedCategory]);
+
+  const filtered = apps.filter((app) => {
+    const q = query.toLowerCase();
+    const matchesQuery =
+      q === "" ||
+      app.name.toLowerCase().includes(q) ||
+      app.path.toLowerCase().includes(q) ||
+      (app.publisher ?? "").toLowerCase().includes(q) ||
+      (app.category ?? "").toLowerCase().includes(q) ||
+      (app.tags ?? []).some((tag) => tag.toLowerCase().includes(q));
+    const matchesCategory = activeCategory == null || app.category === activeCategory;
+    return matchesQuery && matchesCategory;
+  });
+
+  const effectiveCategoryStats = buildCategoryStats(apps, categoryStats);
+  const categoryTabs = [
+    { key: null, label: labels.allCategories, count: apps.length },
+    ...effectiveCategoryStats.map((s) => ({
+      key: s.category,
+      label: categoryLabels[s.category] ?? s.category,
+      count: s.count,
+    })),
+  ];
+  const activeTabIndex = activeCategory == null
+    ? 0
+    : Math.max(0, categoryTabs.findIndex((t) => t.key === activeCategory));
+  const unclassifiedCount = apps.filter((app) => app.category == null).length;
+
+  function handleTabChange(index: number) {
+    setActiveCategory(categoryTabs[index]?.key ?? null);
+  }
+
+  function closeContextMenu() {
+    setMenuAppPath(null);
+    setCustomCategory("");
+  }
+
+  function updateCategory(path: string, category: string) {
+    const trimmed = category.trim();
+    if (!trimmed) return;
+    onUpdateAppCategory?.(path, trimmed);
+    setActiveCategory(trimmed);
+    closeContextMenu();
+  }
+
   const actions = (
     <>
       <label className="javis-resource-search">
-        <span aria-hidden="true">⌕</span>
+        <span className="javis-resource-action-icon icon-search" aria-hidden="true" />
         <input
           onChange={(e) => setQuery(e.currentTarget.value)}
           placeholder={labels.searchPlaceholder}
           value={query}
         />
       </label>
-      <ResourceIconButton label={labels.retry} onClick={onRefresh}>⟳</ResourceIconButton>
+      <ResourceIconButton label={labels.retry} onClick={onRefresh}>
+        <span className="javis-resource-action-icon icon-refresh" aria-hidden="true" />
+      </ResourceIconButton>
+      {classifying ? (
+        <ResourceIconButton label={labels.cancelClassify} onClick={onCancelClassifyApps}>
+          <span className="javis-resource-action-icon icon-close" aria-hidden="true" />
+        </ResourceIconButton>
+      ) : (
+        <ResourceIconButton label={labels.classifyButton} onClick={onClassifyApps}>
+          <span className="javis-resource-action-icon icon-ai" aria-hidden="true" />
+        </ResourceIconButton>
+      )}
       <div className="javis-resource-segment">
-        <button className="active" type="button">☷</button>
-        <button type="button">◷</button>
+        <button aria-label="网格视图" title="网格视图" className="active" type="button">
+          <span className="javis-resource-action-icon icon-grid" aria-hidden="true" />
+        </button>
+        <button aria-label="列表视图" title="列表视图" type="button">
+          <span className="javis-resource-action-icon icon-list" aria-hidden="true" />
+        </button>
       </div>
     </>
   );
@@ -50,9 +133,11 @@ export function AppsView({
     return (
       <ResourceShell
         actions={actions}
+        activeTabIndex={activeTabIndex}
         countLabel={createCountLabel(labels.apps, apps.length)}
-        icon="■"
-        tabs={["全部应用", "办公学习", "影音娱乐", "系统应用"]}
+        icon="#"
+        onTabChange={handleTabChange}
+        tabs={categoryTabs.map((t) => `${t.label}(${t.count})`)}
         title={labels.apps}
       >
         <div className="javis-view-loading">
@@ -73,9 +158,11 @@ export function AppsView({
     return (
       <ResourceShell
         actions={actions}
+        activeTabIndex={activeTabIndex}
         countLabel={createCountLabel(labels.apps, apps.length)}
-        icon="■"
-        tabs={["全部应用", "办公学习", "影音娱乐", "系统应用"]}
+        icon="#"
+        onTabChange={handleTabChange}
+        tabs={categoryTabs.map((t) => `${t.label}(${t.count})`)}
         title={labels.apps}
       >
         <div className="javis-view-error">
@@ -91,11 +178,30 @@ export function AppsView({
   return (
     <ResourceShell
       actions={actions}
+      activeTabIndex={activeTabIndex}
       countLabel={createCountLabel(labels.apps, filtered.length)}
-      icon="■"
-      tabs={["全部应用", "办公学习", "影音娱乐", "系统应用"]}
+      icon="#"
+      onTabChange={handleTabChange}
+      tabs={categoryTabs.map((t) => `${t.label}(${t.count})`)}
       title={labels.apps}
     >
+      {(classifying || classifyProgress) && (
+        <div className="javis-classify-status">
+          {classifyProgress && (
+            <ProgressBar
+              current={classifyProgress.completed ?? classifyProgress.current}
+              label={labels.classifyButton}
+              startedAt={classifyProgress.startedAt}
+              total={classifyProgress.total}
+            />
+          )}
+          {classifying && unclassifiedCount > 0 && (
+            <span className="javis-classify-pending">
+              ({unclassifiedCount.toLocaleString()} pending)
+            </span>
+          )}
+        </div>
+      )}
       {filtered.length === 0 ? (
         <div className="javis-view-empty">
           <p>{labels.noAppsFound}</p>
@@ -103,18 +209,51 @@ export function AppsView({
       ) : (
         <div className="javis-app-grid">
           {filtered.map((app) => (
-            <button
-              className="javis-app-card"
-              key={app.path}
-              onClick={() => onOpen?.(app.path)}
-              type="button"
-            >
-              <AppIcon app={app} />
-              <span className="javis-app-name">{app.name}</span>
-              {app.publisher && (
-                <span className="javis-app-publisher">{app.publisher}</span>
+            <div className="javis-app-cell" key={app.path}>
+              <button
+                className="javis-app-card"
+                onClick={() => onOpen?.(app.path)}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  const hasRightRoom = rect.right + CONTEXT_MENU_WIDTH <= window.innerWidth;
+                  setMenuSide(hasRightRoom ? "right" : "left");
+                  setMenuAppPath(app.path);
+                  setCustomCategory(app.category ?? "");
+                }}
+                type="button"
+              >
+                <AppIcon app={app} />
+                <span className="javis-app-name">{app.name}</span>
+                {app.category && (
+                  <span className="javis-category-badge">
+                    {categoryLabels[app.category] ?? app.category}
+                  </span>
+                )}
+                {app.publisher && (
+                  <span className="javis-app-publisher">{app.publisher}</span>
+                )}
+                {app.tags && app.tags.length > 0 && (
+                  <span className="javis-doc-tags">
+                    {app.tags.map((tag) => (
+                      <span className="javis-tag" key={tag}>{tag}</span>
+                    ))}
+                  </span>
+                )}
+              </button>
+              {menuAppPath === app.path && (
+                <AppCategoryMenu
+                  app={app}
+                  categoryLabels={categoryLabels}
+                  customCategory={customCategory}
+                  effectiveCategoryStats={effectiveCategoryStats}
+                  menuSide={menuSide}
+                  onClose={closeContextMenu}
+                  onCustomCategoryChange={setCustomCategory}
+                  onUpdateCategory={updateCategory}
+                />
               )}
-            </button>
+            </div>
           ))}
         </div>
       )}
@@ -140,4 +279,71 @@ function AppIcon({ app }: { app: WorkbenchAppEntry }) {
   }
 
   return <span className="javis-app-icon">{initial}</span>;
+}
+
+function buildCategoryStats(
+  apps: WorkbenchAppEntry[],
+  fallbackStats: { category: string; count: number }[],
+) {
+  const counts = new Map<string, number>();
+  for (const app of apps) {
+    if (!app.category) continue;
+    counts.set(app.category, (counts.get(app.category) ?? 0) + 1);
+  }
+  const derived = [...counts.entries()].map(([category, count]) => ({ category, count }));
+  return (derived.length > 0 ? derived : fallbackStats).sort((a, b) => b.count - a.count);
+}
+
+function AppCategoryMenu({
+  app,
+  categoryLabels,
+  customCategory,
+  effectiveCategoryStats,
+  menuSide,
+  onClose,
+  onCustomCategoryChange,
+  onUpdateCategory,
+}: {
+  app: WorkbenchAppEntry;
+  categoryLabels: Record<string, string>;
+  customCategory: string;
+  effectiveCategoryStats: { category: string; count: number }[];
+  menuSide: "left" | "right";
+  onClose: () => void;
+  onCustomCategoryChange: (category: string) => void;
+  onUpdateCategory: (path: string, category: string) => void;
+}) {
+  return (
+    <div className={`javis-app-context-menu side-${menuSide}`} role="menu">
+      <strong>{app.name}</strong>
+      {effectiveCategoryStats.length > 0 && (
+        <div className="javis-app-context-options">
+          {effectiveCategoryStats.map((stat) => (
+            <button
+              key={stat.category}
+              onClick={() => onUpdateCategory(app.path, stat.category)}
+              type="button"
+            >
+              {categoryLabels[stat.category] ?? stat.category}
+            </button>
+          ))}
+        </div>
+      )}
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          onUpdateCategory(app.path, customCategory);
+        }}
+      >
+        <input
+          aria-label="自定义分类"
+          onChange={(event) => onCustomCategoryChange(event.currentTarget.value)}
+          placeholder="自定义分类"
+          value={customCategory}
+        />
+        <button type="submit">保存</button>
+        <button onClick={onClose} type="button">取消</button>
+      </form>
+    </div>
+  );
 }

@@ -8,6 +8,7 @@ import {
   formatCompactTokenCount,
   translateWorkbenchText,
 } from "../utils";
+import { resolveContextTokens } from "../model-context-window";
 
 interface ContextRingProps {
   task: WorkbenchTask;
@@ -16,31 +17,9 @@ interface ContextRingProps {
   modelConfiguration?: WorkbenchModelConfiguration;
 }
 
-const MODEL_MAX_TOKENS: Record<string, number> = {
-  "deepseek-v4-pro": 1_000_000,
-  "deepseek-v4-flash": 128_000,
-  deepseek: 1_000_000,
-  "deepseek-chat": 1_000_000,
-  "gpt-4o": 128_000,
-  "gpt-4o-mini": 128_000,
-  "gpt-4.1": 1_000_000,
-  "gpt-4.1-mini": 1_000_000,
-  "gpt-4.1-nano": 1_000_000,
-  "claude-opus-4-7": 200_000,
-  "claude-sonnet-4-6": 200_000,
-  "claude-haiku-4-5": 200_000,
-};
-
-const DEFAULT_MAX_TOKENS = 128_000;
-
 function resolveMaxTokens(modelConfiguration?: WorkbenchModelConfiguration): number {
   const primary = modelConfiguration?.profiles.find((p) => p.slot === "primary");
-  if (!primary?.model) return DEFAULT_MAX_TOKENS;
-  const modelLower = primary.model.toLowerCase();
-  for (const [key, limit] of Object.entries(MODEL_MAX_TOKENS)) {
-    if (modelLower.includes(key)) return limit;
-  }
-  return DEFAULT_MAX_TOKENS;
+  return resolveContextTokens(primary);
 }
 
 const R = 14;

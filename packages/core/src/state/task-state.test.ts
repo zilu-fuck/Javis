@@ -1,8 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DOCUMENTED_TASK_TRANSITIONS,
+  TASK_STATUS_PROGRESS,
   TASK_STATUSES,
   createInitialTaskSnapshot,
+  getTaskProgress,
+  isLegalTaskTransition,
   isTerminalTaskStatus,
   transitionTask,
 } from "../index";
@@ -26,8 +29,10 @@ describe("task-state", () => {
     expect(TASK_STATUSES).toEqual([
       "created",
       "planning",
-      "running",
+      "waiting_info",
       "waiting_permission",
+      "running",
+      "generating",
       "verifying",
       "retrying",
       "completed",
@@ -40,9 +45,13 @@ describe("task-state", () => {
     expect(DOCUMENTED_TASK_TRANSITIONS).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ from: "created", to: "planning" }),
+        expect.objectContaining({ from: "planning", to: "waiting_info" }),
+        expect.objectContaining({ from: "waiting_info", to: "running" }),
         expect.objectContaining({ from: "planning", to: "running" }),
         expect.objectContaining({ from: "running", to: "waiting_permission" }),
         expect.objectContaining({ from: "waiting_permission", to: "running" }),
+        expect.objectContaining({ from: "running", to: "generating" }),
+        expect.objectContaining({ from: "generating", to: "completed" }),
         expect.objectContaining({ from: "running", to: "verifying" }),
         expect.objectContaining({ from: "verifying", to: "completed" }),
         expect.objectContaining({ from: "waiting_permission", to: "completed" }),
@@ -62,6 +71,26 @@ describe("task-state", () => {
 
     expect(finalSnapshot.status).toBe("completed");
     expect(finalSnapshot.updatedAt).toBe("2026-05-24T00:00:02.000Z");
+  });
+
+  it("maps product status stages to non-zero progress", () => {
+    expect(TASK_STATUS_PROGRESS.waiting_info).toBe(35);
+    expect(TASK_STATUS_PROGRESS.waiting_permission).toBe(40);
+    expect(TASK_STATUS_PROGRESS.generating).toBe(75);
+    expect(getTaskProgress("completed")).toBe(100);
+  });
+
+  it("warns but allows undocumented non-terminal transitions", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const snapshot = {
+      ...createInitialTaskSnapshot(),
+      status: "planning" as const,
+    };
+
+    expect(isLegalTaskTransition("planning", "completed")).toBe(false);
+    expect(transitionTask(snapshot, "completed").status).toBe("completed");
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    warnSpy.mockRestore();
   });
 
   it("transitions running through permission and verification to completed", () => {

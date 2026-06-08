@@ -1,12 +1,26 @@
 use serde::{Deserialize, Serialize};
-use std::{env, fs, io::Write, path::{Path, PathBuf}, process::{Child, Command, Output, Stdio}, sync::Mutex, thread, time::{Duration, SystemTime}};
+use std::{
+    env, fs,
+    io::Write,
+    path::{Path, PathBuf},
+    process::{Child, Command, Output, Stdio},
+    sync::Mutex,
+    thread,
+    time::{Duration, SystemTime},
+};
 use tauri::AppHandle;
 
-use crate::{resolve_workspace_path, resolve_command_program, normalize_path, env_flag_enabled, create_approval_id, create_fnv1a_hash, capture_current_git_head, create_file_content_hashes, NativeApprovalBinding, create_native_approval_binding, require_native_approval_binding, require_current_git_head_matches, hydrate_model_api_key_secret, OPENCODE_PROPOSAL_TIMEOUT, JAVIS_TERMINOLOGY_PROMPT_PREFIX, default_openai_compatible_base_url, create_provider_response_diagnostic, summarize_provider_output_for_error};
 use crate::error::JavisError;
+use crate::{
+    capture_current_git_head, create_approval_id, create_file_content_hashes, create_fnv1a_hash,
+    create_native_approval_binding, create_provider_response_diagnostic,
+    default_openai_compatible_base_url, env_flag_enabled, hydrate_model_api_key_secret,
+    normalize_path, require_current_git_head_matches, require_native_approval_binding,
+    resolve_command_program, resolve_workspace_path, summarize_provider_output_for_error,
+    NativeApprovalBinding, JAVIS_TERMINOLOGY_PROMPT_PREFIX, OPENCODE_PROPOSAL_TIMEOUT,
+};
 
 pub(crate) const CODE_PATCH_APPROVAL_TOOL_NAME: &str = "code.applyProposedEdit";
-
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,7 +41,6 @@ pub(crate) struct CodePatchApplyRequest {
     pub(crate) locale: Option<String>,
 }
 
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CodePatchApprovalRequest {
@@ -44,13 +57,20 @@ pub(crate) struct CodePatchApprovalRequest {
     pub(crate) locale: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CodePatchRestoreApprovalRequest {
+    pub(crate) approval_id: String,
+    pub(crate) edit: CodeProposedEdit,
+    #[serde(default)]
+    pub(crate) task_id: Option<String>,
+}
 
 #[derive(Clone)]
 pub(crate) struct FileContentHash {
     pub(crate) path: String,
     pub(crate) hash: String,
 }
-
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,7 +81,6 @@ pub(crate) struct CodeApplyResult {
     pub(crate) message: String,
 }
 
-
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CodeProposeEditRequest {
@@ -69,6 +88,8 @@ pub(crate) struct CodeProposeEditRequest {
     pub(crate) user_goal: String,
     pub(crate) changed_files: Vec<String>,
     pub(crate) diff: String,
+    #[serde(default)]
+    pub(crate) task_id: Option<String>,
     pub(crate) provider_id: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) api_key: Option<String>,
@@ -78,10 +99,10 @@ pub(crate) struct CodeProposeEditRequest {
     pub(crate) locale: Option<String>,
 }
 
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CodeProposedEdit {
+    pub(crate) approval_id: String,
     pub(crate) proposal_id: String,
     pub(crate) workspace_path: String,
     pub(crate) summary: String,
@@ -94,7 +115,6 @@ pub(crate) struct CodeProposedEdit {
     pub(crate) hunks: Option<Vec<CodeProposalHunk>>,
 }
 
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CodeProposalHunk {
@@ -106,7 +126,6 @@ pub(crate) struct CodeProposalHunk {
     diff: String,
 }
 
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RawCodeProposal {
@@ -115,7 +134,6 @@ pub(crate) struct RawCodeProposal {
     patch: String,
 }
 
-
 #[derive(Default)]
 pub(crate) struct RawCodeProposalParts {
     summary: Option<String>,
@@ -123,12 +141,10 @@ pub(crate) struct RawCodeProposalParts {
     patch: Option<String>,
 }
 
-
 #[derive(Default)]
 pub(crate) struct CodePatchApprovalState {
     pub(crate) pending: Option<PendingCodePatchApproval>,
 }
-
 
 pub(crate) struct PendingCodePatchApproval {
     pub(crate) binding: NativeApprovalBinding,
@@ -139,12 +155,10 @@ pub(crate) struct PendingCodePatchApproval {
     pub(crate) file_hashes: Vec<FileContentHash>,
 }
 
-
 pub(crate) struct OpencodeProposalInvocation {
     pub(crate) args: Vec<String>,
     pub(crate) config_content: String,
 }
-
 
 #[tauri::command]
 pub(crate) fn approve_code_patch(
@@ -154,35 +168,48 @@ pub(crate) fn approve_code_patch(
     approve_pending_code_patch(&approval_state, request).map_err(|e| e.to_string())
 }
 
-
 #[tauri::command]
 pub(crate) fn apply_code_patch(
     request: CodePatchApplyRequest,
     approval_state: tauri::State<'_, Mutex<CodePatchApprovalState>>,
 ) -> Result<CodeApplyResult, String> {
-    let workspace = resolve_workspace_path(Some(request.workspace_path.clone()))
-        .map_err(|e| e.to_string())?;
+    let workspace =
+        resolve_workspace_path(Some(request.workspace_path.clone())).map_err(|e| e.to_string())?;
     apply_code_patch_in_workspace(&workspace, request, Some(&approval_state))
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub(crate) fn restore_code_patch_approval(
+    request: CodePatchRestoreApprovalRequest,
+    approval_state: tauri::State<'_, Mutex<CodePatchApprovalState>>,
+) -> Result<(), String> {
+    let mut edit = request.edit;
+    edit.approval_id = request.approval_id;
+    register_pending_code_patch(&approval_state, &edit, request.task_id.as_deref())
+        .map_err(|e| e.to_string())
+}
 
 #[tauri::command]
 pub(crate) fn propose_code_edit(
     app: AppHandle,
     mut request: CodeProposeEditRequest,
+    approval_state: tauri::State<'_, Mutex<CodePatchApprovalState>>,
 ) -> Result<CodeProposedEdit, String> {
-    let workspace = resolve_workspace_path(Some(request.workspace_path.clone()))
-        .map_err(|e| e.to_string())?;
+    let workspace =
+        resolve_workspace_path(Some(request.workspace_path.clone())).map_err(|e| e.to_string())?;
     if !env_flag_enabled("JAVIS_QA_MODE")
         || env::var_os("JAVIS_CODE_PROPOSAL_FIXTURE_PATH").is_none()
     {
-        hydrate_model_api_key_secret(&app, &mut request)
-            .map_err(JavisError::Internal)?;
+        hydrate_model_api_key_secret(&app, &mut request).map_err(JavisError::Internal)?;
     }
-    propose_code_edit_with_opencode(&workspace, request).map_err(|e| e.to_string())
+    let task_id = request.task_id.clone();
+    let proposal =
+        propose_code_edit_with_opencode(&workspace, request).map_err(|e| e.to_string())?;
+    register_pending_code_patch(&approval_state, &proposal, task_id.as_deref())
+        .map_err(|e| e.to_string())?;
+    Ok(proposal)
 }
-
 
 pub(crate) fn propose_code_edit_with_opencode(
     workspace: &Path,
@@ -191,10 +218,14 @@ pub(crate) fn propose_code_edit_with_opencode(
     let canonical_workspace = fs::canonicalize(workspace)
         .map_err(|error| JavisError::Io(format!("Workspace is not accessible: {error}")))?;
     if request.user_goal.trim().is_empty() {
-        return Err(JavisError::Validation("Code proposal goal cannot be empty.".into()));
+        return Err(JavisError::Validation(
+            "Code proposal goal cannot be empty.".into(),
+        ));
     }
     if request.diff.trim().is_empty() {
-        return Err(JavisError::Validation("Code proposal requires a non-empty diff preview.".into()));
+        return Err(JavisError::Validation(
+            "Code proposal requires a non-empty diff preview.".into(),
+        ));
     }
     let requested_changed_files = request
         .changed_files
@@ -211,8 +242,9 @@ pub(crate) fn propose_code_edit_with_opencode(
 
     if env_flag_enabled("JAVIS_QA_MODE") {
         if let Some(path) = env::var_os("JAVIS_CODE_PROPOSAL_FIXTURE_PATH").map(PathBuf::from) {
-            let content = fs::read_to_string(path)
-                .map_err(|error| JavisError::Io(format!("Could not read code proposal fixture: {error}")))?;
+            let content = fs::read_to_string(path).map_err(|error| {
+                JavisError::Io(format!("Could not read code proposal fixture: {error}"))
+            })?;
             return parse_code_proposal_from_text_for_request(
                 &canonical_workspace,
                 &content,
@@ -220,22 +252,19 @@ pub(crate) fn propose_code_edit_with_opencode(
             );
         }
     } else if env::var_os("JAVIS_CODE_PROPOSAL_FIXTURE_PATH").is_some() {
-        return Err(JavisError::Validation("Code proposal fixtures require JAVIS_QA_MODE=1.".into()));
+        return Err(JavisError::Validation(
+            "Code proposal fixtures require JAVIS_QA_MODE=1.".into(),
+        ));
     }
 
     let prompt = create_opencode_proposal_prompt(&request);
     if should_fallback_to_openai_compatible(&request) {
         let output = run_openai_compatible_proposal_request(&request, &prompt)?;
-        return parse_code_proposal_from_text_for_request(
-            &canonical_workspace,
-            &output,
-            &request,
-        );
+        return parse_code_proposal_from_text_for_request(&canonical_workspace, &output, &request);
     }
     let output = run_opencode_proposal_command(&canonical_workspace, &prompt, &request)?;
     parse_code_proposal_from_text_for_request(&canonical_workspace, &output, &request)
 }
-
 
 pub(crate) fn run_opencode_proposal_command(
     workspace: &Path,
@@ -243,8 +272,10 @@ pub(crate) fn run_opencode_proposal_command(
     request: &CodeProposeEditRequest,
 ) -> Result<String, JavisError> {
     let opencode = resolve_opencode_program();
-    let invocation = create_opencode_proposal_invocation(workspace, prompt, request)
-        .map_err(|error| JavisError::Internal(format!("opencode proposal configuration error: {error}")))?;
+    let invocation =
+        create_opencode_proposal_invocation(workspace, prompt, request).map_err(|error| {
+            JavisError::Internal(format!("opencode proposal configuration error: {error}"))
+        })?;
     let output = Command::new(&opencode)
         .args(&invocation.args)
         .current_dir(workspace)
@@ -253,7 +284,12 @@ pub(crate) fn run_opencode_proposal_command(
         .stderr(Stdio::piped())
         .spawn()
         .and_then(|child| wait_with_timeout(child, OPENCODE_PROPOSAL_TIMEOUT))
-        .map_err(|error| JavisError::Io(format!("opencode is unavailable at {}: {error}", opencode.display())))?;
+        .map_err(|error| {
+            JavisError::Io(format!(
+                "opencode is unavailable at {}: {error}",
+                opencode.display()
+            ))
+        })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(if stderr.is_empty() {
@@ -264,7 +300,6 @@ pub(crate) fn run_opencode_proposal_command(
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
-
 
 pub(crate) fn wait_with_timeout(mut child: Child, timeout: Duration) -> std::io::Result<Output> {
     let started = SystemTime::now();
@@ -290,7 +325,6 @@ pub(crate) fn wait_with_timeout(mut child: Child, timeout: Duration) -> std::io:
         thread::sleep(Duration::from_millis(100));
     }
 }
-
 
 pub(crate) fn create_opencode_proposal_invocation(
     workspace: &Path,
@@ -320,8 +354,9 @@ pub(crate) fn create_opencode_proposal_invocation(
     })
 }
 
-
-pub(crate) fn create_opencode_config_content(request: &CodeProposeEditRequest) -> Result<String, JavisError> {
+pub(crate) fn create_opencode_config_content(
+    request: &CodeProposeEditRequest,
+) -> Result<String, JavisError> {
     let mut config = serde_json::json!({
         "permission": {
             "edit": "deny",
@@ -372,7 +407,6 @@ pub(crate) fn create_opencode_config_content(request: &CodeProposeEditRequest) -
     });
     serde_json::to_string(&config).map_err(JavisError::from)
 }
-
 
 pub(crate) fn create_opencode_proposal_prompt(request: &CodeProposeEditRequest) -> String {
     if request
@@ -434,14 +468,12 @@ Current diff preview:
     )
 }
 
-
 pub(crate) fn resolve_opencode_program() -> PathBuf {
     bundled_opencode_candidates()
         .into_iter()
         .find(|path| path.exists())
         .unwrap_or_else(|| PathBuf::from(resolve_command_program("opencode")))
 }
-
 
 pub(crate) fn bundled_opencode_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
@@ -463,7 +495,6 @@ pub(crate) fn bundled_opencode_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-
 pub(crate) fn opencode_candidates_near_executable(exe_path: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(exe_dir) = exe_path.parent() {
@@ -475,7 +506,6 @@ pub(crate) fn opencode_candidates_near_executable(exe_path: &Path) -> Vec<PathBu
     candidates
 }
 
-
 pub(crate) fn infer_provider_id_from_model(request: &CodeProposeEditRequest) -> String {
     normalize_optional_config_value(request.model.as_deref())
         .and_then(|model| {
@@ -486,7 +516,6 @@ pub(crate) fn infer_provider_id_from_model(request: &CodeProposeEditRequest) -> 
         .unwrap_or_else(|| default_provider_for_locale(request.locale.as_deref()))
 }
 
-
 pub(crate) fn default_provider_for_locale(locale: Option<&str>) -> String {
     if locale.is_some_and(|locale| locale.starts_with("zh")) {
         "deepseek".to_string()
@@ -494,7 +523,6 @@ pub(crate) fn default_provider_for_locale(locale: Option<&str>) -> String {
         "openai".to_string()
     }
 }
-
 
 pub(crate) fn default_model_for_locale(locale: Option<&str>) -> String {
     if locale.is_some_and(|locale| locale.starts_with("zh")) {
@@ -504,8 +532,9 @@ pub(crate) fn default_model_for_locale(locale: Option<&str>) -> String {
     }
 }
 
-
-pub(crate) fn normalize_opencode_model_id(request: &CodeProposeEditRequest) -> Result<Option<String>, JavisError> {
+pub(crate) fn normalize_opencode_model_id(
+    request: &CodeProposeEditRequest,
+) -> Result<Option<String>, JavisError> {
     let Some(model) = normalize_optional_config_value(request.model.as_deref()) else {
         return Ok(None);
     };
@@ -519,8 +548,9 @@ pub(crate) fn normalize_opencode_model_id(request: &CodeProposeEditRequest) -> R
     Ok(Some(format!("{provider_id}/{model}")))
 }
 
-
-pub(crate) fn normalize_openai_compatible_model_name(request: &CodeProposeEditRequest) -> Option<String> {
+pub(crate) fn normalize_openai_compatible_model_name(
+    request: &CodeProposeEditRequest,
+) -> Option<String> {
     let model = normalize_optional_config_value(request.model.as_deref())
         .or_else(|| Some(default_model_for_locale(request.locale.as_deref())));
     model.map(|model| {
@@ -531,7 +561,6 @@ pub(crate) fn normalize_openai_compatible_model_name(request: &CodeProposeEditRe
     })
 }
 
-
 pub(crate) fn validate_opencode_config_id(value: &str) -> Result<(), JavisError> {
     if value
         .chars()
@@ -540,9 +569,10 @@ pub(crate) fn validate_opencode_config_id(value: &str) -> Result<(), JavisError>
         return Ok(());
     }
 
-    Err(JavisError::Validation(format!("Invalid opencode provider or model id: {value}")))
+    Err(JavisError::Validation(format!(
+        "Invalid opencode provider or model id: {value}"
+    )))
 }
-
 
 pub(crate) fn should_fallback_to_openai_compatible(request: &CodeProposeEditRequest) -> bool {
     let provider_id = normalize_optional_config_value(request.provider_id.as_deref())
@@ -553,15 +583,16 @@ pub(crate) fn should_fallback_to_openai_compatible(request: &CodeProposeEditRequ
     has_credentials && (provider_id == "deepseek" || provider_id == "custom" && has_custom_base_url)
 }
 
-
 pub(crate) fn run_openai_compatible_proposal_request(
     request: &CodeProposeEditRequest,
     prompt: &str,
 ) -> Result<String, JavisError> {
-    let api_key = normalize_optional_config_value(request.api_key.as_deref())
-        .ok_or_else(|| JavisError::Validation("OpenAI-compatible fallback requires an API key.".into()))?;
-    let model = normalize_openai_compatible_model_name(request)
-        .ok_or_else(|| JavisError::Validation("OpenAI-compatible fallback requires a model.".into()))?;
+    let api_key = normalize_optional_config_value(request.api_key.as_deref()).ok_or_else(|| {
+        JavisError::Validation("OpenAI-compatible fallback requires an API key.".into())
+    })?;
+    let model = normalize_openai_compatible_model_name(request).ok_or_else(|| {
+        JavisError::Validation("OpenAI-compatible fallback requires a model.".into())
+    })?;
     let base_url = normalize_optional_config_value(request.base_url.as_deref())
         .unwrap_or_else(|| default_openai_compatible_base_url(request));
     let endpoint = create_chat_completions_endpoint(&base_url);
@@ -570,17 +601,27 @@ pub(crate) fn run_openai_compatible_proposal_request(
     let client = reqwest::blocking::Client::builder()
         .timeout(OPENCODE_PROPOSAL_TIMEOUT)
         .build()
-        .map_err(|error| JavisError::Internal(format!("Could not create HTTP client for proposal: {error}")))?;
+        .map_err(|error| {
+            JavisError::Internal(format!(
+                "Could not create HTTP client for proposal: {error}"
+            ))
+        })?;
     let response_text = client
         .post(&endpoint)
         .header("Authorization", &format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
         .body(body_text)
         .send()
-        .map_err(|error| JavisError::Internal(format!("OpenAI-compatible proposal fallback failed: {error}")))?
+        .map_err(|error| {
+            JavisError::Internal(format!(
+                "OpenAI-compatible proposal fallback failed: {error}"
+            ))
+        })?
         .text()
         .map_err(|error| {
-            JavisError::Internal(format!("OpenAI-compatible proposal fallback could not read response: {error}"))
+            JavisError::Internal(format!(
+                "OpenAI-compatible proposal fallback could not read response: {error}"
+            ))
         })?;
     let value = serde_json::from_str::<serde_json::Value>(&response_text).map_err(|error| {
         JavisError::Internal(format!(
@@ -615,8 +656,10 @@ pub(crate) fn run_openai_compatible_proposal_request(
     Ok(content)
 }
 
-
-pub(crate) fn create_openai_compatible_proposal_body(model: &str, prompt: &str) -> serde_json::Value {
+pub(crate) fn create_openai_compatible_proposal_body(
+    model: &str,
+    prompt: &str,
+) -> serde_json::Value {
     serde_json::json!({
         "model": model,
         "messages": [
@@ -638,12 +681,13 @@ pub(crate) fn create_openai_compatible_proposal_body(model: &str, prompt: &str) 
     })
 }
 
-
 #[cfg(test)]
-pub(crate) fn parse_code_proposal_from_text(workspace: &Path, text: &str) -> Result<CodeProposedEdit, JavisError> {
+pub(crate) fn parse_code_proposal_from_text(
+    workspace: &Path,
+    text: &str,
+) -> Result<CodeProposedEdit, JavisError> {
     parse_code_proposal_from_text_with_allowed_files(workspace, text, None)
 }
-
 
 pub(crate) fn parse_code_proposal_from_text_for_request(
     workspace: &Path,
@@ -658,7 +702,6 @@ pub(crate) fn parse_code_proposal_from_text_for_request(
     parse_code_proposal_from_text_with_allowed_files(workspace, text, Some(&approved_files))
 }
 
-
 pub(crate) fn parse_code_proposal_from_text_with_allowed_files(
     workspace: &Path,
     text: &str,
@@ -671,6 +714,7 @@ pub(crate) fn parse_code_proposal_from_text_with_allowed_files(
     let base_git_head = capture_current_git_head(&canonical_workspace);
     let hunks = parse_patch_hunks(&raw.patch);
     let mut proposal = CodeProposedEdit {
+        approval_id: create_approval_id(),
         proposal_id: format!("opencode-{}", create_approval_id()),
         workspace_path: normalize_path(&canonical_workspace),
         summary: raw.summary.trim().to_string(),
@@ -683,7 +727,6 @@ pub(crate) fn parse_code_proposal_from_text_with_allowed_files(
     proposal.patch_hash = create_code_proposal_hash(&proposal);
     Ok(proposal)
 }
-
 
 pub(crate) fn extract_raw_code_proposal(text: &str) -> Result<RawCodeProposal, JavisError> {
     if let Some(raw) = parse_raw_code_proposal_candidate(text) {
@@ -738,13 +781,11 @@ pub(crate) fn extract_raw_code_proposal(text: &str) -> Result<RawCodeProposal, J
     )))
 }
 
-
 pub(crate) fn parse_raw_code_proposal_candidate(text: &str) -> Option<RawCodeProposal> {
     let value =
         serde_json::from_str::<serde_json::Value>(normalize_json_candidate(text).trim()).ok()?;
     raw_code_proposal_from_value(&value)
 }
-
 
 pub(crate) fn raw_code_proposal_from_value(value: &serde_json::Value) -> Option<RawCodeProposal> {
     let object = value.as_object()?;
@@ -796,7 +837,6 @@ pub(crate) fn raw_code_proposal_from_value(value: &serde_json::Value) -> Option<
     })
 }
 
-
 pub(crate) fn get_string_field(
     object: &serde_json::Map<String, serde_json::Value>,
     keys: &[&str],
@@ -808,7 +848,6 @@ pub(crate) fn get_string_field(
         .map(str::to_string)
 }
 
-
 pub(crate) fn get_required_string_field_preserving_body(
     object: &serde_json::Map<String, serde_json::Value>,
     keys: &[&str],
@@ -818,7 +857,6 @@ pub(crate) fn get_required_string_field_preserving_body(
         .filter(|value| !value.trim().is_empty())
         .map(str::to_string)
 }
-
 
 pub(crate) fn get_string_array_field(
     object: &serde_json::Map<String, serde_json::Value>,
@@ -838,20 +876,25 @@ pub(crate) fn get_string_array_field(
     })
 }
 
-
 pub(crate) fn validate_raw_code_proposal(
     workspace: &Path,
     proposal: &RawCodeProposal,
     allowed_files: Option<&[PathBuf]>,
 ) -> Result<(), JavisError> {
     if proposal.summary.trim().is_empty() {
-        return Err(JavisError::Validation("Code proposal summary cannot be empty.".into()));
+        return Err(JavisError::Validation(
+            "Code proposal summary cannot be empty.".into(),
+        ));
     }
     if proposal.patch.trim().is_empty() {
-        return Err(JavisError::Validation("Code proposal patch cannot be empty.".into()));
+        return Err(JavisError::Validation(
+            "Code proposal patch cannot be empty.".into(),
+        ));
     }
     if proposal.changed_files.is_empty() {
-        return Err(JavisError::Validation("Code proposal must list at least one changed file.".into()));
+        return Err(JavisError::Validation(
+            "Code proposal must list at least one changed file.".into(),
+        ));
     }
     let approved_files = proposal
         .changed_files
@@ -887,7 +930,6 @@ pub(crate) fn validate_raw_code_proposal(
     Ok(())
 }
 
-
 pub(crate) fn create_code_proposal_hash(edit: &CodeProposedEdit) -> String {
     let mut parts: Vec<&str> = Vec::new();
     parts.push(edit.proposal_id.as_str());
@@ -903,7 +945,6 @@ pub(crate) fn create_code_proposal_hash(edit: &CodeProposedEdit) -> String {
     create_fnv1a_hash(payload.as_bytes())
 }
 
-
 pub(crate) fn apply_code_patch_in_workspace(
     workspace: &Path,
     request: CodePatchApplyRequest,
@@ -912,19 +953,26 @@ pub(crate) fn apply_code_patch_in_workspace(
     let canonical_workspace = fs::canonicalize(workspace)
         .map_err(|error| JavisError::Io(format!("Workspace is not accessible: {error}")))?;
     if request.approval_id.trim().is_empty() {
-        return Err(JavisError::Validation("Code patch approval id is required.".into()));
+        return Err(JavisError::Validation(
+            "Code patch approval id is required.".into(),
+        ));
     }
     if request.proposal_id.trim().is_empty() {
-        return Err(JavisError::Validation("Code patch proposal id is required.".into()));
+        return Err(JavisError::Validation(
+            "Code patch proposal id is required.".into(),
+        ));
     }
     let patch = request.patch.trim();
     if patch.is_empty() {
         return Err(JavisError::Validation("Code patch cannot be empty.".into()));
     }
     if request.changed_files.is_empty() {
-        return Err(JavisError::Validation("Code patch must list at least one approved changed file.".into()));
+        return Err(JavisError::Validation(
+            "Code patch must list at least one approved changed file.".into(),
+        ));
     }
     let expected_patch_hash = create_code_proposal_hash(&CodeProposedEdit {
+        approval_id: request.approval_id.clone(),
         proposal_id: request.proposal_id.clone(),
         workspace_path: normalize_path(&canonical_workspace),
         summary: String::new(),
@@ -935,7 +983,9 @@ pub(crate) fn apply_code_patch_in_workspace(
         hunks: None,
     });
     if request.patch_hash != expected_patch_hash {
-        return Err(JavisError::Validation("Code patch hash does not match the approved proposal.".into()));
+        return Err(JavisError::Validation(
+            "Code patch hash does not match the approved proposal.".into(),
+        ));
     }
     if let Some(approval_state) = approval_state {
         take_approved_code_patch(approval_state, &request, &canonical_workspace)?;
@@ -959,7 +1009,10 @@ pub(crate) fn apply_code_patch_in_workspace(
     // Best-effort dry-run check — non-fatal by design.
     // git apply --check can produce false negatives on some platforms (CRLF,
     // new file creation). The actual git apply below is the authoritative guard.
-    if let Ok(mut child) = Command::new(resolve_command_program("git"))
+    let git = crate::git::resolve_git_executable_for_workspace(&canonical_workspace)
+        .map_err(|error| JavisError::Io(format!("Could not locate git executable: {error}")))?;
+
+    if let Ok(mut child) = Command::new(&git)
         .args(["apply", "--check", "--whitespace=nowarn", "-"])
         .current_dir(&canonical_workspace)
         .stdin(Stdio::piped())
@@ -974,7 +1027,7 @@ pub(crate) fn apply_code_patch_in_workspace(
         let _ = child.wait_with_output();
     }
 
-    let mut child = Command::new(resolve_command_program("git"))
+    let mut child = Command::new(&git)
         .args(["apply", "--whitespace=nowarn", "-"])
         .current_dir(&canonical_workspace)
         .stdin(Stdio::piped())
@@ -1016,7 +1069,6 @@ pub(crate) fn apply_code_patch_in_workspace(
     })
 }
 
-
 pub(crate) fn extract_unified_diff_paths(patch: &str) -> Result<Vec<PathBuf>, JavisError> {
     let mut paths = Vec::new();
     for line in patch.lines() {
@@ -1025,7 +1077,9 @@ pub(crate) fn extract_unified_diff_paths(patch: &str) -> Result<Vec<PathBuf>, Ja
         }
         let parts = line.split_whitespace().collect::<Vec<_>>();
         if parts.len() < 4 {
-            return Err(JavisError::Validation("Patch contains a malformed diff header.".into()));
+            return Err(JavisError::Validation(
+                "Patch contains a malformed diff header.".into(),
+            ));
         }
         let path = normalize_git_diff_path(parts[3])?;
         if !paths.contains(&path) {
@@ -1034,11 +1088,12 @@ pub(crate) fn extract_unified_diff_paths(patch: &str) -> Result<Vec<PathBuf>, Ja
     }
 
     if paths.is_empty() {
-        return Err(JavisError::Validation("Patch does not contain a unified diff header.".into()));
+        return Err(JavisError::Validation(
+            "Patch does not contain a unified diff header.".into(),
+        ));
     }
     Ok(paths)
 }
-
 
 pub(crate) fn normalize_git_diff_path(path: &str) -> Result<PathBuf, JavisError> {
     let without_prefix = path
@@ -1048,25 +1103,29 @@ pub(crate) fn normalize_git_diff_path(path: &str) -> Result<PathBuf, JavisError>
     normalize_relative_code_path(without_prefix)
 }
 
-
 pub(crate) fn normalize_relative_code_path(path: &str) -> Result<PathBuf, JavisError> {
     let trimmed = path.trim().replace('\\', "/");
     if trimmed.is_empty() {
-        return Err(JavisError::Validation("Changed file path cannot be empty.".into()));
+        return Err(JavisError::Validation(
+            "Changed file path cannot be empty.".into(),
+        ));
     }
     if trimmed.starts_with('/') || trimmed.contains(':') {
-        return Err(JavisError::Validation(format!("Changed file path must be relative: {trimmed}")));
+        return Err(JavisError::Validation(format!(
+            "Changed file path must be relative: {trimmed}"
+        )));
     }
     let path = PathBuf::from(trimmed);
     if path
         .components()
         .any(|component| matches!(component, std::path::Component::ParentDir))
     {
-        return Err(JavisError::Validation("Changed file path cannot contain parent directory traversal.".into()));
+        return Err(JavisError::Validation(
+            "Changed file path cannot contain parent directory traversal.".into(),
+        ));
     }
     Ok(path)
 }
-
 
 pub(crate) fn require_approved_relative_paths(
     workspace: &Path,
@@ -1077,7 +1136,10 @@ pub(crate) fn require_approved_relative_paths(
 ) -> Result<(), JavisError> {
     for file in requested_files {
         if !approved_files.contains(file) {
-            return Err(JavisError::Validation(format!("{unapproved_message}: {}", file.display())));
+            return Err(JavisError::Validation(format!(
+                "{unapproved_message}: {}",
+                file.display()
+            )));
         }
     }
     for file in approved_files {
@@ -1086,47 +1148,117 @@ pub(crate) fn require_approved_relative_paths(
     Ok(())
 }
 
-
 pub(crate) fn ensure_relative_path_stays_in_root(
     root: &Path,
     relative_path: &Path,
     outside_root_message: &str,
 ) -> Result<(), JavisError> {
     let target = root.join(relative_path);
-    let parent = target
-        .parent()
-        .ok_or_else(|| JavisError::Validation("Changed file path does not have a parent directory.".into()))?;
-    let canonical_parent = fs::canonicalize(parent)
-        .map_err(|error| JavisError::Io(format!("Changed file parent is not accessible: {error}")))?;
+    let parent = target.parent().ok_or_else(|| {
+        JavisError::Validation("Changed file path does not have a parent directory.".into())
+    })?;
+    let canonical_parent = fs::canonicalize(parent).map_err(|error| {
+        JavisError::Io(format!("Changed file parent is not accessible: {error}"))
+    })?;
     if !canonical_parent.starts_with(root) {
         return Err(JavisError::Validation(outside_root_message.to_string()));
     }
     Ok(())
 }
 
-
 pub(crate) fn approve_pending_code_patch(
     approval_state: &Mutex<CodePatchApprovalState>,
     request: CodePatchApprovalRequest,
 ) -> Result<(), JavisError> {
     if request.approval_id.trim().is_empty() {
-        return Err(JavisError::Validation("Code patch approval id is required.".into()));
+        return Err(JavisError::Validation(
+            "Code patch approval id is required.".into(),
+        ));
     }
     if request.proposal_id.trim().is_empty() {
-        return Err(JavisError::Validation("Code patch proposal id is required.".into()));
-    }
-    if request.workspace_path.trim().is_empty() {
-        return Err(JavisError::Validation("Code patch workspace path is required.".into()));
-    }
-    if request.changed_files.is_empty() {
-        return Err(JavisError::Validation("Code patch must list at least one approved changed file.".into()));
+        return Err(JavisError::Validation(
+            "Code patch proposal id is required.".into(),
+        ));
     }
     if request.patch_hash.trim().is_empty() {
-        return Err(JavisError::Validation("Code patch hash is required.".into()));
+        return Err(JavisError::Validation(
+            "Code patch hash is required.".into(),
+        ));
     }
     let canonical_workspace = fs::canonicalize(&request.workspace_path)
         .map_err(|error| JavisError::Io(format!("Workspace is not accessible: {error}")))?;
-    let approved_files = request
+    let mut state = approval_state.lock().map_err(|_| {
+        JavisError::Internal("Code patch approval state could not be locked.".into())
+    })?;
+    let Some(pending) = state.pending.as_mut() else {
+        return Err(JavisError::Permission(
+            "No pending Code Patch proposal exists.".into(),
+        ));
+    };
+    if pending.proposal_id != request.proposal_id {
+        return Err(JavisError::Permission(
+            "Code patch proposal id does not match the pending proposal.".into(),
+        ));
+    }
+    if pending.workspace_path != normalize_path(&canonical_workspace) {
+        return Err(JavisError::Permission(
+            "Code patch workspace does not match the pending proposal.".into(),
+        ));
+    }
+    if pending.changed_files != request.changed_files {
+        return Err(JavisError::Permission(
+            "Code patch changed files do not match the pending proposal.".into(),
+        ));
+    }
+    if pending.patch_hash != request.patch_hash {
+        return Err(JavisError::Permission(
+            "Code patch hash does not match the pending proposal.".into(),
+        ));
+    }
+    crate::approve_native_approval_binding(
+        &mut pending.binding,
+        &request.approval_id,
+        CODE_PATCH_APPROVAL_TOOL_NAME,
+        request.task_id.as_deref(),
+        &request.patch_hash,
+        "Code patch approval id does not match the pending proposal.",
+    )
+    .map_err(JavisError::Permission)
+}
+
+pub(crate) fn register_pending_code_patch(
+    approval_state: &Mutex<CodePatchApprovalState>,
+    edit: &CodeProposedEdit,
+    task_id: Option<&str>,
+) -> Result<(), JavisError> {
+    if edit.approval_id.trim().is_empty() {
+        return Err(JavisError::Validation(
+            "Code patch approval id is required.".into(),
+        ));
+    }
+    if edit.proposal_id.trim().is_empty() {
+        return Err(JavisError::Validation(
+            "Code patch proposal id is required.".into(),
+        ));
+    }
+    if edit.workspace_path.trim().is_empty() {
+        return Err(JavisError::Validation(
+            "Code patch workspace path is required.".into(),
+        ));
+    }
+    if edit.changed_files.is_empty() {
+        return Err(JavisError::Validation(
+            "Code patch must list at least one approved changed file.".into(),
+        ));
+    }
+    if edit.patch_hash.trim().is_empty() {
+        return Err(JavisError::Validation(
+            "Code patch hash is required.".into(),
+        ));
+    }
+    let canonical_workspace = fs::canonicalize(&edit.workspace_path)
+        .map_err(|error| JavisError::Io(format!("Workspace is not accessible: {error}")))?;
+    let approved_files = edit
         .changed_files
         .iter()
         .map(|file| normalize_relative_code_path(file))
@@ -1140,37 +1272,38 @@ pub(crate) fn approve_pending_code_patch(
     )?;
     let file_hashes = create_file_content_hashes(&canonical_workspace, &approved_files)
         .map_err(JavisError::from)?;
-    let mut state = approval_state
-        .lock()
-        .map_err(|_| JavisError::Internal("Code patch approval state could not be locked.".into()))?;
+    let mut state = approval_state.lock().map_err(|_| {
+        JavisError::Internal("Code patch approval state could not be locked.".into())
+    })?;
     state.pending = Some(PendingCodePatchApproval {
         binding: create_native_approval_binding(
-            request.approval_id,
+            edit.approval_id.clone(),
             CODE_PATCH_APPROVAL_TOOL_NAME,
-            request.task_id.clone().unwrap_or_default(),
-            request.patch_hash.clone(),
-            true,
+            task_id.unwrap_or_default().to_string(),
+            edit.patch_hash.clone(),
+            false,
         ),
-        proposal_id: request.proposal_id,
+        proposal_id: edit.proposal_id.clone(),
         workspace_path: normalize_path(&canonical_workspace),
-        changed_files: request.changed_files,
-        patch_hash: request.patch_hash,
+        changed_files: edit.changed_files.clone(),
+        patch_hash: edit.patch_hash.clone(),
         file_hashes,
     });
     Ok(())
 }
-
 
 pub(crate) fn take_approved_code_patch(
     approval_state: &Mutex<CodePatchApprovalState>,
     request: &CodePatchApplyRequest,
     canonical_workspace: &Path,
 ) -> Result<(), JavisError> {
-    let mut state = approval_state
-        .lock()
-        .map_err(|_| JavisError::Internal("Code patch approval state could not be locked.".into()))?;
+    let mut state = approval_state.lock().map_err(|_| {
+        JavisError::Internal("Code patch approval state could not be locked.".into())
+    })?;
     let Some(pending) = state.pending.as_ref() else {
-        return Err(JavisError::Permission("No approved Code Patch proposal is pending.".into()));
+        return Err(JavisError::Permission(
+            "No approved Code Patch proposal is pending.".into(),
+        ));
     };
     require_native_approval_binding(
         &pending.binding,
@@ -1182,16 +1315,24 @@ pub(crate) fn take_approved_code_patch(
         "Code patch proposal has not been approved.",
     )?;
     if pending.proposal_id != request.proposal_id {
-        return Err(JavisError::Permission("Code patch proposal id does not match the approved proposal.".into()));
+        return Err(JavisError::Permission(
+            "Code patch proposal id does not match the approved proposal.".into(),
+        ));
     }
     if pending.workspace_path != normalize_path(canonical_workspace) {
-        return Err(JavisError::Permission("Code patch workspace does not match the approved proposal.".into()));
+        return Err(JavisError::Permission(
+            "Code patch workspace does not match the approved proposal.".into(),
+        ));
     }
     if pending.changed_files != request.changed_files {
-        return Err(JavisError::Permission("Code patch changed files do not match the approved proposal.".into()));
+        return Err(JavisError::Permission(
+            "Code patch changed files do not match the approved proposal.".into(),
+        ));
     }
     if pending.patch_hash != request.patch_hash {
-        return Err(JavisError::Permission("Code patch hash does not match the approved proposal.".into()));
+        return Err(JavisError::Permission(
+            "Code patch hash does not match the approved proposal.".into(),
+        ));
     }
     let approved_files = request
         .changed_files
@@ -1209,7 +1350,9 @@ pub(crate) fn take_approved_code_patch(
                 approved.path != current.path || approved.hash != current.hash
             })
     {
-        return Err(JavisError::Permission("Code patch approved files changed before apply.".into()));
+        return Err(JavisError::Permission(
+            "Code patch approved files changed before apply.".into(),
+        ));
     }
     if let Some(base_git_head) = &request.base_git_head {
         require_current_git_head_matches(canonical_workspace, base_git_head)
@@ -1218,7 +1361,6 @@ pub(crate) fn take_approved_code_patch(
     state.pending = None;
     Ok(())
 }
-
 
 pub(crate) fn parse_patch_hunks(patch: &str) -> Option<Vec<CodeProposalHunk>> {
     let trimmed = patch.trim();
@@ -1272,7 +1414,6 @@ pub(crate) fn parse_patch_hunks(patch: &str) -> Option<Vec<CodeProposalHunk>> {
     }
 }
 
-
 pub(crate) fn parse_hunk_range(range: &str) -> (u32, u32) {
     let parts: Vec<&str> = range.splitn(2, ',').collect();
     let start = parts
@@ -1286,14 +1427,12 @@ pub(crate) fn parse_hunk_range(range: &str) -> (u32, u32) {
     (start, count)
 }
 
-
 pub(crate) fn normalize_optional_config_value(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
 }
-
 
 pub(crate) fn create_chat_completions_endpoint(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
@@ -1305,7 +1444,6 @@ pub(crate) fn create_chat_completions_endpoint(base_url: &str) -> String {
     }
     format!("{trimmed}/chat/completions")
 }
-
 
 pub(crate) fn normalize_json_candidate(text: &str) -> String {
     let trimmed = text.trim();
@@ -1320,7 +1458,6 @@ pub(crate) fn normalize_json_candidate(text: &str) -> String {
         .trim()
         .to_string()
 }
-
 
 pub(crate) fn extract_json_object_text(text: &str) -> Option<String> {
     let normalized = normalize_json_candidate(text);

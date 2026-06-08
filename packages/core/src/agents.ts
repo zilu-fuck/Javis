@@ -75,7 +75,7 @@ export const demoAgents: Agent[] = [
     description: "桌面自动化操控：截取桌面或窗口画面，读取控件结构，并通过鼠标、键盘或 UIA 控件调用完成 Windows 应用操作。",
     allowedToolNames: [
       // Original file browsing (preserved)
-      "file.listDirectory",
+      "computer.listDirectory",
       "computer.openPath",
       "file.scanUserImages",
       "file.scanInstalledApps",

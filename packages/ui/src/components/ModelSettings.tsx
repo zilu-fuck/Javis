@@ -2,13 +2,18 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { createPortal } from "react-dom";
 import type {
   WorkbenchLocale,
+  WorkbenchAgentCatalogEntry,
   WorkbenchModelConfiguration,
   WorkbenchModelProfile,
   WorkbenchModelSettings,
   WorkbenchModelSlot,
+  WorkbenchAgentStyleState,
   WorkbenchUserProfileMemorySummary,
 } from "../types";
 import type { ProviderCatalogEntry } from "../types";
+import { translateWorkbenchText } from "../utils";
+import { AgentStyleEditor } from "./AgentStyleEditor";
+import { withInferredContextTokens } from "../model-context-window";
 
 interface ProviderCapabilities {
   vision: boolean;
@@ -18,6 +23,8 @@ interface ProviderCapabilities {
 
 interface ModelSettingsProps {
   labels: WorkbenchLocale["labels"];
+  locale?: WorkbenchLocale;
+  agentCatalog?: WorkbenchAgentCatalogEntry[];
   modelSettings: WorkbenchModelSettings;
   modelConfiguration?: WorkbenchModelConfiguration;
   userProfileMemorySummary?: WorkbenchUserProfileMemorySummary | null;
@@ -26,6 +33,9 @@ interface ModelSettingsProps {
   onModelConfigurationChange?: (config: WorkbenchModelConfiguration) => void;
   onRebuildUserProfileMemory?: () => void;
   onClearUserProfileMemory?: () => void;
+  onReadAgentStyle?: (kind: string) => Promise<WorkbenchAgentStyleState>;
+  onSaveAgentStyle?: (kind: string, content: string) => Promise<WorkbenchAgentStyleState | void>;
+  onResetAgentStyle?: (kind: string) => Promise<WorkbenchAgentStyleState | void>;
   /** Save a per-provider API key to the OS credential store immediately. */
   onSaveProviderApiKey?: (keyReference: string, apiKey: string) => Promise<void>;
   /**
@@ -59,19 +69,18 @@ const SLOT_LABELS: Record<WorkbenchModelSlot, { zh: string; en: string }> = {
 
 const MODEL_SLOTS = ["primary", "secondary", "multimodal"] as const;
 
-const KNOWN_AGENT_KINDS = [
-  "commander",
-  "code",
-  "chinese-reviewer",
-  "verifier",
-  "scheduler",
-  "research",
-  "file",
-  "shell",
-  "computer",
-  "browser",
-  "workspace",
-  "vision",
+const FALLBACK_AGENT_CATALOG: WorkbenchAgentCatalogEntry[] = [
+  { kind: "commander", displayName: "Commander" },
+  { kind: "code", displayName: "Code Agent" },
+  { kind: "verifier", displayName: "Verifier" },
+  { kind: "scheduler", displayName: "Scheduler Agent" },
+  { kind: "research", displayName: "Research Agent" },
+  { kind: "file", displayName: "File Agent" },
+  { kind: "shell", displayName: "Shell Agent" },
+  { kind: "computer", displayName: "Computer Agent" },
+  { kind: "browser", displayName: "Browser Agent" },
+  { kind: "workspace", displayName: "Workspace Agent" },
+  { kind: "vision", displayName: "Vision Agent" },
 ];
 
 const API_TYPE_OPTIONS = [
@@ -129,6 +138,7 @@ interface ConfiguredModelOption {
   model: string;
   baseUrl: string;
   apiKeyReference: string;
+  contextTokens?: number;
 }
 
 interface RoundedSelectOption {
@@ -153,6 +163,8 @@ function emptyProfile(slot: WorkbenchModelSlot): WorkbenchModelProfile {
 
 export function ModelSettings({
   labels,
+  locale,
+  agentCatalog,
   modelSettings,
   modelConfiguration,
   userProfileMemorySummary,
@@ -161,6 +173,9 @@ export function ModelSettings({
   onModelConfigurationChange,
   onRebuildUserProfileMemory,
   onClearUserProfileMemory,
+  onReadAgentStyle,
+  onSaveAgentStyle,
+  onResetAgentStyle,
   onSaveProviderApiKey,
   onFetchProviderModels,
   providerCatalog,
@@ -171,6 +186,11 @@ export function ModelSettings({
   const isWebPreview =
     typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);
   const isZh = labels.aiModeSettings === "AI 模式";
+  const effectiveLocale: WorkbenchLocale = locale ?? { labels };
+  const assignableAgents = useMemo(
+    () => buildAssignableAgentOptions(agentCatalog, effectiveLocale),
+    [agentCatalog, effectiveLocale],
+  );
 
   // Effective catalog: external prop overrides built-in, falls back to hardcoded default.
   const effectiveCatalog = providerCatalog ?? PROVIDER_CATALOG;
@@ -316,12 +336,14 @@ export function ModelSettings({
         model: option.model,
         apiKeyReference: option.apiKeyReference,
         baseUrl: option.baseUrl,
+        contextTokens: option.contextTokens,
       };
+      const inferredProfile = withInferredContextTokens(nextProfile);
       if (!existingProfile) {
-        return [...current, nextProfile];
+        return [...current, inferredProfile];
       }
       return current.map((profile) =>
-        profile.slot === slot ? nextProfile : profile,
+        profile.slot === slot ? inferredProfile : profile,
       );
     });
     setOpenModelSlot(null);
@@ -334,7 +356,15 @@ export function ModelSettings({
       onModelConfigurationChange({
         profiles: [
           ...addedProfiles.map((profile) => ({ ...profile })),
-          ...MODEL_SLOTS.map((slot) => ({ ...getProfileForSlot(slot) })),
+          ...MODEL_SLOTS.map((slot) =>
+            normalizeSlotProfileConnection(
+              getProfileForSlot(slot),
+              addedProfiles,
+              providerBaseUrls,
+              modelSettings,
+              effectiveById,
+            ),
+          ),
         ],
         agentOverrides: { ...agentOverrides },
       });
@@ -418,20 +448,21 @@ export function ModelSettings({
       }
       const id = uniqueProfileId(current, `${selectedProvider}.${model}`);
       const apiKey = providerApiKeys[selectedProvider]?.trim() ?? "";
+      const nextProfile = withInferredContextTokens({
+        id,
+        slot: null,
+        displayName: model,
+        provider: selectedProvider,
+        model,
+        apiKeyReference,
+        baseUrl,
+        apiKey,
+        hasStoredApiKey: Boolean(apiKey) || providerKeySaved[selectedProvider],
+        capabilities: resolveDefaultCapabilities(selectedProvider),
+      });
       return [
         ...current,
-        {
-          id,
-          slot: null,
-          displayName: model,
-          provider: selectedProvider,
-          model,
-          apiKeyReference,
-          baseUrl,
-          apiKey,
-          hasStoredApiKey: Boolean(apiKey) || providerKeySaved[selectedProvider],
-          capabilities: resolveDefaultCapabilities(selectedProvider),
-        },
+        nextProfile,
       ];
     });
     if (modelSettings.provider === selectedProvider && modelSettings.model !== model) {
@@ -476,6 +507,16 @@ export function ModelSettings({
       return;
     }
 
+    if (!onFetchProviderModels) {
+      openModelMenu();
+      setModelFetchMessage(
+        isZh
+          ? "模型列表后端不可用，请手动输入模型 ID"
+          : "Model list backend is unavailable. Enter the model ID manually.",
+      );
+      return;
+    }
+
     const typedKey = providerApiKeys[selectedProvider]?.trim() ?? "";
     const selectedApiType = resolveApiType(selectedProvider, effectiveById);
     const keyRef = getProviderKeyReference(selectedProvider, slotProfiles);
@@ -483,49 +524,14 @@ export function ModelSettings({
     setModelFetchLoading(true);
     setModelFetchMessage(isZh ? "正在获取模型列表..." : "Fetching model list...");
     try {
-      let modelIds: string[];
-
-      if (onFetchProviderModels) {
-        // Desktop layer handles both typed and stored keys
-        modelIds = await onFetchProviderModels({
-          provider: selectedProvider,
-          baseUrl,
-          apiKey: typedKey,
-          apiType: selectedApiType,
-          keyReference: keyRef,
-          modelListMode,
-        });
-      } else {
-        // Web preview fallback: fetch directly with typed key
-        const normalizedBase = baseUrl.replace(/\/+$/, "");
-        const url = modelListMode === "anthropic"
-          ? `${normalizedBase}/v1/models?limit=1000`
-          : `${normalizedBase}/models`;
-
-        const headers: Record<string, string> = { "Content-Type": "application/json" };
-        if (typedKey) {
-          if (modelListMode === "anthropic") {
-            headers["x-api-key"] = typedKey;
-            headers["anthropic-version"] = "2023-06-01";
-          } else {
-            headers["Authorization"] = `Bearer ${typedKey}`;
-          }
-        }
-
-        const response = await fetch(url, {
-          method: "GET",
-          headers,
-          signal: AbortSignal.timeout(15000),
-        });
-
-        if (!response.ok) {
-          const errorText = await response.text().catch(() => "");
-          throw new Error(`HTTP ${response.status}${errorText ? `: ${errorText.slice(0, 200)}` : ""}`);
-        }
-
-        const data = await response.json();
-        modelIds = (data.data || []).map((m: { id: string }) => m.id);
-      }
+      const modelIds = await onFetchProviderModels({
+        provider: selectedProvider,
+        baseUrl,
+        apiKey: typedKey,
+        apiType: selectedApiType,
+        keyReference: keyRef,
+        modelListMode,
+      });
 
       if (modelIds.length === 0) {
         setModelFetchMessage(isZh ? "未找到可用模型" : "No models found");
@@ -958,15 +964,15 @@ export function ModelSettings({
                         {isZh ? "代理模型分配" : "Agent Model Assignment"}
                       </h2>
                       <div className="javis-settings-card javis-ai-agent-card">
-                        {KNOWN_AGENT_KINDS.map((agentKind) => (
-                          <label key={agentKind}>
-                            <span>{agentKind}</span>
+                        {assignableAgents.map((agent) => (
+                          <label key={agent.kind}>
+                            <span>{agent.label}</span>
                             <RoundedSelect
-                              aria-label={`${agentKind} model`}
+                              aria-label={`${agent.label} model`}
                               onChange={(value) =>
                                 setAgentOverrides((current) => ({
                                   ...current,
-                                  [agentKind]: value,
+                                  [agent.kind]: value,
                                 }))
                               }
                               options={[
@@ -980,7 +986,7 @@ export function ModelSettings({
                                   };
                                 }),
                               ]}
-                              value={agentOverrides[agentKind] ?? ""}
+                              value={agentOverrides[agent.kind] ?? ""}
                             />
                           </label>
                         ))}
@@ -1005,6 +1011,15 @@ export function ModelSettings({
                           </span>
                         ) : null}
                       </div>
+
+                      <AgentStyleEditor
+                        agentCatalog={agentCatalog}
+                        labels={labels}
+                        locale={effectiveLocale}
+                        onReadAgentStyle={onReadAgentStyle}
+                        onResetAgentStyle={onResetAgentStyle}
+                        onSaveAgentStyle={onSaveAgentStyle}
+                      />
                   </>
                 </section>
               ) : activeTab === "privacy" ? (
@@ -1229,6 +1244,7 @@ function buildConfiguredModelOptions(
     model: modelSettings.model,
     baseUrl: modelSettings.baseUrl,
     apiKeyReference: modelSettings.apiKeyReference,
+    contextTokens: undefined,
   });
 
   profiles.forEach((profile) => {
@@ -1239,6 +1255,7 @@ function buildConfiguredModelOptions(
       model: profile.model,
       baseUrl: profile.baseUrl,
       apiKeyReference: profile.apiKeyReference,
+      contextTokens: profile.contextTokens,
     });
   });
 
@@ -1256,6 +1273,30 @@ function getConfiguredModelValue(
     option.apiKeyReference === profile.apiKeyReference,
   );
   return match?.value ?? "";
+}
+
+function normalizeSlotProfileConnection(
+  profile: WorkbenchModelProfile,
+  providerProfiles: WorkbenchModelProfile[],
+  providerBaseUrls: Record<string, string>,
+  modelSettings: WorkbenchModelSettings,
+  byId: Map<string, ProviderCatalogEntry> = PROVIDERS_BY_ID,
+): WorkbenchModelProfile {
+  if (!profile.provider) return { ...profile };
+  if (!providerProfiles.some((candidate) => candidate.provider === profile.provider)) {
+    return withInferredContextTokens({ ...profile });
+  }
+  return {
+    ...withInferredContextTokens(profile),
+    baseUrl: getProviderBaseUrl(
+      profile.provider,
+      providerProfiles,
+      providerBaseUrls,
+      modelSettings,
+      byId,
+    ),
+    apiKeyReference: getProviderKeyReference(profile.provider, providerProfiles),
+  };
 }
 
 function providerBaseUrlsFromProfiles(
@@ -1358,6 +1399,27 @@ function uniqueProfileId(profiles: WorkbenchModelProfile[], seed: string): strin
     index += 1;
   }
   return `${base}-${index}`;
+}
+
+function buildAssignableAgentOptions(
+  agentCatalog: WorkbenchAgentCatalogEntry[] | undefined,
+  locale: WorkbenchLocale,
+): Array<{ kind: string; label: string }> {
+  const catalog = agentCatalog?.length ? agentCatalog : FALLBACK_AGENT_CATALOG;
+  const seen = new Set<string>();
+  const options: Array<{ kind: string; label: string }> = [];
+
+  for (const agent of catalog) {
+    if (agent.kind === "chinese-reviewer") continue;
+    if (!agent.kind || seen.has(agent.kind)) continue;
+    seen.add(agent.kind);
+    options.push({
+      kind: agent.kind,
+      label: translateWorkbenchText(agent.displayName || agent.kind, locale),
+    });
+  }
+
+  return options;
 }
 
 /** Extract provider name from apiKeyReference like "model.deepseek" → "deepseek". */

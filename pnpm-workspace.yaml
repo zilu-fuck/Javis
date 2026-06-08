@@ -1,4 +1,4 @@
 packages:
   - "apps/*"
+  - "apps/desktop/src-tauri/sidecar/*"
   - "packages/*"
-

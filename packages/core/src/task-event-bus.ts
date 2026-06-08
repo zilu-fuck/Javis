@@ -33,11 +33,38 @@ export type TaskRuntimeEvent =
   | { kind: "agent.chunk"; taskId: ID; agentKind: AgentKind; text: string }
   | { kind: "agent.chunk_end"; taskId: ID; agentKind: AgentKind; fullText: string; error?: string }
   // Step-level progress events
-  | { kind: "step.progress"; taskId: ID; stepId: ID; percent: number; detail: string }
-  | { kind: "step.started"; taskId: ID; stepId: ID }
-  | { kind: "step.completed"; taskId: ID; stepId: ID; summary: string }
+  | { kind: "step.progress"; taskId: ID; stepId: ID; percent: number; detail: string; agentKind?: AgentKind; agentId?: ID }
+  | { kind: "step.started"; taskId: ID; stepId: ID; agentKind?: AgentKind; agentId?: ID }
+  | { kind: "step.completed"; taskId: ID; stepId: ID; summary: string; agentKind?: AgentKind; agentId?: ID }
   // Tool partial output events
   | { kind: "tool.partial"; taskId: ID; toolCallId: ID; partialOutput: string };
+
+export const AGENT_RUN_EVENT_KINDS = [
+  "task.created",
+  "agent.status",
+  "agent.chunk_start",
+  "agent.chunk",
+  "agent.chunk_end",
+  "step.started",
+  "step.progress",
+  "step.completed",
+  "tool.planned",
+  "tool.completed",
+  "tool.partial",
+  "permission.requested",
+  "permission.resolved",
+  "ask_user.requested",
+  "ask_user.responded",
+  "task.completed",
+  "task.failed",
+] as const;
+
+export type AgentRunEventKind = typeof AGENT_RUN_EVENT_KINDS[number];
+export type AgentRunEvent = Extract<TaskRuntimeEvent, { kind: AgentRunEventKind }>;
+
+export function isAgentRunEvent(event: TaskRuntimeEvent): event is AgentRunEvent {
+  return (AGENT_RUN_EVENT_KINDS as readonly string[]).includes(event.kind);
+}
 
 export type TaskEventHandler = (event: TaskRuntimeEvent) => void;
 export type TaskEventMiddleware = (
@@ -95,6 +122,8 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "event",
         title: "task.created",
         detail: "Task event bus recorded task creation.",
+        userMessage: "任务已创建",
+        devDetail: "Task event bus recorded task creation.",
       };
     case "agent.status":
       return {
@@ -102,6 +131,9 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "event",
         title: "agent.status",
         detail: `${event.agentKind}: ${event.message}`,
+        userMessage: getAgentStatusUserMessage(event.agentKind, event.status, event.message),
+        devDetail: `${event.agentKind}: ${event.message}`,
+        agentId: agentIdFromKind(event.agentKind),
       };
     case "tool.planned":
       return {
@@ -109,6 +141,9 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "tool",
         title: "tool_call.planned",
         detail: event.detail,
+        userMessage: getToolUserMessage(event.toolName, "planned"),
+        devDetail: event.detail,
+        agentId: agentIdFromToolName(event.toolName),
       };
     case "tool.completed":
       return {
@@ -116,6 +151,9 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "tool",
         title: "tool_call.updated",
         detail: event.detail,
+        userMessage: getToolUserMessage(event.toolName, "completed"),
+        devDetail: event.detail,
+        agentId: agentIdFromToolName(event.toolName),
       };
     case "permission.requested":
       return {
@@ -123,6 +161,8 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "permission",
         title: "permission.requested",
         detail: event.request.reason,
+        userMessage: "需要你的确认才能继续",
+        devDetail: event.request.reason,
       };
     case "permission.resolved":
       return {
@@ -130,6 +170,8 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "permission",
         title: "permission.resolved",
         detail: `Permission ${event.requestId} was ${event.decision}.`,
+        userMessage: event.decision === "approved" ? "确认已通过" : "确认已拒绝",
+        devDetail: `Permission ${event.requestId} was ${event.decision}.`,
       };
     case "ask_user.requested":
       return {
@@ -137,6 +179,8 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "event",
         title: "ask_user.requested",
         detail: event.question.question,
+        userMessage: event.question.question,
+        devDetail: `ask_user.requested: ${event.question.question}`,
       };
     case "ask_user.responded":
       return {
@@ -144,6 +188,8 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "event",
         title: "ask_user.responded",
         detail: `User answered: ${event.answer}`,
+        userMessage: "已收到你的补充信息",
+        devDetail: `User answered: ${event.answer}`,
       };
     case "task.completed":
       return {
@@ -151,6 +197,8 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "verification",
         title: "task.completed",
         detail: event.detail ?? "Task event bus recorded task completion.",
+        userMessage: event.detail ?? "任务已完成",
+        devDetail: event.detail ?? "Task event bus recorded task completion.",
       };
     case "task.failed":
       return {
@@ -158,6 +206,8 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "tool",
         title: "task.failed",
         detail: event.error,
+        userMessage: `出错: ${toShortError(event.error)}`,
+        devDetail: event.error,
       };
     case "agent.chunk_start":
       return {
@@ -165,6 +215,9 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "event",
         title: "agent.chunk_start",
         detail: `${event.agentKind} is generating output...`,
+        userMessage: "正在生成回复...",
+        devDetail: `${event.agentKind} is generating output...`,
+        agentId: agentIdFromKind(event.agentKind),
       };
     case "agent.chunk":
       return {
@@ -172,6 +225,9 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "event",
         title: "agent.chunk",
         detail: event.text,
+        userMessage: "",
+        devDetail: event.text,
+        agentId: agentIdFromKind(event.agentKind),
       };
     case "agent.chunk_end":
       return {
@@ -179,6 +235,9 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "event",
         title: "agent.chunk_end",
         detail: `${event.agentKind} completed output (${event.fullText.length} chars).`,
+        userMessage: "回复生成完成",
+        devDetail: `${event.agentKind} completed output (${event.fullText.length} chars).`,
+        agentId: agentIdFromKind(event.agentKind),
       };
     case "step.progress":
       return {
@@ -186,6 +245,10 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "event",
         title: "step.progress",
         detail: event.detail,
+        userMessage: event.detail,
+        devDetail: `Step ${event.stepId} progress ${event.percent}%: ${event.detail}`,
+        agentId: event.agentId ?? agentIdFromOptionalKind(event.agentKind),
+        stepId: event.stepId,
       };
     case "step.started":
       return {
@@ -193,6 +256,10 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "event",
         title: "step.started",
         detail: `Step ${event.stepId} started.`,
+        userMessage: `正在执行: ${event.stepId}`,
+        devDetail: `Dispatching step ${event.stepId}.`,
+        agentId: event.agentId ?? agentIdFromOptionalKind(event.agentKind),
+        stepId: event.stepId,
       };
     case "step.completed":
       return {
@@ -200,6 +267,10 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "event",
         title: "step.completed",
         detail: event.summary,
+        userMessage: `${event.stepId} 完成`,
+        devDetail: event.summary,
+        agentId: event.agentId ?? agentIdFromOptionalKind(event.agentKind),
+        stepId: event.stepId,
       };
     case "tool.partial":
       return {
@@ -207,6 +278,55 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "tool",
         title: "tool.partial",
         detail: event.partialOutput,
+        userMessage: "",
+        devDetail: event.partialOutput,
       };
   }
+}
+
+function agentIdFromKind(agentKind: AgentKind): string {
+  return `agent-${agentKind}`;
+}
+
+function agentIdFromOptionalKind(agentKind: AgentKind | undefined): string | undefined {
+  return agentKind ? agentIdFromKind(agentKind) : undefined;
+}
+
+function agentIdFromToolName(toolName: string): string | undefined {
+  const [prefix] = toolName.split(".");
+  if (!prefix) return undefined;
+  return agentIdFromKind(prefix as AgentKind);
+}
+
+function getAgentStatusUserMessage(
+  agentKind: AgentKind,
+  status: AgentRunStatus,
+  message: string,
+): string {
+  if (status === "running") {
+    return `正在处理: ${message}`;
+  }
+  if (status === "completed") {
+    return `${agentKind} 已完成`;
+  }
+  if (status === "failed") {
+    return `${agentKind} 执行失败`;
+  }
+  if (status === "waiting_permission") {
+    return "等待你的确认";
+  }
+  return message;
+}
+
+function getToolUserMessage(toolName: string, phase: "planned" | "completed"): string {
+  const readableName = toolName
+    .replace(/^commander\./, "")
+    .replace(/\./g, " ");
+  return phase === "planned"
+    ? `准备执行: ${readableName}`
+    : `${readableName} 已完成`;
+}
+
+function toShortError(error: string): string {
+  return error.split(/\r?\n/u)[0]?.slice(0, 160) || "任务执行失败";
 }

@@ -5,8 +5,12 @@ import type {
   WorkbenchModelConfiguration,
   WorkbenchNewChatRecommendations,
   WorkbenchPermissionDecision,
+  WorkbenchDetailItem,
+  WorkbenchChatMessage,
   WorkbenchTask,
+  WorkbenchWorkspaceToolAction,
 } from "../types";
+import { isChineseLocale } from "../utils";
 import { NewChat } from "./NewChat";
 import { ThreadView } from "./ThreadView";
 
@@ -29,7 +33,12 @@ interface ChatViewProps {
   onAskUserAnswer?: (answer: string) => void;
   onRetryTask?: () => void;
   onStopTask?: () => void;
+  onConversationMessagesChange?: (messages: WorkbenchChatMessage[]) => void;
+  onOpenDetail?: (detail: WorkbenchDetailItem) => void;
+  onOpenFile?: (path: string) => void;
+  onOpenWorkspaceTool?: (action: WorkbenchWorkspaceToolAction) => void;
   onSelectAgent?: (agentId: string) => void;
+  onSelectComposeMode?: (mode: "chat" | "project") => void;
   selectedAgentId?: string;
   onSubmitGoal: (goal?: string, workspacePath?: string, scheduledTaskId?: string, attachments?: File[], imageDataUrls?: string[]) => void;
 }
@@ -53,11 +62,17 @@ export function ChatView({
   onAskUserAnswer,
   onRetryTask,
   onStopTask,
+  onConversationMessagesChange,
+  onOpenDetail,
+  onOpenFile,
+  onOpenWorkspaceTool,
   onSelectAgent,
+  onSelectComposeMode,
   selectedAgentId,
   onSubmitGoal,
 }: ChatViewProps) {
   const labels = locale.labels;
+  const isChinese = isChineseLocale(locale);
   const isNewChat = task.id === "task-idle";
   const showWorkspaceContext =
     activeComposeMode === "project" || Boolean(task.project || task.codeReviewPreview || task.codeProposedEdit || task.codeApplyResult);
@@ -70,7 +85,7 @@ export function ChatView({
     onSubmitGoal(undefined, undefined, undefined, files.length > 0 ? files : undefined);
   }
 
-  async function handleSubmitWithAttachments(_goal: string, files: File[]) {
+  async function handleSubmitWithAttachments(goal: string, files: File[]) {
     // Limit: max 5 images, max 10 MB each.
     const imageFiles = files.filter((f) => f.type.startsWith("image/")).slice(0, 5);
     const validFiles = imageFiles.filter((f) => f.size <= 10 * 1024 * 1024);
@@ -78,9 +93,8 @@ export function ChatView({
     pendingAttachmentsRef.current = [];
     // Don't pass goalOverride — let submitGoal read from draftGoal so
     // conversation continuation works (continuation checks !goalOverride).
-    onSubmitGoal(undefined, undefined, undefined, undefined, dataUrls.length > 0 ? dataUrls : undefined);
+    onSubmitGoal(goal, undefined, undefined, undefined, dataUrls.length > 0 ? dataUrls : undefined);
     // Clear input after submit reads draftGoal.
-    onDraftGoalChange("");
   }
 
   if (isNewChat) {
@@ -89,11 +103,13 @@ export function ChatView({
         composeMode={activeComposeMode ?? "chat"}
         currentWorkspacePath={currentWorkspacePath}
         draftGoal={draftGoal}
+        isChinese={isChinese}
         labels={labels}
         recommendations={newChatRecommendations}
         onBrowseWorkspacePath={onBrowseWorkspacePath}
         onDeleteRecentWorkspacePath={onDeleteRecentWorkspacePath}
         onDraftGoalChange={onDraftGoalChange}
+        onSelectComposeMode={onSelectComposeMode}
         onSubmit={handleSubmit}
         onSubmitWithAttachments={handleSubmitWithAttachments}
         onUseWorkspacePath={onUseWorkspacePath}
@@ -108,6 +124,7 @@ export function ChatView({
   return (
     <ThreadView
       currentWorkspacePath={currentWorkspacePath}
+      composeMode={activeComposeMode ?? "chat"}
       draftGoal={draftGoal}
       labels={labels}
       locale={locale}
@@ -119,7 +136,12 @@ export function ChatView({
       onAskUserAnswer={onAskUserAnswer}
       onRetryTask={onRetryTask}
       onStopTask={onStopTask}
+      onConversationMessagesChange={onConversationMessagesChange}
+      onOpenDetail={onOpenDetail}
+      onOpenFile={onOpenFile}
+      onOpenWorkspaceTool={onOpenWorkspaceTool}
       onSelectAgent={onSelectAgent}
+      onSelectComposeMode={onSelectComposeMode}
       selectedAgentId={selectedAgentId}
       onSubmit={handleSubmit}
       onSubmitWithAttachments={handleSubmitWithAttachments}

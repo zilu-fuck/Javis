@@ -1,6 +1,20 @@
 import { useState } from "react";
-import type { WorkbenchLocale, WorkbenchPermissionDecision, WorkbenchTask } from "../types";
+import type {
+  WorkbenchAskUserChoice,
+  WorkbenchLocale,
+  WorkbenchPermissionDecision,
+  WorkbenchTask,
+} from "../types";
 import { isResearchFallbackTask, translateWorkbenchText } from "../utils";
+
+export const HELP_ME_DECIDE_ANSWER = "__javis_help_me_decide__";
+
+const COMPUTER_TASK_APPROVAL_OPERATIONS = new Set([
+  "computer.moveMouse",
+  "computer.click",
+  "computer.scroll",
+  "computer.focusWindow",
+]);
 
 interface TaskSectionsProps {
   labels: WorkbenchLocale["labels"];
@@ -21,6 +35,9 @@ export function TaskSections({ labels, locale, task, onPermissionDecision, onAsk
       {task.status === "failed" ? (
         <section className="javis-recovery" aria-label={labels.failedRecoveryTitle}>
           <p className="javis-message-title">{labels.failedRecoveryTitle}</p>
+          {task.userFacingError ? (
+            <p className="javis-recovery-error">{task.userFacingError}</p>
+          ) : null}
           <p>{labels.failedRecoveryMessage}</p>
         </section>
       ) : null}
@@ -73,7 +90,15 @@ export function TaskSections({ labels, locale, task, onPermissionDecision, onAsk
             >
               {labels.approve}
             </button>
-            {task.permissionRequest.dryRun.operation.startsWith("computer.") ? (
+            {canShowComputerTaskApproval(task.permissionRequest.dryRun.operation) ? (
+              <button
+                disabled={task.permissionRequest.status !== "pending"}
+                onClick={() => onPermissionDecision?.("approved_always")}
+                type="button"
+              >
+                {translateWorkbenchText("Allow this task", locale)}
+              </button>
+            ) : task.permissionRequest.dryRun.operation.startsWith("computer.") ? null : (
               <button
                 disabled={task.permissionRequest.status !== "pending"}
                 onClick={() => onPermissionDecision?.("approved_always")}
@@ -81,7 +106,7 @@ export function TaskSections({ labels, locale, task, onPermissionDecision, onAsk
               >
                 {labels.alwaysAllow}
               </button>
-            ) : null}
+            )}
             <button
               disabled={task.permissionRequest.status !== "pending"}
               onClick={() => onPermissionDecision?.("denied")}
@@ -116,19 +141,30 @@ export function TaskSections({ labels, locale, task, onPermissionDecision, onAsk
           </p>
           {task.askUserQuestion.choices && task.askUserQuestion.choices.length > 0 ? (
             <div className="javis-ask-user-choices">
-              {task.askUserQuestion.choices.map((choice) => (
-                <button
-                  key={choice}
-                  disabled={task.askUserQuestion!.status !== "pending"}
-                  onClick={() => onAskUserAnswer?.(choice)}
-                  type="button"
-                >
-                  {translateWorkbenchText(choice, locale)}
-                </button>
-              ))}
+              {task.askUserQuestion.choices.map((rawChoice) => {
+                const choice = normalizeAskUserChoice(rawChoice);
+                return (
+                  <button
+                    className={choice.isRecommended ? "recommended" : undefined}
+                    key={choice.value}
+                    disabled={task.askUserQuestion!.status !== "pending"}
+                    onClick={() => onAskUserAnswer?.(choice.value)}
+                    type="button"
+                  >
+                    {translateWorkbenchText(choice.label, locale)}
+                  </button>
+                );
+              })}
+              <button
+                disabled={task.askUserQuestion.status !== "pending"}
+                onClick={() => onAskUserAnswer?.(HELP_ME_DECIDE_ANSWER)}
+                type="button"
+              >
+                {translateWorkbenchText("Help me decide", locale)}
+              </button>
             </div>
           ) : null}
-          {task.askUserQuestion.status === "pending" && (!task.askUserQuestion.choices || task.askUserQuestion.choices.length === 0) ? (
+          {task.askUserQuestion.status === "pending" ? (
             <AskUserFreeFormInput onSubmit={(answer) => onAskUserAnswer?.(answer)} labels={labels} />
           ) : null}
           {task.askUserQuestion.answer ? (
@@ -140,6 +176,16 @@ export function TaskSections({ labels, locale, task, onPermissionDecision, onAsk
       ) : null}
     </>
   );
+}
+
+function canShowComputerTaskApproval(operation: string): boolean {
+  return COMPUTER_TASK_APPROVAL_OPERATIONS.has(operation);
+}
+
+function normalizeAskUserChoice(choice: string | WorkbenchAskUserChoice): WorkbenchAskUserChoice {
+  return typeof choice === "string"
+    ? { label: choice, value: choice }
+    : choice;
 }
 
 function AskUserFreeFormInput({

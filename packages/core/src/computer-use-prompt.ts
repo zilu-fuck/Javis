@@ -13,6 +13,7 @@ CAPABILITIES:
 
 TOOLS:
 - computer.screenshot({ windowHandle?, method? }) for visual context
+- computer.listWindows({}) for current window handles, titles, and foreground state
 - computer.inspectUi({ windowHandle, maxDepth?, maxNodes? }) for UIA control trees
 - computer.invokeUi({ selector }) for buttons/menu items with automationId or name
 - computer.setUiValue({ selector, value }) for editable controls
@@ -45,6 +46,7 @@ RULES:
 - Output exactly ONE action per turn — the loop handles iteration
 - Click on the CENTER of target elements, not edges
 - When typing, first click the target input field, then use computer.type in the next step
+- Prefer window handles from the WINDOWS list in the prompt; call computer.listWindows only if that list is missing or stale
 - Prefer computer.inspectUi for a known windowHandle, then computer.invokeUi or computer.setUiValue when the target has a clear automationId/name selector
 - Selector format for invokeUi/setUiValue: { "selector": { "windowHandle": number, "automationId"?: string, "name"?: string, "controlType"?: string } }. Use automationId (most reliable) or name from the inspectUi tree output. Avoid controlType — it is localized and may not match across different Windows languages.
 - Never interact with system dialogs (UAC, Task Manager, Registry Editor, system settings)
@@ -105,6 +107,7 @@ export const COMPUTER_USE_OUTPUT_SCHEMA = {
             "computer.keyCombo",
             "computer.scroll",
             "computer.focusWindow",
+            "computer.listWindows",
             "computer.inspectUi",
             "computer.invokeUi",
             "computer.setUiValue",

@@ -11,6 +11,7 @@ interface NewChatProps {
   composeMode: "chat" | "project";
   currentWorkspacePath: string;
   draftGoal: string;
+  isChinese: boolean;
   labels: WorkbenchLocale["labels"];
   recommendations?: WorkbenchNewChatRecommendations;
   recentWorkspacePaths: string[];
@@ -19,6 +20,7 @@ interface NewChatProps {
   onBrowseWorkspacePath?: () => void;
   onDeleteRecentWorkspacePath?: (path: string) => void;
   onDraftGoalChange: (nextGoal: string) => void;
+  onSelectComposeMode?: (mode: "chat" | "project") => void;
   onSubmit: FormEventHandler<HTMLFormElement>;
   onSubmitWithAttachments?: (goal: string, attachments: File[]) => void;
   onUseWorkspacePath?: (path: string) => void;
@@ -29,6 +31,7 @@ export function NewChat({
   composeMode,
   currentWorkspacePath,
   draftGoal,
+  isChinese,
   labels,
   recommendations,
   recentWorkspacePaths,
@@ -37,13 +40,13 @@ export function NewChat({
   onBrowseWorkspacePath,
   onDeleteRecentWorkspacePath,
   onDraftGoalChange,
+  onSelectComposeMode,
   onSubmit,
   onSubmitWithAttachments,
   onUseWorkspacePath,
   onWorkspacePathChange,
 }: NewChatProps) {
   const isProjectMode = composeMode === "project";
-  const isChinese = labels.newChat !== "New chat";
   const primaryPrompts = recommendations?.primary.length
     ? recommendations.primary
     : defaultPrimaryPrompts(isChinese);
@@ -67,6 +70,7 @@ export function NewChat({
       <ChatComposer
         actionsClassName="javis-new-chat-actions"
         className="javis-new-chat-composer"
+        composeMode={composeMode}
         currentWorkspacePath={currentWorkspacePath}
         draftGoal={draftGoal}
         labels={labels}
@@ -77,6 +81,7 @@ export function NewChat({
         onBrowseWorkspacePath={onBrowseWorkspacePath}
         onDeleteRecentWorkspacePath={onDeleteRecentWorkspacePath}
         onDraftGoalChange={onDraftGoalChange}
+        onSelectComposeMode={onSelectComposeMode}
         onSubmit={onSubmit}
         onSubmitWithAttachments={onSubmitWithAttachments}
         onUseWorkspacePath={onUseWorkspacePath}

@@ -42,11 +42,15 @@ export function resolvePermissionRequest(
 ): PermissionRequest {
   assertPendingPermissionRequest(request);
   assertPermissionBindingCurrent(request);
+  const currentTimestamp = now();
+  if (isPermissionRequestStale(request, DEFAULT_PERMISSION_TTL_MS, currentTimestamp)) {
+    throw new Error(`Permission request ${request.id} is expired.`);
+  }
 
   return {
     ...request,
     status: decision === "approved_always" ? "approved" : decision,
-    resolvedAt: now(),
+    resolvedAt: currentTimestamp,
   };
 }
 

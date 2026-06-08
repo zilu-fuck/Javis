@@ -21,8 +21,30 @@ export function createRuntimeState(
   let snapshot = initialSnapshot;
   const listeners = new Set<(nextSnapshot: TaskSnapshot) => void>();
   const timers = new Set<ReturnType<typeof setTimeout>>();
+  let pendingFrame: ReturnType<typeof setTimeout> | number | undefined;
   let disposed = false;
   const deltaReducer = createDeltaReducer(initialSnapshot);
+  const notify = () => {
+    for (const listener of listeners) {
+      listener(snapshot);
+    }
+  };
+  const scheduleNotify = () => {
+    if (pendingFrame !== undefined) {
+      return;
+    }
+    const flush = () => {
+      pendingFrame = undefined;
+      if (!disposed) {
+        notify();
+      }
+    };
+    if (typeof requestAnimationFrame === "function") {
+      pendingFrame = requestAnimationFrame(flush);
+      return;
+    }
+    pendingFrame = setTimeout(flush, 0);
+  };
 
   return {
     clearTimers() {
@@ -34,6 +56,14 @@ export function createRuntimeState(
     },
     dispose() {
       disposed = true;
+      if (pendingFrame !== undefined) {
+        if (typeof cancelAnimationFrame === "function" && typeof pendingFrame === "number") {
+          cancelAnimationFrame(pendingFrame);
+        } else {
+          clearTimeout(pendingFrame as ReturnType<typeof setTimeout>);
+        }
+        pendingFrame = undefined;
+      }
       this.clearTimers();
       listeners.clear();
     },
@@ -43,18 +73,18 @@ export function createRuntimeState(
       }
       snapshot = nextSnapshot;
       deltaReducer.syncFrom(nextSnapshot);
-      for (const listener of listeners) {
-        listener(snapshot);
-      }
+      notify();
     },
     emitDelta(event) {
       if (disposed) {
         return;
       }
       snapshot = deltaReducer.apply(event);
-      for (const listener of listeners) {
-        listener(snapshot);
+      if (event.kind === "agent.chunk_end") {
+        notify();
+        return;
       }
+      scheduleNotify();
     },
     getSnapshot() {
       return snapshot;

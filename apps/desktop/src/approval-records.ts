@@ -310,6 +310,7 @@ function sanitizeCodeProposedEdit(value: unknown): CodeProposedEdit | null {
     return null;
   }
   return {
+    ...(isString(value.approvalId) ? { approvalId: value.approvalId } : {}),
     proposalId: value.proposalId,
     workspacePath: value.workspacePath,
     summary: value.summary,

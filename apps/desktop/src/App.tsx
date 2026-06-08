@@ -9,7 +9,7 @@ import {
   type TaskSnapshot,
 } from "@javis/core";
 import { bridgeVisionIfNeeded } from "./vision-bridge";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openPath } from "@tauri-apps/plugin-opener";
@@ -25,10 +25,16 @@ import type {
   WorkbenchSkillSearchSource,
   WorkbenchNewChatRecommendations,
   WorkbenchSystemResources,
+  WorkbenchAgentCatalogEntry,
   WorkbenchAgentSessionContext,
+  WorkbenchChatMessage,
+  WorkbenchFileEntry,
   WorkbenchFileService,
   WorkbenchFileSearchResult,
   WorkbenchTerminalService,
+  WorkbenchAgentStyleState,
+  BrowserQuickRequest,
+  BrowserQuickResult,
 } from "@javis/ui";
 import { JavisWorkbench, zhCNWorkbenchLocale, defaultWorkbenchLocale } from "@javis/ui";
 import {
@@ -74,7 +80,9 @@ import {
   runRestoredPdfOrganization,
 } from "./restored-approval";
 import { useModelSettingsControls } from "./use-model-settings";
+import { normalizeModelConfigurationConnections } from "./model-settings";
 import { createConfiguredModelProvider } from "./model-provider";
+import { fetchProviderModels } from "./provider-models";
 import { useModelProfiles, type ModelProfileRepositoryLike } from "./use-model-profiles";
 import { useScannedData } from "./use-scanned-data";
 import { useScheduledTasks } from "./use-scheduled-tasks";
@@ -97,6 +105,17 @@ import {
   createFileClassificationRepository,
   type FileClassificationRepository,
 } from "./file-classification-persistence";
+import {
+  RESOURCE_SCAN_ROOTS_MIGRATION,
+  createResourceScanRootRepository,
+  type ResourceScanRootRepository,
+} from "./resource-scan-roots";
+import {
+  RESOURCE_FILE_CACHE_MIGRATION,
+  RESOURCE_FILE_CACHE_INDEX_MIGRATION,
+  createResourceCacheRepository,
+  type ResourceCacheRepository,
+} from "./resource-scan-cache";
 import {
   invokeDesktopDatabase,
   runDesktopDatabaseMigrations,
@@ -231,12 +250,46 @@ function scheduledTaskToWorkbench(
 }
 
 function extractAtReferences(goal: string): Array<{ raw: string; path: string }> {
+  const bracketRefs: Array<{ raw: string; path: string }> = [];
+  const bracketPattern = /@\[((?:\\\]|[^\]])+)\]/g;
+  let bracketMatch: RegExpExecArray | null;
+  while ((bracketMatch = bracketPattern.exec(goal))) {
+    const bracketPath = bracketMatch[1] ?? "";
+    bracketRefs.push({
+      raw: bracketMatch[0],
+      path: bracketPath.replace(/\\]/g, "]"),
+    });
+  }
+  if (bracketRefs.length > 0) return bracketRefs;
+
   const matches = goal.match(/@([^\s,，。；;]+)/g);
   if (!matches) return [];
   return matches.map((raw) => {
     const path = raw.slice(1); // strip leading @
     return { raw, path };
   });
+}
+
+function getAllowedRootScopeForReference(
+  referencePath: string,
+  documents: WorkbenchFileEntry[],
+  workspacePath?: string,
+): { workspaceRoot?: string; allowedRootIds?: string[] } {
+  const referenceKey = normalizePathForReferenceMatch(referencePath);
+  const matchedDocument = documents.find(
+    (doc) => normalizePathForReferenceMatch(doc.path) === referenceKey,
+  );
+  const allowedRootIds = matchedDocument?.sourceRootId?.trim()
+    ? [matchedDocument.sourceRootId.trim()]
+    : undefined;
+  return {
+    workspaceRoot: workspacePath?.trim() || undefined,
+    allowedRootIds,
+  };
+}
+
+function normalizePathForReferenceMatch(path: string): string {
+  return path.trim().replace(/\\/g, "/").toLocaleLowerCase();
 }
 
 function getConversationMessages(task: TaskSnapshot): ChatMessage[] {
@@ -256,7 +309,24 @@ function logNonFatalError(context: string, error: unknown) {
   console.warn(context, error);
 }
 
-type SubmitGoalHandler = (goalOverride?: string, workspacePathOverride?: string, scheduledTaskId?: string) => void;
+type SubmitGoalHandler = (
+  goalOverride?: string,
+  workspacePathOverride?: string,
+  scheduledTaskId?: string,
+  attachments?: File[],
+  imageDataUrls?: string[],
+) => void;
+
+interface PendingGoalSubmission {
+  goalOverride?: string;
+  rawGoal: string;
+  workspacePathOverride?: string;
+  scheduledTaskId?: string;
+  attachments?: File[];
+  imageDataUrls?: string[];
+  composeMode: "chat" | "project";
+  clearDraftOnQueue: boolean;
+}
 
 function hasUsableAiConfiguration(
   modelConfiguration: WorkbenchModelConfiguration | undefined,
@@ -305,6 +375,11 @@ function App() {
   const scheduledTasksCurrentRef = useRef(scheduledTasks);
   scheduledTasksCurrentRef.current = scheduledTasks;
   const submitGoalRef = useRef<SubmitGoalHandler>(() => {});
+  const pendingGoalQueueRef = useRef<PendingGoalSubmission[]>([]);
+  const queuedSubmissionModeRef = useRef<"chat" | "project" | null>(null);
+  const queuedContinuationTaskRef = useRef<TaskSnapshot | null>(null);
+  const queuedStartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [, setQueuedGoalCount] = useState(0);
   const modelConfigRef = useRef<WorkbenchModelConfiguration | undefined>(undefined);
   const {
     browseWorkspacePath,
@@ -353,16 +428,13 @@ function App() {
   const [approvalRecords, setApprovalRecords] = useState(() =>
     loadApprovalRecords(window.localStorage),
   );
-  const historyInitialRef = useRef(history);
   const historyCurrentRef = useRef(history);
   historyCurrentRef.current = history;
   const approvalRecordsInitialRef = useRef(approvalRecords);
   const approvalRecordsCurrentRef = useRef(approvalRecords);
   approvalRecordsCurrentRef.current = approvalRecords;
-  const workspaceSessionInitialRef = useRef(workspaceSession);
-  const workspaceSessionCurrentRef = useRef(workspaceSession);
-  workspaceSessionCurrentRef.current = workspaceSession;
   const [areDurableApprovalRecordsReady, setDurableApprovalRecordsReady] = useState(false);
+  const [isDatabaseInitializing, setDatabaseInitializing] = useState(true);
   const didCheckRestoredApproval = useRef(false);
   const didInitDatabaseRef = useRef(false);
   const auditRecordIdsRef = useRef(new Set<string>());
@@ -420,6 +492,14 @@ function App() {
     loadUserProfileMemory(window.localStorage),
   );
   useEffect(() => {
+    return () => {
+      if (queuedStartTimerRef.current) {
+        clearTimeout(queuedStartTimerRef.current);
+        queuedStartTimerRef.current = null;
+      }
+    };
+  }, []);
+  useEffect(() => {
     if (!currentWindow) {
       return;
     }
@@ -459,6 +539,7 @@ function App() {
   } = useTaskRuntime({
     runtime,
     setHistory,
+    setActiveHistoryEntryId,
     setScheduledTasks,
     persistWorkspaceForTask,
     persistDurableApprovalRecord,
@@ -484,6 +565,8 @@ function App() {
   );
 
   const fileClassificationRepoRef = useRef<FileClassificationRepository | null>(null);
+  const resourceScanRootRepoRef = useRef<ResourceScanRootRepository | null>(null);
+  const resourceCacheRepoRef = useRef<ResourceCacheRepository | null>(null);
   const modelProfileRepoRef = useRef<ModelProfileRepositoryLike>(null);
   const {
     modelConfiguration,
@@ -515,21 +598,34 @@ function App() {
     imagesProgress,
     classifying,
     classifyProgress,
+    appsClassifying,
+    appsClassifyProgress,
     mountRoots,
     categoryStats,
+    appCategoryStats,
+    resourceScanRoots,
     handleRefreshApps,
+    handleUpdateAppCategory,
     handleRefreshDocuments,
     handleRefreshImages,
     handleNavigateDirectory,
     handleListDirectory,
     handleRefreshScan,
     handleClassifyDocuments: runClassifyDocuments,
+    handleClassifyApps: runClassifyApps,
     handleCancelClassify,
+    handleCancelClassifyApps,
+    handleAddScanRoot,
+    handleRemoveScanRoot,
+    handleToggleScanRoot,
+    handleRefreshScanRoot,
     scanning,
   } = useScannedData({
     activeView,
     runtime,
     fileClassificationRepoRef,
+    resourceScanRootRepoRef,
+    resourceCacheRepoRef,
   });
 
   const {
@@ -574,6 +670,13 @@ function App() {
       return;
     }
     await runClassifyDocuments();
+  }
+
+  async function handleClassifyApps() {
+    if (!ensureAiConfigured("apps AI classification")) {
+      return;
+    }
+    await runClassifyApps();
   }
 
   async function handleTranslateSkillsToChinese() {
@@ -699,6 +802,7 @@ function App() {
     didInitDatabaseRef.current = true;
 
     void (async () => {
+      setDatabaseInitializing(true);
       const database = invokeDesktopDatabase(invoke);
       databaseRef.current = database;
 
@@ -713,6 +817,8 @@ function App() {
       await runDesktopDatabaseMigrations(database, USER_PREFERENCES_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, JSONL_LOG_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, FILE_CLASSIFICATION_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, [RESOURCE_SCAN_ROOTS_MIGRATION]);
+      await runDesktopDatabaseMigrations(database, [RESOURCE_FILE_CACHE_MIGRATION, RESOURCE_FILE_CACHE_INDEX_MIGRATION]);
       await runDesktopDatabaseMigrations(database, USER_PROFILE_MEMORY_MIGRATIONS);
 
       // One-time import from localStorage
@@ -755,6 +861,12 @@ function App() {
       const fileClassificationRepo = createFileClassificationRepository(database);
       fileClassificationRepoRef.current = fileClassificationRepo;
 
+      const resourceScanRootRepo = createResourceScanRootRepository(database);
+      resourceScanRootRepoRef.current = resourceScanRootRepo;
+
+      const resourceCacheRepo = createResourceCacheRepository(database);
+      resourceCacheRepoRef.current = resourceCacheRepo;
+
       const importedHistory = await taskHistoryRepo.importFromLocalStorage(window.localStorage);
       const importedWorkspaceSession = await workspaceSessionRepo.importFromLocalStorage(
         window.localStorage,
@@ -764,11 +876,15 @@ function App() {
       );
       const legacySettings = await modelSettingsRepo.importFromLocalStorage(window.localStorage);
       const importedUserProfileMemory = await userProfileMemoryRepo.importFromLocalStorage(window.localStorage);
-      const loadedConfig = await modelProfileRepo.importFromLegacySettings(legacySettings);
+      const loadedConfig = normalizeModelConfigurationConnections(
+        await modelProfileRepo.importFromLegacySettings(legacySettings),
+        PROVIDER_DEFINITIONS,
+      );
       const cleanOverrides: Record<string, string> = {};
       for (const [key, value] of Object.entries(loadedConfig.agentOverrides)) {
         if (value) cleanOverrides[key] = value;
       }
+      await modelProfileRepo.save(loadedConfig.profiles, cleanOverrides);
       // Check which profiles have stored API keys in the OS credential store
       const profilesWithKeyStatus = await Promise.all(
         loadedConfig.profiles.map(async (p) => {
@@ -787,12 +903,10 @@ function App() {
         agentOverrides: cleanOverrides,
       });
 
-      if (historyCurrentRef.current === historyInitialRef.current) {
-        setHistory(importedHistory);
-      }
-      if (workspaceSessionCurrentRef.current === workspaceSessionInitialRef.current) {
-        replaceWorkspaceSession(importedWorkspaceSession);
-      }
+      // Always apply imported history on first database init —
+      // localStorage snapshot is a placeholder; SQLite is authoritative.
+      setHistory(importedHistory);
+      replaceWorkspaceSession(importedWorkspaceSession);
       setUserProfileMemory(importedUserProfileMemory);
       if (approvalRecordsCurrentRef.current === approvalRecordsInitialRef.current) {
         setApprovalRecords(importedApprovalRecords);
@@ -847,6 +961,8 @@ function App() {
     })().catch((error) => {
       console.error("Database initialization failed, using localStorage fallback", error);
       setDurableApprovalRecordsReady(true);
+    }).finally(() => {
+      setDatabaseInitializing(false);
     });
   }, [replaceWorkspaceSession]);
 
@@ -879,22 +995,86 @@ function App() {
     setTask(createRestoredPdfApprovalTask(pendingRecord));
   }, [approvalRecords, areDurableApprovalRecordsReady]);
 
-  function submitGoal(goalOverride?: string, workspacePathOverride?: string, scheduledTaskId?: string, _attachments?: File[], imageDataUrls?: string[]) {
-    const rawGoal = (goalOverride ?? draftGoal).trim();
+  function queueGoalSubmission(submission: PendingGoalSubmission): void {
+    pendingGoalQueueRef.current.push(submission);
+    setQueuedGoalCount(pendingGoalQueueRef.current.length);
+    if (submission.clearDraftOnQueue) {
+      setDraftGoal("");
+    }
+  }
+
+  function scheduleNextQueuedGoal(): void {
+    if (queuedStartTimerRef.current || pendingGoalQueueRef.current.length === 0) {
+      return;
+    }
+    queuedStartTimerRef.current = setTimeout(() => {
+      queuedStartTimerRef.current = null;
+      if (isTaskActiveRef.current || pendingGoalQueueRef.current.length === 0) {
+        return;
+      }
+      const next = pendingGoalQueueRef.current.shift();
+      setQueuedGoalCount(pendingGoalQueueRef.current.length);
+      if (!next) {
+        return;
+      }
+      queuedSubmissionModeRef.current = next.composeMode;
+      submitGoal(
+        next.goalOverride,
+        next.workspacePathOverride,
+        next.scheduledTaskId,
+        next.attachments,
+        next.imageDataUrls,
+        true,
+        next.rawGoal,
+      );
+      queuedSubmissionModeRef.current = null;
+      queuedContinuationTaskRef.current = null;
+    }, 0);
+  }
+
+  function submitGoal(
+    goalOverride?: string,
+    workspacePathOverride?: string,
+    scheduledTaskId?: string,
+    _attachments?: File[],
+    imageDataUrls?: string[],
+    forceStart = false,
+    queuedRawGoal?: string,
+  ) {
+    const rawGoal = (queuedRawGoal ?? goalOverride ?? draftGoal).trim();
     if (!rawGoal) {
       return;
     }
     if (!ensureAiConfigured(composeMode === "project" ? "Agent 模式" : "Chat 模式")) {
       return;
     }
+    if (isTaskActiveRef.current && !forceStart) {
+      queueGoalSubmission({
+        goalOverride,
+        rawGoal,
+        workspacePathOverride,
+        scheduledTaskId,
+        attachments: _attachments,
+        imageDataUrls,
+        composeMode,
+        clearDraftOnQueue: !goalOverride,
+      });
+      return;
+    }
+    const effectiveComposeMode = queuedSubmissionModeRef.current ?? composeMode;
+    const queuedContinuationTask =
+      forceStart && !goalOverride && !workspacePathOverride && !scheduledTaskId
+        ? queuedContinuationTaskRef.current
+        : null;
     const continuationTask =
-      !goalOverride && !workspacePathOverride && !scheduledTaskId
+      queuedContinuationTask ??
+      (!goalOverride && !workspacePathOverride && !scheduledTaskId
         ? activeHistoryEntryId
           ? historyCurrentRef.current.find((entry) => entry.id === activeHistoryEntryId)
           : isArchivableTask(task)
             ? task
             : undefined
-        : undefined;
+        : undefined);
     const startOptions = continuationTask
       ? {
           taskId: continuationTask.id,
@@ -903,7 +1083,7 @@ function App() {
       : undefined;
     const startMode =
       !goalOverride && !workspacePathOverride && !scheduledTaskId
-        ? composeMode
+        ? effectiveComposeMode
         : undefined;
     const taskWorkspacePath =
       startMode === "project" || workspacePathOverride || scheduledTaskId
@@ -966,7 +1146,12 @@ function App() {
         let resolvedGoal = bridgeInput;
         for (const ref of atRefs) {
           try {
-            const content = await readFileChunk(ref.path);
+            const readScope = getAllowedRootScopeForReference(
+              ref.path,
+              userDocuments,
+              taskWorkspacePath ?? workspaceRef.current,
+            );
+            const content = await readFileChunk(ref.path, undefined, readScope);
             resolvedGoal = injectDocumentContext(resolvedGoal, ref.path, content);
           } catch (error) {
             logNonFatalError(`Failed to read referenced file ${ref.path}`, error);
@@ -1010,9 +1195,11 @@ function App() {
   }
 
   function handleStopTask() {
+    queuedContinuationTaskRef.current = task;
     runtime.stopTask();
     setIsTaskActive(false);
     isTaskActiveRef.current = false;
+    scheduleNextQueuedGoal();
   }
 
   function retryCurrentTask() {
@@ -1085,6 +1272,10 @@ function App() {
           ),
       nextTask,
     );
+    if (nextTask.status === "completed" || nextTask.status === "failed" || nextTask.status === "cancelled") {
+      queuedContinuationTaskRef.current = nextTask;
+      scheduleNextQueuedGoal();
+    }
   }
 
   function updateApprovalRecord(record: DurableApprovalRecord) {
@@ -1182,11 +1373,44 @@ function App() {
   function handleAskUserAnswer(answer: string) {
     const request = task.askUserQuestion;
     if (
-      (task.status === "waiting_permission" || task.status === "running") &&
+      (task.status === "waiting_info" || task.status === "waiting_permission" || task.status === "running") &&
       request?.status === "pending"
     ) {
       runtime.respondToAskUser(answer, request.id);
     }
+  }
+
+  function handleConversationMessagesChange(
+    taskId: string | undefined,
+    messages: WorkbenchChatMessage[],
+  ) {
+    const nextMessages = messages.map((message) => ({ ...message })) as ChatMessage[];
+    const updatedAt = new Date().toISOString();
+    setTask((current) =>
+      !taskId || current.id === taskId
+        ? { ...current, conversationMessages: nextMessages, updatedAt }
+        : current,
+    );
+    setHistory((current) => {
+      const targetId = taskId ?? activeHistoryEntryId;
+      const targetTask = targetId
+        ? current.find((entry) => entry.id === targetId)
+        : undefined;
+      if (!targetTask) {
+        return current;
+      }
+      const updatedTask: TaskSnapshot = {
+        ...targetTask,
+        conversationMessages: nextMessages,
+        updatedAt,
+      };
+      const updated = upsertTaskHistory(current, updatedTask);
+      const repository = taskHistoryRepoRef.current;
+      if (repository) {
+        void repository.upsert(updatedTask);
+      }
+      return updated;
+    });
   }
 
   function handleRemoveTrustedComputerApp(title: string) {
@@ -1206,6 +1430,10 @@ function App() {
   }
 
   function deleteHistoryEntry(id: string) {
+    const entry = history.find((item) => item.id === id);
+    if (!window.confirm(`Delete history "${entry?.title ?? id}"?`)) {
+      return;
+    }
     if (activeHistoryEntryId === id) {
       setActiveHistoryEntryId(undefined);
     }
@@ -1217,6 +1445,14 @@ function App() {
       }
       return updated;
     });
+  }
+
+  function confirmDeleteScheduledTask(id: string) {
+    const taskToDelete = scheduledTasks.find((item) => item.id === id);
+    if (!window.confirm(`Delete scheduled task "${taskToDelete?.name ?? id}"?`)) {
+      return;
+    }
+    deleteScheduledTask(id);
   }
 
   function handleChangeActiveView(view: ActiveView) {
@@ -1236,6 +1472,14 @@ function App() {
   }
 
   const effectiveLocale = localePreference === "en" ? defaultWorkbenchLocale : zhCNWorkbenchLocale;
+  const agentCatalog: WorkbenchAgentCatalogEntry[] = useMemo(
+    () =>
+      demoAgents.map((agent) => ({
+        kind: agent.kind,
+        displayName: agent.displayName,
+      })),
+    [],
+  );
   const newChatRecommendations: WorkbenchNewChatRecommendations = useMemo(
     () => createNewChatRecommendations(userProfileMemory, localePreference === "en" ? "en" : "zh"),
     [localePreference, userProfileMemory],
@@ -1263,6 +1507,14 @@ function App() {
         }
       : null,
     [userProfileMemory],
+  );
+  const displayUserImages = useMemo(
+    () =>
+      userImages.map((image) => ({
+        ...image,
+        thumbnailUrl: image.thumbnailUrl ?? convertFileSrc(image.path),
+      })),
+    [userImages],
   );
 
   useEffect(() => {
@@ -1358,8 +1610,10 @@ function App() {
           },
         });
       },
-      async input(terminalId: string, data: string) {
-        await invoke("terminal_input", { request: { terminalId, data, permissionMode: "full_access" } });
+      async input(session: WorkbenchAgentSessionContext, terminalId: string, data: string) {
+        await invoke("terminal_input", {
+          request: { terminalId, data, permissionMode: session.permissionMode },
+        });
       },
       async resize(terminalId: string, cols: number, rows: number) {
         await invoke("terminal_resize", { request: { terminalId, cols, rows } });
@@ -1453,6 +1707,41 @@ function App() {
     [],
   );
 
+  async function readAgentStyle(kind: string): Promise<WorkbenchAgentStyleState> {
+    const result = await invoke<{
+      content: string;
+      source: "global" | "workspace" | "none";
+      filePath?: string;
+    }>("read_agent_style", {
+      kind,
+      workspacePath: workspacePath.trim() || null,
+    });
+    return {
+      kind,
+      currentStyle: result.content,
+      source: result.source,
+      filePath: result.filePath,
+    };
+  }
+
+  async function saveAgentStyle(kind: string, content: string): Promise<WorkbenchAgentStyleState> {
+    await invoke("write_agent_style", {
+      kind,
+      content,
+      workspacePath: workspacePath.trim() || null,
+    });
+    return readAgentStyle(kind);
+  }
+
+  async function resetAgentStyle(kind: string): Promise<WorkbenchAgentStyleState> {
+    await invoke("write_agent_style", {
+      kind,
+      content: "",
+      workspacePath: workspacePath.trim() || null,
+    });
+    return readAgentStyle(kind);
+  }
+
   return (
     <div className="javis-desktop-frame">
       <TitleBar />
@@ -1473,6 +1762,12 @@ function App() {
               </button>
             </div>
           </section>
+        </div>
+      ) : null}
+      {isDatabaseInitializing ? (
+        <div className="javis-database-loading" role="status">
+          <strong>Javis 正在恢复工作区</strong>
+          <span>正在初始化数据库、迁移旧数据并恢复历史会话...</span>
         </div>
       ) : null}
       <JavisWorkbench
@@ -1510,6 +1805,7 @@ function App() {
         initialSidebarWidth={prefSidebarWidth}
         installedApps={installedApps}
         isTaskActive={isTaskActive}
+        agentCatalog={agentCatalog}
         locale={effectiveLocale}
         modelSettings={modelSettings}
         newChatRecommendations={newChatRecommendations}
@@ -1520,7 +1816,7 @@ function App() {
         activeComposeMode={composeMode}
         onDeleteHistoryEntry={deleteHistoryEntry}
         onDeleteRecentWorkspacePath={deleteRecentWorkspacePath}
-        onDeleteScheduledTask={deleteScheduledTask}
+        onDeleteScheduledTask={confirmDeleteScheduledTask}
         onDraftGoalChange={setDraftGoal}
         onModelSettingsChange={async (settings) => {
           await updateModelSettings(settings);
@@ -1531,43 +1827,15 @@ function App() {
         onModelConfigurationChange={handleModelConfigurationChange}
         onRebuildUserProfileMemory={handleRebuildUserProfileMemory}
         onClearUserProfileMemory={handleClearUserProfileMemory}
+        onReadAgentStyle={readAgentStyle}
+        onSaveAgentStyle={saveAgentStyle}
+        onResetAgentStyle={resetAgentStyle}
         onSaveProviderApiKey={async (keyReference, apiKey) => {
           await invoke("save_model_api_key_secret", {
             request: { keyReference, apiKey },
           });
         }}
-        onFetchProviderModels={async ({ provider: _provider, baseUrl, apiKey, apiType, keyReference, modelListMode }) => {
-          if (modelListMode === "unsupported") {
-            throw new Error("This provider does not support automatic model fetch yet. Enter the model ID manually.");
-          }
-          // If user typed a key, fetch directly from JS
-          if (apiKey) {
-            const normalizedBase = baseUrl.replace(/\/+$/, "");
-            const url = modelListMode === "anthropic"
-              ? `${normalizedBase}/v1/models?limit=1000`
-              : `${normalizedBase}/models`;
-            const headers: Record<string, string> = { "Content-Type": "application/json" };
-            if (modelListMode === "anthropic") {
-              headers["x-api-key"] = apiKey;
-              headers["anthropic-version"] = "2023-06-01";
-            } else {
-              headers["Authorization"] = `Bearer ${apiKey}`;
-            }
-            const response = await fetch(url, { method: "GET", headers, signal: AbortSignal.timeout(15000) });
-            if (!response.ok) {
-              const text = await response.text().catch(() => "");
-              throw new Error(`HTTP ${response.status}${text ? `: ${text.slice(0, 200)}` : ""}`);
-            }
-            const data = await response.json() as { data?: Array<{ id: string }> };
-            return (data.data || []).map((m) => m.id);
-          }
-          // Key is in OS credential store — proxy through Rust
-          const result = await invoke<{ models: string[]; error: string | null }>("fetch_provider_models", {
-            request: { keyReference, baseUrl, apiType, modelListMode },
-          });
-          if (result.error) throw new Error(result.error);
-          return result.models;
-        }}
+        onFetchProviderModels={fetchProviderModels}
         providerCatalog={providerCatalog}
         getProviderCapabilities={getProviderCapabilities}
         onNavigateDirectory={handleNavigateDirectory}
@@ -1581,7 +1849,9 @@ function App() {
             : handlePermissionDecision
         }
         onAskUserAnswer={handleAskUserAnswer}
+        onConversationMessagesChange={handleConversationMessagesChange}
         onRefreshApps={handleRefreshApps}
+        onUpdateAppCategory={handleUpdateAppCategory}
         onRefreshDocuments={handleRefreshDocuments}
         onRefreshImages={handleRefreshImages}
         onRetryTask={retryCurrentTask}
@@ -1636,40 +1906,99 @@ function App() {
         systemResources={systemResources}
         task={task}
         userDocuments={userDocuments}
-        userImages={userImages}
+        userImages={displayUserImages}
         scanning={scanning}
         scanProgress={scanProgress}
         classifying={classifying}
         classifyProgress={classifyProgress}
+        appsClassifying={appsClassifying}
+        appsClassifyProgress={appsClassifyProgress}
         mountRoots={mountRoots}
         categoryStats={categoryStats}
+        appCategoryStats={appCategoryStats}
+        resourceScanRoots={resourceScanRoots}
         onRefreshScan={handleRefreshScan}
         onClassifyDocuments={handleClassifyDocuments}
+        onClassifyApps={handleClassifyApps}
         onCancelClassify={handleCancelClassify}
+        onCancelClassifyApps={handleCancelClassifyApps}
+        onToggleScanRoot={handleToggleScanRoot}
+        onRemoveScanRoot={handleRemoveScanRoot}
+        onAddScanRoot={handleAddScanRoot}
+        onRefreshScanRoot={handleRefreshScanRoot}
         trustedComputerApps={trustedComputerApps}
         onRemoveTrustedComputerApp={handleRemoveTrustedComputerApp}
         terminalService={terminalService}
         fileService={fileService}
-        onQuickActionBrowser={async (url: string) => {
-          const navResult = await invoke<{ url: string; title?: string }>("browser_navigate", {
-            request: { url, sessionId: activeHistoryEntryId ?? task.id, allowLocalhost: true },
+        onQuickActionBrowser={async (session, request): Promise<BrowserQuickResult> => {
+          const actionRequest: BrowserQuickRequest = typeof request === "string"
+            ? { action: "navigate", url: request }
+            : request;
+          const sessionRequest = { sessionId: session.sessionId, allowLocalhost: true };
+          const normalize = (value: Partial<BrowserQuickResult>): BrowserQuickResult => ({
+            url: value.url ?? "",
+            title: value.title,
+            content: value.content,
+            screenshotDataUrl: value.screenshotDataUrl,
+            loadState: value.loadState,
+            sidecarRunning: value.sidecarRunning,
+            canGoBack: value.canGoBack,
+            canGoForward: value.canGoForward,
           });
-          const [screenshot, content] = await Promise.all([
-            invoke<{ dataUrl: string }>("browser_screenshot", { request: { fullPage: false } }),
-            invoke<{ content: string; title?: string }>("browser_get_content", {
-              request: { format: "text", maxLength: 2000 },
-            }),
-          ]);
-          return {
-            url: navResult.url,
-            title: navResult.title ?? content.title,
-            content: content.content,
-            screenshotDataUrl: screenshot.dataUrl,
+          const snapshot = async (fallback: BrowserQuickResult): Promise<BrowserQuickResult> => {
+            try {
+              const nextSnapshot = await invoke<BrowserQuickResult>("browser_snapshot", {
+                request: sessionRequest,
+              });
+              return normalize({
+                ...fallback,
+                ...nextSnapshot,
+                url: nextSnapshot.url || fallback.url,
+                title: nextSnapshot.title || fallback.title,
+                loadState: nextSnapshot.loadState || fallback.loadState,
+              });
+            } catch {
+              return normalize({
+                ...fallback,
+                loadState: fallback.loadState || "snapshot unavailable",
+              });
+            }
           };
+
+          if (actionRequest.action === "status") {
+            return normalize(await invoke<BrowserQuickResult>("browser_status", {
+              request: sessionRequest,
+            }));
+          }
+          if (actionRequest.action === "refresh") {
+            return snapshot(normalize(await invoke<BrowserQuickResult>("browser_refresh", {
+              request: sessionRequest,
+            })));
+          }
+          if (actionRequest.action === "back") {
+            return snapshot(normalize(await invoke<BrowserQuickResult>("browser_go_back", {
+              request: sessionRequest,
+            })));
+          }
+          if (actionRequest.action === "forward") {
+            return snapshot(normalize(await invoke<BrowserQuickResult>("browser_go_forward", {
+              request: sessionRequest,
+            })));
+          }
+
+          const nextUrl = actionRequest.url;
+          if (!nextUrl) {
+            throw new Error("Browser URL is required.");
+          }
+          return snapshot(normalize(await invoke<BrowserQuickResult>("browser_navigate", {
+            request: { ...sessionRequest, url: nextUrl },
+          })));
         }}
-        onQuickActionReview={async () => {
-          const root = workspacePath || computerPath;
-          const sessionId = `${activeHistoryEntryId ?? "live"}:${task.id ?? "idle"}`;
+        onQuickActionReview={async (session) => {
+          const root = session.workspaceRoot;
+          if (!root) {
+            throw new Error("Select a workspace before opening review.");
+          }
           const [status, diff] = await Promise.all([
             invoke<{
               files: Array<{ path: string }>;
@@ -1677,10 +2006,10 @@ function App() {
               workspaceRoot: string;
               branch?: string;
             }>("git_status", {
-              request: { sessionId, workspaceRoot: root },
+              request: { sessionId: session.sessionId, workspaceRoot: root },
             }),
             invoke<{ diff: string }>("git_diff", {
-              request: { sessionId, workspaceRoot: root },
+              request: { sessionId: session.sessionId, workspaceRoot: root },
             }),
           ]);
           return {
@@ -1691,30 +2020,34 @@ function App() {
             branch: status.branch,
           };
         }}
-        onQuickActionSideChat={async (message: string) => {
+        onQuickActionSideChat={async (session, message: string) => {
           const sessionPrompt = [
+            "You are Javis Commander in the Javis workbench.",
+            "Never claim to be the underlying model, provider, vendor, lab, or training team.",
+            "If asked who you are, answer as Javis or Javis Commander.",
+            "",
             "Javis side chat context:",
-            `workspaceRoot: ${workspacePath || computerPath || "(none)"}`,
-            `threadId: ${activeHistoryEntryId ?? task.id ?? "live"}`,
+            `workspaceRoot: ${session.workspaceRoot || "(none)"}`,
+            `threadId: ${session.threadId}`,
+            `taskId: ${session.taskId ?? "(none)"}`,
+            `activeTool: ${session.activeTool ?? "(none)"}`,
             "",
             message,
           ].join("\n");
-          const result = await invoke<{ text: string }>("complete_model_prompt", {
-            request: {
-              prompt: sessionPrompt,
-              providerId: modelSettings.provider,
-              model: modelSettings.model,
-              apiKey: modelSettings.apiKey,
-              apiKeyReference: modelSettings.apiKeyReference,
-              baseUrl: modelSettings.baseUrl,
-              maxTokens: 800,
-              temperature: 0.7,
-              locale: "zh-CN",
-            },
+          const provider = createConfiguredModelProvider(modelSettings);
+          const result = await provider.complete(sessionPrompt, {
+            maxTokens: 800,
+            temperature: 0.7,
+            locale: localePreference,
+            agentKind: "commander",
+            workspacePath: session.workspaceRoot,
           });
           return result.text;
         }}
-        onQuickActionTerminal={async (command: string) => {
+        onQuickActionTerminal={async (session, command: string) => {
+          if (!session.workspaceRoot) {
+            throw new Error("Select a workspace before running terminal commands.");
+          }
           const parts = command.trim().split(/\s+/);
           const program = parts[0];
           const args = parts.slice(1);
@@ -1724,7 +2057,7 @@ function App() {
             exitCode: number;
             cwd: string;
           }>("run_read_only_command", {
-            request: { program, args, workspacePath: workspacePath || computerPath },
+            request: { program, args, workspacePath: session.workspaceRoot },
           });
           return {
             command,

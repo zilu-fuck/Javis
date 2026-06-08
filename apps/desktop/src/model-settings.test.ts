@@ -3,6 +3,7 @@ import {
   DEFAULT_MODEL_SETTINGS,
   MODEL_SETTINGS_STORAGE_KEY,
   loadModelSettings,
+  normalizeModelConfigurationConnections,
   saveModelSettings,
   sanitizeModelSettings,
 } from "./model-settings";
@@ -82,6 +83,70 @@ describe("model settings persistence", () => {
       apiKey: "",
       apiKeyReference: "default",
       baseUrl: "",
+    });
+  });
+});
+
+describe("model profile connection normalization", () => {
+  const providers = [
+    { id: "openai", defaultBaseUrl: "https://api.openai.com/v1" },
+    { id: "zhipu", defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4" },
+    { id: "dashscope", defaultBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1" },
+  ];
+
+  it("repairs a GLM slot that kept an OpenAI URL and default key reference", () => {
+    const normalized = normalizeModelConfigurationConnections({
+      profiles: [{
+        id: "primary",
+        slot: "primary",
+        displayName: "Primary",
+        provider: "zhipu",
+        model: "glm-4-plus",
+        apiKeyReference: "default",
+        baseUrl: "https://api.openai.com/v1",
+        capabilities: { vision: true, code: true, longContext: true },
+      }],
+      agentOverrides: {},
+    }, providers);
+
+    expect(normalized.profiles[0]).toMatchObject({
+      provider: "zhipu",
+      apiKeyReference: "model.zhipu",
+      baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    });
+  });
+
+  it("aligns Qwen/DashScope slots to the provider model connection", () => {
+    const normalized = normalizeModelConfigurationConnections({
+      profiles: [
+        {
+          id: "dashscope-qwen-max",
+          slot: null,
+          displayName: "qwen-max",
+          provider: "dashscope",
+          model: "qwen-max",
+          apiKeyReference: "model.dashscope",
+          baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+          capabilities: { vision: true, code: true, longContext: true },
+        },
+        {
+          id: "primary",
+          slot: "primary",
+          displayName: "Primary",
+          provider: "dashscope",
+          model: "qwen-max",
+          apiKeyReference: "default",
+          baseUrl: "https://api.openai.com/v1",
+          capabilities: { vision: true, code: true, longContext: true },
+        },
+      ],
+      agentOverrides: {},
+    }, providers);
+
+    expect(normalized.profiles.find((profile) => profile.slot === "primary")).toMatchObject({
+      provider: "dashscope",
+      apiKeyReference: "model.dashscope",
+      baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     });
   });
 });

@@ -187,12 +187,18 @@ export async function runRestoredPdfOrganization(
     request: {
       approvalId: record.approvalId,
       operations: record.permissionRequest.dryRun.affectedPaths,
+      taskId: record.taskId,
     },
+  });
+  await invoke("approve_pdf_organization", {
+    approvalId: record.approvalId,
+    taskId: record.taskId,
   });
   return invoke<FileOrganizationExecution>("execute_pdf_organization", {
     request: {
       approvalId: record.approvalId,
       operations: record.permissionRequest.dryRun.affectedPaths,
+      taskId: record.taskId,
     },
   });
 }
@@ -206,26 +212,40 @@ export async function applyRestoredCodePatch(record: DurableApprovalRecord): Pro
   if (proposalSafetyError) {
     throw new Error(proposalSafetyError);
   }
+  const restoredEdit = {
+    ...edit,
+    approvalId: edit.approvalId ?? record.approvalId,
+  };
+  await invoke("restore_code_patch_approval", {
+    request: {
+      approvalId: record.approvalId,
+      edit: restoredEdit,
+      taskId: record.taskId,
+    },
+  });
   await invoke("approve_code_patch", {
     request: {
       approvalId: record.approvalId,
-      proposalId: edit.proposalId,
-      workspacePath: edit.workspacePath,
-      changedFiles: edit.changedFiles,
-      patchHash: edit.patchHash,
+      proposalId: restoredEdit.proposalId,
+      workspacePath: restoredEdit.workspacePath,
+      changedFiles: restoredEdit.changedFiles,
+      patchHash: restoredEdit.patchHash,
+      taskId: record.taskId,
     },
   });
   const applyResult = await invoke<CodeApplyResult>("apply_code_patch", {
     request: {
       approvalId: record.approvalId,
-      proposalId: edit.proposalId,
-      workspacePath: edit.workspacePath,
-      changedFiles: edit.changedFiles,
-      patch: edit.patch,
-      patchHash: edit.patchHash,
+      proposalId: restoredEdit.proposalId,
+      workspacePath: restoredEdit.workspacePath,
+      changedFiles: restoredEdit.changedFiles,
+      patch: restoredEdit.patch,
+      patchHash: restoredEdit.patchHash,
+      baseGitHead: restoredEdit.baseGitHead,
+      taskId: record.taskId,
     },
   });
-  const applySafetyError = validateCodeApplyResult(edit, applyResult);
+  const applySafetyError = validateCodeApplyResult(restoredEdit, applyResult);
   if (applySafetyError) {
     throw new Error(applySafetyError);
   }

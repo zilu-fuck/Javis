@@ -27,6 +27,7 @@ export class OpenAIAdapter implements ProviderAdapter {
     return {
       prompt: input.prompt,
       imageDataUrl: input.imageDataUrl,
+      images: input.images,
       providerId: input.providerId || "openai",
       model: input.model,
       apiKeyReference: input.apiKeyReference,

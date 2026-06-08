@@ -1,5 +1,16 @@
-import { describe, expect, it } from "vitest";
-import { getProviderCapabilities, validateImageDataUrl } from "./app-runtime";
+import { describe, expect, it, vi, beforeEach } from "vitest";
+import { invoke } from "@tauri-apps/api/core";
+import { getProviderCapabilities, resolveImageDataUrl, validateImageDataUrl } from "./app-runtime";
+
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(),
+}));
+
+const invokeMock = vi.mocked(invoke);
+
+beforeEach(() => {
+  invokeMock.mockReset();
+});
 
 describe("getProviderCapabilities", () => {
   it("returns capabilities for openai", () => {
@@ -52,5 +63,26 @@ describe("validateImageDataUrl", () => {
     expect(() => validateImageDataUrl("data:image/png;base64,")).toThrow("non-empty base64");
     expect(() => validateImageDataUrl("data:image/png;base64,abcde")).toThrow("valid padded base64");
     expect(() => validateImageDataUrl("data:image/svg+xml;base64,PHN2Zz4=")).toThrow("PNG, JPEG");
+  });
+});
+
+describe("resolveImageDataUrl", () => {
+  it("passes workspace roots to the native image reader", async () => {
+    invokeMock.mockResolvedValueOnce("data:image/png;base64,YWJjZA==");
+
+    await expect(resolveImageDataUrl("images/pic.png", "E:/Javis")).resolves.toBe(
+      "data:image/png;base64,YWJjZA==",
+    );
+
+    expect(invokeMock).toHaveBeenCalledWith("read_image_data_url", {
+      path: "E:/Javis/images/pic.png",
+      workspaceRoot: "E:/Javis",
+      allowedRootIds: null,
+    });
+  });
+
+  it("rejects local image paths without a selected workspace", async () => {
+    await expect(resolveImageDataUrl("images/pic.png")).rejects.toThrow("selected workspace");
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });

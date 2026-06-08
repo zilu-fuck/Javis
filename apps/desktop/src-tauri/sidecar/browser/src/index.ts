@@ -3,6 +3,8 @@ import * as readline from "node:readline";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
+import * as dns from "node:dns/promises";
+import * as net from "node:net";
 import { execFile } from "node:child_process";
 
 // ---------------------------------------------------------------------------
@@ -33,6 +35,9 @@ let browser: Browser | null = null;
 let context: BrowserContext | null = null;
 let page: Page | null = null;
 let userDataDir: string | null = null;
+let requestPolicy = { allowLocalhost: false };
+let navigationHistory: string[] = [];
+let navigationIndex = -1;
 
 async function ensureBrowser(headless = true): Promise<{ browser: Browser; context: BrowserContext; page: Page }> {
   // Detect stale browser (e.g. process crashed, disconnected).
@@ -51,9 +56,132 @@ async function ensureBrowser(headless = true): Promise<{ browser: Browser; conte
 
   browser = await chromium.launch({ headless });
   context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  await context.route("**/*", async (route) => {
+    const allowed = await isBrowserRequestAllowed(route.request().url(), requestPolicy.allowLocalhost);
+    if (!allowed) {
+      await route.abort("blockedbyclient");
+      return;
+    }
+    await route.continue();
+  });
   page = await context.newPage();
 
   return { browser, context, page };
+}
+
+function setRequestPolicy(allowLocalhost: boolean): void {
+  requestPolicy = { allowLocalhost };
+}
+
+function recordNavigation(url: string): void {
+  if (!url || url === "about:blank") return;
+  if (navigationHistory[navigationIndex] === url) return;
+  navigationHistory = navigationHistory.slice(0, navigationIndex + 1);
+  navigationHistory.push(url);
+  navigationIndex = navigationHistory.length - 1;
+}
+
+async function currentPageStatus(loadState = "idle", status: number | null = null): Promise<Record<string, unknown>> {
+  if (!browser || !browser.isConnected() || !page) {
+    return {
+      sidecarRunning: false,
+      url: "",
+      title: "",
+      status,
+      loadState: "idle",
+      canGoBack: false,
+      canGoForward: false,
+    };
+  }
+
+  return {
+    sidecarRunning: true,
+    url: page.url(),
+    title: await page.title(),
+    status,
+    loadState,
+    canGoBack: navigationIndex > 0,
+    canGoForward: navigationIndex >= 0 && navigationIndex < navigationHistory.length - 1,
+  };
+}
+
+async function isBrowserRequestAllowed(rawUrl: string, allowLocalhost: boolean): Promise<boolean> {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+
+  if (["about:", "blob:", "data:"].includes(parsed.protocol)) {
+    return true;
+  }
+  if (!["http:", "https:", "ws:", "wss:"].includes(parsed.protocol)) {
+    return false;
+  }
+  if (parsed.username || parsed.password) {
+    return false;
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  if (!host) return false;
+  if (isPrivateHost(host)) {
+    return allowLocalhost && isLocalhost(host);
+  }
+  if (allowLocalhost && isLocalhost(host)) {
+    return true;
+  }
+  if (net.isIP(host) !== 0) {
+    return !isPrivateIp(host);
+  }
+
+  try {
+    const addresses = await dns.lookup(host, { all: true });
+    return addresses.length > 0 && addresses.every((entry) => !isPrivateIp(entry.address));
+  } catch {
+    return false;
+  }
+}
+
+function isLocalhost(host: string): boolean {
+  return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+}
+
+function isPrivateHost(host: string): boolean {
+  if (isLocalhost(host)) return true;
+  if (host === "metadata.google.internal" || host === "metadata") return true;
+  return net.isIP(host) !== 0 && isPrivateIp(host);
+}
+
+function isPrivateIp(address: string): boolean {
+  if (net.isIPv4(address)) {
+    const parts = address.split(".").map((part) => Number(part));
+    const a = parts[0] ?? -1;
+    const b = parts[1] ?? -1;
+    return (
+      a === 0 ||
+      a === 10 ||
+      a === 127 ||
+      a === 169 && b === 254 ||
+      a === 172 && b >= 16 && b <= 31 ||
+      a === 192 && b === 168 ||
+      a === 100 && b >= 64 && b <= 127 ||
+      a === 224 ||
+      a >= 240
+    );
+  }
+  if (net.isIPv6(address)) {
+    const normalized = address.toLowerCase();
+    return (
+      normalized === "::" ||
+      normalized === "::1" ||
+      normalized.startsWith("fe80:") ||
+      normalized.startsWith("fc") ||
+      normalized.startsWith("fd") ||
+      normalized.startsWith("ff")
+    );
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +209,7 @@ async function handleNavigate(params: Record<string, unknown> | undefined): Prom
   const url = String(params?.url ?? "");
   const waitForSelector = params?.waitForSelector ? String(params.waitForSelector) : undefined;
   const timeoutMs = params?.timeoutMs ? Number(params.timeoutMs) : 30_000;
+  setRequestPolicy(params?.allowLocalhost === true);
 
   const response = await page.goto(url, { waitUntil: "load", timeout: timeoutMs });
 
@@ -88,12 +217,56 @@ async function handleNavigate(params: Record<string, unknown> | undefined): Prom
     await page.waitForSelector(waitForSelector, { timeout: timeoutMs });
   }
 
-  return {
-    url: page.url(),
-    title: await page.title(),
-    status: response?.status() ?? null,
-    loadState: "load",
-  };
+  recordNavigation(page.url());
+  return currentPageStatus("load", response?.status() ?? null);
+}
+
+async function handleStatus(): Promise<unknown> {
+  return currentPageStatus();
+}
+
+async function handleRefresh(params: Record<string, unknown> | undefined): Promise<unknown> {
+  const { page } = await ensureBrowser();
+  const timeoutMs = params?.timeoutMs ? Number(params.timeoutMs) : 30_000;
+  setRequestPolicy(params?.allowLocalhost === true);
+
+  const response = await page.reload({ waitUntil: "load", timeout: timeoutMs });
+  recordNavigation(page.url());
+  return currentPageStatus("load", response?.status() ?? null);
+}
+
+async function handleGoBack(params: Record<string, unknown> | undefined): Promise<unknown> {
+  const { page } = await ensureBrowser();
+  const timeoutMs = params?.timeoutMs ? Number(params.timeoutMs) : 30_000;
+  setRequestPolicy(params?.allowLocalhost === true);
+
+  if (navigationIndex <= 0) {
+    return currentPageStatus("idle");
+  }
+
+  const response = await page.goBack({ waitUntil: "load", timeout: timeoutMs });
+  navigationIndex = Math.max(0, navigationIndex - 1);
+  if (response === null && navigationHistory[navigationIndex]) {
+    await page.goto(navigationHistory[navigationIndex], { waitUntil: "load", timeout: timeoutMs });
+  }
+  return currentPageStatus("load", response?.status() ?? null);
+}
+
+async function handleGoForward(params: Record<string, unknown> | undefined): Promise<unknown> {
+  const { page } = await ensureBrowser();
+  const timeoutMs = params?.timeoutMs ? Number(params.timeoutMs) : 30_000;
+  setRequestPolicy(params?.allowLocalhost === true);
+
+  if (navigationIndex < 0 || navigationIndex >= navigationHistory.length - 1) {
+    return currentPageStatus("idle");
+  }
+
+  const response = await page.goForward({ waitUntil: "load", timeout: timeoutMs });
+  navigationIndex = Math.min(navigationHistory.length - 1, navigationIndex + 1);
+  if (response === null && navigationHistory[navigationIndex]) {
+    await page.goto(navigationHistory[navigationIndex], { waitUntil: "load", timeout: timeoutMs });
+  }
+  return currentPageStatus("load", response?.status() ?? null);
 }
 
 async function handleScreenshot(params: Record<string, unknown> | undefined): Promise<unknown> {
@@ -120,6 +293,7 @@ async function handleScreenshot(params: Record<string, unknown> | undefined): Pr
     dataUrl,
     width: viewport?.width ?? 0,
     height: viewport?.height ?? 0,
+    url: page.url(),
   };
 }
 
@@ -152,6 +326,29 @@ async function handleGetContent(params: Record<string, unknown> | undefined): Pr
     url: page.url(),
     title: await page.title(),
   };
+}
+
+async function handleExtractLinks(params: Record<string, unknown> | undefined): Promise<unknown> {
+  const { page } = await ensureBrowser();
+  const selector = params?.selector ? String(params.selector) : "a[href]";
+  const maxResults = Math.max(1, Math.min(params?.maxResults ? Number(params.maxResults) : 50, 200));
+
+  const links = await page.$$eval(
+    selector,
+    (elements: Element[], max: number) =>
+      elements.slice(0, max).map((el) => {
+        const anchor = el as HTMLAnchorElement;
+        return {
+          href: anchor.href || "",
+          text: (anchor.textContent || "").trim().slice(0, 200),
+          tag: anchor.tagName?.toLowerCase(),
+          rel: anchor.rel || "",
+        };
+      }),
+    maxResults,
+  );
+
+  return { links, count: links.length, url: page.url() };
 }
 
 async function handleClick(params: Record<string, unknown> | undefined): Promise<unknown> {
@@ -279,6 +476,8 @@ async function handleClose(): Promise<unknown> {
   browser = null;
   context = null;
   page = null;
+  navigationHistory = [];
+  navigationIndex = -1;
 
   if (userDataDir) {
     try { fs.rmSync(userDataDir, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -302,11 +501,26 @@ async function dispatch(req: Request): Promise<void> {
       case "navigate":
         result = await handleNavigate(params);
         break;
+      case "status":
+        result = await handleStatus();
+        break;
+      case "refresh":
+        result = await handleRefresh(params);
+        break;
+      case "goBack":
+        result = await handleGoBack(params);
+        break;
+      case "goForward":
+        result = await handleGoForward(params);
+        break;
       case "screenshot":
         result = await handleScreenshot(params);
         break;
       case "getContent":
         result = await handleGetContent(params);
+        break;
+      case "extractLinks":
+        result = await handleExtractLinks(params);
         break;
       case "click":
         result = await handleClick(params);

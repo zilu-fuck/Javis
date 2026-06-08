@@ -24,31 +24,36 @@ use windows_sys::Win32::{
     },
 };
 
-mod streaming;
-mod database;
 mod anthropic;
-mod error;
-mod shell;
-mod web;
-mod pdf;
-mod inspect;
 mod audit;
-mod workspace;
-mod mcpserv;
-mod scan;
-mod code;
 mod browser;
-mod git;
-mod files;
-mod terminal;
-mod file_write;
+mod code;
 mod computer;
+mod database;
+mod error;
+mod file_write;
+mod files;
+mod git;
+mod inspect;
+mod mcpserv;
+mod pdf;
+mod scan;
+mod shell;
+mod streaming;
+mod terminal;
+mod web;
+mod workspace;
 
 // Re-import from extracted modules
-use code::{normalize_optional_config_value, create_chat_completions_endpoint, CodeProposeEditRequest, default_model_for_locale, default_provider_for_locale, infer_provider_id_from_model, normalize_openai_compatible_model_name, FileContentHash};
+use code::{
+    create_chat_completions_endpoint, default_model_for_locale, default_provider_for_locale,
+    infer_provider_id_from_model, normalize_openai_compatible_model_name,
+    normalize_optional_config_value, CodeProposeEditRequest, FileContentHash,
+};
 use web::WebSearchResult;
 
 pub(crate) const OPENCODE_PROPOSAL_TIMEOUT: Duration = Duration::from_secs(90);
+pub(crate) const NATIVE_APPROVAL_TTL: Duration = Duration::from_secs(10 * 60);
 pub(crate) const MODEL_API_KEY_SECRET_REFERENCE: &str = "default";
 pub(crate) const MODEL_API_KEY_SECRET_PREFIX: &str = "dpapi-v1:";
 pub(crate) const JAVIS_TERMINOLOGY_PROMPT_PREFIX: &str = r#"Javis terminology rules for Chinese output:
@@ -137,6 +142,8 @@ pub(crate) struct NativeApprovalBinding {
     task_id: String,
     preview_hash: String,
     approved: bool,
+    created_at: SystemTime,
+    approved_at: Option<SystemTime>,
 }
 pub(crate) fn env_flag_enabled(name: &str) -> bool {
     env::var(name)
@@ -252,6 +259,14 @@ struct ModelApiKeySecretStatus {
     exists: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentStyleResponse {
+    content: String,
+    source: String,
+    file_path: Option<String>,
+}
+
 #[tauri::command]
 fn check_model_api_key_secret(
     app: AppHandle,
@@ -263,11 +278,127 @@ fn check_model_api_key_secret(
         exists: path.exists(),
     })
 }
+
+#[tauri::command]
+fn read_agent_style(
+    app: AppHandle,
+    kind: String,
+    workspace_path: Option<String>,
+) -> Result<AgentStyleResponse, String> {
+    let kind = normalize_agent_style_kind(&kind)?;
+    if let Some(workspace) = resolve_optional_workspace_for_agent_style(workspace_path.clone())? {
+        let path = workspace_agent_style_path(&workspace, &kind);
+        if path.exists() {
+            let content = read_truncated_agent_style(&path)?;
+            return Ok(AgentStyleResponse {
+                content,
+                source: "workspace".to_string(),
+                file_path: Some(path.to_string_lossy().to_string()),
+            });
+        }
+    }
+
+    let path = global_agent_style_path(&app, &kind)?;
+    if path.exists() {
+        let content = read_truncated_agent_style(&path)?;
+        return Ok(AgentStyleResponse {
+            content,
+            source: "global".to_string(),
+            file_path: Some(path.to_string_lossy().to_string()),
+        });
+    }
+
+    Ok(AgentStyleResponse {
+        content: String::new(),
+        source: "none".to_string(),
+        file_path: None,
+    })
+}
+
+#[tauri::command]
+fn write_agent_style(
+    app: AppHandle,
+    kind: String,
+    content: String,
+    workspace_path: Option<String>,
+) -> Result<(), String> {
+    let kind = normalize_agent_style_kind(&kind)?;
+    let path = if let Some(workspace) = resolve_optional_workspace_for_agent_style(workspace_path)?
+    {
+        workspace_agent_style_path(&workspace, &kind)
+    } else {
+        global_agent_style_path(&app, &kind)?
+    };
+
+    if content.trim().is_empty() {
+        match fs::remove_file(&path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("Could not delete agent style: {error}")),
+        }
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create agent style directory: {error}"))?;
+    }
+    let truncated: String = content.chars().take(6000).collect();
+    fs::write(&path, truncated).map_err(|error| format!("Could not save agent style: {error}"))
+}
+
+fn normalize_agent_style_kind(kind: &str) -> Result<String, String> {
+    let value = kind.trim();
+    if value.is_empty()
+        || !value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err("Invalid agent kind.".to_string());
+    }
+    Ok(value.to_string())
+}
+
+fn resolve_optional_workspace_for_agent_style(
+    workspace_path: Option<String>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(path) = workspace_path else {
+        return Ok(None);
+    };
+    if path.trim().is_empty() {
+        return Ok(None);
+    }
+    resolve_workspace_path(Some(path))
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn workspace_agent_style_path(workspace: &Path, kind: &str) -> PathBuf {
+    workspace
+        .join(".javis")
+        .join("agent-styles")
+        .join(format!("{kind}.md"))
+}
+
+fn global_agent_style_path(app: &AppHandle, kind: &str) -> Result<PathBuf, String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not resolve app data directory: {error}"))?;
+    Ok(data_dir.join("agent-styles").join(format!("{kind}.md")))
+}
+
+fn read_truncated_agent_style(path: &Path) -> Result<String, String> {
+    let content =
+        fs::read_to_string(path).map_err(|error| format!("Could not read agent style: {error}"))?;
+    Ok(content.chars().take(6000).collect())
+}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FetchProviderModelsRequest {
     key_reference: String,
+    api_key: Option<String>,
     base_url: String,
+    provider_id: Option<String>,
     /// "openai-compatible" or "anthropic-messages"
     api_type: String,
     /// "openai", "anthropic", or "unsupported"
@@ -285,7 +416,15 @@ fn fetch_provider_models(
     app: AppHandle,
     request: FetchProviderModelsRequest,
 ) -> Result<FetchProviderModelsResponse, String> {
-    let key = load_model_api_key_secret_for_app(&app, &request.key_reference).unwrap_or_default();
+    let provider_id = normalize_optional_config_value(request.provider_id.as_deref())
+        .or_else(|| infer_provider_id_from_key_reference(&request.key_reference))
+        .unwrap_or_else(|| "openai".to_string());
+    let key = if let Some(api_key) = normalize_optional_config_value(request.api_key.as_deref()) {
+        api_key
+    } else {
+        ensure_saved_model_key_matches_base_url(&provider_id, Some(&request.base_url))?;
+        load_model_api_key_secret_with_fallback(&app, &request.key_reference, &provider_id)?
+    };
     let base = request.base_url.trim_end_matches('/');
     let model_list_mode = request.model_list_mode.as_deref().unwrap_or_else(|| {
         if request.api_type == "anthropic-messages" {
@@ -315,7 +454,9 @@ fn fetch_provider_models(
     let mut req = client.get(&url).header("Content-Type", "application/json");
     if !key.is_empty() {
         if model_list_mode == "anthropic" {
-            req = req.header("x-api-key", &key).header("anthropic-version", "2023-06-01");
+            req = req
+                .header("x-api-key", &key)
+                .header("anthropic-version", "2023-06-01");
         } else {
             req = req.header("Authorization", &format!("Bearer {key}"));
         }
@@ -376,14 +517,21 @@ pub(crate) fn resolve_command_program(program: &str) -> String {
     program.to_string()
 }
 
-pub(crate) fn resolve_workspace_path(workspace_path: Option<String>) -> Result<PathBuf, error::JavisError> {
+pub(crate) fn resolve_workspace_path(
+    workspace_path: Option<String>,
+) -> Result<PathBuf, error::JavisError> {
     if let Some(path) = workspace_path {
         let trimmed_path = path.trim();
         if trimmed_path.is_empty() {
-            return Err(error::JavisError::Validation("Workspace path cannot be empty.".into()));
+            return Err(error::JavisError::Validation(
+                "Workspace path cannot be empty.".into(),
+            ));
         }
-        let workspace = fs::canonicalize(trimmed_path)
-            .map_err(|e| error::JavisError::Io(format!("Selected workspace path is not accessible: {trimmed_path}: {e}")))?;
+        let workspace = fs::canonicalize(trimmed_path).map_err(|e| {
+            error::JavisError::Io(format!(
+                "Selected workspace path is not accessible: {trimmed_path}: {e}"
+            ))
+        })?;
         if !workspace.is_dir() {
             return Err(error::JavisError::Validation(format!(
                 "Selected workspace path is not a directory: {}",
@@ -445,8 +593,19 @@ pub(crate) fn hydrate_model_api_key_secret(
     else {
         return Ok(());
     };
-    let provider_id = normalize_optional_config_value(request.provider_id.as_deref()).unwrap_or_else(|| "unknown".to_string());
-    request.api_key = Some(load_model_api_key_secret_with_fallback(app, &key_reference, &provider_id)?);
+    let provider_id = normalize_optional_config_value(request.provider_id.as_deref())
+        .unwrap_or_else(|| "unknown".to_string());
+    let base_url = normalize_optional_config_value(request.base_url.as_deref())
+        .unwrap_or_else(|| default_openai_compatible_base_url(request));
+    if !openai_compatible_request_requires_api_key(&provider_id, &base_url) {
+        return Ok(());
+    }
+    ensure_saved_model_key_matches_base_url(&provider_id, Some(&base_url))?;
+    request.api_key = Some(load_model_api_key_secret_with_fallback(
+        app,
+        &key_reference,
+        &provider_id,
+    )?);
     Ok(())
 }
 
@@ -463,32 +622,36 @@ pub(crate) fn hydrate_model_completion_api_key_secret(
     };
     let provider_id = normalize_optional_config_value(request.provider_id.as_deref())
         .unwrap_or_else(|| infer_model_completion_provider_id(request));
-    request.api_key = Some(load_model_api_key_secret_with_fallback(app, &key_reference, &provider_id)?);
+    let base_url = normalize_optional_config_value(request.base_url.as_deref())
+        .unwrap_or_else(|| default_openai_compatible_base_url_for_provider(&provider_id));
+    if !openai_compatible_request_requires_api_key(&provider_id, &base_url) {
+        return Ok(());
+    }
+    ensure_saved_model_key_matches_base_url(&provider_id, Some(&base_url))?;
+    request.api_key = Some(load_model_api_key_secret_with_fallback(
+        app,
+        &key_reference,
+        &provider_id,
+    )?);
     Ok(())
 }
 
-/// Try `key_reference` first, then `model.<provider_id>`, then `"default"`.
+/// Try only provider-scoped saved keys. The legacy `"default"` reference is
+/// accepted for OpenAI compatibility, but is never used as a cross-provider
+/// fallback.
 /// Returns the resolved secret or a descriptive error listing all attempts.
 fn load_model_api_key_secret_with_fallback(
     app: &AppHandle,
     key_reference: &str,
     provider_id: &str,
 ) -> Result<String, String> {
-    let provider_ref = format!("model.{provider_id}");
-    let mut candidates: Vec<&str> = vec![key_reference];
-    if provider_ref != key_reference {
-        candidates.push(&provider_ref);
-    }
-    let default_ref = MODEL_API_KEY_SECRET_REFERENCE;
-    if default_ref != key_reference && default_ref != provider_ref {
-        candidates.push(default_ref);
-    }
+    let candidates = model_api_key_secret_candidates(key_reference, provider_id)?;
     let mut errors: Vec<String> = Vec::new();
     for candidate in &candidates {
-        match try_load_model_api_key_secret_for_app(app, candidate) {
+        match try_load_model_api_key_secret_for_app(app, candidate.as_str()) {
             Some(api_key) => return Ok(api_key),
             None => {
-                let path = model_api_key_secret_path(app, candidate)
+                let path = model_api_key_secret_path(app, candidate.as_str())
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|_| format!("<path error for {candidate}>"));
                 errors.push(format!("  {candidate} → {path}"));
@@ -503,11 +666,36 @@ fn load_model_api_key_secret_with_fallback(
     ))
 }
 
-#[cfg(windows)]
-fn try_load_model_api_key_secret_for_app(
-    app: &AppHandle,
+fn model_api_key_secret_candidates(
     key_reference: &str,
-) -> Option<String> {
+    provider_id: &str,
+) -> Result<Vec<String>, String> {
+    let key_reference = normalize_model_api_key_reference(key_reference)?;
+    let provider_id = normalize_provider_id_for_secret_scope(provider_id);
+    let provider_ref = format!("model.{provider_id}");
+    let mut candidates = Vec::new();
+    if key_reference == provider_ref
+        || (provider_id == "openai" && key_reference == MODEL_API_KEY_SECRET_REFERENCE)
+    {
+        candidates.push(key_reference);
+    }
+    if !candidates.iter().any(|candidate| candidate == &provider_ref) {
+        candidates.push(provider_ref);
+    }
+    Ok(candidates)
+}
+
+fn normalize_provider_id_for_secret_scope(provider_id: &str) -> String {
+    let normalized = provider_id.trim().to_ascii_lowercase();
+    if normalized.is_empty() || normalized == "unknown" {
+        "openai".to_string()
+    } else {
+        normalized
+    }
+}
+
+#[cfg(windows)]
+fn try_load_model_api_key_secret_for_app(app: &AppHandle, key_reference: &str) -> Option<String> {
     let key_reference = normalize_model_api_key_reference(key_reference).ok()?;
     let path = model_api_key_secret_path(app, &key_reference).ok()?;
     if !path.exists() {
@@ -518,14 +706,12 @@ fn try_load_model_api_key_secret_for_app(
 }
 
 #[cfg(not(windows))]
-fn try_load_model_api_key_secret_for_app(
-    app: &AppHandle,
-    key_reference: &str,
-) -> Option<String> {
+fn try_load_model_api_key_secret_for_app(app: &AppHandle, key_reference: &str) -> Option<String> {
     load_model_api_key_secret_for_app(app, key_reference).ok()
 }
 
 #[cfg(windows)]
+#[allow(dead_code)]
 fn load_model_api_key_secret_for_app(
     app: &AppHandle,
     key_reference: &str,
@@ -570,6 +756,52 @@ fn normalize_model_api_key_reference(value: &str) -> Result<String, String> {
     Err(format!(
         "Unknown model API key reference: {value}. Expected 'default' or 'model.<name>'."
     ))
+}
+
+fn infer_provider_id_from_key_reference(key_reference: &str) -> Option<String> {
+    normalize_model_api_key_reference(key_reference)
+        .ok()
+        .and_then(|reference| {
+            reference
+                .strip_prefix("model.")
+                .map(|value| value.to_string())
+        })
+}
+
+fn ensure_saved_model_key_matches_base_url(
+    provider_id: &str,
+    base_url: Option<&str>,
+) -> Result<(), String> {
+    let Some(base_url) = normalize_optional_config_value(base_url) else {
+        return Ok(());
+    };
+    let normalized_provider = provider_id.trim().to_ascii_lowercase();
+    if normalized_provider == "custom" {
+        return Err(saved_model_key_base_url_error());
+    }
+    let expected = default_model_base_url_for_secret_scope(&normalized_provider);
+    if normalize_base_url_for_secret_scope(&base_url)
+        == normalize_base_url_for_secret_scope(&expected)
+    {
+        return Ok(());
+    }
+    Err(saved_model_key_base_url_error())
+}
+
+fn default_model_base_url_for_secret_scope(provider_id: &str) -> String {
+    match provider_id {
+        "anthropic" => "https://api.anthropic.com".to_string(),
+        "deepseek-anthropic" => "https://api.deepseek.com/anthropic".to_string(),
+        _ => default_openai_compatible_base_url_for_provider(provider_id),
+    }
+}
+
+fn normalize_base_url_for_secret_scope(base_url: &str) -> String {
+    base_url.trim().trim_end_matches('/').to_ascii_lowercase()
+}
+
+fn saved_model_key_base_url_error() -> String {
+    "Stored model API keys can only be used with that provider's default Base URL. Re-enter the key for this request to use a custom Base URL.".to_string()
 }
 
 #[cfg(windows)]
@@ -876,9 +1108,8 @@ fn create_openai_compatible_completion_body(
 ) -> serde_json::Value {
     let images = build_image_list(request);
     let user_content = if !images.is_empty() {
-        let mut content: Vec<serde_json::Value> = vec![
-            serde_json::json!({ "type": "text", "text": request.prompt }),
-        ];
+        let mut content: Vec<serde_json::Value> =
+            vec![serde_json::json!({ "type": "text", "text": request.prompt })];
         for img in &images {
             content.push(serde_json::json!({ "type": "image_url", "image_url": { "url": img } }));
         }
@@ -994,7 +1225,9 @@ pub(crate) fn extract_openai_compatible_usage(value: &serde_json::Value) -> Opti
     })
 }
 
-pub(crate) fn normalize_model_completion_model_name(request: &ModelCompletionRequest) -> Option<String> {
+pub(crate) fn normalize_model_completion_model_name(
+    request: &ModelCompletionRequest,
+) -> Option<String> {
     let model = normalize_optional_config_value(request.model.as_deref())
         .or_else(|| Some(default_model_for_locale(request.locale.as_deref())));
     model.map(|model| {
@@ -1017,13 +1250,24 @@ pub(crate) fn infer_model_completion_provider_id(request: &ModelCompletionReques
 
 static PROVIDER_DEFAULT_BASE_URLS: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
     HashMap::from([
+        ("anthropic", "https://api.anthropic.com"),
         ("baichuan", "https://api.baichuan-ai.com/v1"),
         ("baidu-cloud", "https://qianfan.baidubce.com/v2"),
-        ("dashscope", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
-        ("dashscope-coding", "https://coding.dashscope.aliyuncs.com/v1"),
+        (
+            "dashscope",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        ),
+        (
+            "dashscope-coding",
+            "https://coding.dashscope.aliyuncs.com/v1",
+        ),
         ("deepseek", "https://api.deepseek.com"),
+        ("deepseek-anthropic", "https://api.deepseek.com/anthropic"),
         ("fireworks", "https://api.fireworks.ai/inference/v1"),
-        ("gemini", "https://generativelanguage.googleapis.com/v1beta/openai"),
+        (
+            "gemini",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+        ),
         ("groq", "https://api.groq.com/openai/v1"),
         ("hunyuan", "https://api.hunyuan.cloud.tencent.com/v1"),
         ("infini", "https://cloud.infini-ai.com/maas/v1"),
@@ -1039,7 +1283,10 @@ static PROVIDER_DEFAULT_BASE_URLS: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
         ("stepfun", "https://api.stepfun.com/v1"),
         ("together", "https://api.together.xyz/v1"),
         ("volcengine", "https://ark.cn-beijing.volces.com/api/v3"),
-        ("volcengine-coding", "https://ark.cn-beijing.volces.com/api/coding/v3"),
+        (
+            "volcengine-coding",
+            "https://ark.cn-beijing.volces.com/api/coding/v3",
+        ),
         ("xai", "https://api.x.ai/v1"),
         ("zhipu", "https://open.bigmodel.cn/api/paas/v4"),
     ])
@@ -1052,7 +1299,10 @@ pub(crate) fn default_openai_compatible_base_url_for_provider(provider_id: &str)
         .unwrap_or_else(|| "https://api.openai.com/v1".to_string())
 }
 
-pub(crate) fn openai_compatible_request_requires_api_key(provider_id: &str, base_url: &str) -> bool {
+pub(crate) fn openai_compatible_request_requires_api_key(
+    provider_id: &str,
+    base_url: &str,
+) -> bool {
     provider_id != "ollama" && !is_local_openai_compatible_base_url(base_url)
 }
 
@@ -1210,12 +1460,15 @@ pub(crate) fn create_native_approval_binding(
     preview_hash: String,
     approved: bool,
 ) -> NativeApprovalBinding {
+    let now = SystemTime::now();
     NativeApprovalBinding {
         approval_id,
         tool_name: tool_name.to_string(),
         task_id,
         preview_hash,
         approved,
+        created_at: now,
+        approved_at: approved.then_some(now),
     }
 }
 
@@ -1237,7 +1490,14 @@ pub(crate) fn approve_native_approval_binding(
     if binding.preview_hash != preview_hash {
         return Err("Approval preview hash does not match the pending dry-run.".to_string());
     }
+    require_native_approval_timestamp_fresh(
+        binding.created_at,
+        "Native approval request expired; please request approval again.",
+        "Native approval request timestamp is invalid.",
+    )
+    .map_err(|error| error.to_string())?;
     binding.approved = true;
+    binding.approved_at = Some(SystemTime::now());
     Ok(())
 }
 
@@ -1254,14 +1514,40 @@ pub(crate) fn require_native_approval_binding(
         return Err(error::JavisError::Permission(mismatch_error.to_string()));
     }
     if binding.tool_name != tool_name {
-        return Err(error::JavisError::Permission("Approval tool binding does not match the approved dry-run.".into()));
+        return Err(error::JavisError::Permission(
+            "Approval tool binding does not match the approved dry-run.".into(),
+        ));
     }
     require_native_approval_task_id(binding, task_id)?;
     if binding.preview_hash != preview_hash {
-        return Err(error::JavisError::Permission("Approval preview hash does not match the approved dry-run.".into()));
+        return Err(error::JavisError::Permission(
+            "Approval preview hash does not match the approved dry-run.".into(),
+        ));
     }
     if !binding.approved {
         return Err(error::JavisError::Permission(unapproved_error.to_string()));
+    }
+    let approved_at = binding.approved_at.ok_or_else(|| {
+        error::JavisError::Permission("Native approval timestamp is missing.".to_string())
+    })?;
+    require_native_approval_timestamp_fresh(
+        approved_at,
+        "Native approval expired; please request approval again.",
+        "Native approval timestamp is invalid.",
+    )?;
+    Ok(())
+}
+
+fn require_native_approval_timestamp_fresh(
+    timestamp: SystemTime,
+    expired_message: &str,
+    invalid_message: &str,
+) -> Result<(), error::JavisError> {
+    let age = timestamp
+        .elapsed()
+        .map_err(|_| error::JavisError::Permission(invalid_message.to_string()))?;
+    if age >= NATIVE_APPROVAL_TTL {
+        return Err(error::JavisError::Permission(expired_message.to_string()));
     }
     Ok(())
 }
@@ -1273,7 +1559,9 @@ pub(crate) fn require_native_approval_task_id(
     let approved_task_id = binding.task_id.trim();
     let requested_task_id = task_id.unwrap_or_default().trim();
     if approved_task_id != requested_task_id {
-        return Err(error::JavisError::Permission("Approval task id does not match the approved request.".into()));
+        return Err(error::JavisError::Permission(
+            "Approval task id does not match the approved request.".into(),
+        ));
     }
     Ok(())
 }
@@ -1331,7 +1619,8 @@ pub(crate) fn create_fnv1a_hash(content: &[u8]) -> String {
 }
 
 pub(crate) fn capture_current_git_head(workspace: &Path) -> Option<String> {
-    let output = Command::new(resolve_command_program("git"))
+    let git = git::resolve_git_executable_for_workspace(workspace).ok()?;
+    let output = Command::new(git)
         .args(["rev-parse", "HEAD"])
         .current_dir(workspace)
         .output()
@@ -1414,16 +1703,16 @@ pub(crate) fn html_decode(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::audit::*;
     use super::code::*;
-    use super::pdf::*;
     #[allow(unused_imports)]
     use super::file_write::*;
+    use super::inspect::*;
+    use super::pdf::*;
+    use super::scan::*;
     use super::shell::*;
     use super::web::*;
-    use super::scan::*;
-    use super::inspect::*;
-    use super::audit::*;
+    use super::*;
 
     #[test]
     fn normalize_path_strips_windows_verbatim_prefix() {
@@ -1873,7 +2162,10 @@ mod tests {
         .expect("write text file");
 
         assert_eq!(result.status, "written");
-        assert_eq!(fs::read_to_string(target).expect("read written file"), "# Search\n");
+        assert_eq!(
+            fs::read_to_string(target).expect("read written file"),
+            "# Search\n"
+        );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
 
@@ -1884,7 +2176,8 @@ mod tests {
         let approval_state = Mutex::new(file_write::WriteTextApprovalState::default());
         replace_pending_write_text_approval(&approval_state, "approval-1", &request)
             .expect("store pending text write approval");
-        approve_pending_write_text(&approval_state, "approval-1", None).expect("approve text write");
+        approve_pending_write_text(&approval_state, "approval-1", None)
+            .expect("approve text write");
 
         let result = take_approved_write_text(
             &approval_state,
@@ -1905,15 +2198,114 @@ mod tests {
     }
 
     #[test]
-    fn approved_write_text_rejects_stale_overwrite_target() {
-        let root = create_test_directory("write-text-stale-overwrite");
+    fn native_write_approval_rejects_expired_pending_request() {
+        let root = create_test_directory("write-text-expired-pending");
+        let request = write_text_file_request(&root, "notes.md", "# Notes\n");
+        let approval_state = Mutex::new(file_write::WriteTextApprovalState::default());
+        replace_pending_write_text_approval(&approval_state, "approval-1", &request)
+            .expect("store pending text write approval");
+        {
+            let mut state = approval_state.lock().expect("lock approval state");
+            state
+                .pending
+                .as_mut()
+                .expect("pending approval")
+                .binding
+                .created_at = SystemTime::now() - NATIVE_APPROVAL_TTL - Duration::from_secs(1);
+        }
+
+        let result = approve_pending_write_text(&approval_state, "approval-1", None);
+
+        assert_eq!(
+            result.expect_err("expired pending approval should fail"),
+            "Permission denied: Native approval request expired; please request approval again."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn native_write_approval_rejects_expired_approved_request() {
+        let root = create_test_directory("write-text-expired-approved");
+        let request = write_text_file_request(&root, "notes.md", "# Notes\n");
+        let approval_state = Mutex::new(file_write::WriteTextApprovalState::default());
+        replace_pending_write_text_approval(&approval_state, "approval-1", &request)
+            .expect("store pending text write approval");
+        approve_pending_write_text(&approval_state, "approval-1", None)
+            .expect("approve text write");
+        {
+            let mut state = approval_state.lock().expect("lock approval state");
+            state
+                .pending
+                .as_mut()
+                .expect("pending approval")
+                .binding
+                .approved_at =
+                Some(SystemTime::now() - NATIVE_APPROVAL_TTL - Duration::from_secs(1));
+        }
+
+        let result = take_approved_write_text(
+            &approval_state,
+            &ExecuteWriteTextFileRequest {
+                approval_id: "approval-1".to_string(),
+                target_path: request.target_path.clone(),
+                content: request.content.clone(),
+                workspace_path: request.workspace_path.clone(),
+                task_id: None,
+            },
+        );
+
+        assert_eq!(
+            result
+                .expect_err("expired approved request should fail")
+                .to_string(),
+            "Permission denied: Native approval expired; please request approval again."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn write_text_plan_rejects_existing_target() {
+        let root = create_test_directory("write-text-existing-target");
         let target = root.join("notes.md");
         fs::write(&target, "before\n").expect("write original file");
         let request = write_text_file_request(&root, "notes.md", "after\n");
         let approval_state = Mutex::new(file_write::WriteTextApprovalState::default());
+
+        let result = replace_pending_write_text_approval(&approval_state, "approval-1", &request);
+
+        assert_eq!(
+            result.expect_err("existing target should fail"),
+            "Text write target already exists; overwriting is not supported in v1."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn write_text_plan_rejects_absolute_target() {
+        let root = create_test_directory("write-text-absolute-target");
+        let request =
+            write_text_file_request(&root, &normalize_path(&root.join("notes.md")), "after\n");
+        let approval_state = Mutex::new(file_write::WriteTextApprovalState::default());
+
+        let result = replace_pending_write_text_approval(&approval_state, "approval-1", &request);
+
+        assert_eq!(
+            result.expect_err("absolute target should fail"),
+            "Text write target path must be workspace-relative."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn approved_write_text_rejects_target_created_after_approval() {
+        let root = create_test_directory("write-text-create-race");
+        let target = root.join("notes.md");
+        let request = write_text_file_request(&root, "notes.md", "after\n");
+        let approval_state = Mutex::new(file_write::WriteTextApprovalState::default());
         replace_pending_write_text_approval(&approval_state, "approval-1", &request)
             .expect("store pending text write approval");
-        approve_pending_write_text(&approval_state, "approval-1", None).expect("approve text write");
+        approve_pending_write_text(&approval_state, "approval-1", None)
+            .expect("approve text write");
         let approved = take_approved_write_text(
             &approval_state,
             &ExecuteWriteTextFileRequest {
@@ -1925,7 +2317,7 @@ mod tests {
             },
         )
         .expect("take approved text write");
-        fs::write(&target, "external edit\n").expect("change target after approval");
+        fs::write(&target, "external create\n").expect("create target after approval");
 
         let result = write_text_file(
             &target,
@@ -1935,8 +2327,8 @@ mod tests {
         );
 
         assert_eq!(
-            result.expect_err("stale overwrite should fail"),
-            "Target file changed after approval."
+            result.expect_err("post-approval create should fail"),
+            "Target file now exists; create approval is stale."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -2164,7 +2556,9 @@ mod tests {
         let result = apply_code_patch_in_workspace(&root, request, None);
 
         assert_eq!(
-            result.expect_err("missing approval id should fail").to_string(),
+            result
+                .expect_err("missing approval id should fail")
+                .to_string(),
             "Validation error: Code patch approval id is required."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
@@ -2183,7 +2577,9 @@ mod tests {
         let result = apply_code_patch_in_workspace(&root, request, None);
 
         assert_eq!(
-            result.expect_err("patch hash mismatch should fail").to_string(),
+            result
+                .expect_err("patch hash mismatch should fail")
+                .to_string(),
             "Validation error: Code patch hash does not match the approved proposal."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
@@ -2209,6 +2605,28 @@ mod tests {
     }
 
     #[test]
+    fn code_patch_approval_requires_registered_pending_proposal() {
+        let root = create_test_directory("code-patch-approval-pending-required");
+        let approval_state = Mutex::new(code::CodePatchApprovalState::default());
+        let request = code_patch_apply_request(
+            &root,
+            vec!["src/message.txt".to_string()],
+            "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
+        );
+
+        let result =
+            approve_pending_code_patch(&approval_state, code_patch_approval_request(&request));
+
+        assert_eq!(
+            result
+                .expect_err("pending proposal should be required")
+                .to_string(),
+            "Permission denied: No pending Code Patch proposal exists."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
     fn approved_code_patch_apply_is_one_time_use() {
         let root = create_test_directory("code-patch-one-shot");
         init_git_repo(&root);
@@ -2222,8 +2640,7 @@ mod tests {
         run_git(&root, &["checkout", "--", "src/message.txt"]);
         let request = code_patch_apply_request(&root, vec!["src/message.txt".to_string()], patch);
         let approval_state = Mutex::new(code::CodePatchApprovalState::default());
-        approve_pending_code_patch(&approval_state, code_patch_approval_request(&request))
-            .expect("approve code patch");
+        register_and_approve_code_patch(&approval_state, &request);
 
         let result = apply_code_patch_in_workspace(&root, request.clone(), Some(&approval_state))
             .expect("apply approved patch");
@@ -2231,7 +2648,9 @@ mod tests {
 
         assert!(result.applied);
         assert_eq!(
-            second_result.expect_err("approval should be consumed").to_string(),
+            second_result
+                .expect_err("approval should be consumed")
+                .to_string(),
             "Permission denied: No approved Code Patch proposal is pending."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
@@ -2251,12 +2670,27 @@ mod tests {
         );
         let mut approval = code_patch_approval_request(&request);
         approval.proposal_id = "other-proposal".to_string();
+        let edit = CodeProposedEdit {
+            approval_id: request.approval_id.clone(),
+            proposal_id: approval.proposal_id.clone(),
+            workspace_path: request.workspace_path.clone(),
+            summary: "Test patch.".to_string(),
+            changed_files: request.changed_files.clone(),
+            patch: request.patch.clone(),
+            patch_hash: request.patch_hash.clone(),
+            base_git_head: request.base_git_head.clone(),
+            hunks: None,
+        };
+        register_pending_code_patch(&approval_state, &edit, None)
+            .expect("register pending code patch");
         approve_pending_code_patch(&approval_state, approval).expect("approve code patch");
 
         let result = apply_code_patch_in_workspace(&root, request, Some(&approval_state));
 
         assert_eq!(
-            result.expect_err("proposal mismatch should fail").to_string(),
+            result
+                .expect_err("proposal mismatch should fail")
+                .to_string(),
             "Permission denied: Code patch proposal id does not match the approved proposal."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
@@ -2274,8 +2708,7 @@ mod tests {
             vec!["src/message.txt".to_string()],
             "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
         );
-        approve_pending_code_patch(&approval_state, code_patch_approval_request(&request))
-            .expect("approve code patch");
+        register_and_approve_code_patch(&approval_state, &request);
         {
             let mut state = approval_state.lock().expect("lock approval state");
             state
@@ -2289,7 +2722,9 @@ mod tests {
         let result = apply_code_patch_in_workspace(&root, request, Some(&approval_state));
 
         assert_eq!(
-            result.expect_err("tool binding mismatch should fail").to_string(),
+            result
+                .expect_err("tool binding mismatch should fail")
+                .to_string(),
             "Permission denied: Approval tool binding does not match the approved dry-run."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
@@ -2307,8 +2742,7 @@ mod tests {
             vec!["src/message.txt".to_string()],
             "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
         );
-        approve_pending_code_patch(&approval_state, code_patch_approval_request(&request))
-            .expect("approve code patch");
+        register_and_approve_code_patch(&approval_state, &request);
         {
             let mut state = approval_state.lock().expect("lock approval state");
             state
@@ -2322,7 +2756,9 @@ mod tests {
         let result = apply_code_patch_in_workspace(&root, request, Some(&approval_state));
 
         assert_eq!(
-            result.expect_err("preview hash mismatch should fail").to_string(),
+            result
+                .expect_err("preview hash mismatch should fail")
+                .to_string(),
             "Permission denied: Approval preview hash does not match the approved dry-run."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
@@ -2342,14 +2778,15 @@ mod tests {
         run_git(&root, &["checkout", "--", "src/message.txt"]);
         let request = code_patch_apply_request(&root, vec!["src/message.txt".to_string()], patch);
         let approval_state = Mutex::new(code::CodePatchApprovalState::default());
-        approve_pending_code_patch(&approval_state, code_patch_approval_request(&request))
-            .expect("approve code patch");
+        register_and_approve_code_patch(&approval_state, &request);
         fs::write(&file, "external edit\n").expect("write stale file");
 
         let result = apply_code_patch_in_workspace(&root, request, Some(&approval_state));
 
         assert_eq!(
-            result.expect_err("stale approved file should fail").to_string(),
+            result
+                .expect_err("stale approved file should fail")
+                .to_string(),
             "Permission denied: Code patch approved files changed before apply."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
@@ -2364,8 +2801,7 @@ mod tests {
         let patch = "diff --git a/src/new.txt b/src/new.txt\nnew file mode 100644\nindex 0000000..3b18e51\n--- /dev/null\n+++ b/src/new.txt\n@@ -0,0 +1 @@\n+created\n".to_string();
         let request = code_patch_apply_request(&root, vec!["src/new.txt".to_string()], patch);
         let approval_state = Mutex::new(code::CodePatchApprovalState::default());
-        approve_pending_code_patch(&approval_state, code_patch_approval_request(&request))
-            .expect("approve code patch");
+        register_and_approve_code_patch(&approval_state, &request);
 
         let result = apply_code_patch_in_workspace(&root, request, Some(&approval_state))
             .expect("apply approved patch");
@@ -2393,7 +2829,9 @@ mod tests {
         );
 
         assert_eq!(
-            result.expect_err("unapproved requested path should fail").to_string(),
+            result
+                .expect_err("unapproved requested path should fail")
+                .to_string(),
             "Validation error: Requested path is not approved: src/other.txt"
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
@@ -2479,6 +2917,7 @@ mod tests {
     #[test]
     fn code_proposal_hash_matches_core_test_vector() {
         let proposal = CodeProposedEdit {
+            approval_id: "approval-test".to_string(),
             proposal_id: "opencode-test".to_string(),
             workspace_path: "E:/Javis".to_string(),
             summary: "Tighten message copy.".to_string(),
@@ -2618,6 +3057,7 @@ mod tests {
             user_goal: "Review changes".to_string(),
             changed_files: vec!["src/message.txt".to_string()],
             diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
+            task_id: None,
             provider_id: Some("deepseek".to_string()),
             model: Some("deepseek/deepseek-v4-flash".to_string()),
             api_key: Some("sk-local-secret-that-must-not-leak".to_string()),
@@ -2725,6 +3165,7 @@ mod tests {
             user_goal: "修复当前变更".to_string(),
             changed_files: vec!["src/message.txt".to_string()],
             diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
+            task_id: None,
             provider_id: None,
             model: None,
             api_key: None,
@@ -2760,6 +3201,7 @@ mod tests {
             user_goal: "Review changes".to_string(),
             changed_files: vec!["src/message.txt".to_string()],
             diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
+            task_id: None,
             provider_id: Some("openai".to_string()),
             model: Some("openai/gpt-5.1-codex".to_string()),
             api_key: Some("sk-test".to_string()),
@@ -2795,6 +3237,7 @@ mod tests {
             user_goal: "Review changes".to_string(),
             changed_files: vec!["src/message.txt".to_string()],
             diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
+            task_id: None,
             provider_id: Some("custom".to_string()),
             model: Some("custom/local-model".to_string()),
             api_key: Some("local-key".to_string()),
@@ -2832,6 +3275,7 @@ mod tests {
             user_goal: "Review changes".to_string(),
             changed_files: vec!["src/message.txt".to_string()],
             diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
+            task_id: None,
             provider_id: Some("deepseek".to_string()),
             model: Some("deepseek-v4-flash".to_string()),
             api_key: Some("sk-test".to_string()),
@@ -2861,6 +3305,7 @@ mod tests {
             user_goal: "Review changes".to_string(),
             changed_files: vec!["src/message.txt".to_string()],
             diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
+            task_id: None,
             provider_id: Some("deepseek".to_string()),
             model: Some("deepseek/deepseek-v4-flash".to_string()),
             api_key: Some("sk-test".to_string()),
@@ -2954,6 +3399,7 @@ mod tests {
             user_goal: "Review changes".to_string(),
             changed_files: vec!["src/message.txt".to_string()],
             diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
+            task_id: None,
             provider_id: Some("deepseek".to_string()),
             model: Some("deepseek/deepseek-v4-flash".to_string()),
             api_key: None,
@@ -3027,6 +3473,7 @@ mod tests {
                 user_goal: "Review changes".to_string(),
                 changed_files: vec!["proposal.json".to_string()],
                 diff: "diff --git a/proposal.json b/proposal.json\n".to_string(),
+                task_id: None,
                 provider_id: None,
                 model: None,
                 api_key: None,
@@ -3037,7 +3484,9 @@ mod tests {
         );
 
         assert_eq!(
-            result.expect_err("fixture should require QA mode").to_string(),
+            result
+                .expect_err("fixture should require QA mode")
+                .to_string(),
             "Validation error: Code proposal fixtures require JAVIS_QA_MODE=1."
         );
         env::remove_var("JAVIS_CODE_PROPOSAL_FIXTURE_PATH");
@@ -3209,6 +3658,67 @@ mod tests {
     }
 
     #[test]
+    fn saved_model_key_scope_accepts_provider_default_base_url() {
+        assert!(ensure_saved_model_key_matches_base_url(
+            "deepseek",
+            Some("https://api.deepseek.com/")
+        )
+        .is_ok());
+        assert!(ensure_saved_model_key_matches_base_url(
+            "anthropic",
+            Some("https://api.anthropic.com")
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn saved_model_key_scope_rejects_custom_base_url() {
+        assert!(ensure_saved_model_key_matches_base_url(
+            "deepseek",
+            Some("https://evil.example.test/v1")
+        )
+        .is_err());
+        assert!(ensure_saved_model_key_matches_base_url(
+            "custom",
+            Some("https://api.example.test/v1")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn provider_id_can_be_inferred_from_provider_key_reference() {
+        assert_eq!(
+            infer_provider_id_from_key_reference("model.deepseek").as_deref(),
+            Some("deepseek")
+        );
+        assert!(infer_provider_id_from_key_reference("default").is_none());
+    }
+
+    #[test]
+    fn model_api_key_candidates_do_not_cross_provider_fallback_to_default() {
+        assert_eq!(
+            model_api_key_secret_candidates("default", "deepseek").unwrap(),
+            vec!["model.deepseek".to_string()]
+        );
+        assert_eq!(
+            model_api_key_secret_candidates("model.primary", "dashscope").unwrap(),
+            vec!["model.dashscope".to_string()]
+        );
+    }
+
+    #[test]
+    fn model_api_key_candidates_keep_openai_default_compatibility() {
+        assert_eq!(
+            model_api_key_secret_candidates("default", "openai").unwrap(),
+            vec!["default".to_string(), "model.openai".to_string()]
+        );
+        assert_eq!(
+            model_api_key_secret_candidates("model.openai", "unknown").unwrap(),
+            vec!["model.openai".to_string()]
+        );
+    }
+
+    #[test]
     fn reads_boolean_environment_flags() {
         let key = "JAVIS_TEST_BOOLEAN_FLAG";
         env::remove_var(key);
@@ -3356,6 +3866,7 @@ mod tests {
         let canonical_workspace =
             fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
         let proposal = CodeProposedEdit {
+            approval_id: "approval-test".to_string(),
             proposal_id: "opencode-test".to_string(),
             workspace_path: normalize_path(&canonical_workspace),
             summary: "Test patch.".to_string(),
@@ -3388,6 +3899,27 @@ mod tests {
             task_id: None,
             locale: None,
         }
+    }
+
+    fn register_and_approve_code_patch(
+        approval_state: &Mutex<code::CodePatchApprovalState>,
+        request: &CodePatchApplyRequest,
+    ) {
+        let edit = CodeProposedEdit {
+            approval_id: request.approval_id.clone(),
+            proposal_id: request.proposal_id.clone(),
+            workspace_path: request.workspace_path.clone(),
+            summary: "Test patch.".to_string(),
+            changed_files: request.changed_files.clone(),
+            patch: request.patch.clone(),
+            patch_hash: request.patch_hash.clone(),
+            base_git_head: request.base_git_head.clone(),
+            hunks: None,
+        };
+        register_pending_code_patch(approval_state, &edit, request.task_id.as_deref())
+            .expect("register pending code patch");
+        approve_pending_code_patch(approval_state, code_patch_approval_request(request))
+            .expect("approve code patch");
     }
 
     fn init_git_repo(root: &Path) {
@@ -3468,12 +4000,10 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["role"], "system");
         assert_eq!(messages[1]["role"], "user");
-        assert!(
-            messages[1]["content"]
-                .as_str()
-                .unwrap()
-                .contains("hello world")
-        );
+        assert!(messages[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("hello world"));
     }
 
     #[test]
@@ -3574,6 +4104,7 @@ mod tests {
             user_goal: "Fix a bug".to_string(),
             changed_files: vec![],
             diff: String::new(),
+            task_id: None,
             provider_id: Some("deepseek".to_string()),
             model: Some("deepseek-chat".to_string()),
             api_key: Some("sk-test-key".to_string()),
@@ -3595,6 +4126,7 @@ mod tests {
             user_goal: "Fix a bug".to_string(),
             changed_files: vec![],
             diff: String::new(),
+            task_id: None,
             provider_id: Some("deepseek".to_string()),
             model: Some("deepseek-chat".to_string()),
             api_key: None,
@@ -3639,7 +4171,10 @@ mod tests {
         let lower_skips: Vec<String> = SKIP_DIRS.iter().map(|d| d.to_lowercase()).collect();
         assert!(lower_skips.contains(&".npm".to_string()));
         assert!(lower_skips.contains(&".yarn".to_string()));
-        assert!(lower_skips.contains(&".docker".to_string()) || lower_skips.contains(&".vscode".to_string()));
+        assert!(
+            lower_skips.contains(&".docker".to_string())
+                || lower_skips.contains(&".vscode".to_string())
+        );
     }
 
     #[test]
@@ -3649,7 +4184,10 @@ mod tests {
         assert!(is_root_level_vendor_skip("NVIDIA", Path::new("D:\\")));
 
         // C:\Projects\Intel → parent is C:\Projects, should NOT skip
-        assert!(!is_root_level_vendor_skip("Intel", Path::new("C:\\Projects")));
+        assert!(!is_root_level_vendor_skip(
+            "Intel",
+            Path::new("C:\\Projects")
+        ));
 
         // Non-vendor name at root → should NOT skip
         assert!(!is_root_level_vendor_skip("Projects", Path::new("C:\\")));
@@ -3668,22 +4206,23 @@ mod tests {
         let deep = tmp.path().join("deep").join("deeper");
         fs::create_dir_all(&deep).unwrap();
         let file_path = deep.join("file.txt");
-        fs::File::create(&file_path).unwrap().write_all(b"x").unwrap();
+        fs::File::create(&file_path)
+            .unwrap()
+            .write_all(b"x")
+            .unwrap();
 
         // Default (unlimited depth) finds the file
         let result1 = collect_files(&[tmp.path().to_path_buf()], &["txt"], 10, true).unwrap();
         assert_eq!(result1.len(), 1);
 
         // max_depth=2 should NOT reach "deeper/file.txt" (depth 2 from root)
-        let result2 = collect_files_with_depth(
-            &[tmp.path().to_path_buf()], &["txt"], 10, true, 2,
-        ).unwrap();
+        let result2 =
+            collect_files_with_depth(&[tmp.path().to_path_buf()], &["txt"], 10, true, 2).unwrap();
         assert_eq!(result2.len(), 0);
 
         // max_depth=3 should reach "deeper/file.txt"
-        let result3 = collect_files_with_depth(
-            &[tmp.path().to_path_buf()], &["txt"], 10, true, 3,
-        ).unwrap();
+        let result3 =
+            collect_files_with_depth(&[tmp.path().to_path_buf()], &["txt"], 10, true, 3).unwrap();
         assert_eq!(result3.len(), 1);
     }
 
@@ -3695,7 +4234,10 @@ mod tests {
         let deep = tmp.path().join("a").join("b").join("c").join("d");
         fs::create_dir_all(&deep).unwrap();
         let file_path = deep.join("file.txt");
-        fs::File::create(&file_path).unwrap().write_all(b"x").unwrap();
+        fs::File::create(&file_path)
+            .unwrap()
+            .write_all(b"x")
+            .unwrap();
 
         // Default collect_files (unlimited depth) should find the file
         let result = collect_files(&[tmp.path().to_path_buf()], &["txt"], 10, true).unwrap();
@@ -3709,12 +4251,15 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         for i in 0..15 {
             let file_path = tmp.path().join(format!("{}.txt", i));
-            fs::File::create(&file_path).unwrap().write_all(b"x").unwrap();
+            fs::File::create(&file_path)
+                .unwrap()
+                .write_all(b"x")
+                .unwrap();
         }
 
-        let result = collect_files_with_depth(
-            &[tmp.path().to_path_buf()], &["txt"], 5, true, usize::MAX,
-        ).unwrap();
+        let result =
+            collect_files_with_depth(&[tmp.path().to_path_buf()], &["txt"], 5, true, usize::MAX)
+                .unwrap();
         assert_eq!(result.len(), 5);
     }
 
@@ -3725,7 +4270,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         for i in 0..10 {
             let file_path = tmp.path().join(format!("{}.txt", i));
-            fs::File::create(&file_path).unwrap().write_all(b"x").unwrap();
+            fs::File::create(&file_path)
+                .unwrap()
+                .write_all(b"x")
+                .unwrap();
         }
 
         let ext_lower = vec!["txt".to_string()];
@@ -3760,10 +4308,16 @@ mod tests {
         let node_modules = tmp.path().join("node_modules");
         fs::create_dir_all(&node_modules).unwrap();
         let hidden_file = node_modules.join("package.json");
-        fs::File::create(&hidden_file).unwrap().write_all(b"{}").unwrap();
+        fs::File::create(&hidden_file)
+            .unwrap()
+            .write_all(b"{}")
+            .unwrap();
 
         let visible_file = tmp.path().join("readme.md");
-        fs::File::create(&visible_file).unwrap().write_all(b"# Readme").unwrap();
+        fs::File::create(&visible_file)
+            .unwrap()
+            .write_all(b"# Readme")
+            .unwrap();
 
         let result = collect_files(&[tmp.path().to_path_buf()], &["md", "json"], 20, true).unwrap();
         // Should only find readme.md, NOT package.json inside node_modules
@@ -3793,15 +4347,19 @@ pub fn run() {
             save_model_api_key_secret,
             delete_model_api_key_secret,
             check_model_api_key_secret,
+            read_agent_style,
+            write_agent_style,
             get_system_resource_snapshot,
             fetch_provider_models,
             code::propose_code_edit,
             complete_model_prompt,
+            streaming::stream_model_prompt_l1_start,
             streaming::stream_model_prompt_start,
             streaming::stream_model_prompt_cancel,
             streaming::cancel_all_model_streams,
             code::approve_code_patch,
             code::apply_code_patch,
+            code::restore_code_patch_approval,
             pdf::plan_pdf_organization,
             pdf::approve_pdf_organization,
             pdf::restore_pdf_organization_approval,
@@ -3819,6 +4377,12 @@ pub fn run() {
             mcpserv::write_mcp_config,
             audit::append_task_audit_jsonl_line,
             audit::append_task_session_jsonl_line,
+            database::approval_records_upsert,
+            database::approval_records_prune,
+            database::resource_scan_roots_delete,
+            database::resource_scan_roots_list,
+            database::resource_scan_roots_set_enabled,
+            database::resource_scan_roots_upsert,
             database::db_execute,
             database::db_select,
             database::db_debug_path,
@@ -3826,7 +4390,9 @@ pub fn run() {
             workspace::load_workspace_definitions,
             workspace::save_workspace_definition,
             workspace::delete_workspace_definition,
+            scan::get_user_home,
             scan::scan_all_user_files,
+            scan::scan_resource_files,
             scan::list_mount_roots,
             scan::cancel_scan_all_files,
             git::git_status,
@@ -3839,8 +4405,13 @@ pub fn run() {
             terminal::terminal_resize,
             terminal::terminal_kill,
             browser::browser_navigate,
+            browser::browser_status,
+            browser::browser_refresh,
+            browser::browser_go_back,
+            browser::browser_go_forward,
             browser::browser_screenshot,
             browser::browser_get_content,
+            browser::browser_extract_links,
             browser::browser_click,
             browser::browser_type,
             browser::browser_evaluate,
@@ -3861,6 +4432,11 @@ pub fn run() {
             computer::computer_invoke_ui,
             computer::computer_set_ui_value
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                let _ = database::close_database();
+            }
+        });
 }

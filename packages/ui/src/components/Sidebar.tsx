@@ -10,15 +10,18 @@ import type {
   SidebarNavItem,
   SidebarNavSubItem,
   WorkbenchHistoryEntry,
+  WorkbenchAgentCatalogEntry,
   WorkbenchLocale,
   WorkbenchModelConfiguration,
   WorkbenchModelSettings,
+  WorkbenchAgentStyleState,
   WorkbenchUserProfileMemorySummary,
 } from "../types";
 import {
   filterWorkbenchHistoryEntries,
   formatModifiedTime,
   formatWorkspaceName,
+  getTaskStatusLabel,
   translateWorkbenchText,
 } from "../utils";
 import { ModelSettings } from "./ModelSettings";
@@ -30,6 +33,7 @@ interface SidebarProps {
   locale: WorkbenchLocale;
   modelSettings: WorkbenchModelSettings;
   modelConfiguration?: WorkbenchModelConfiguration;
+  agentCatalog?: WorkbenchAgentCatalogEntry[];
   userProfileMemorySummary?: WorkbenchUserProfileMemorySummary | null;
   historyEntries: WorkbenchHistoryEntry[];
   currentWorkspacePath?: string;
@@ -43,6 +47,9 @@ interface SidebarProps {
   sidebarResizeValue?: number;
   skillCount?: number;
   categoryStats?: { category: string; count: number }[];
+  appCategoryStats?: { category: string; count: number }[];
+  documentCategoryStats?: { category: string; count: number }[];
+  galleryCategoryStats?: { category: string; count: number }[];
   mountRoots?: { name: string; path: string }[];
   /** Custom sidebar nav items. Falls back to built-in defaults when omitted. */
   sidebarNavItems?: SidebarNavItem[];
@@ -52,6 +59,9 @@ interface SidebarProps {
   onModelConfigurationChange?: (config: WorkbenchModelConfiguration) => void;
   onRebuildUserProfileMemory?: () => void;
   onClearUserProfileMemory?: () => void;
+  onReadAgentStyle?: (kind: string) => Promise<WorkbenchAgentStyleState>;
+  onSaveAgentStyle?: (kind: string, content: string) => Promise<WorkbenchAgentStyleState | void>;
+  onResetAgentStyle?: (kind: string) => Promise<WorkbenchAgentStyleState | void>;
   onSaveProviderApiKey?: (keyReference: string, apiKey: string) => Promise<void>;
   onFetchProviderModels?: (params: {
     provider: string;
@@ -68,6 +78,7 @@ interface SidebarProps {
   onSelectHistoryEntry?: (id: string) => void;
   onSidebarSearchQueryChange: (query: string) => void;
   onChangeActiveView?: (view: ActiveView) => void;
+  onSelectResourceCategory?: (view: ActiveView, category: string | null) => void;
   onSelectComposeMode?: (mode: "chat" | "project") => void;
   onSelectSkillPage?: (page: "mine" | "market") => void;
   onNavigateDirectory?: (path: string) => void;
@@ -82,6 +93,7 @@ export function Sidebar({
   locale,
   modelSettings,
   modelConfiguration,
+  agentCatalog,
   userProfileMemorySummary,
   historyEntries,
   currentWorkspacePath,
@@ -95,6 +107,9 @@ export function Sidebar({
   sidebarResizeValue,
   skillCount = 0,
   categoryStats,
+  appCategoryStats,
+  documentCategoryStats,
+  galleryCategoryStats,
   mountRoots,
   sidebarNavItems,
   onDeleteHistoryEntry,
@@ -103,6 +118,9 @@ export function Sidebar({
   onModelConfigurationChange,
   onRebuildUserProfileMemory,
   onClearUserProfileMemory,
+  onReadAgentStyle,
+  onSaveAgentStyle,
+  onResetAgentStyle,
   onSaveProviderApiKey,
   onFetchProviderModels,
   providerCatalog,
@@ -112,6 +130,7 @@ export function Sidebar({
   onSelectHistoryEntry,
   onSidebarSearchQueryChange,
   onChangeActiveView,
+  onSelectResourceCategory,
   onSelectComposeMode,
   onSelectSkillPage,
   onNavigateDirectory,
@@ -128,6 +147,9 @@ export function Sidebar({
     () => {
       const builtinOptions = {
         categoryStats,
+        appCategoryStats,
+        documentCategoryStats,
+        galleryCategoryStats,
         mountRoots,
         categoryLabels: locale.categoryLabels,
       };
@@ -138,7 +160,11 @@ export function Sidebar({
           )
         : getBuiltinSidebarNavItems(labels, scheduledTaskCount, skillCount, builtinOptions);
     },
-    [labels, scheduledTaskCount, skillCount, sidebarNavItems, categoryStats, mountRoots, locale.categoryLabels],
+    [
+      labels, scheduledTaskCount, skillCount, sidebarNavItems, categoryStats,
+      appCategoryStats, documentCategoryStats, galleryCategoryStats,
+      mountRoots, locale.categoryLabels,
+    ],
   );
 
   // Derive collapsible view IDs from nav items
@@ -191,7 +217,8 @@ export function Sidebar({
     [currentWorkspacePath, filteredHistoryEntries, labels.chat, recentWorkspacePaths],
   );
 
-  function navItem(view: ActiveView, icon: string, label: string, badge?: number) {
+  function navItem(item: SidebarNavItem) {
+    const view = item.viewId;
     const isActive =
       view === "chat"
         ? activeView === view && !activeHistoryEntryId
@@ -209,14 +236,16 @@ export function Sidebar({
           }
         }}
       >
-        <span className={`javis-nav-icon icon-${view}`}>{icon}</span>
-        <span>{label}</span>
-        {badge != null && badge > 0 ? <span className="javis-nav-badge">{badge}</span> : null}
+        <span className={`javis-nav-icon icon-${view}`}>{item.icon}</span>
+        <NavItemText label={item.label} meta={item.meta} />
+        {item.status ? <StatusDot status={item.status} /> : null}
+        {item.badge != null && item.badge > 0 ? <span className="javis-nav-badge">{item.badge}</span> : null}
       </div>
     );
   }
 
-  function navCollapsibleItem(viewId: string, icon: string, label: string, badge?: number) {
+  function navCollapsibleItem(item: SidebarNavItem) {
+    const viewId = item.viewId;
     const isActive =
       viewId === "chat"
         ? activeView === viewId && !activeHistoryEntryId
@@ -252,9 +281,10 @@ export function Sidebar({
           }
         }}
       >
-        <span className={`javis-nav-icon icon-${viewId}`}>{icon}</span>
-        <span>{label}</span>
-        {badge != null && badge > 0 ? <span className="javis-nav-badge">{badge}</span> : null}
+        <span className={`javis-nav-icon icon-${viewId}`}>{item.icon}</span>
+        <NavItemText label={item.label} meta={item.meta} />
+        {item.status ? <StatusDot status={item.status} /> : null}
+        {item.badge != null && item.badge > 0 ? <span className="javis-nav-badge">{item.badge}</span> : null}
         <span className="javis-nav-caret">{isCollapsed ? "v" : "^"}</span>
       </div>
     );
@@ -279,6 +309,11 @@ export function Sidebar({
         onSelectSkillPage?.(subitem.skillPage);
       }
       onChangeActiveView?.(targetViewId);
+      if (subitem.category !== undefined) {
+        onSelectResourceCategory?.(targetViewId, subitem.category);
+      } else if (targetViewId === "apps" || targetViewId === "documents" || targetViewId === "gallery") {
+        onSelectResourceCategory?.(targetViewId, null);
+      }
       if (subitem.path) {
         onNavigateDirectory?.(subitem.path);
       }
@@ -290,8 +325,8 @@ export function Sidebar({
         onClick={handleClick}
         type="button"
       >
-        <span />
-        <span>{subitem.label}</span>
+        <StatusDot status={subitem.status} />
+        <NavItemText label={subitem.label} meta={subitem.meta} />
         {subitem.badge != null && subitem.badge > 0 ? (
           <span className="javis-nav-badge">{subitem.badge}</span>
         ) : null}
@@ -302,11 +337,12 @@ export function Sidebar({
   function renderNavGroups() {
     const groups = new Map<string, SidebarNavItem[]>();
     for (const item of effectiveNavItems) {
-      const existing = groups.get(item.group);
+      const group = item.group ?? "custom";
+      const existing = groups.get(group);
       if (existing) {
         existing.push(item);
       } else {
-        groups.set(item.group, [item]);
+        groups.set(group, [item]);
       }
     }
 
@@ -318,17 +354,20 @@ export function Sidebar({
 
     return [...groups.entries()].map(([groupType, items]) => (
       <div className={`javis-nav-group ${groupType}`} key={groupType}>
-        {groupLabels[groupType] && (
-          <p className="javis-nav-section">{groupLabels[groupType]}</p>
+        {(items.find((item) => item.groupLabel)?.groupLabel ?? groupLabels[groupType]) && (
+          <p className="javis-nav-section">
+            {items.find((item) => item.groupLabel)?.groupLabel ?? groupLabels[groupType]}
+          </p>
         )}
         {items.map((item) => {
+          const subitems = item.subitems ?? item.children;
           if (item.collapsible) {
             const isCollapsed = collapsedGroups[item.viewId] ?? true;
             return (
               <React.Fragment key={item.viewId}>
-                {navCollapsibleItem(item.viewId, item.icon, item.label, item.badge)}
+                {navCollapsibleItem(item)}
                 {!isCollapsed &&
-                  item.subitems?.map((sub) => (
+                  subitems?.map((sub) => (
                     <React.Fragment key={`${item.viewId}-${sub.viewId ?? item.viewId}-${sub.skillPage ?? sub.path ?? sub.label}`}>
                       {navSubitem(item.viewId, sub)}
                     </React.Fragment>
@@ -338,7 +377,12 @@ export function Sidebar({
           }
           return (
             <React.Fragment key={item.viewId}>
-              {navItem(item.viewId, item.icon, item.label, item.badge)}
+              {navItem(item)}
+              {subitems?.map((sub) => (
+                <React.Fragment key={`${item.viewId}-${sub.viewId ?? item.viewId}-${sub.skillPage ?? sub.path ?? sub.label}`}>
+                  {navSubitem(item.viewId, sub)}
+                </React.Fragment>
+              ))}
             </React.Fragment>
           );
         })}
@@ -409,7 +453,7 @@ export function Sidebar({
 
                         return (
                         <div
-                          className={`javis-history-entry ${isActiveHistoryEntry ? "active" : ""}`}
+                          className={`javis-history-entry status-${entry.status} ${isActiveHistoryEntry ? "active" : ""}`}
                           key={entry.id}
                         >
                           <button
@@ -418,10 +462,10 @@ export function Sidebar({
                             onClick={() => onSelectHistoryEntry?.(entry.id)}
                             type="button"
                           >
-                            <span className="javis-nav-icon">*</span>
+                            <StatusDot status={getHistoryStatusDotStatus(entry.status)} />
                             <span>
                               <strong>{translateWorkbenchText(entry.title, locale)}</strong>
-                              <small>
+                              <small title={`${getTaskStatusLabel(entry.status, locale)} · ${new Date(entry.updatedAt).toLocaleString()}`}>
                                 {translateWorkbenchText(entry.status, locale)} ·{" "}
                                 {formatModifiedTime(entry.updatedAt)}
                               </small>
@@ -471,14 +515,19 @@ export function Sidebar({
       </nav>
       <ModelSettings
         labels={labels}
+        locale={locale}
         modelSettings={modelSettings}
         modelConfiguration={modelConfiguration}
+        agentCatalog={agentCatalog}
         userProfileMemorySummary={userProfileMemorySummary}
         onModelSettingsChange={onModelSettingsChange}
         onTestModelConnection={onTestModelConnection}
         onModelConfigurationChange={onModelConfigurationChange}
         onRebuildUserProfileMemory={onRebuildUserProfileMemory}
         onClearUserProfileMemory={onClearUserProfileMemory}
+        onReadAgentStyle={onReadAgentStyle}
+        onSaveAgentStyle={onSaveAgentStyle}
+        onResetAgentStyle={onResetAgentStyle}
         onSaveProviderApiKey={onSaveProviderApiKey}
         onFetchProviderModels={onFetchProviderModels}
         providerCatalog={providerCatalog}
@@ -499,6 +548,40 @@ export function Sidebar({
       />
     </aside>
   );
+}
+
+function NavItemText({ label, meta }: { label: string; meta?: string }) {
+  return (
+    <span className="javis-nav-item-text">
+      <span>{label}</span>
+      {meta ? <small>{meta}</small> : null}
+    </span>
+  );
+}
+
+function StatusDot({
+  status = "idle",
+}: {
+  status?: "idle" | "running" | "completed" | "failed";
+}) {
+  return <span className={`javis-sidebar-status-dot status-${status}`} aria-hidden="true" />;
+}
+
+function getHistoryStatusDotStatus(status: WorkbenchHistoryEntry["status"]): "idle" | "running" | "completed" | "failed" {
+  if (status === "completed") return "completed";
+  if (status === "failed") return "failed";
+  if (
+    status === "planning" ||
+    status === "running" ||
+    status === "generating" ||
+    status === "verifying" ||
+    status === "retrying" ||
+    status === "waiting_info" ||
+    status === "waiting_permission"
+  ) {
+    return "running";
+  }
+  return "idle";
 }
 
 interface HistoryGroup {

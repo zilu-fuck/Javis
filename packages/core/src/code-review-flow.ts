@@ -323,6 +323,7 @@ export async function runCodeReviewTask({
           proposedEdit = await codeTool.proposeEdit({
             userGoal,
             preview: codeReviewPreview,
+            taskId,
           });
         } catch (error) {
           emit({
@@ -415,7 +416,7 @@ export async function runCodeReviewTask({
         }
 
         const applyPermissionRequest: ToolPermissionRequest = createPendingPermissionRequest({
-          id: `${taskId}-apply-permission`,
+          id: proposedEdit.approvalId || `${taskId}-apply-permission`,
           level: "confirmed_write",
           title: "Approve Code Agent patch application",
           reason: "Applying the proposed patch changes local project files, so Javis needs explicit approval.",
@@ -567,6 +568,7 @@ export async function runCodeReviewTask({
           try {
             const applyResult = await codeTool.applyProposedEdit(proposedEdit, {
               approvalId: resolvedApplyRequest.id,
+              taskId,
             });
             const applySafetyError = validateCodeApplyResult(proposedEdit, applyResult);
             if (applySafetyError) {

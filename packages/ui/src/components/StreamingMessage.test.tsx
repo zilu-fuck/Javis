@@ -27,6 +27,29 @@ describe("StreamingMessage", () => {
     expect(html).toContain("|</span>");
   });
 
+  it("shows a thinking indicator before the first streamed token", () => {
+    const html = renderToStaticMarkup(
+      <StreamingMessage text="" isStreaming={true} agentLabel="Commander" />,
+    );
+    expect(html).toContain("javis-thinking-indicator");
+    expect(html).toContain("Understanding your message");
+    expect(html).not.toContain("javis-cursor-blink");
+  });
+
+  it("renders localized thinking messages", () => {
+    const html = renderToStaticMarkup(
+      <StreamingMessage
+        text=""
+        isStreaming={true}
+        agentLabel="Javis · 指挥官"
+        thinkingLabel="思考中"
+        thinkingMessages={["正在选择合适路径"]}
+      />,
+    );
+    expect(html).toContain("正在选择合适路径");
+    expect(html).toContain("思考中");
+  });
+
   it("hides blinking cursor when streaming is complete", () => {
     const html = renderToStaticMarkup(
       <StreamingMessage text="complete output" isStreaming={false} agentLabel="Verifier" />,

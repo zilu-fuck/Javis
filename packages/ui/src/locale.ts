@@ -231,6 +231,8 @@ export const zhCNWorkbenchLocale: WorkbenchLocale = {
     "Research Agent": "研究代理",
     "Computer Agent": "电脑代理",
     "Scheduler Agent": "定时代理",
+    "Workspace Agent": "工作区代理",
+    "Vision Agent": "视觉代理",
     "Chinese Reviewer": "中文审校",
     "Verifier": "验证器",
     "Task planning and orchestration": "任务规划与调度",

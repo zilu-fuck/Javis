@@ -1,5 +1,5 @@
 import type { AgentKind, TaskLogEntry, TaskSnapshot } from "./index";
-import type { TaskRuntimeEvent } from "./task-event-bus";
+import { taskEventToLogEntry, type TaskRuntimeEvent } from "./task-event-bus";
 
 export interface DeltaReducer {
   getSnapshot(): TaskSnapshot;
@@ -50,12 +50,7 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
           current = { ...current, isStreaming: true };
           partialTexts.set(event.agentKind, "");
           activeStreamingAgentKind = event.agentKind;
-          logs.push({
-            id: `${event.taskId}-chunk-start-${event.agentKind}-${Date.now()}`,
-            kind: "event",
-            title: "agent.chunk_start",
-            detail: `${event.agentKind} is generating output...`,
-          });
+          logs.push(taskEventToLogEntry(event));
           break;
         }
         case "agent.chunk": {
@@ -85,14 +80,7 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
                 break;
             }
           }
-          logs.push({
-            id: `${event.taskId}-chunk-end-${event.agentKind}-${Date.now()}`,
-            kind: "event",
-            title: "agent.chunk_end",
-            detail: event.error
-              ? `${event.agentKind} failed: ${event.error}`
-              : `${event.agentKind} completed output (${event.fullText.length} chars).`,
-          });
+          logs.push(taskEventToLogEntry(event));
           break;
         }
         case "step.progress":
@@ -103,6 +91,7 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
               step.id === event.stepId ? { ...step, status: "running" as const } : step,
             ),
           };
+          logs.push(taskEventToLogEntry(event));
           break;
         }
         case "step.completed": {
@@ -112,6 +101,7 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
               step.id === event.stepId ? { ...step, status: "completed" as const } : step,
             ),
           };
+          logs.push(taskEventToLogEntry(event));
           break;
         }
         case "task.completed":

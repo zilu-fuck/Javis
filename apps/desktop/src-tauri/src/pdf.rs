@@ -1,10 +1,18 @@
 use serde::{Deserialize, Serialize};
-use std::{fs, io::Read, path::{Path, PathBuf}, sync::Mutex};
+use std::{
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
-use crate::{NativeApprovalBinding, create_native_approval_binding, approve_native_approval_binding, require_native_approval_binding, normalize_path, create_fnv1a_hash, format_system_time, resolve_workspace_path, create_approval_id};
+use crate::{
+    approve_native_approval_binding, create_approval_id, create_fnv1a_hash,
+    create_native_approval_binding, format_system_time, normalize_path,
+    require_native_approval_binding, resolve_workspace_path, NativeApprovalBinding,
+};
 
 pub(crate) const PDF_APPROVAL_TOOL_NAME: &str = "file.executePdfOrganization";
-
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,7 +24,6 @@ pub(crate) struct MarkdownDocument {
     excerpt: Option<String>,
 }
 
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FileOrganizationPlan {
@@ -25,7 +32,6 @@ pub(crate) struct FileOrganizationPlan {
     file_count: usize,
     dry_run: FileDryRunSummary,
 }
-
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,7 +42,6 @@ pub(crate) struct FileDryRunSummary {
     pub(crate) reversible: bool,
 }
 
-
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PlannedPathOperation {
@@ -46,7 +51,6 @@ pub(crate) struct PlannedPathOperation {
     pub(crate) conflict: Option<String>,
 }
 
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ExecuteFileOrganizationRequest {
@@ -55,7 +59,6 @@ pub(crate) struct ExecuteFileOrganizationRequest {
     #[serde(default)]
     pub(crate) task_id: Option<String>,
 }
-
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -67,7 +70,6 @@ pub(crate) struct FileOrganizationExecution {
     results: Vec<FileOperationResult>,
 }
 
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FileOperationResult {
@@ -77,18 +79,15 @@ pub(crate) struct FileOperationResult {
     pub(crate) message: String,
 }
 
-
 #[derive(Default)]
 pub(crate) struct PdfOrganizationApprovalState {
     pub(crate) pending: Option<PendingPdfOrganizationApproval>,
 }
 
-
 pub(crate) struct PendingPdfOrganizationApproval {
     pub(crate) binding: NativeApprovalBinding,
     pub(crate) operations: Vec<PlannedPathOperation>,
 }
-
 
 #[tauri::command]
 pub(crate) fn scan_markdown_documents(
@@ -101,7 +100,6 @@ pub(crate) fn scan_markdown_documents(
     documents.truncate(50);
     Ok(documents)
 }
-
 
 #[tauri::command]
 pub(crate) fn plan_pdf_organization(
@@ -165,7 +163,6 @@ pub(crate) fn plan_pdf_organization(
     })
 }
 
-
 #[tauri::command]
 pub(crate) fn approve_pdf_organization(
     approval_id: String,
@@ -174,7 +171,6 @@ pub(crate) fn approve_pdf_organization(
 ) -> Result<(), String> {
     approve_pending_pdf_organization(&approval_state, &approval_id, task_id.as_deref())
 }
-
 
 #[tauri::command]
 pub(crate) fn restore_pdf_organization_approval(
@@ -188,14 +184,8 @@ pub(crate) fn restore_pdf_organization_approval(
         &downloads,
         &request.operations,
         request.task_id.as_deref(),
-    )?;
-    approve_pending_pdf_organization(
-        &approval_state,
-        &request.approval_id,
-        request.task_id.as_deref(),
     )
 }
-
 
 #[tauri::command]
 pub(crate) fn execute_pdf_organization(
@@ -232,7 +222,6 @@ pub(crate) fn execute_pdf_organization(
     })
 }
 
-
 pub(crate) fn downloads_directory() -> Result<PathBuf, String> {
     let home = std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
@@ -244,7 +233,6 @@ pub(crate) fn downloads_directory() -> Result<PathBuf, String> {
     }
     Err("Downloads directory was not found.".to_string())
 }
-
 
 pub(crate) fn replace_pending_pdf_approval(
     approval_state: &Mutex<PdfOrganizationApprovalState>,
@@ -271,7 +259,6 @@ pub(crate) fn replace_pending_pdf_approval(
     Ok(())
 }
 
-
 pub(crate) fn create_pdf_operations_preview_hash(operations: &[PlannedPathOperation]) -> String {
     let payload = operations
         .iter()
@@ -288,7 +275,6 @@ pub(crate) fn create_pdf_operations_preview_hash(operations: &[PlannedPathOperat
         .join("\n---\n");
     create_fnv1a_hash(payload.as_bytes())
 }
-
 
 pub(crate) fn require_approved_pdf_operations(
     downloads: &Path,
@@ -326,7 +312,6 @@ pub(crate) fn require_approved_pdf_operations(
     Ok(())
 }
 
-
 pub(crate) fn approve_pending_pdf_organization(
     approval_state: &Mutex<PdfOrganizationApprovalState>,
     approval_id: &str,
@@ -347,7 +332,6 @@ pub(crate) fn approve_pending_pdf_organization(
         "PDF organization approval id does not match the pending dry-run.",
     )
 }
-
 
 pub(crate) fn take_approved_pdf_operations(
     approval_state: &Mutex<PdfOrganizationApprovalState>,
@@ -379,7 +363,6 @@ pub(crate) fn take_approved_pdf_operations(
     Ok(operations)
 }
 
-
 pub(crate) fn infer_pdf_category(path: &Path) -> &'static str {
     let name = path
         .file_stem()
@@ -398,7 +381,6 @@ pub(crate) fn infer_pdf_category(path: &Path) -> &'static str {
     }
     "Unsorted"
 }
-
 
 pub(crate) fn execute_pdf_move_operation(
     downloads: &Path,
@@ -493,7 +475,6 @@ pub(crate) fn execute_pdf_move_operation(
     }
 }
 
-
 pub(crate) fn target_parent_stays_in_downloads(target: &Path, downloads_canonical: &Path) -> bool {
     let Some(mut candidate) = target.parent() else {
         return false;
@@ -513,12 +494,10 @@ pub(crate) fn target_parent_stays_in_downloads(target: &Path, downloads_canonica
     }
 }
 
-
 pub(crate) fn has_parent_dir_component(path: &Path) -> bool {
     path.components()
         .any(|component| matches!(component, std::path::Component::ParentDir))
 }
-
 
 pub(crate) fn file_operation_result(
     operation: PlannedPathOperation,
@@ -532,7 +511,6 @@ pub(crate) fn file_operation_result(
         message: message.to_string(),
     }
 }
-
 
 pub(crate) fn scan_directory(
     directory: &Path,
@@ -590,7 +568,6 @@ fn scan_directory_recursive(
     Ok(())
 }
 
-
 pub(crate) fn should_skip_directory(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
@@ -601,7 +578,6 @@ pub(crate) fn should_skip_directory(path: &Path) -> bool {
         ".git" | "node_modules" | "target" | "dist" | "dist-ssr" | "gen"
     )
 }
-
 
 pub(crate) fn should_skip_file(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
@@ -616,7 +592,6 @@ pub(crate) fn should_skip_file(path: &Path) -> bool {
         || normalized.contains("password")
 }
 
-
 pub(crate) fn read_text_prefix(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
     let mut buffer = Vec::new();
@@ -627,7 +602,6 @@ pub(crate) fn read_text_prefix(path: &Path) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&buffer).to_string())
 }
 
-
 pub(crate) fn first_heading(content: &str) -> Option<String> {
     content
         .lines()
@@ -636,7 +610,6 @@ pub(crate) fn first_heading(content: &str) -> Option<String> {
         .map(|line| line.trim_start_matches("# ").trim().to_string())
 }
 
-
 pub(crate) fn first_excerpt(content: &str) -> Option<String> {
     content
         .lines()
@@ -644,4 +617,3 @@ pub(crate) fn first_excerpt(content: &str) -> Option<String> {
         .find(|line| !line.is_empty() && !line.starts_with('#'))
         .map(|line| line.chars().take(180).collect())
 }
-

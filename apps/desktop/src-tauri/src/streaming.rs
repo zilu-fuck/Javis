@@ -11,19 +11,14 @@ use std::{
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use crate::{
-    create_openai_compatible_stream_body,
-    extract_openai_compatible_usage,
-    default_openai_compatible_base_url_for_provider,
-    extract_openai_compatible_stream_text,
-    hydrate_model_completion_api_key_secret,
-    infer_model_completion_provider_id,
-    normalize_model_completion_model_name,
-    openai_compatible_request_requires_api_key,
-    ModelCompletionRequest,
-    ModelUsage,
-};
 use crate::code::{create_chat_completions_endpoint, normalize_optional_config_value};
+use crate::{
+    create_openai_compatible_stream_body, default_openai_compatible_base_url_for_provider,
+    extract_openai_compatible_stream_text, extract_openai_compatible_usage,
+    hydrate_model_completion_api_key_secret, infer_model_completion_provider_id,
+    normalize_model_completion_model_name, openai_compatible_request_requires_api_key,
+    ModelCompletionRequest, ModelUsage,
+};
 
 const STREAMING_READ_TIMEOUT: Duration = Duration::from_secs(120);
 /// Minimum characters to accumulate before emitting a chunk event.
@@ -112,9 +107,8 @@ pub fn stream_model_prompt_start(
     stream_id: Option<String>,
 ) -> Result<String, String> {
     hydrate_model_completion_api_key_secret(&app_handle, &mut request)?;
-    let stream_id = stream_id.unwrap_or_else(|| {
-        format!("stream-{}", NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed))
-    });
+    let stream_id = stream_id
+        .unwrap_or_else(|| format!("stream-{}", NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed)));
     let stream_id_clone = stream_id.clone();
     let app = app_handle.clone();
     let cancelled = register_stream(&stream_id);
@@ -122,6 +116,73 @@ pub fn stream_model_prompt_start(
     thread::spawn(move || {
         let result = execute_streaming_request(&request, &app, &stream_id_clone, &cancelled);
         // Remove stream from active set regardless of outcome
+        {
+            let mut streams = ACTIVE_STREAMS.lock().unwrap();
+            streams.retain(|s| s.stream_id != stream_id_clone);
+        }
+        match result {
+            Ok(result) => {
+                let _ = app.emit(
+                    "stream-model-done",
+                    StreamDonePayload {
+                        stream_id: stream_id_clone,
+                        finish_reason: Some("stop".into()),
+                        total_chunks: result.total_chunks,
+                        token_usage: result.token_usage,
+                    },
+                );
+            }
+            Err(e) => {
+                let _ = app.emit(
+                    "stream-model-error",
+                    StreamErrorPayload {
+                        stream_id: stream_id_clone,
+                        error: e,
+                    },
+                );
+            }
+        }
+    });
+
+    Ok(stream_id)
+}
+
+#[tauri::command]
+pub async fn stream_model_prompt_l1_start(
+    app_handle: AppHandle,
+    mut request: ModelCompletionRequest,
+    stream_id: Option<String>,
+) -> Result<String, String> {
+    hydrate_model_completion_api_key_secret(&app_handle, &mut request)?;
+    let stream_id = stream_id
+        .unwrap_or_else(|| format!("stream-{}", NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed)));
+    let stream_id_clone = stream_id.clone();
+    let app = app_handle.clone();
+    let cancelled = register_stream(&stream_id);
+
+    tauri::async_runtime::spawn(async move {
+        let protocol = request
+            .protocol
+            .as_deref()
+            .unwrap_or("openai-compatible")
+            .to_string();
+        let result = if protocol == "anthropic" {
+            let request = request;
+            let app = app.clone();
+            let stream_id = stream_id_clone.clone();
+            let cancelled = cancelled.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::anthropic::execute_anthropic_streaming_request(
+                    &request, &app, &stream_id, &cancelled,
+                )
+            })
+            .await
+            .map_err(|error| format!("Anthropic stream task failed: {error}"))
+            .and_then(|result| result)
+        } else {
+            execute_streaming_request_async(&request, &app, &stream_id_clone, &cancelled).await
+        };
+
         {
             let mut streams = ACTIVE_STREAMS.lock().unwrap();
             streams.retain(|s| s.stream_id != stream_id_clone);
@@ -161,7 +222,9 @@ fn execute_streaming_request(
 ) -> Result<StreamingRequestResult, String> {
     let protocol = request.protocol.as_deref().unwrap_or("openai-compatible");
     if protocol == "anthropic" {
-        return crate::anthropic::execute_anthropic_streaming_request(request, app, stream_id, cancelled);
+        return crate::anthropic::execute_anthropic_streaming_request(
+            request, app, stream_id, cancelled,
+        );
     }
 
     let model = normalize_model_completion_model_name(request)
@@ -214,9 +277,8 @@ fn execute_streaming_request(
         if data.is_empty() || data == "[DONE]" {
             continue;
         }
-        let value = serde_json::from_str::<serde_json::Value>(data).map_err(|error| {
-            format!("Model stream returned invalid JSON chunk: {error}")
-        })?;
+        let value = serde_json::from_str::<serde_json::Value>(data)
+            .map_err(|error| format!("Model stream returned invalid JSON chunk: {error}"))?;
         if let Some(usage) = extract_openai_compatible_usage(&value) {
             token_usage = Some(usage);
         }
@@ -265,6 +327,160 @@ fn execute_streaming_request(
         total_chunks,
         token_usage,
     })
+}
+
+async fn execute_streaming_request_async(
+    request: &ModelCompletionRequest,
+    app: &AppHandle,
+    stream_id: &str,
+    cancelled: &AtomicBool,
+) -> Result<StreamingRequestResult, String> {
+    let model = normalize_model_completion_model_name(request)
+        .ok_or_else(|| "Model stream requires a model.".to_string())?;
+    let provider_id = normalize_optional_config_value(request.provider_id.as_deref())
+        .unwrap_or_else(|| infer_model_completion_provider_id(request));
+    let base_url = normalize_optional_config_value(request.base_url.as_deref())
+        .unwrap_or_else(|| default_openai_compatible_base_url_for_provider(&provider_id));
+    let api_key = normalize_optional_config_value(request.api_key.as_deref());
+    if api_key.is_none() && openai_compatible_request_requires_api_key(&provider_id, &base_url) {
+        return Err("Model stream requires an API key.".to_string());
+    }
+    let endpoint = create_chat_completions_endpoint(&base_url);
+    let body = create_openai_compatible_stream_body(&model, request);
+
+    let client = reqwest::Client::builder()
+        .timeout(STREAMING_READ_TIMEOUT)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut request_builder = client
+        .post(&endpoint)
+        .header("Content-Type", "application/json")
+        .json(&body);
+    if let Some(api_key) = api_key {
+        request_builder = request_builder.header("Authorization", &format!("Bearer {api_key}"));
+    }
+    let mut response = request_builder
+        .send()
+        .await
+        .map_err(|error| format!("Model stream request failed: {error}"))?;
+
+    let mut total_chunks: u32 = 0;
+    let mut token_usage: Option<ModelUsage> = None;
+    let mut batch_text = String::with_capacity(64);
+    let mut batch_chunks: u32 = 0;
+    let mut pending = String::new();
+
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("Stream read error: {error}"))?
+    {
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+        pending.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(newline_index) = pending.find('\n') {
+            let line = pending[..newline_index].trim().to_string();
+            pending = pending[newline_index + 1..].to_string();
+            consume_stream_line(
+                &line,
+                app,
+                stream_id,
+                &model,
+                &provider_id,
+                &mut total_chunks,
+                &mut token_usage,
+                &mut batch_text,
+                &mut batch_chunks,
+            )?;
+        }
+    }
+
+    let trailing = pending.trim().to_string();
+    if !trailing.is_empty() {
+        consume_stream_line(
+            &trailing,
+            app,
+            stream_id,
+            &model,
+            &provider_id,
+            &mut total_chunks,
+            &mut token_usage,
+            &mut batch_text,
+            &mut batch_chunks,
+        )?;
+    }
+
+    if !batch_text.is_empty() {
+        let _ = app.emit(
+            "stream-model-chunk",
+            StreamChunkPayload {
+                stream_id: stream_id.to_string(),
+                text: batch_text,
+                model: Some(model.clone()),
+                provider: Some(provider_id.clone()),
+                index: total_chunks,
+            },
+        );
+    }
+
+    if total_chunks == 0 && !cancelled.load(Ordering::Relaxed) {
+        return Err("Model stream returned no content chunks.".to_string());
+    }
+
+    Ok(StreamingRequestResult {
+        total_chunks,
+        token_usage,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn consume_stream_line(
+    line: &str,
+    app: &AppHandle,
+    stream_id: &str,
+    model: &str,
+    provider_id: &str,
+    total_chunks: &mut u32,
+    token_usage: &mut Option<ModelUsage>,
+    batch_text: &mut String,
+    batch_chunks: &mut u32,
+) -> Result<(), String> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("data:") {
+        return Ok(());
+    }
+    let data = trimmed.trim_start_matches("data:").trim();
+    if data.is_empty() || data == "[DONE]" {
+        return Ok(());
+    }
+    let value = serde_json::from_str::<serde_json::Value>(data)
+        .map_err(|error| format!("Model stream returned invalid JSON chunk: {error}"))?;
+    if let Some(usage) = extract_openai_compatible_usage(&value) {
+        *token_usage = Some(usage);
+    }
+    if let Some(text) = extract_openai_compatible_stream_text(&value) {
+        batch_text.push_str(&text);
+        *batch_chunks += 1;
+        *total_chunks += 1;
+
+        if batch_text.len() >= STREAMING_CHUNK_CHAR_THRESHOLD
+            || *batch_chunks >= STREAMING_CHUNK_COUNT_THRESHOLD
+        {
+            let _ = app.emit(
+                "stream-model-chunk",
+                StreamChunkPayload {
+                    stream_id: stream_id.to_string(),
+                    text: std::mem::take(batch_text),
+                    model: Some(model.to_string()),
+                    provider: Some(provider_id.to_string()),
+                    index: *total_chunks,
+                },
+            );
+            *batch_chunks = 0;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) struct StreamingRequestResult {

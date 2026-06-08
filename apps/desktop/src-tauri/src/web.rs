@@ -1,9 +1,20 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use std::{env, fs, io::Read, path::PathBuf, process::{Command, Output, Stdio}, thread, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{
+    env, fs,
+    io::Read,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs},
+    path::PathBuf,
+    process::{Command, Output, Stdio},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-use crate::{resolve_command_program, format_system_time, html_to_text, extract_title, html_decode, env_flag_enabled, search_with_fixture_file};
-
+use crate::{
+    env_flag_enabled, extract_title, format_system_time, html_decode, html_to_text,
+    resolve_command_program, search_with_fixture_file,
+};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,18 +28,51 @@ fn is_code_search_query(query: &str) -> bool {
     let q = query.to_lowercase();
     let code_patterns = [
         // English
-        "github", "repo", "repository", "code", "library", "npm", "package",
-        "api", "sdk", "framework", "bug", "issue", "pr ", "pull request",
-        "commit", "release", "changelog", "dependency", "rust ", "crate",
-        "typescript", "javascript", "python ", "golang", "docker", "kubernetes",
-        "open source", "plugin", "extension", "component", "module",
+        "github",
+        "repo",
+        "repository",
+        "code",
+        "library",
+        "npm",
+        "package",
+        "api",
+        "sdk",
+        "framework",
+        "bug",
+        "issue",
+        "pr ",
+        "pull request",
+        "commit",
+        "release",
+        "changelog",
+        "dependency",
+        "rust ",
+        "crate",
+        "typescript",
+        "javascript",
+        "python ",
+        "golang",
+        "docker",
+        "kubernetes",
+        "open source",
+        "plugin",
+        "extension",
+        "component",
+        "module",
         // Chinese
-        "代码", "仓库", "开源", "插件", "模块", "组件", "依赖", "框架",
-        "npm 包", "库",
+        "代码",
+        "仓库",
+        "开源",
+        "插件",
+        "模块",
+        "组件",
+        "依赖",
+        "框架",
+        "npm 包",
+        "库",
     ];
     code_patterns.iter().any(|p| q.contains(p))
 }
-
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,7 +90,6 @@ fn default_search_type() -> String {
     "auto".to_string()
 }
 
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WebSource {
@@ -55,7 +98,6 @@ pub(crate) struct WebSource {
     excerpt: String,
     fetched_at: String,
 }
-
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -67,7 +109,6 @@ pub(crate) struct WebSearchResult {
     pub(crate) provider: Option<String>,
 }
 
-
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GithubSearchItem {
@@ -77,19 +118,17 @@ pub(crate) struct GithubSearchItem {
     pub(crate) updated_at: Option<String>,
 }
 
-
 #[tauri::command]
 pub(crate) fn fetch_web_source(request: WebSourceRequest) -> Result<WebSource, String> {
-    if !request.url.starts_with("https://") && !request.url.starts_with("http://") {
-        return Err("Only http and https URLs are supported.".to_string());
-    }
+    let url = validate_public_http_url(&request.url)?;
 
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| error.to_string())?;
     let body = client
-        .get(&request.url)
+        .get(url.clone())
         .header("User-Agent", "Javis/0.1")
         .send()
         .map_err(|error| error.to_string())?
@@ -98,16 +137,105 @@ pub(crate) fn fetch_web_source(request: WebSourceRequest) -> Result<WebSource, S
     let plain_text = html_to_text(&body);
 
     Ok(WebSource {
-        url: request.url,
+        url: url.to_string(),
         title: extract_title(&body),
         excerpt: plain_text.chars().take(600).collect(),
         fetched_at: format_system_time(SystemTime::now()),
     })
 }
 
+fn validate_public_http_url(raw_url: &str) -> Result<Url, String> {
+    validate_public_http_url_with_resolver(raw_url, resolve_host_ips)
+}
+
+fn validate_public_http_url_with_resolver(
+    raw_url: &str,
+    resolver: impl Fn(&str, u16) -> Result<Vec<IpAddr>, String>,
+) -> Result<Url, String> {
+    let url = Url::parse(raw_url.trim()).map_err(|_| "Invalid URL.".to_string())?;
+    match url.scheme() {
+        "http" | "https" => {}
+        _ => return Err("Only http and https URLs are supported.".to_string()),
+    }
+
+    let Some(host) = url.host_str() else {
+        return Err("URL host is required.".to_string());
+    };
+    if is_blocked_hostname(host) {
+        return Err(format!(
+            "URLs targeting private/loopback addresses are not allowed: {host}"
+        ));
+    }
+    let ip_host = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = ip_host.parse::<IpAddr>() {
+        if is_private_ip(ip) {
+            return Err(format!(
+                "URLs targeting private/loopback addresses are not allowed: {host}"
+            ));
+        }
+    } else {
+        let port = url.port_or_known_default().unwrap_or(443);
+        for ip in resolver(host, port)? {
+            if is_private_ip(ip) {
+                return Err(format!(
+                    "URLs resolving to private/loopback addresses are not allowed: {host}"
+                ));
+            }
+        }
+    }
+
+    Ok(url)
+}
+
+fn resolve_host_ips(host: &str, port: u16) -> Result<Vec<IpAddr>, String> {
+    let addrs = (host, port)
+        .to_socket_addrs()
+        .map_err(|error| format!("Could not resolve URL host: {error}"))?
+        .map(|addr| addr.ip())
+        .collect::<Vec<_>>();
+    if addrs.is_empty() {
+        return Err("URL host did not resolve to an address.".to_string());
+    }
+    Ok(addrs)
+}
+
+fn is_blocked_hostname(host: &str) -> bool {
+    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "localhost" | "metadata.google.internal" | "metadata" | "169.254.169.254"
+    ) || normalized.ends_with(".localhost")
+}
+
+fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_private_ipv4(ip),
+        IpAddr::V6(ip) => is_private_ipv6(ip),
+    }
+}
+
+fn is_private_ipv4(ip: Ipv4Addr) -> bool {
+    ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || matches!(ip.octets(), [100, 64..=127, _, _])
+}
+
+fn is_private_ipv6(ip: Ipv6Addr) -> bool {
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || ip.is_unicast_link_local()
+        || (ip.octets()[0] & 0xfe) == 0xfc
+}
 
 #[tauri::command]
-pub(crate) fn search_web_sources(request: WebSearchRequest) -> Result<Vec<WebSearchResult>, String> {
+pub(crate) fn search_web_sources(
+    request: WebSearchRequest,
+) -> Result<Vec<WebSearchResult>, String> {
     let query = request.query.trim();
     if query.is_empty() {
         return Err("Search query cannot be empty.".to_string());
@@ -126,9 +254,9 @@ pub(crate) fn search_web_sources(request: WebSearchRequest) -> Result<Vec<WebSea
     }
 
     let prefer_github = match request.search_type.as_str() {
-        "web" => false,                       // Explicitly skip GitHub
-        "code" => true,                       // Explicitly use GitHub
-        _ => is_code_search_query(query),     // "auto": detect intent
+        "web" => false,                   // Explicitly skip GitHub
+        "code" => true,                   // Explicitly use GitHub
+        _ => is_code_search_query(query), // "auto": detect intent
     };
 
     if env_flag_enabled("JAVIS_SEARCH_DISABLE_GITHUB_CLI") {
@@ -154,8 +282,10 @@ pub(crate) fn search_web_sources(request: WebSearchRequest) -> Result<Vec<WebSea
     }
 }
 
-
-pub(crate) fn search_with_github_cli(query: &str, max_results: usize) -> Result<Vec<WebSearchResult>, String> {
+pub(crate) fn search_with_github_cli(
+    query: &str,
+    max_results: usize,
+) -> Result<Vec<WebSearchResult>, String> {
     let limit = max_results.to_string();
     let args = [
         "search",
@@ -188,7 +318,6 @@ pub(crate) fn search_with_github_cli(query: &str, max_results: usize) -> Result<
     Ok(github_items_to_search_results(items, max_results))
 }
 
-
 pub(crate) fn github_items_to_search_results(
     items: Vec<GithubSearchItem>,
     max_results: usize,
@@ -210,7 +339,6 @@ pub(crate) fn github_items_to_search_results(
         })
         .collect()
 }
-
 
 pub(crate) fn search_with_agent_chrome(
     query: &str,
@@ -263,7 +391,6 @@ pub(crate) fn search_with_agent_chrome(
     Ok(results)
 }
 
-
 pub(crate) fn resolve_agent_chrome_program() -> Option<PathBuf> {
     if let Some(path) = env::var_os("JAVIS_AGENT_CHROME_PATH").map(PathBuf::from) {
         if path.exists() {
@@ -287,7 +414,6 @@ pub(crate) fn resolve_agent_chrome_program() -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.exists())
 }
 
-
 pub(crate) fn create_agent_chrome_profile_dir() -> Result<PathBuf, String> {
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -297,7 +423,6 @@ pub(crate) fn create_agent_chrome_profile_dir() -> Result<PathBuf, String> {
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     Ok(directory)
 }
-
 
 pub(crate) fn run_command_with_timeout(
     program: String,
@@ -374,7 +499,6 @@ pub(crate) fn run_command_with_timeout(
     }
 }
 
-
 pub(crate) fn parse_bing_html_results(html: &str, max_results: usize) -> Vec<WebSearchResult> {
     let fetched_at = format_system_time(SystemTime::now());
     let mut results = Vec::new();
@@ -433,7 +557,6 @@ pub(crate) fn parse_bing_html_results(html: &str, max_results: usize) -> Vec<Web
     results
 }
 
-
 pub(crate) fn extract_bing_snippet(value: &str) -> Option<String> {
     let index = value.find("b_caption")?;
     let snippet = &value[index..];
@@ -447,7 +570,6 @@ pub(crate) fn extract_bing_snippet(value: &str) -> Option<String> {
     Some(html_to_text(&after_tag[..end_index]))
 }
 
-
 pub(crate) fn extract_html_attribute(value: &str, attribute: &str) -> Option<String> {
     let pattern = format!("{attribute}=\"");
     let start = value.find(&pattern)? + pattern.len();
@@ -455,7 +577,6 @@ pub(crate) fn extract_html_attribute(value: &str, attribute: &str) -> Option<Str
     let end = rest.find('"')?;
     Some(html_decode(&rest[..end]))
 }
-
 
 pub(crate) fn normalize_bing_url(value: &str) -> Option<String> {
     if let Some(index) = value.find("u=") {
@@ -480,7 +601,6 @@ pub(crate) fn normalize_bing_url(value: &str) -> Option<String> {
     None
 }
 
-
 pub(crate) fn percent_encode_query(value: &str) -> String {
     value
         .bytes()
@@ -494,3 +614,66 @@ pub(crate) fn percent_encode_query(value: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_public_http_url_allows_public_https() {
+        let url = validate_public_http_url_with_resolver(
+            "https://example.com/path?q=1",
+            |_host, _port| Ok(vec!["93.184.216.34".parse().unwrap()]),
+        )
+        .expect("public url");
+
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some("example.com"));
+    }
+
+    #[test]
+    fn validate_public_http_url_rejects_hostname_resolving_to_private_ip() {
+        let result = validate_public_http_url_with_resolver(
+            "https://public-name.example/path",
+            |_host, _port| Ok(vec!["127.0.0.1".parse().unwrap()]),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_public_http_url_rejects_loopback_and_private_ips() {
+        for url in [
+            "http://localhost/test",
+            "http://127.0.0.1/test",
+            "http://10.0.0.1/test",
+            "http://172.16.0.1/test",
+            "http://192.168.1.1/test",
+            "http://[::1]/test",
+            "http://[fc00::1]/test",
+        ] {
+            assert!(
+                validate_public_http_url(url).is_err(),
+                "{url} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_public_http_url_rejects_metadata_hosts() {
+        for url in [
+            "http://169.254.169.254/latest/meta-data",
+            "http://metadata.google.internal/computeMetadata/v1",
+        ] {
+            assert!(
+                validate_public_http_url(url).is_err(),
+                "{url} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_public_http_url_rejects_non_http_schemes() {
+        assert!(validate_public_http_url("file:///C:/Windows/win.ini").is_err());
+        assert!(validate_public_http_url("ftp://example.com/file").is_err());
+    }
+}

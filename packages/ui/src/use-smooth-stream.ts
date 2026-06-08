@@ -81,10 +81,8 @@ export function useSmoothStream({
           setDisplayedContent(displayedRef.current);
         }
         setIsSettled(true);
-        rafRef.current = null;
-        return;
       }
-      rafRef.current = requestAnimationFrame(renderLoop);
+      rafRef.current = null;
       return;
     }
 
@@ -100,7 +98,7 @@ export function useSmoothStream({
     setDisplayedContent(displayedRef.current);
     setIsSettled(false);
 
-    if (queue.length > 0 || !streamDoneRef.current) {
+    if (queue.length > 0) {
       rafRef.current = requestAnimationFrame(renderLoop);
       return;
     }
@@ -114,7 +112,13 @@ export function useSmoothStream({
   }, [minDelay]);
 
   useEffect(() => {
-    if ((isStreaming || chunkQueueRef.current.length > 0) && rafRef.current === null) {
+    if (chunkQueueRef.current.length > 0 && rafRef.current === null) {
+      setIsSettled(false);
+      rafRef.current = requestAnimationFrame(renderLoop);
+      return;
+    }
+
+    if (!isStreaming && displayedRef.current !== targetRef.current && rafRef.current === null) {
       setIsSettled(false);
       rafRef.current = requestAnimationFrame(renderLoop);
     }

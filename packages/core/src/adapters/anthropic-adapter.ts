@@ -36,6 +36,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     return {
       prompt: input.prompt,
       imageDataUrl: input.imageDataUrl,
+      images: input.images,
       providerId: input.providerId || this.adapterId,
       model: input.model,
       apiKeyReference: input.apiKeyReference,

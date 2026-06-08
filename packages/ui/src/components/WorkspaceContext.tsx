@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { WorkbenchLocale } from "../types";
 import { formatWorkspaceName } from "../utils";
 
@@ -21,7 +21,13 @@ export function WorkspaceContext({
   onUseWorkspacePath,
   onWorkspacePathChange,
 }: WorkspaceContextProps) {
+  const detailsRef = useRef<HTMLDetailsElement | null>(null);
   const [workspaceBrowseError, setWorkspaceBrowseError] = useState(false);
+  const [draftWorkspacePath, setDraftWorkspacePath] = useState(currentWorkspacePath);
+
+  useEffect(() => {
+    setDraftWorkspacePath(currentWorkspacePath);
+  }, [currentWorkspacePath]);
 
   async function handleBrowseWorkspace() {
     setWorkspaceBrowseError(false);
@@ -32,9 +38,17 @@ export function WorkspaceContext({
     }
   }
 
+  function handleUseWorkspacePath(path: string) {
+    const trimmedPath = path.trim();
+    if (!trimmedPath) return;
+    onWorkspacePathChange?.(trimmedPath);
+    onUseWorkspacePath?.(trimmedPath);
+    detailsRef.current?.removeAttribute("open");
+  }
+
   return (
     <div className="javis-workspace-context" aria-label={labels.currentWorkspace}>
-      <details className="javis-workspace-menu">
+      <details className="javis-workspace-menu" ref={detailsRef}>
         <summary title={currentWorkspacePath || labels.workspacePathPlaceholder}>
           <span className="javis-workspace-glyph">▱</span>
           <span>{formatWorkspaceName(currentWorkspacePath) || labels.currentWorkspace}</span>
@@ -45,15 +59,15 @@ export function WorkspaceContext({
             <span>{labels.currentWorkspace}</span>
             <input
               aria-label={labels.currentWorkspace}
-              onChange={(event) => onWorkspacePathChange?.(event.currentTarget.value)}
+              onChange={(event) => setDraftWorkspacePath(event.currentTarget.value)}
               placeholder={labels.workspacePathPlaceholder}
-              value={currentWorkspacePath}
+              value={draftWorkspacePath}
             />
           </label>
           <div className="javis-workspace-actions">
             <button
-              disabled={!currentWorkspacePath.trim()}
-              onClick={() => onUseWorkspacePath?.(currentWorkspacePath)}
+              disabled={!draftWorkspacePath.trim()}
+              onClick={() => handleUseWorkspacePath(draftWorkspacePath)}
               type="button"
             >
               {labels.useWorkspace}
@@ -71,7 +85,7 @@ export function WorkspaceContext({
               {recentWorkspacePaths.map((path) => (
                 <div className="javis-workspace-recent-entry" key={path}>
                   <button
-                    onClick={() => onUseWorkspacePath?.(path)}
+                    onClick={() => handleUseWorkspacePath(path)}
                     title={path}
                     type="button"
                   >

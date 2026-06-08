@@ -39,11 +39,15 @@ describe("OpenAIAdapter", () => {
     const adapter = new OpenAIAdapter();
     const payload = adapter.buildCompletionRequest({
       ...baseInput,
+      imageDataUrl: "data:image/png;base64,one",
+      images: ["data:image/png;base64,one", "data:image/png;base64,two"],
       maxTokens: 1024,
       temperature: 0.7,
       stopSequences: ["STOP"],
       locale: "zh-CN",
     });
+    expect(payload.imageDataUrl).toBe("data:image/png;base64,one");
+    expect(payload.images).toEqual(["data:image/png;base64,one", "data:image/png;base64,two"]);
     expect(payload.maxTokens).toBe(1024);
     expect(payload.temperature).toBe(0.7);
     expect(payload.stopSequences).toEqual(["STOP"]);
@@ -79,9 +83,11 @@ describe("OpenAICompatibleAdapter", () => {
       ...baseInput,
       providerId: "dashscope",
       baseUrl: "https://example.test/v1///",
+      images: ["data:image/png;base64,one", "data:image/png;base64,two"],
     });
 
     expect(payload.baseUrl).toBe("https://example.test/v1");
+    expect(payload.images).toEqual(["data:image/png;base64,one", "data:image/png;base64,two"]);
   });
 });
 
@@ -200,6 +206,20 @@ describe("AnthropicAdapter", () => {
   it("reports vision capability", () => {
     const adapter = new AnthropicAdapter();
     expect(adapter.capabilities.vision).toBe(true);
+  });
+
+  it("passes multi-image inputs through to the native request payload", () => {
+    const adapter = new AnthropicAdapter();
+    const payload = adapter.buildCompletionRequest({
+      ...baseInput,
+      providerId: "anthropic",
+      baseUrl: "https://api.anthropic.com",
+      imageDataUrl: "data:image/png;base64,one",
+      images: ["data:image/png;base64,one", "data:image/png;base64,two"],
+    });
+
+    expect(payload.imageDataUrl).toBe("data:image/png;base64,one");
+    expect(payload.images).toEqual(["data:image/png;base64,one", "data:image/png;base64,two"]);
   });
 });
 

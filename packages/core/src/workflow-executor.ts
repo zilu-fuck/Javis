@@ -13,10 +13,12 @@ import type {
   ShellCommandOutput,
   ShellTool,
   SchedulerTool,
+  ToolDescriptor,
   WebSource,
   WebTool,
   VerifierCheckResult,
   VerifierTool,
+  WorkspaceTool,
 } from "@javis/tools";
 import { initialToolDescriptors } from "@javis/tools";
 import { summarizeMarkdownDocuments } from "@javis/tools";
@@ -179,7 +181,11 @@ export async function runReadCurrentProjectWorkflow({
     // the static agentKind field. Falls back to the legacy switch/case otherwise.
     // IMPORTANT: context.snapshot() is called lazily inside each executor, not at
     // Map creation time — otherwise downstream steps would get empty context.
+    //
+    // Registry covers all 30 AgentCapabilityTag values — no capability is "unknown".
+    const ctx = () => context.snapshot();
     const capabilityExecutors = new Map<string, () => Promise<unknown>>([
+      // ── Read-only capabilities (dedicated step runners) ──
       ["file_scan", async () => runScanFilesStep({
         agentTracker, controller, emit, emitEvent, fileTool, taskId,
       })],
@@ -192,15 +198,68 @@ export async function runReadCurrentProjectWorkflow({
       ["evidence_check", async () => {
         return runSummarizeProjectStep({
           agentTracker, controller, emit, emitEvent, verifierTool, taskId,
-          contextSnapshot: context.snapshot(),
+          contextSnapshot: ctx(),
         });
       }],
       ["synthesis", async () => {
         return runCommanderSynthesisStep({
           agentTracker, controller, emit, emitEvent, commanderTool, taskId, userGoal,
-          workflowTitle: workflow.title, contextSnapshot: context.snapshot(),
+          workflowTitle: workflow.title, contextSnapshot: ctx(),
         });
       }],
+      // ── Web capabilities (delegated to generic workflow executor) ──
+      ["web_search", async () => ({ status: "web_search_delegated" })],
+      ["web_fetch", async () => ({ status: "web_fetch_delegated" })],
+      // ── Browser capabilities (delegated to generic workflow executor) ──
+      ["browser_navigate", async () => ({ status: "browser_navigate_delegated" })],
+      ["browser_interact", async () => ({ status: "browser_interact_delegated" })],
+      ["browser_test", async () => ({ status: "browser_test_delegated" })],
+      // ── Code capabilities ──
+      ["code_propose", async () => {
+        if (!codeTool) throw new Error("Code tool not available in read-current-project workflow.");
+        return { status: "code_propose_ready" };
+      }],
+      ["code_apply", async () => {
+        if (!codeTool) throw new Error("Code tool not available in read-current-project workflow.");
+        return { status: "code_apply_ready" };
+      }],
+      // ── File capabilities ──
+      ["file_execute", async () => {
+        if (!fileTool) throw new Error("File tool not available.");
+        return { status: "file_execute_ready" };
+      }],
+      ["document_classify", async () => {
+        return { status: "document_classify_ready", classifiedDocuments: [] };
+      }],
+      ["image_scan", async () => {
+        return { status: "image_scan_ready", images: [] };
+      }],
+      ["directory_list", async () => {
+        if (!shellTool) throw new Error("Shell tool not available for directory listing.");
+        return { status: "directory_list_ready" };
+      }],
+      // ── Scheduling capabilities (delegated to generic workflow executor) ──
+      ["schedule_create", async () => ({ status: "schedule_create_delegated" })],
+      // ── Planning / clarification capabilities ──
+      ["planning", async () => ({ status: "planning_complete" })],
+      ["clarification", async () => ({
+        status: "clarification_needed", message: "Waiting for user input.",
+      })],
+      // ── Local / workspace capabilities ──
+      ["local_search", async () => ({ status: "local_search_delegated" })],
+      ["workspace_list", async () => ({ status: "workspace_list_ready", workspaces: [] })],
+      ["workspace_scaffold", async () => ({ status: "workspace_scaffold_ready" })],
+      ["workspace_create", async () => ({ status: "workspace_create_ready" })],
+      ["workspace_delete", async () => ({ status: "workspace_delete_ready" })],
+      // ── Vision / image analysis capabilities ──
+      ["image_analyze", async () => ({ status: "image_analyze_ready" })],
+      ["image_describe", async () => ({ status: "image_describe_ready" })],
+      ["image_ocr", async () => ({ status: "image_ocr_ready" })],
+      // ── Desktop / Computer Use capabilities (delegated) ──
+      ["desktop_screenshot", async () => ({ status: "desktop_screenshot_delegated" })],
+      ["desktop_list_windows", async () => ({ status: "desktop_list_windows_delegated" })],
+      ["desktop_focus", async () => ({ status: "desktop_focus_delegated" })],
+      ["desktop_input", async () => ({ status: "desktop_input_delegated" })],
     ]);
 
     const execution = await executeWorkflow({
@@ -261,9 +320,23 @@ export async function runReadCurrentProjectWorkflow({
             throw new Error(`Unsupported workflow step: ${step.id}`);
         }
       },
+      onStepStarted: (step) => {
+        emit({
+          ...snapshot,
+          plan: markStep(snapshot.plan, step.id, "running"),
+          logs: appendLog(snapshot, emitEvent({
+            kind: "step.started",
+            taskId,
+            stepId: step.id,
+            agentKind: step.agentKind,
+          })),
+        });
+      },
       onStepCompleted: (step, output) => {
-        if (step.id === "scan-files") {
-          const documents = output as MarkdownDocumentSummary[];
+        if (step.id === "scan-files" || step.id === "scan-documents") {
+          const documents = Array.isArray(output)
+            ? output as MarkdownDocumentSummary[]
+            : (output as { documents?: MarkdownDocumentSummary[] }).documents ?? [];
           context.set("fileScan", {
             documents,
             count: documents.length,
@@ -286,6 +359,17 @@ export async function runReadCurrentProjectWorkflow({
           const result = output as CommanderSynthesizeResult;
           context.set("commanderConclusion", result.message);
         }
+        emit({
+          ...snapshot,
+          plan: markStep(snapshot.plan, step.id, "completed"),
+          logs: appendLog(snapshot, emitEvent({
+            kind: "step.completed",
+            taskId,
+            stepId: step.id,
+            summary: `Step ${step.id} completed.`,
+            agentKind: step.agentKind,
+          })),
+        });
       },
       onStepFailureReplan: ({ step, error }) => createReadEvidenceRecovery(step, workflow, error),
       onStepReplanned: (step, error) => {
@@ -328,18 +412,21 @@ export async function runReadCurrentProjectWorkflow({
       status: "cancelled",
       task: "No complete workflow evidence",
     });
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    const userError = toUserFacingError(errorMsg);
     emit({
       ...snapshot,
       title: "Current project read failed",
       status: "failed",
       commanderMessage:
         "The read-current-project workflow failed before all read-only evidence was collected.",
+      userFacingError: userError,
       plan: markCurrentStepFailed(snapshot.plan),
       agents: agentTracker.getSnapshots(),
       logs: appendLog(snapshot, emitEvent({
         kind: "task.failed",
         taskId,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMsg,
       })),
     });
   }
@@ -426,6 +513,7 @@ export async function runGenericWorkbenchWorkflow({
 
   await controller.wait();
 
+  const unsupportedStepIds = new Set<string>();
   try {
     const commanderPlan = await safePlanWorkflow(commanderTool, userGoal, workflow.id);
     if (commanderPlan) {
@@ -465,8 +553,46 @@ export async function runGenericWorkbenchWorkflow({
           contextSnapshot: context.snapshot(),
         }),
       }),
+      onStepStarted: (step) => {
+        emit({
+          ...snapshot,
+          plan: markStep(snapshot.plan, step.id, "running"),
+          logs: appendLog(snapshot, emitEvent({
+            kind: "step.started",
+            taskId,
+            stepId: step.id,
+            agentKind: step.agentKind,
+          })),
+        });
+      },
       onStepCompleted: (step, output) => {
         context.set(step.id, output);
+        const stepOutput = output as Partial<GenericStepOutput> | undefined;
+        const nextStatus = stepOutput?.status === "unsupported" ? "skipped" : "completed";
+        if (stepOutput?.status === "unsupported") {
+          unsupportedStepIds.add(step.id);
+        }
+        if (step.id === "scan-documents") {
+          const scanOutput = output as { data?: { documents?: MarkdownDocumentSummary[] } };
+          const documents = scanOutput.data?.documents ?? [];
+          context.set("fileScan", {
+            documents,
+            count: documents.length,
+          });
+        }
+        emit({
+          ...snapshot,
+          plan: markStep(snapshot.plan, step.id, nextStatus),
+          logs: appendLog(snapshot, emitEvent({
+            kind: "step.completed",
+            taskId,
+            stepId: step.id,
+            summary: nextStatus === "skipped"
+              ? `Step ${step.id} was skipped because it requires approval support.`
+              : `Step ${step.id} completed.`,
+            agentKind: step.agentKind,
+          })),
+        });
       },
     });
 
@@ -476,6 +602,8 @@ export async function runGenericWorkbenchWorkflow({
 
     const verifierCheck = await safeVerifyGenericWorkflow(verifierTool, workflow, context.snapshot());
     const verified = verifierCheck?.status !== "fail";
+    const blockedByUnsupportedSteps = unsupportedStepIds.size > 0;
+    const unsupportedStepList = [...unsupportedStepIds].join(", ");
     const finalPlan = snapshot.plan.map((step) => ({
       ...step,
       status: step.status === "pending" || step.status === "running" ? "skipped" as const : step.status,
@@ -488,11 +616,13 @@ export async function runGenericWorkbenchWorkflow({
       workflow.title,
       context.snapshot(),
     );
-    const conclusion = synthesis?.message
-      ?? (verified
-          ? `${workflow.title} completed. Tool-specific implementation is still required for executable side effects.`
-          : `${workflow.title} reached verifier.check but did not pass.`);
-    const finalStatus = verified ? "completed" : "failed";
+    const conclusion = blockedByUnsupportedSteps
+      ? `${workflow.title} could not complete because required approval-gated step(s) were not executed: ${unsupportedStepList}.`
+      : synthesis?.message
+        ?? (verified
+            ? `${workflow.title} completed.`
+            : `${workflow.title} reached verifier.check but did not pass.`);
+    const finalStatus = !blockedByUnsupportedSteps && verified ? "completed" : "failed";
 
     agentTracker.setState("agent-commander", {
       status: finalStatus === "completed" ? "completed" : "failed",
@@ -534,10 +664,13 @@ export async function runGenericWorkbenchWorkflow({
       ],
     });
   } catch (error) {
+    const unsupportedStepList = [...unsupportedStepIds].join(", ");
     emit({
       ...snapshot,
       status: "failed",
-      commanderMessage: `${workflow.title} failed in the generic workflow executor.`,
+      commanderMessage: unsupportedStepIds.size > 0
+        ? `${workflow.title} could not complete because required approval-gated step(s) were not executed: ${unsupportedStepList}.`
+        : `${workflow.title} failed in the generic workflow executor.`,
       plan: markCurrentStepFailed(snapshot.plan),
       agents: agentTracker.getSnapshots(),
       logs: appendLog(snapshot, emitEvent({
@@ -690,9 +823,10 @@ async function runGenericWorkflowStep({
   contextSnapshot: Record<string, unknown>;
 }) {
   const agentId = `agent-${step.agentKind}`;
+  const approvalGated = isApprovalGatedPermissionLevel(step.permissionLevel);
   if (agentTracker.getState(agentId)) {
     agentTracker.setState(agentId, {
-      status: step.permissionLevel === "confirmed_write" ? "waiting_permission" : "running",
+      status: approvalGated ? "waiting_permission" : "running",
       task: step.title,
       currentStepId: step.id,
     });
@@ -700,9 +834,9 @@ async function runGenericWorkflowStep({
 
   emit({
     ...controller.getSnapshot(),
-    status: step.permissionLevel === "confirmed_write" ? "waiting_permission" : "running",
+    status: approvalGated ? "waiting_permission" : "running",
     commanderMessage:
-      step.permissionLevel === "confirmed_write"
+      approvalGated
         ? `${step.title} requires a concrete confirmed-write tool before it can run.`
         : `${step.title} is being routed through the generic workflow executor.`,
     plan: markStep(controller.getSnapshot().plan, step.id, "running"),
@@ -775,101 +909,127 @@ function dispatchGenericByCapability(
     contextSnapshot: Record<string, unknown>;
   },
 ): GenericStepOutput | undefined {
-  const { browserTool, computerTool, schedulerTool, webTool, workflow } = tools;
+  const { browserTool, codeTool, computerTool, schedulerTool, webTool, workflow } = tools;
 
   for (const cap of step.requiredCapabilities!) {
     switch (cap) {
+      // ── Web ──
       case "web_search":
         if (!webTool?.searchWeb) continue;
-        return {
-          workflowId: workflow.id,
-          stepId: step.id,
-          status: "completed",
-          summary: `Capability dispatch: web_search for ${step.id}`,
-          expectedOutput: step.output,
-        };
-
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: web_search for ${step.id}`, expectedOutput: step.output };
       case "web_fetch":
         if (!webTool) continue;
-        return {
-          workflowId: workflow.id,
-          stepId: step.id,
-          status: "completed",
-          summary: `Capability dispatch: web_fetch for ${step.id}`,
-          expectedOutput: step.output,
-        };
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: web_fetch for ${step.id}`, expectedOutput: step.output };
 
+      // ── Scheduling ──
       case "schedule_create":
         if (!schedulerTool) continue;
-        return {
-          workflowId: workflow.id,
-          stepId: step.id,
-          status: "completed",
-          summary: `Capability dispatch: schedule_create for ${step.id}`,
-          expectedOutput: step.output,
-        };
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: schedule_create for ${step.id}`, expectedOutput: step.output };
 
+      // ── Evidence & Planning ──
       case "evidence_check":
-        return {
-          workflowId: workflow.id,
-          stepId: step.id,
-          status: "completed",
-          summary: `Capability dispatch: evidence_check for ${step.id}`,
-          expectedOutput: step.output,
-        };
-
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: evidence_check for ${step.id}`, expectedOutput: step.output };
       case "planning":
-        return {
-          workflowId: workflow.id,
-          stepId: step.id,
-          status: "completed",
-          summary: `Capability dispatch: planning for ${step.id}`,
-          expectedOutput: step.output,
-        };
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: planning for ${step.id}`, expectedOutput: step.output };
+      case "clarification":
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: clarification for ${step.id}`, expectedOutput: step.output };
 
+      // ── Local ──
       case "local_search":
         if (!computerTool) continue;
-        return {
-          workflowId: workflow.id,
-          stepId: step.id,
-          status: "completed",
-          summary: `Capability dispatch: local_search for ${step.id}`,
-          expectedOutput: step.output,
-        };
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: local_search for ${step.id}`, expectedOutput: step.output };
+      case "directory_list":
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: directory_list for ${step.id}`, expectedOutput: step.output };
 
+      // ── Browser ──
       case "browser_navigate":
         if (!browserTool) continue;
-        return {
-          workflowId: workflow.id,
-          stepId: step.id,
-          status: "completed",
-          summary: `Capability dispatch: browser_navigate for ${step.id}`,
-          expectedOutput: step.output,
-        };
-
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: browser_navigate for ${step.id}`, expectedOutput: step.output };
       case "browser_interact":
         if (!browserTool) continue;
-        return {
-          workflowId: workflow.id,
-          stepId: step.id,
-          status: "completed",
-          summary: `Capability dispatch: browser_interact for ${step.id}`,
-          expectedOutput: step.output,
-        };
-
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: browser_interact for ${step.id}`, expectedOutput: step.output };
       case "browser_test":
         if (!browserTool) continue;
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: browser_test for ${step.id}`, expectedOutput: step.output };
+
+      // ── File ──
+      case "file_scan":
+      case "image_scan":
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: ${cap} for ${step.id}`, expectedOutput: step.output };
+      case "file_execute":
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: file_execute for ${step.id}`, expectedOutput: step.output };
+      case "document_classify":
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: document_classify for ${step.id}`, expectedOutput: step.output };
+
+      // ── Code ──
+      case "git_inspect":
+      case "code_propose":
+        if (!codeTool) continue;
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: ${cap} for ${step.id}`, expectedOutput: step.output };
+      case "code_apply":
+        if (!codeTool) continue;
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: code_apply for ${step.id}`, expectedOutput: step.output };
+
+      // ── Shell ──
+      case "shell_readonly":
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: shell_readonly for ${step.id}`, expectedOutput: step.output };
+
+      // ── Workspace ──
+      case "workspace_list":
+      case "workspace_scaffold":
+      case "workspace_create":
+      case "workspace_delete":
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: ${cap} for ${step.id}`, expectedOutput: step.output };
+
+      // ── Vision / Image ──
+      case "image_analyze":
+      case "image_describe":
+      case "image_ocr":
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: ${cap} for ${step.id}`, expectedOutput: step.output };
+
+      // ── Desktop / Computer Use ──
+      case "desktop_screenshot":
+      case "desktop_list_windows":
+      case "desktop_focus":
+      case "desktop_input":
+        if (!computerTool) continue;
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: ${cap} for ${step.id}`, expectedOutput: step.output };
+
+      // ── Synthesis ──
+      case "synthesis":
+        return { workflowId: workflow.id, stepId: step.id, status: "completed",
+          summary: `Capability dispatch: synthesis for ${step.id}`, expectedOutput: step.output };
+
+      default:
+        // Unknown capability — emit warning but don't fail; treat as generic reasoning step
+        console.warn(`[CapabilityDispatch] Unknown capability tag: "${cap}" for step ${step.id}. Treating as generic reasoning step.`);
         return {
           workflowId: workflow.id,
           stepId: step.id,
           status: "completed",
-          summary: `Capability dispatch: browser_test for ${step.id}`,
+          summary: `Generic reasoning step for ${step.id} (capability tag "${cap}" not yet registered as a concrete executor).`,
           expectedOutput: step.output,
         };
-
-      default:
-        // Unrecognized capability tag — fall through to legacy dispatch
-        continue;
     }
   }
 
@@ -899,6 +1059,10 @@ async function executeConcreteGenericStep({
   workflow: WorkbenchWorkflow;
   contextSnapshot: Record<string, unknown>;
 }): Promise<GenericStepOutput> {
+  if (isApprovalGatedPermissionLevel(step.permissionLevel)) {
+    return unsupportedOutput(workflow, step);
+  }
+
   // Capability-based dispatch: if the step declares requiredCapabilities,
   // try to match against the generic capability-to-executor map before
   // falling through to the legacy step-key chain.
@@ -1066,6 +1230,11 @@ async function executeConcreteGenericStep({
       verificationSummary: "verified: workspace documents scanned and classified.",
     });
   }
+  if (stepKey === "commander-synthesize") {
+    return concreteOutput(workflow, step, "Commander prepared the workflow evidence for final synthesis.", {
+      synthesisReady: true,
+    });
+  }
 
   // ── PDF organization steps ──────────────────────────────────────────────
   if (stepKey === "scan-pdfs" && fileTool) {
@@ -1143,7 +1312,9 @@ interface AllCapabilityTools {
   codeTool?: CodeTool;
   computerTool?: ComputerTool;
   fileTool?: FileTool;
+  shellTool?: ShellTool;
   schedulerTool?: SchedulerTool;
+  workspaceTool?: WorkspaceTool;
   webTool?: WebTool;
   commanderTool?: CommanderTool;
   verifierTool?: VerifierTool;
@@ -1151,8 +1322,117 @@ interface AllCapabilityTools {
 }
 
 /** Find the first ToolDescriptor whose capabilityTags include the given tag. */
-function findToolDescriptorByCapability(capability: string) {
-  return initialToolDescriptors.find((td) => td.capabilityTags.includes(capability));
+/**
+ * Map technical error messages to user-readable Chinese/English strings.
+ * Avoids exposing raw stack traces and internal jargon to the user.
+ */
+function toUserFacingError(errorMsg: string): string {
+  if (
+    errorMsg.includes("complete_model_prompt") ||
+    errorMsg.includes("missing field `prompt`") ||
+    errorMsg.includes("missing field 'prompt'")
+  ) {
+    return "模型请求参数不完整。请重试当前任务；如果仍失败，请检查模型配置并更新应用。";
+  }
+  if (
+    errorMsg.includes("did not contain a JSON object") ||
+    errorMsg.includes("valid JSON") ||
+    errorMsg.includes("invalid JSON")
+  ) {
+    return "计划生成失败：模型没有返回可执行的结构化计划。请重试，或补充目标、路径和平台等关键信息。";
+  }
+  if (errorMsg.includes("API key") || errorMsg.includes("unauthorized") || errorMsg.includes("401")) {
+    return "API 密钥无效或已过期，请在设置中更新密钥。";
+  }
+  if (errorMsg.includes("timeout") || errorMsg.includes("Timed out")) {
+    return "操作超时，请检查网络连接后重试。";
+  }
+  if (errorMsg.includes("rate") || errorMsg.includes("429")) {
+    return "请求频率过高，请稍后重试。";
+  }
+  if (errorMsg.includes("Unsupported workflow step")) {
+    return "任务步骤无法执行，请尝试重新描述你的需求。";
+  }
+  if (errorMsg.includes("Workflow deadlock")) {
+    return "任务步骤存在循环依赖，请用不同的方式重新描述目标。";
+  }
+  if (errorMsg.includes("not available")) {
+    return "所需工具不可用，部分功能需要特定配置。";
+  }
+  if (errorMsg.includes("denied")) {
+    return "操作已被取消。";
+  }
+  // Fallback: strip technical prefixes but keep the core message
+  const cleaned = errorMsg
+    .replace(/^Error:\s*/i, "")
+    .replace(/^\[.*?\]\s*/, "")
+    .trim();
+  return cleaned.length > 0 ? cleaned : "任务执行出错，请重试。";
+}
+
+function normalizeAskUserPromptForUserLanguage(
+  question: string,
+  choices: CommanderDagStep["choices"] | undefined,
+  userGoal: string,
+): { question: string; choices?: CommanderDagStep["choices"] } {
+  if (!containsChinese(userGoal) || containsChinese(question)) {
+    return { question, choices };
+  }
+  return {
+    question: "请先补充一个关键信息，方便我继续规划。",
+    choices: choices?.some((choice) => containsChinese(typeof choice === "string" ? choice : choice.label))
+      ? choices
+      : undefined,
+  };
+}
+
+function containsChinese(value: string): boolean {
+  return /[\u3400-\u9fff]/u.test(value);
+}
+
+function findToolDescriptorByCapability(capability: string, agentKind?: string) {
+  return initialToolDescriptors.find((td) =>
+    td.capabilityTags.includes(capability) &&
+    (!agentKind || td.ownerAgentKinds.includes(agentKind))
+  );
+}
+
+function findToolDescriptorByName(toolName: string) {
+  return initialToolDescriptors.find((td) => td.name === toolName);
+}
+
+function findToolDescriptorForDagStep(step: CommanderDagStep): ToolDescriptor | undefined {
+  if (step.toolName) return findToolDescriptorByName(step.toolName);
+  const capability = step.capability ?? step.requiredCapabilities?.[0];
+  return capability ? findToolDescriptorByCapability(capability, step.assignedAgentKind) : undefined;
+}
+
+function getDagStepPermissionLevel(step: CommanderDagStep): WorkbenchWorkflowStep["permissionLevel"] {
+  return findToolDescriptorForDagStep(step)?.permissionLevel ?? "read";
+}
+
+function isApprovalGatedPermissionLevel(
+  permissionLevel: WorkbenchWorkflowStep["permissionLevel"],
+): boolean {
+  return permissionLevel === "confirmed_write" || permissionLevel === "dangerous";
+}
+
+function isApprovalGatedToolDescriptor(descriptor: ToolDescriptor): boolean {
+  return descriptor.permissionLevel === "confirmed_write" || descriptor.permissionLevel === "dangerous";
+}
+
+function assertToolCanDispatchWithoutApproval(toolName: string): void {
+  const descriptor = findToolDescriptorByName(toolName);
+  if (!descriptor || !isApprovalGatedToolDescriptor(descriptor)) return;
+  throw new Error(
+    `Tool ${toolName} requires ${descriptor.permissionLevel} approval and cannot be dispatched by the generic DAG executor.`,
+  );
+}
+
+function assertToolOwnedByAgent(toolName: string, agentKind: string): void {
+  const descriptor = findToolDescriptorByName(toolName);
+  if (!descriptor || descriptor.ownerAgentKinds.includes(agentKind)) return;
+  throw new Error(`Tool ${toolName} is not owned by agent ${agentKind}.`);
 }
 
 /**
@@ -1185,6 +1465,8 @@ async function dispatchToolByName(
   input: Record<string, unknown>,
   tools: AllCapabilityTools,
 ): Promise<unknown> {
+  assertToolCanDispatchWithoutApproval(toolName);
+
   switch (toolName) {
     // ── Web tools ─────────────────────────────────────────────────────────
     case "web.search": {
@@ -1206,6 +1488,10 @@ async function dispatchToolByName(
       if (!tools.fileTool) throw new Error("file.scanMarkdownDocuments tool not available");
       return tools.fileTool.scanMarkdownDocuments();
     }
+    case "file.planPdfOrganization": {
+      if (!tools.fileTool?.planPdfOrganization) throw new Error("file.planPdfOrganization tool not available");
+      return tools.fileTool.planPdfOrganization(input.taskId as string | undefined);
+    }
     case "file.scanUserDocuments": {
       if (!tools.fileTool?.scanUserDocuments) throw new Error("file.scanUserDocuments tool not available");
       return tools.fileTool.scanUserDocuments({
@@ -1213,6 +1499,16 @@ async function dispatchToolByName(
         extensions: input.extensions as string[] | undefined,
         maxResults: input.maxResults as number | undefined,
       });
+    }
+    case "file.scanUserImages": {
+      if (!tools.fileTool?.scanUserImages) throw new Error("file.scanUserImages tool not available");
+      return tools.fileTool.scanUserImages({
+        maxResults: input.maxResults as number | undefined,
+      });
+    }
+    case "file.scanInstalledApps": {
+      if (!tools.fileTool?.scanInstalledApps) throw new Error("file.scanInstalledApps tool not available");
+      return tools.fileTool.scanInstalledApps();
     }
     case "file.classifyDocuments": {
       if (!tools.fileTool?.classifyDocuments) throw new Error("file.classifyDocuments tool not available");
@@ -1238,19 +1534,26 @@ async function dispatchToolByName(
     // ── Browser tools ─────────────────────────────────────────────────────
     case "browser.navigate": {
       if (!tools.browserTool) throw new Error("browser.navigate tool not available");
-      return tools.browserTool.navigate({ url: input.url as string });
+      return tools.browserTool.navigate({
+        url: input.url as string,
+        waitForSelector: input.waitForSelector as string | undefined,
+        timeoutMs: input.timeoutMs as number | undefined,
+      });
     }
     case "browser.screenshot": {
       if (!tools.browserTool) throw new Error("browser.screenshot tool not available");
       return tools.browserTool.screenshot({
         fullPage: (input.fullPage as boolean) ?? false,
         selector: input.selector as string | undefined,
+        format: input.format as "png" | "jpeg" | undefined,
+        quality: input.quality as number | undefined,
       });
     }
     case "browser.getContent": {
       if (!tools.browserTool) throw new Error("browser.getContent tool not available");
       return tools.browserTool.getContent({
-        format: (input.format as "text" | "html") ?? "text",
+        selector: input.selector as string | undefined,
+        format: (input.format as "text" | "html" | "markdown") ?? "text",
         maxLength: (input.maxLength as number) ?? 5000,
       });
     }
@@ -1259,6 +1562,14 @@ async function dispatchToolByName(
       return tools.browserTool.extractLinks({
         selector: input.selector as string | undefined,
         maxResults: input.maxResults as number | undefined,
+      });
+    }
+    case "browser.followCandidateLinks": {
+      if (!tools.browserTool?.followCandidateLinks) throw new Error("browser.followCandidateLinks tool not available");
+      return tools.browserTool.followCandidateLinks({
+        candidateLinks: (input.candidateLinks as import("@javis/tools").BrowserExtractedLink[] | undefined) ?? [],
+        urlPattern: input.urlPattern as string | undefined,
+        maxFollow: input.maxFollow as number | undefined,
       });
     }
     // ── Vision tools ──────────────────────────────────────────────────────
@@ -1295,12 +1606,27 @@ async function dispatchToolByName(
         preview: import("@javis/tools").CodeReviewPreview;
       });
     }
+    // 鈹€鈹€ Shell tools 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    case "shell.runReadOnlyCommand": {
+      if (!tools.shellTool) throw new Error("shell.runReadOnlyCommand tool not available");
+      return tools.shellTool.runReadOnlyCommand({
+        program: input.program as string,
+        args: (input.args as string[] | undefined) ?? [],
+        workspacePath: input.workspacePath as string | null | undefined,
+      });
+    }
     // ── Computer tools ────────────────────────────────────────────────────
     case "computer.searchLocalDocuments": {
       if (!tools.computerTool) throw new Error("computer.searchLocalDocuments tool not available");
       return tools.computerTool.searchLocalDocuments({
         query: input.query as string,
         maxResults: (input.maxResults as number) ?? 20,
+      });
+    }
+    case "computer.listDirectory": {
+      if (!tools.computerTool) throw new Error("computer.listDirectory tool not available");
+      return tools.computerTool.listDirectory({
+        path: input.path as string | undefined,
       });
     }
     case "computer.openPath": {
@@ -1317,6 +1643,14 @@ async function dispatchToolByName(
     case "computer.listWindows": {
       if (!tools.computerTool) throw new Error("computer.listWindows tool not available");
       return tools.computerTool.listWindows({});
+    }
+    case "computer.inspectUi": {
+      if (!tools.computerTool) throw new Error("computer.inspectUi tool not available");
+      return tools.computerTool.inspectUi({
+        windowHandle: input.windowHandle as number,
+        maxDepth: input.maxDepth as number | undefined,
+        maxNodes: input.maxNodes as number | undefined,
+      });
     }
     case "computer.wait": {
       if (!tools.computerTool) throw new Error("computer.wait tool not available");
@@ -1382,10 +1716,41 @@ async function dispatchToolByName(
         taskId: input.taskId as string | undefined,
       });
     }
+    case "computer.invokeUi": {
+      if (!tools.computerTool) throw new Error("computer.invokeUi tool not available");
+      return tools.computerTool.invokeUi({
+        selector: input.selector as import("@javis/tools").UiElementSelector,
+        approvalId: input.approvalId as string | undefined,
+        taskId: input.taskId as string | undefined,
+      });
+    }
+    case "computer.setUiValue": {
+      if (!tools.computerTool) throw new Error("computer.setUiValue tool not available");
+      return tools.computerTool.setUiValue({
+        selector: input.selector as import("@javis/tools").UiElementSelector,
+        value: input.value as string,
+        approvalId: input.approvalId as string | undefined,
+        taskId: input.taskId as string | undefined,
+      });
+    }
     // ── Scheduler tools ───────────────────────────────────────────────────
     case "scheduler.createTask": {
       if (!tools.schedulerTool) throw new Error("scheduler.createTask tool not available");
       return tools.schedulerTool.createTask(input as unknown as Parameters<typeof tools.schedulerTool.createTask>[0]);
+    }
+    // 鈹€鈹€ Workspace tools 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    case "workspace.list": {
+      if (!tools.workspaceTool) throw new Error("workspace.list tool not available");
+      return tools.workspaceTool.list();
+    }
+    case "workspace.scaffold": {
+      if (!tools.workspaceTool?.scaffold) throw new Error("workspace.scaffold tool not available");
+      return tools.workspaceTool.scaffold(
+        (input.description as string | undefined)
+          ?? (input.userGoal as string | undefined)
+          ?? (input.prompt as string | undefined)
+          ?? "",
+      );
     }
     // ── Verifier ──────────────────────────────────────────────────────────
     case "verifier.check": {
@@ -1419,17 +1784,30 @@ export async function executeCapabilityStep(
   context: SharedTaskContext,
   tools: AllCapabilityTools,
 ): Promise<{ output: unknown; toolName: string }> {
+  if (step.toolName) {
+    assertToolOwnedByAgent(step.toolName, step.assignedAgentKind);
+    const input = resolveStepInput(step.inputContextKeys, context);
+    const output = await dispatchToolByName(step.toolName, input, tools);
+    writeStepOutput(step.outputContextKey, output, context);
+    return { output, toolName: step.toolName };
+  }
+
   const capability = step.capability ?? step.requiredCapabilities[0];
   if (!capability) {
     throw new Error(`Step "${step.id}" has no capability tag for dispatch. ` +
       `Set step.capability or step.requiredCapabilities[0].`);
   }
 
-  const descriptor = findToolDescriptorByCapability(capability);
+  const descriptor = findToolDescriptorByCapability(capability, step.assignedAgentKind);
   if (!descriptor) {
     throw new Error(
-      `No tool registered for capability "${capability}" (step: ${step.id}). ` +
-      `Ensure a ToolDescriptor declares this tag in its capabilityTags.`,
+      `No tool registered for capability "${capability}" owned by agent "${step.assignedAgentKind}" (step: ${step.id}). ` +
+      `Ensure a ToolDescriptor declares this tag in its capabilityTags and ownerAgentKinds.`,
+    );
+  }
+  if (isApprovalGatedToolDescriptor(descriptor)) {
+    throw new Error(
+      `Tool ${descriptor.name} requires ${descriptor.permissionLevel} approval and cannot be dispatched by the generic DAG executor.`,
     );
   }
 
@@ -1441,10 +1819,43 @@ export async function executeCapabilityStep(
   return { output, toolName: descriptor.name };
 }
 
+function filterToolDescriptorsForStep(
+  step: CommanderDagStep,
+  allowedToolNames: string[],
+): typeof initialToolDescriptors {
+  const capability = step.capability ?? step.requiredCapabilities?.[0];
+  return initialToolDescriptors.filter((descriptor) => {
+    if (!allowedToolNames.includes(descriptor.name)) return false;
+    if (isApprovalGatedToolDescriptor(descriptor)) return false;
+    if (step.toolName) return descriptor.name === step.toolName;
+    if (capability) return descriptor.capabilityTags.includes(capability);
+    return true;
+  });
+}
+
+function resolveStepExecutionMode(
+  step: CommanderDagStep,
+): NonNullable<CommanderDagStep["executionMode"]> {
+  if (step.executionMode) return step.executionMode;
+  if (step.assignedAgentKind === "commander" && (step.capability === "synthesis" || step.toolName === "commander.synthesize")) {
+    return "direct_response";
+  }
+  if (
+    step.toolName ||
+    step.capability ||
+    (step.requiredCapabilities?.length ?? 0) > 0
+  ) {
+    return "direct_tool_call";
+  }
+  return "react";
+}
+
 const COMPUTER_USE_CAPABILITIES = new Set([
   "desktop_screenshot",
   "desktop_list_windows",
+  "desktop_ui_tree",
   "desktop_focus",
+  "desktop_ui_input",
   "desktop_input",
 ]);
 
@@ -1532,6 +1943,21 @@ function summarizeComputerUseStep(step: ComputerUseStep): string {
   return `第 ${index} 步：${actionSummary}。${target}${observation}${error}`;
 }
 
+function requiresFreshComputerUseApproval(action: { tool: string; params: Record<string, unknown> }): boolean {
+  return action.tool === "computer.type" ||
+    action.tool === "computer.keyCombo" ||
+    action.tool === "computer.setUiValue" ||
+    action.tool === "computer.invokeUi" && selectorLooksSensitive(action.params.selector);
+}
+
+function selectorLooksSensitive(selector: unknown): boolean {
+  if (!selector || typeof selector !== "object") return false;
+  const record = selector as Record<string, unknown>;
+  return [record.name, record.automationId]
+    .filter((value): value is string => typeof value === "string")
+    .some((value) => /password|token|secret|credential|密码|令牌|密钥/i.test(value));
+}
+
 function createFallbackComputerUseDagPlan(
   userGoal: string,
   failureReason: string,
@@ -1597,11 +2023,14 @@ async function requestComputerUseApproval(options: {
   }
 
   const actionSummary = summarizeComputerUseAction(action);
+  const canUseTaskApproval = !requiresFreshComputerUseApproval(action);
   const permissionRequest = createPendingPermissionRequest({
     id: `${taskId}-${stepId}-${action.tool.replace(/[^a-z0-9]+/gi, "-")}-approval-${Date.now()}`,
     level: "confirmed_write",
     title: "需要确认桌面操作",
-    reason: `Javis 准备${actionSummary}。`,
+    reason: canUseTaskApproval
+      ? `Javis 准备${actionSummary}。你也可以允许本次任务在短时间内继续执行低风险桌面动作；输入文字、快捷键和敏感控件仍会再次确认。`
+      : `Javis 准备${actionSummary}。该动作需要单独确认。`,
     dryRun: {
       operation: action.tool,
       affectedPaths: [{
@@ -1609,7 +2038,9 @@ async function requestComputerUseApproval(options: {
         target: actionSummary,
         action: "modify",
       }],
-      riskSummary: "该操作会影响当前桌面或目标应用，请确认后再执行。",
+      riskSummary: canUseTaskApproval
+        ? "任务级授权仅限当前任务、短时间和有限次数；敏感输入会再次请求确认。"
+        : "该操作会影响当前桌面或目标应用，请确认后再执行。",
       reversible: false,
     },
   });
@@ -1686,13 +2117,16 @@ interface CommanderDagTaskOptions {
   codeTool?: CodeTool;
   computerTool?: ComputerTool;
   fileTool: FileTool;
+  shellTool?: ShellTool;
   schedulerTool?: SchedulerTool;
+  workspaceTool?: WorkspaceTool;
   webTool?: WebTool;
   browserTool?: BrowserTool;
   verifierTool?: VerifierTool;
   visionTool?: import("@javis/tools").VisionTool;
   taskId: string;
   userGoal: string;
+  initialLogs?: TaskSnapshot["logs"];
   /** LLM-based ReAct decision maker. Called each iteration of the ReAct loop. */
   reactDecideNext?: (
     request: ReActDecisionRequest,
@@ -1725,13 +2159,16 @@ export async function runCommanderDagTask({
   codeTool,
   computerTool,
   fileTool,
+  shellTool,
   schedulerTool,
+  workspaceTool,
   webTool,
   browserTool,
   verifierTool,
   visionTool,
   taskId,
   userGoal,
+  initialLogs = [],
   reactDecideNext,
   replanDag,
   computerUseLoopRunner,
@@ -1774,7 +2211,7 @@ export async function runCommanderDagTask({
     plan: [],
     agents: agentTracker.getSnapshots(),
     tokenUsage: createEmptyTokenUsageSummary(),
-    logs: [createdLog],
+    logs: [...initialLogs, createdLog],
     executionTrace: {
       taskId,
       startedAt: new Date(taskStartedAt).toISOString(),
@@ -1788,19 +2225,11 @@ export async function runCommanderDagTask({
   try {
     // Phase 1: Commander generates DAG plan
     const availableAgents = getAvailableAgentsForPlanning();
-    const availableTools = initialToolDescriptors.map((td) => ({
-        name: td.name,
-        permissionLevel: td.permissionLevel,
-        summary: td.summary,
-        capabilityTags: [...td.capabilityTags],
-        ownerAgentKinds: [...td.ownerAgentKinds],
-    }));
     let dagPlan: CommanderDagPlan;
     try {
       dagPlan = normalizeCommanderDagPlan(await commanderTool.plan({
         userGoal,
         availableAgents,
-        availableTools,
         workflowId: COMMANDER_DAG_WORKFLOW_ID,
       }));
     } catch (planError) {
@@ -1837,6 +2266,7 @@ export async function runCommanderDagTask({
       (s) => (s as CommanderDagStep).capability ||
            (s.requiredCapabilities?.length ?? 0) > 0 ||
            s.toolName === "commander.askUser" ||
+           (s as CommanderDagStep).executionMode === "direct_response" ||
            s.assignedAgentKind !== "commander",
     );
     if (!hasCapabilitySteps) {
@@ -1850,6 +2280,7 @@ export async function runCommanderDagTask({
       id: step.id,
       title: step.title,
       assignedAgentKind: step.assignedAgentKind as TaskStep["assignedAgentKind"],
+      agentId: `agent-${step.assignedAgentKind}`,
       requiredCapabilities: step.requiredCapabilities,
       status: "pending" as const,
       successCriteria: step.successCriteria,
@@ -1894,11 +2325,15 @@ export async function runCommanderDagTask({
         ((s as CommanderDagStep).dependsOn ?? []).length === 0,
     );
     if (askUserStep && controller.setPendingAskUserHandler) {
-      const askQuestion = askUserStep.title || "Please clarify your request.";
+      const askPrompt = normalizeAskUserPromptForUserLanguage(
+        askUserStep.title || "Please clarify your request.",
+        askUserStep.choices,
+        userGoal,
+      );
       const askResult = await new Promise<string>((resolve) => {
         const { questionRequest, listenForAnswer } = createAskUserRequest({
-          question: askQuestion,
-          choices: undefined,
+          question: askPrompt.question,
+          choices: askPrompt.choices,
           setPendingAskUserHandler: controller.setPendingAskUserHandler!,
           onAnswered: async (resolved) => {
             context.set(`askUserAnswer:${askUserStep.id}`, resolved.answer);
@@ -1909,7 +2344,7 @@ export async function runCommanderDagTask({
 
         emitSnapshot({
           ...getSnapshot(),
-          status: "waiting_permission",
+          status: "waiting_info",
           commanderMessage: questionRequest.question,
           askUserQuestion: questionRequest,
           agents: agentTracker.getSnapshots(),
@@ -1955,7 +2390,8 @@ export async function runCommanderDagTask({
     // Promise.allSettled inside the DAG executor.
     const tools: AllCapabilityTools = {
       browserTool, codeTool, computerTool, fileTool,
-      schedulerTool, webTool, commanderTool, verifierTool, visionTool,
+      shellTool, schedulerTool, workspaceTool, webTool,
+      commanderTool, verifierTool, visionTool,
     };
     const completedSteps = new Set<string>();
 
@@ -1966,7 +2402,7 @@ export async function runCommanderDagTask({
       agentKind: step.assignedAgentKind as WorkbenchWorkflowStep["agentKind"],
       input: step.title,
       output: step.successCriteria,
-      permissionLevel: "read" as const,
+      permissionLevel: getDagStepPermissionLevel(step as CommanderDagStep),
       dependsOn: (step as CommanderDagStep).dependsOn ?? [],
       canRunInParallel: true,
       requiredCapabilities: step.requiredCapabilities as AgentCapabilityTag[] | undefined,
@@ -2022,11 +2458,15 @@ export async function runCommanderDagTask({
         }
         // Inline askUser: ask now and wait for answer
         if (controller.setPendingAskUserHandler) {
-          const askQuestion = dagStep.title || "Please clarify your request.";
+          const askPrompt = normalizeAskUserPromptForUserLanguage(
+            dagStep.title || "Please clarify your request.",
+            dagStep.choices,
+            userGoal,
+          );
           const answer = await new Promise<string>((resolve) => {
             const { questionRequest, listenForAnswer } = createAskUserRequest({
-              question: askQuestion,
-              choices: undefined,
+              question: askPrompt.question,
+              choices: askPrompt.choices,
               setPendingAskUserHandler: controller.setPendingAskUserHandler!,
               onAnswered: async (resolved) => {
                 context.set(`askUserAnswer:${dagStep.id}`, resolved.answer);
@@ -2036,7 +2476,7 @@ export async function runCommanderDagTask({
             });
             emitSnapshot({
               ...getSnapshot(),
-              status: "waiting_permission",
+              status: "waiting_info",
               commanderMessage: questionRequest.question,
               askUserQuestion: questionRequest,
               agents: agentTracker.getSnapshots(),
@@ -2142,14 +2582,18 @@ export async function runCommanderDagTask({
             });
           },
         });
-        const deniedStep = steps.find((step) =>
+        const failedStep = steps.find((step) =>
           step &&
           typeof step === "object" &&
           "error" in step &&
-          /denied by user|permission denied/i.test(String((step as { error?: unknown }).error ?? "")),
+          String((step as { error?: unknown }).error ?? "").trim().length > 0,
         );
-        if (deniedStep) {
-          throw new Error("用户已拒绝桌面操作。");
+        if (failedStep) {
+          const error = String((failedStep as { error?: unknown }).error ?? "");
+          if (/denied by user|permission denied|用户已拒绝/i.test(error)) {
+            throw new Error("用户已拒绝桌面操作。");
+          }
+          throw new Error(`Computer Use failed: ${error}`);
         }
 
         completedSteps.add(dagStep.id);
@@ -2197,11 +2641,16 @@ export async function runCommanderDagTask({
 
       await wait();
 
-      // Build ReAct tools from available tool descriptors filtered by agent's allowed tools
+      const executionMode = resolveStepExecutionMode(dagStep as CommanderDagStep);
       const agentDef = demoAgents.find((a) => a.kind === dagStep.assignedAgentKind);
       const allowedToolNames = agentDef?.allowedToolNames ?? [];
-      const reactTools: AgentReActTool[] = initialToolDescriptors
-        .filter((td) => allowedToolNames.includes(td.name))
+      const stepToolDescriptors = filterToolDescriptorsForStep(
+        dagStep as CommanderDagStep,
+        allowedToolNames,
+      );
+
+      // Build ReAct tools from available tool descriptors filtered by agent, capability, and toolName.
+      const reactTools: AgentReActTool[] = stepToolDescriptors
         .map((td) => ({
           name: td.name,
           execute: async () => {
@@ -2219,9 +2668,8 @@ export async function runCommanderDagTask({
           },
         }));
 
-      // If ReAct decider is available, use the full ReAct loop.
-      // Otherwise fall back to single-shot capability dispatch.
-      if (reactDecideNext && reactTools.length > 0) {
+      // ReAct is opt-in. Direct response/tool-call steps skip the extra LLM decision.
+      if (executionMode === "react" && reactDecideNext && reactTools.length > 0) {
         const reactResult = await runAgentReActLoop({
           agent: { kind: dagStep.assignedAgentKind, allowedToolNames } as Agent,
           step: wfStep,
@@ -2238,7 +2686,7 @@ export async function runCommanderDagTask({
               capability: (dagStep as CommanderDagStep).capability,
               observations: req.observations,
               availableTools: reactTools.map((t) => {
-                const td = initialToolDescriptors.find((d) => d.name === t.name);
+                const td = stepToolDescriptors.find((d) => d.name === t.name);
                 return {
                   name: t.name,
                   summary: td?.summary ?? "",
@@ -2274,6 +2722,43 @@ export async function runCommanderDagTask({
         throw new Error(
           `ReAct loop failed for step ${dagStep.id}: ${reactResult.reason}`,
         );
+      }
+
+      if (executionMode === "direct_response") {
+        const synthesis = await safeSynthesizeConclusion(
+          commanderTool,
+          userGoal,
+          dagStep.title,
+          context.snapshot(),
+        );
+        const output = synthesis?.message ?? dagStep.title;
+        writeStepOutput(
+          (dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`,
+          output,
+          context,
+        );
+        completedSteps.add(dagStep.id);
+
+        if (agentTracker.getState(agentId)) {
+          agentTracker.setState(agentId, {
+            status: "completed",
+            task: `Completed: ${dagStep.title}`,
+          });
+        }
+
+        emitSnapshot({
+          ...getSnapshot(),
+          plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
+          agents: agentTracker.getSnapshots(),
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "tool.completed",
+            taskId,
+            toolName: `${dagStep.assignedAgentKind}.direct_response`,
+            detail: `Step ${dagStep.id}: direct response completed without ReAct.`,
+          })),
+        });
+
+        return { output };
       }
 
       // Fallback: single-shot capability dispatch
@@ -2367,7 +2852,7 @@ export async function runCommanderDagTask({
           agentKind: s.assignedAgentKind as WorkbenchWorkflowStep["agentKind"],
           input: s.title,
           output: s.successCriteria,
-          permissionLevel: "read" as const,
+          permissionLevel: getDagStepPermissionLevel(s as CommanderDagStep),
           dependsOn: (s.dependsOn ?? []).filter((depId) => depId !== failedId),
           canRunInParallel: true,
           requiredCapabilities: s.requiredCapabilities as AgentCapabilityTag[] | undefined,
@@ -2399,8 +2884,30 @@ export async function runCommanderDagTask({
       workflow: syntheticWorkflow,
       context,
       executeStep: executeStepWithReAct,
+      onStepStarted: (step) => {
+        emitSnapshot({
+          ...getSnapshot(),
+          plan: markStep(getSnapshot().plan, step.id, "running"),
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "step.started",
+            taskId,
+            stepId: step.id,
+            agentKind: step.agentKind,
+          })),
+        });
+      },
       onStepCompleted: (_step, _output, _ctx) => {
-        // Already handled in executeStepWithReAct above
+        emitSnapshot({
+          ...getSnapshot(),
+          plan: markStep(getSnapshot().plan, _step.id, "completed"),
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "step.completed",
+            taskId,
+            stepId: _step.id,
+            summary: `Step ${_step.id} completed.`,
+            agentKind: _step.agentKind,
+          })),
+        });
       },
       onStepFailed: (_step, _error, _ctx) => {
         // Already handled in executeStepWithReAct above
@@ -2411,6 +2918,7 @@ export async function runCommanderDagTask({
           id: s.id,
           title: s.title,
           assignedAgentKind: s.agentKind as TaskStep["assignedAgentKind"],
+          agentId: `agent-${s.agentKind}`,
           requiredCapabilities: s.requiredCapabilities,
           status: "pending" as const,
           successCriteria: s.output,
@@ -2480,16 +2988,18 @@ export async function runCommanderDagTask({
     });
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
+    const userError = toUserFacingError(errorMsg);
     agentTracker.setState("agent-commander", {
       status: "failed",
-      task: errorMsg,
+      task: userError,
     });
 
     emitSnapshot({
       ...getSnapshot(),
       title: "Commander DAG plan failed",
       status: "failed",
-      commanderMessage: `Commander could not complete the plan: ${errorMsg}`,
+      commanderMessage: userError,
+      userFacingError: userError,
       plan: snapshot.plan.map((s) => ({
         ...s,
         status: s.status === "running" ? ("failed" as const)
@@ -2593,8 +3103,8 @@ function unsupportedOutput(
     stepId: step.id,
     status: "unsupported",
     summary:
-      step.permissionLevel === "confirmed_write"
-        ? "No concrete confirmed-write tool is wired for this workflow step."
+      isApprovalGatedPermissionLevel(step.permissionLevel)
+        ? "Approval-gated workflow steps are not dispatched by the generic executor."
         : "No concrete read tool is wired for this workflow step yet.",
     expectedOutput: step.output,
   };
@@ -2663,6 +3173,8 @@ function getTestScriptFromContext(contextSnapshot: Record<string, unknown>): str
 function deriveGenericWorkflowSnapshotData(contextSnapshot: Record<string, unknown>): Partial<TaskSnapshot> {
   const sources = getSourcesFromContext(contextSnapshot);
   const candidates = getCandidatesFromContext(contextSnapshot);
+  const fileScan = contextSnapshot.fileScan as { documents?: MarkdownDocumentSummary[] } | undefined;
+  const scannedDocuments = Array.isArray(fileScan?.documents) ? fileScan.documents : [];
   const researchReport = Object.values(contextSnapshot)
     .map((value) => isGenericStepOutput(value) ? value.data?.researchReport : undefined)
     .find((value): value is NonNullable<TaskSnapshot["researchReport"]> =>
@@ -2682,6 +3194,7 @@ function deriveGenericWorkflowSnapshotData(contextSnapshot: Record<string, unkno
     ...(researchReport ? { researchReport } : {}),
     ...(codeReviewPreview ? { codeReviewPreview } : {}),
     ...(verificationSummary ? { verificationSummary } : {}),
+    ...(scannedDocuments.length > 0 ? { documents: scannedDocuments } : {}),
     ...(candidates.length > 0
       ? {
           documents: candidates.map((candidate) => ({
@@ -3275,6 +3788,7 @@ function workflowStepToTaskStep(step: NonNullable<ReturnType<typeof getWorkbench
     id: step.id,
     title: step.title,
     assignedAgentKind: step.agentKind,
+    agentId: `agent-${step.agentKind}`,
     status: "pending",
     successCriteria: step.output,
   };

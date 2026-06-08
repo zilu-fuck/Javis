@@ -3,6 +3,7 @@ import {
   getTopRoute,
   getTopRoutes,
   getRecommendedWorkflowIds,
+  extractUrls,
   isPdfOrganizationGoal,
   isComputerUseGoal,
   scoreRoutes,
@@ -31,6 +32,41 @@ describe("routing", () => {
 
   it("uses URL presence as a strong research signal", () => {
     expect(getTopRoute("summarize https://example.com")?.route).toBe("research");
+  });
+
+  it("extracts bounded unique URLs without trailing sentence punctuation", () => {
+    const extraUrls = Array.from({ length: 12 }, (_, index) => `https://example.com/${index}`).join(" ");
+
+    expect(extractUrls(
+      `Read https://example.com/docs), then https://example.com/docs. Also see https://example.org/a?b=1, ${extraUrls}`,
+    )).toEqual([
+      "https://example.com/docs",
+      "https://example.org/a?b=1",
+      "https://example.com/0",
+      "https://example.com/1",
+      "https://example.com/2",
+      "https://example.com/3",
+      "https://example.com/4",
+      "https://example.com/5",
+      "https://example.com/6",
+      "https://example.com/7",
+    ]);
+  });
+
+  it("strips common closing quotes and CJK sentence punctuation from extracted URLs", () => {
+    expect(extractUrls(
+      "Read https://example.com/foo). Then https://example.com/a?b=1.” Also https://example.com/path，",
+    )).toEqual([
+      "https://example.com/foo",
+      "https://example.com/a?b=1",
+      "https://example.com/path",
+    ]);
+  });
+
+  it("keeps URL-encoded punctuation intact", () => {
+    expect(extractUrls("Open https://example.com/path%EF%BC%8C.")).toEqual([
+      "https://example.com/path%EF%BC%8C",
+    ]);
   });
 
   it("returns multiple confident routes for combined goals", () => {

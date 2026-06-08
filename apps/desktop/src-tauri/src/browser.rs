@@ -1,14 +1,16 @@
+use crate::error::JavisError;
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::{
     env,
     io::{BufRead, BufReader, Write},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs},
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::{mpsc, Mutex},
     thread,
     time::{Duration, SystemTime},
 };
-use crate::error::JavisError;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -81,6 +83,14 @@ pub(crate) struct BrowserNavigateRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserSessionRequest {
+    session_id: Option<String>,
+    allow_localhost: Option<bool>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct BrowserScreenshotRequest {
     selector: Option<String>,
     full_page: Option<bool>,
@@ -94,6 +104,13 @@ pub(crate) struct BrowserGetContentRequest {
     selector: Option<String>,
     format: Option<String>,
     max_length: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserExtractLinksRequest {
+    selector: Option<String>,
+    max_results: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -147,6 +164,8 @@ pub(crate) struct BrowserNavigateResult {
     title: String,
     status: u16,
     load_state: String,
+    can_go_back: bool,
+    can_go_forward: bool,
 }
 
 #[derive(Serialize)]
@@ -163,6 +182,22 @@ pub(crate) struct BrowserGetContentResult {
     content: String,
     url: String,
     title: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserExtractedLink {
+    href: String,
+    text: String,
+    tag: Option<String>,
+    rel: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserExtractLinksResult {
+    links: Vec<BrowserExtractedLink>,
+    count: usize,
 }
 
 #[derive(Serialize)]
@@ -202,11 +237,26 @@ pub(crate) struct BrowserRunTestResult {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrowserSnapshotResult {
+    sidecar_running: bool,
     url: String,
     title: String,
     load_state: String,
     content: String,
     screenshot_data_url: String,
+    can_go_back: bool,
+    can_go_forward: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserStatusResult {
+    sidecar_running: bool,
+    url: String,
+    title: String,
+    status: u16,
+    load_state: String,
+    can_go_back: bool,
+    can_go_forward: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -350,7 +400,10 @@ fn spawn_sidecar(state: &BrowserState) -> Result<(), JavisError> {
     thread::spawn(move || {
         let reader = BufReader::new(stdout);
         for line_result in reader.lines() {
-            if tx_for_thread.send(line_result.map_err(|e| e.to_string())).is_err() {
+            if tx_for_thread
+                .send(line_result.map_err(|e| e.to_string()))
+                .is_err()
+            {
                 break;
             }
         }
@@ -393,9 +446,7 @@ fn spawn_sidecar(state: &BrowserState) -> Result<(), JavisError> {
             Ok(Err(e)) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(JavisError::Io(format!(
-                    "Error reading sidecar stdout: {e}"
-                )));
+                return Err(JavisError::Io(format!("Error reading sidecar stdout: {e}")));
             }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => {
@@ -407,9 +458,7 @@ fn spawn_sidecar(state: &BrowserState) -> Result<(), JavisError> {
             }
         }
 
-        let elapsed = SystemTime::now()
-            .duration_since(start)
-            .unwrap_or_default();
+        let elapsed = SystemTime::now().duration_since(start).unwrap_or_default();
         if elapsed >= SIDECAR_READY_TIMEOUT {
             let _ = child.kill();
             let _ = child.wait();
@@ -479,21 +528,15 @@ fn send_request(
 
         match inner.rx.try_recv() {
             Ok(Ok(line)) => {
-                let value: serde_json::Value = serde_json::from_str(&line).map_err(|e| {
-                    JavisError::Serde(format!("Invalid JSON from sidecar: {e}"))
-                })?;
+                let value: serde_json::Value = serde_json::from_str(&line)
+                    .map_err(|e| JavisError::Serde(format!("Invalid JSON from sidecar: {e}")))?;
 
                 if let Some(error) = value.get("error") {
                     let msg = error.as_str().unwrap_or("Unknown sidecar error");
                     return Err(JavisError::Internal(format!("Sidecar error: {msg}")));
                 }
 
-                return Ok(
-                    value
-                        .get("result")
-                        .cloned()
-                        .unwrap_or(value),
-                );
+                return Ok(value.get("result").cloned().unwrap_or(value));
             }
             Ok(Err(e)) => {
                 return Err(JavisError::Io(format!(
@@ -508,9 +551,7 @@ fn send_request(
             }
         }
 
-        let elapsed = SystemTime::now()
-            .duration_since(start)
-            .unwrap_or_default();
+        let elapsed = SystemTime::now().duration_since(start).unwrap_or_default();
         if elapsed >= COMMAND_TIMEOUT {
             return Err(JavisError::Internal(format!(
                 "Sidecar command '{}' timed out after {} seconds.",
@@ -532,101 +573,176 @@ fn validate_url(url: &str) -> Result<(), JavisError> {
 }
 
 fn validate_url_with_localhost(url: &str, allow_localhost: bool) -> Result<(), JavisError> {
-    let lower = url.to_ascii_lowercase();
+    validate_url_with_resolver(url, allow_localhost, resolve_host_ips)
+}
 
-    // Only allow http and https schemes.
-    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+fn validate_url_with_resolver(
+    raw_url: &str,
+    allow_localhost: bool,
+    resolver: impl Fn(&str, u16) -> Result<Vec<IpAddr>, JavisError>,
+) -> Result<(), JavisError> {
+    let parsed = Url::parse(raw_url.trim())
+        .map_err(|_| JavisError::Validation("Invalid browser URL.".to_string()))?;
+
+    if !matches!(parsed.scheme(), "http" | "https") {
         return Err(JavisError::Validation(
             "Only http:// and https:// URLs are allowed.".to_string(),
         ));
     }
 
-    // Extract the portion after the scheme.
-    let after_scheme = if lower.starts_with("https://") {
-        &url[8..]
-    } else {
-        &url[7..]
+    let Some(host) = parsed.host_str() else {
+        return Err(JavisError::Validation("URL host is required.".to_string()));
     };
 
-    // Strip userinfo (anything before '@') to prevent `http://evil.com@127.0.0.1`.
-    let after_userinfo = match after_scheme.rfind('@') {
-        Some(pos) => &after_scheme[pos + 1..],
-        None => after_scheme,
-    };
-
-    let host_end = after_userinfo
-        .find('/')
-        .or_else(|| after_userinfo.find(':'))
-        .unwrap_or(after_userinfo.len());
-    let raw_host = &after_userinfo[..host_end];
-
-    // Percent-decode the host to prevent `http://127%2e0%2e0%2e1`.
-    let host = percent_decode_host(raw_host);
-
-    if is_private_host(&host) && !(allow_localhost && is_localhost(&host)) {
+    if is_private_host(host) && !(allow_localhost && is_localhost(host)) {
         return Err(JavisError::Validation(format!(
             "URLs targeting private/loopback addresses are not allowed: {host}"
         )));
+    }
+    if allow_localhost && is_localhost(host) {
+        return Ok(());
+    }
+
+    if host.parse::<IpAddr>().is_err() {
+        let port = parsed.port_or_known_default().unwrap_or(443);
+        for ip in resolver(host, port)? {
+            if is_private_ip(ip) {
+                return Err(JavisError::Validation(format!(
+                    "URLs resolving to private/loopback addresses are not allowed: {host}"
+                )));
+            }
+        }
     }
 
     Ok(())
 }
 
-fn is_localhost(host: &str) -> bool {
-    matches!(host.to_ascii_lowercase().as_str(), "localhost" | "127.0.0.1" | "::1" | "[::1]")
+fn resolve_host_ips(host: &str, port: u16) -> Result<Vec<IpAddr>, JavisError> {
+    let addrs = (host, port)
+        .to_socket_addrs()
+        .map_err(|error| JavisError::Validation(format!("Could not resolve URL host: {error}")))?
+        .map(|addr| addr.ip())
+        .collect::<Vec<_>>();
+    if addrs.is_empty() {
+        return Err(JavisError::Validation(
+            "URL host did not resolve to an address.".to_string(),
+        ));
+    }
+    Ok(addrs)
 }
 
-fn ensure_browser_write_permission(session_id: Option<&str>, permission_mode: Option<&str>) -> Result<(), JavisError> {
+fn ensure_localhost_navigation_session(
+    allow_localhost: bool,
+    session_id: Option<&str>,
+) -> Result<(), JavisError> {
+    if allow_localhost && session_id.unwrap_or_default().trim().is_empty() {
+        return Err(JavisError::Validation(
+            "Local browser navigation requires a session id.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_localhost(host: &str) -> bool {
+    matches!(
+        host.to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "::1" | "[::1]"
+    )
+}
+
+fn ensure_browser_write_permission(
+    session_id: Option<&str>,
+    permission_mode: Option<&str>,
+) -> Result<(), JavisError> {
     if session_id.unwrap_or_default().trim().is_empty() {
         return Err(JavisError::Validation(
             "Browser write operation requires a session id.".to_string(),
         ));
     }
     match permission_mode {
-        Some("confirmed_write") | Some("full_access") => Ok(()),
-        Some("read_only") => Err(JavisError::Validation(
-            "Browser write operation requires confirmed write permission.".to_string(),
-        )),
+        Some("confirmed_write") | Some("full_access") | Some("read_only") => {
+            Err(JavisError::Validation(
+                "Browser write operation requires a native approval binding and is disabled until browser approvals are implemented.".to_string(),
+            ))
+        }
         Some(other) => Err(JavisError::Validation(format!(
             "Unknown browser permission mode: {other}"
         ))),
         None => Err(JavisError::Validation(
-            "Browser write operation requires a permission mode.".to_string(),
+            "Browser write operation requires a native approval binding.".to_string(),
         )),
     }
 }
 
-/// Simple percent-decoding for the host portion (handles %2E → '.', etc.).
-fn percent_decode_host(host: &str) -> String {
-    let bytes = host.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                out.push(hi << 4 | lo);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).to_ascii_lowercase()
+fn validate_current_page_url(
+    result: &serde_json::Value,
+    allow_localhost: bool,
+) -> Result<(), JavisError> {
+    let Some(url) = result.get("url").and_then(|value| value.as_str()) else {
+        return Err(JavisError::Validation(
+            "Browser sidecar did not report the current page URL.".to_string(),
+        ));
+    };
+    validate_url_with_localhost(url, allow_localhost)
 }
 
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
+fn require_localhost_session(request: &BrowserSessionRequest) -> Result<(), JavisError> {
+    ensure_localhost_navigation_session(
+        request.allow_localhost.unwrap_or(false),
+        request.session_id.as_deref(),
+    )
+}
+
+fn status_from_value(result: serde_json::Value) -> BrowserStatusResult {
+    BrowserStatusResult {
+        sidecar_running: result
+            .get("sidecarRunning")
+            .or_else(|| result.get("sidecar_running"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true),
+        url: result
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        title: result
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        status: result.get("status").and_then(|v| v.as_u64()).unwrap_or(0) as u16,
+        load_state: result
+            .get("loadState")
+            .or_else(|| result.get("load_state"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        can_go_back: result
+            .get("canGoBack")
+            .or_else(|| result.get("can_go_back"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        can_go_forward: result
+            .get("canGoForward")
+            .or_else(|| result.get("can_go_forward"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     }
+}
+
+fn session_params(request: &BrowserSessionRequest) -> serde_json::Value {
+    serde_json::json!({
+        "timeoutMs": request.timeout_ms,
+        "allowLocalhost": request.allow_localhost.unwrap_or(false),
+    })
 }
 
 fn is_private_host(host: &str) -> bool {
     if host == "localhost" {
         return true;
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return is_private_ip(ip);
     }
 
     // IPv4 checks.
@@ -634,12 +750,12 @@ fn is_private_host(host: &str) -> bool {
     if parts.len() == 4 {
         if let (Ok(a), Ok(b)) = (parts[0].parse::<u8>(), parts[1].parse::<u8>()) {
             match a {
-                127 => return true,                                // 127.0.0.0/8
-                10 => return true,                                 // 10.0.0.0/8
-                172 if (16..=31).contains(&b) => return true,     // 172.16.0.0/12
-                192 if b == 168 => return true,                    // 192.168.0.0/16
-                169 if b == 254 => return true,                    // 169.254.0.0/16 (link-local)
-                0 if b == 0 => return true,                        // 0.0.0.0
+                127 => return true,                           // 127.0.0.0/8
+                10 => return true,                            // 10.0.0.0/8
+                172 if (16..=31).contains(&b) => return true, // 172.16.0.0/12
+                192 if b == 168 => return true,               // 192.168.0.0/16
+                169 if b == 254 => return true,               // 169.254.0.0/16 (link-local)
+                0 if b == 0 => return true,                   // 0.0.0.0
                 _ => {}
             }
         }
@@ -666,16 +782,91 @@ fn is_private_host(host: &str) -> bool {
     false
 }
 
+fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_private_ipv4(ip),
+        IpAddr::V6(ip) => is_private_ipv6(ip),
+    }
+}
+
+fn is_private_ipv4(ip: Ipv4Addr) -> bool {
+    ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || matches!(ip.octets(), [100, 64..=127, _, _])
+}
+
+fn is_private_ipv6(ip: Ipv6Addr) -> bool {
+    ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || ip.is_unicast_link_local()
+        || (ip.octets()[0] & 0xfe) == 0xfc
+}
+
 // ---------------------------------------------------------------------------
 // Tauri commands — Read
 // ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub(crate) fn browser_status(
+    state: tauri::State<'_, BrowserState>,
+    request: Option<BrowserSessionRequest>,
+) -> Result<BrowserStatusResult, String> {
+    let request = request.unwrap_or(BrowserSessionRequest {
+        session_id: None,
+        allow_localhost: None,
+        timeout_ms: None,
+    });
+    require_localhost_session(&request).map_err(|e| e.to_string())?;
+
+    let has_sidecar = {
+        let guard = state
+            .inner
+            .lock()
+            .map_err(|e| format!("Failed to lock browser state: {e}"))?;
+        guard.is_some()
+    };
+
+    if !has_sidecar {
+        return Ok(BrowserStatusResult {
+            sidecar_running: false,
+            url: String::new(),
+            title: String::new(),
+            status: 0,
+            load_state: "idle".to_string(),
+            can_go_back: false,
+            can_go_forward: false,
+        });
+    }
+
+    let result =
+        send_request(&state, "status", serde_json::Value::Null).map_err(|e| e.to_string())?;
+    if result
+        .get("sidecarRunning")
+        .or_else(|| result.get("sidecar_running"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        validate_current_page_url(&result, request.allow_localhost.unwrap_or(false))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(status_from_value(result))
+}
 
 #[tauri::command]
 pub(crate) fn browser_navigate(
     state: tauri::State<'_, BrowserState>,
     request: BrowserNavigateRequest,
 ) -> Result<BrowserNavigateResult, String> {
-    let _ = request.session_id.as_deref();
+    ensure_localhost_navigation_session(
+        request.allow_localhost.unwrap_or(false),
+        request.session_id.as_deref(),
+    )
+    .map_err(|e| e.to_string())?;
     if request.allow_localhost.unwrap_or(false) {
         validate_url_with_localhost(&request.url, true).map_err(|e| e.to_string())?;
     } else {
@@ -686,38 +877,37 @@ pub(crate) fn browser_navigate(
         "url": request.url,
         "waitForSelector": request.wait_for_selector,
         "timeoutMs": request.timeout_ms,
+        "allowLocalhost": request.allow_localhost.unwrap_or(false),
     });
 
     let result = send_request(&state, "navigate", params).map_err(|e| e.to_string())?;
+    validate_current_page_url(&result, request.allow_localhost.unwrap_or(false))
+        .map_err(|e| e.to_string())?;
+    let status = status_from_value(result);
 
     Ok(BrowserNavigateResult {
-        url: result
-            .get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        title: result
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        status: result
-            .get("status")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u16,
-        load_state: result
-            .get("loadState")
-            .or_else(|| result.get("load_state"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string(),
+        url: status.url,
+        title: status.title,
+        status: status.status,
+        load_state: status.load_state,
+        can_go_back: status.can_go_back,
+        can_go_forward: status.can_go_forward,
     })
 }
 
 #[tauri::command]
 pub(crate) fn browser_snapshot(
     state: tauri::State<'_, BrowserState>,
+    request: Option<BrowserSessionRequest>,
 ) -> Result<BrowserSnapshotResult, String> {
+    let request = request.unwrap_or(BrowserSessionRequest {
+        session_id: None,
+        allow_localhost: None,
+        timeout_ms: None,
+    });
+    require_localhost_session(&request).map_err(|e| e.to_string())?;
+    let allow_localhost = request.allow_localhost.unwrap_or(false);
+
     let content_result = send_request(
         &state,
         "getContent",
@@ -728,6 +918,7 @@ pub(crate) fn browser_snapshot(
         }),
     )
     .map_err(|e| e.to_string())?;
+    validate_current_page_url(&content_result, allow_localhost).map_err(|e| e.to_string())?;
     let screenshot_result = send_request(
         &state,
         "screenshot",
@@ -737,17 +928,14 @@ pub(crate) fn browser_snapshot(
         }),
     )
     .map_err(|e| e.to_string())?;
+    validate_current_page_url(&screenshot_result, allow_localhost).map_err(|e| e.to_string())?;
+    let status_result =
+        send_request(&state, "status", serde_json::Value::Null).map_err(|e| e.to_string())?;
+    let status = status_from_value(status_result);
     Ok(BrowserSnapshotResult {
-        url: content_result
-            .get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        title: content_result
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
+        sidecar_running: status.sidecar_running,
+        url: status.url,
+        title: status.title,
         load_state: "snapshot".to_string(),
         content: content_result
             .get("content")
@@ -760,7 +948,48 @@ pub(crate) fn browser_snapshot(
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string(),
+        can_go_back: status.can_go_back,
+        can_go_forward: status.can_go_forward,
     })
+}
+
+#[tauri::command]
+pub(crate) fn browser_refresh(
+    state: tauri::State<'_, BrowserState>,
+    request: BrowserSessionRequest,
+) -> Result<BrowserStatusResult, String> {
+    require_localhost_session(&request).map_err(|e| e.to_string())?;
+    let result =
+        send_request(&state, "refresh", session_params(&request)).map_err(|e| e.to_string())?;
+    validate_current_page_url(&result, request.allow_localhost.unwrap_or(false))
+        .map_err(|e| e.to_string())?;
+    Ok(status_from_value(result))
+}
+
+#[tauri::command]
+pub(crate) fn browser_go_back(
+    state: tauri::State<'_, BrowserState>,
+    request: BrowserSessionRequest,
+) -> Result<BrowserStatusResult, String> {
+    require_localhost_session(&request).map_err(|e| e.to_string())?;
+    let result =
+        send_request(&state, "goBack", session_params(&request)).map_err(|e| e.to_string())?;
+    validate_current_page_url(&result, request.allow_localhost.unwrap_or(false))
+        .map_err(|e| e.to_string())?;
+    Ok(status_from_value(result))
+}
+
+#[tauri::command]
+pub(crate) fn browser_go_forward(
+    state: tauri::State<'_, BrowserState>,
+    request: BrowserSessionRequest,
+) -> Result<BrowserStatusResult, String> {
+    require_localhost_session(&request).map_err(|e| e.to_string())?;
+    let result = send_request(&state, "goForward", session_params(&request))
+        .map_err(|e| e.to_string())?;
+    validate_current_page_url(&result, request.allow_localhost.unwrap_or(false))
+        .map_err(|e| e.to_string())?;
+    Ok(status_from_value(result))
 }
 
 #[tauri::command]
@@ -776,6 +1005,7 @@ pub(crate) fn browser_screenshot(
     });
 
     let result = send_request(&state, "screenshot", params).map_err(|e| e.to_string())?;
+    validate_current_page_url(&result, false).map_err(|e| e.to_string())?;
 
     Ok(BrowserScreenshotResult {
         data_url: result
@@ -784,14 +1014,8 @@ pub(crate) fn browser_screenshot(
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string(),
-        width: result
-            .get("width")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32,
-        height: result
-            .get("height")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as u32,
+        width: result.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+        height: result.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
     })
 }
 
@@ -807,6 +1031,7 @@ pub(crate) fn browser_get_content(
     });
 
     let result = send_request(&state, "getContent", params).map_err(|e| e.to_string())?;
+    validate_current_page_url(&result, false).map_err(|e| e.to_string())?;
 
     Ok(BrowserGetContentResult {
         content: result
@@ -832,12 +1057,66 @@ pub(crate) fn browser_get_content(
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
+pub(crate) fn browser_extract_links(
+    state: tauri::State<'_, BrowserState>,
+    request: BrowserExtractLinksRequest,
+) -> Result<BrowserExtractLinksResult, String> {
+    let params = serde_json::json!({
+        "selector": request.selector,
+        "maxResults": request.max_results,
+    });
+
+    let result = send_request(&state, "extractLinks", params).map_err(|e| e.to_string())?;
+    validate_current_page_url(&result, false).map_err(|e| e.to_string())?;
+    let links = result
+        .get("links")
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| BrowserExtractedLink {
+                    href: item
+                        .get("href")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    text: item
+                        .get("text")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    tag: item
+                        .get("tag")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string()),
+                    rel: item
+                        .get("rel")
+                        .and_then(|value| value.as_str())
+                        .map(|value| value.to_string()),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(BrowserExtractLinksResult {
+        count: result
+            .get("count")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(links.len() as u64) as usize,
+        links,
+    })
+}
+
+#[tauri::command]
 pub(crate) fn browser_click(
     state: tauri::State<'_, BrowserState>,
     request: BrowserClickRequest,
 ) -> Result<BrowserClickResult, String> {
-    ensure_browser_write_permission(request.session_id.as_deref(), request.permission_mode.as_deref())
-        .map_err(|e| e.to_string())?;
+    ensure_browser_write_permission(
+        request.session_id.as_deref(),
+        request.permission_mode.as_deref(),
+    )
+    .map_err(|e| e.to_string())?;
     let params = serde_json::json!({
         "selector": request.selector,
         "button": request.button,
@@ -870,8 +1149,11 @@ pub(crate) fn browser_type(
     state: tauri::State<'_, BrowserState>,
     request: BrowserTypeRequest,
 ) -> Result<BrowserTypeResult, String> {
-    ensure_browser_write_permission(request.session_id.as_deref(), request.permission_mode.as_deref())
-        .map_err(|e| e.to_string())?;
+    ensure_browser_write_permission(
+        request.session_id.as_deref(),
+        request.permission_mode.as_deref(),
+    )
+    .map_err(|e| e.to_string())?;
     let params = serde_json::json!({
         "selector": request.selector,
         "text": request.text,
@@ -905,8 +1187,11 @@ pub(crate) fn browser_evaluate(
     state: tauri::State<'_, BrowserState>,
     request: BrowserEvaluateRequest,
 ) -> Result<BrowserEvaluateResult, String> {
-    ensure_browser_write_permission(request.session_id.as_deref(), request.permission_mode.as_deref())
-        .map_err(|e| e.to_string())?;
+    ensure_browser_write_permission(
+        request.session_id.as_deref(),
+        request.permission_mode.as_deref(),
+    )
+    .map_err(|e| e.to_string())?;
     let params = serde_json::json!({
         "expression": request.expression,
         "timeoutMs": request.timeout_ms,
@@ -933,47 +1218,13 @@ pub(crate) fn browser_run_test(
     state: tauri::State<'_, BrowserState>,
     request: BrowserRunTestRequest,
 ) -> Result<BrowserRunTestResult, String> {
-    let start = SystemTime::now();
-
-    let params = serde_json::json!({
-        "script": request.script,
-        "testFile": request.test_file,
-        "timeoutMs": request.timeout_ms,
-    });
-
-    let result = send_request(&state, "runTest", params).map_err(|e| e.to_string())?;
-
-    let duration_ms = SystemTime::now()
-        .duration_since(start)
-        .unwrap_or_default()
-        .as_millis() as u64;
-
-    Ok(BrowserRunTestResult {
-        passed: result
-            .get("passed")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        exit_code: result
-            .get("exitCode")
-            .or_else(|| result.get("exit_code"))
-            .and_then(|v| v.as_i64())
-            .unwrap_or(-1) as i32,
-        stdout: result
-            .get("stdout")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        stderr: result
-            .get("stderr")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        duration_ms: result
-            .get("durationMs")
-            .or_else(|| result.get("duration_ms"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(duration_ms),
-    })
+    let BrowserRunTestRequest {
+        script,
+        test_file,
+        timeout_ms,
+    } = request;
+    let _ = (&state, script, test_file, timeout_ms);
+    Err("Browser test execution requires native approval and is disabled until browser approvals are implemented.".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -981,9 +1232,7 @@ pub(crate) fn browser_run_test(
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub(crate) fn browser_close(
-    state: tauri::State<'_, BrowserState>,
-) -> Result<(), String> {
+pub(crate) fn browser_close(state: tauri::State<'_, BrowserState>) -> Result<(), String> {
     let mut guard = state
         .inner
         .lock()
@@ -1071,13 +1320,38 @@ mod tests {
 
     #[test]
     fn validate_url_allows_public_https() {
-        assert!(validate_url("https://example.com").is_ok());
-        assert!(validate_url("https://example.com/path?q=1").is_ok());
+        assert!(
+            validate_url_with_resolver("https://example.com", false, |_host, _port| {
+                Ok(vec!["93.184.216.34".parse().unwrap()])
+            })
+            .is_ok()
+        );
+        assert!(validate_url_with_resolver(
+            "https://example.com/path?q=1",
+            false,
+            |_host, _port| { Ok(vec!["93.184.216.34".parse().unwrap()]) }
+        )
+        .is_ok());
     }
 
     #[test]
     fn validate_url_allows_public_http() {
-        assert!(validate_url("http://example.com").is_ok());
+        assert!(
+            validate_url_with_resolver("http://example.com", false, |_host, _port| {
+                Ok(vec!["93.184.216.34".parse().unwrap()])
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_url_rejects_hostname_resolving_to_private_ip() {
+        let result =
+            validate_url_with_resolver("https://public-name.example", false, |_host, _port| {
+                Ok(vec!["127.0.0.1".parse().unwrap()])
+            });
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1175,9 +1449,32 @@ mod tests {
     }
 
     #[test]
-    fn percent_decode_host_handles_encoded_dots() {
-        assert_eq!(percent_decode_host("127%2e0%2e0%2e1"), "127.0.0.1");
-        assert_eq!(percent_decode_host("example%2ecom"), "example.com");
-        assert_eq!(percent_decode_host("127.0.0.1"), "127.0.0.1");
+    fn localhost_navigation_requires_session_id() {
+        assert!(ensure_localhost_navigation_session(true, None).is_err());
+        assert!(ensure_localhost_navigation_session(true, Some("   ")).is_err());
+        assert!(ensure_localhost_navigation_session(true, Some("thread:task")).is_ok());
+        assert!(ensure_localhost_navigation_session(false, None).is_ok());
+    }
+
+    #[test]
+    fn browser_write_permission_rejects_self_reported_modes() {
+        assert!(ensure_browser_write_permission(Some("session"), Some("confirmed_write")).is_err());
+        assert!(ensure_browser_write_permission(Some("session"), Some("full_access")).is_err());
+        assert!(ensure_browser_write_permission(Some("session"), Some("read_only")).is_err());
+        assert!(ensure_browser_write_permission(None, Some("full_access")).is_err());
+    }
+
+    #[test]
+    fn current_page_url_rejects_redirected_private_url() {
+        let result = serde_json::json!({ "url": "http://127.0.0.1:3000/admin" });
+
+        assert!(validate_current_page_url(&result, false).is_err());
+    }
+
+    #[test]
+    fn current_page_url_allows_explicit_localhost_navigation() {
+        let result = serde_json::json!({ "url": "http://localhost:3000" });
+
+        assert!(validate_current_page_url(&result, true).is_ok());
     }
 }

@@ -40,6 +40,8 @@ const ARCHIVABLE_STATUSES = new Set<TaskSnapshot["status"]>([
   "failed",
   "cancelled",
 ]);
+const REDACTED_IMAGE_DATA_URL = "[redacted image data URL]";
+const IMAGE_DATA_URL_PATTERN = /data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=_-]+/gi;
 
 export function isArchivableTask(task: TaskSnapshot): boolean {
   return task.id !== "task-idle" && ARCHIVABLE_STATUSES.has(task.status);
@@ -98,9 +100,61 @@ export function upsertTaskHistory(
   }
 
   return [
-    sanitizedTask,
+    withHistoryTitle(sanitizedTask),
     ...current.filter((entry) => entry.id !== sanitizedTask.id),
   ].slice(0, TASK_HISTORY_LIMIT);
+}
+
+function withHistoryTitle(task: TaskSnapshot): TaskSnapshot {
+  const derivedTitle = deriveHistoryTitle(task);
+  return derivedTitle ? { ...task, title: derivedTitle } : task;
+}
+
+function deriveHistoryTitle(task: TaskSnapshot): string | undefined {
+  if (!isGenericTaskTitle(task.title)) {
+    return undefined;
+  }
+  const userMessages = task.conversationMessages
+    ?.filter((message) => message.role === "user")
+    .map((message) => message.content)
+    .filter((content) => !isLowInformationTitle(content));
+  const source = userMessages?.[userMessages.length - 1] || task.userGoal;
+  const normalized = source.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return undefined;
+  }
+  return normalized.length > 30 ? `${normalized.slice(0, 30)}...` : normalized;
+}
+
+function isGenericTaskTitle(title: string): boolean {
+  const normalized = title.trim().toLowerCase();
+  return (
+    isLowInformationTitle(title) ||
+    normalized === "task" ||
+    normalized === "planning task" ||
+    normalized === "task completed" ||
+    normalized === "answered" ||
+    normalized === "answering" ||
+    normalized === "ready" ||
+    normalized === "已回答" ||
+    normalized === "正在回答" ||
+    normalized === "回答中" ||
+    normalized === "已完成" ||
+    normalized === "准备就绪"
+  );
+}
+
+function isLowInformationTitle(title: string): boolean {
+  const normalized = title.trim().toLowerCase();
+  return (
+    normalized === "你好" ||
+    normalized === "您好" ||
+    normalized === "嗨" ||
+    normalized === "哈喽" ||
+    normalized === "hello" ||
+    normalized === "hi" ||
+    normalized === "hey"
+  );
 }
 
 export function getTaskUpdatedAt(task: TaskSnapshot): string {
@@ -177,6 +231,7 @@ function sanitizeTaskHistory(history: unknown[]): TaskSnapshot[] {
     .map(sanitizeTaskSnapshot)
     .filter((task): task is TaskSnapshot => Boolean(task))
     .filter(isArchivableTask)
+    .map(withHistoryTitle)
     .slice(0, TASK_HISTORY_LIMIT);
 }
 
@@ -259,15 +314,7 @@ ON CONFLICT(id) DO UPDATE SET
 
 function taskHistoryBindValues(task: TaskSnapshot): DatabaseValue[] {
   // Strip base64 image attachments before persisting — too large for SQLite.
-  const toStore: TaskSnapshot = task.conversationMessages?.some((m) => m.attachments?.length)
-    ? {
-        ...task,
-        conversationMessages: task.conversationMessages.map((m) => ({
-          role: m.role,
-          content: m.content,
-        })),
-      }
-    : task;
+  const toStore = redactTaskSnapshotForPersistence(task);
   return [
     toStore.id,
     toStore.title,
@@ -384,7 +431,41 @@ export function sanitizeTaskSnapshot(value: unknown): TaskSnapshot | null {
     ];
   }
 
-  return snapshot;
+  return redactTaskSnapshotForPersistence(snapshot);
+}
+
+export function redactTaskSnapshotForPersistence(task: TaskSnapshot): TaskSnapshot {
+  return {
+    ...task,
+    title: redactImageDataUrls(task.title),
+    userGoal: redactImageDataUrls(task.userGoal),
+    commanderMessage: redactImageDataUrls(task.commanderMessage),
+    logs: task.logs.map((log) => {
+      const redacted = {
+        ...log,
+        detail: redactImageDataUrls(log.detail),
+      };
+      if (log.userMessage !== undefined) {
+        redacted.userMessage = redactImageDataUrls(log.userMessage);
+      }
+      if (log.devDetail !== undefined) {
+        redacted.devDetail = redactImageDataUrls(log.devDetail);
+      }
+      return redacted;
+    }),
+    conversationMessages: task.conversationMessages?.map((message) => {
+      const redacted = {
+        ...message,
+        content: redactImageDataUrls(message.content),
+      };
+      delete redacted.attachments;
+      return redacted;
+    }),
+  };
+}
+
+function redactImageDataUrls(value: string): string {
+  return value.replace(IMAGE_DATA_URL_PATTERN, REDACTED_IMAGE_DATA_URL);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -407,8 +488,10 @@ function isTaskStatus(value: unknown): value is TaskSnapshot["status"] {
   return (
     value === "created" ||
     value === "planning" ||
-    value === "running" ||
+    value === "waiting_info" ||
     value === "waiting_permission" ||
+    value === "running" ||
+    value === "generating" ||
     value === "verifying" ||
     value === "retrying" ||
     value === "completed" ||
@@ -504,6 +587,7 @@ function isTaskStepArray(value: unknown): value is TaskSnapshot["plan"] {
         isString(step.title) &&
         isAgentKind(step.assignedAgentKind) &&
         isTaskStepStatus(step.status) &&
+        (!("agentId" in step) || isString(step.agentId)) &&
         (!("successCriteria" in step) || isString(step.successCriteria)),
     )
   );
@@ -533,7 +617,11 @@ function isTaskLogArray(value: unknown): value is TaskSnapshot["logs"] {
         isString(log.id) &&
         isTaskLogKind(log.kind) &&
         isString(log.title) &&
-        isString(log.detail),
+        isString(log.detail) &&
+        (!("userMessage" in log) || isString(log.userMessage)) &&
+        (!("devDetail" in log) || isString(log.devDetail)) &&
+        (!("agentId" in log) || isString(log.agentId)) &&
+        (!("stepId" in log) || isString(log.stepId)),
     )
   );
 }
@@ -544,11 +632,37 @@ function isChatMessageArray(value: unknown): value is NonNullable<TaskSnapshot["
     value.every(
       (message) =>
         isRecord(message) &&
+        (!("id" in message) || isString(message.id)) &&
+        (!("kind" in message) || isConversationMessageKind(message.kind)) &&
         (message.role === "user" || message.role === "assistant") &&
         isString(message.content) &&
+        (!("parentMessageId" in message) || isString(message.parentMessageId)) &&
+        (!("createdAt" in message) || isString(message.createdAt)) &&
         (message.attachments === undefined ||
-         (Array.isArray(message.attachments) && message.attachments.every(isString))),
+         (Array.isArray(message.attachments) && message.attachments.every(isString))) &&
+        (!("askUserQuestion" in message) || isAskUserQuestionLike(message.askUserQuestion)) &&
+        (!("permissionRequest" in message) || isRecord(message.permissionRequest)),
     )
+  );
+}
+
+function isConversationMessageKind(value: unknown): value is NonNullable<NonNullable<TaskSnapshot["conversationMessages"]>[number]["kind"]> {
+  return (
+    value === "user_text" ||
+    value === "assistant_text" ||
+    value === "ask_user_question" ||
+    value === "permission_request"
+  );
+}
+
+function isAskUserQuestionLike(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isString(value.id) &&
+    isString(value.question) &&
+    isString(value.status) &&
+    (!("choices" in value) || Array.isArray(value.choices)) &&
+    (!("answer" in value) || isString(value.answer))
   );
 }
 
@@ -715,7 +829,22 @@ function sanitizeAskUserQuestion(
   };
 
   if (Array.isArray(value.choices)) {
-    result.choices = value.choices.filter((c): c is string => isString(c));
+    const choices: NonNullable<typeof result.choices> = [];
+    for (const choice of value.choices) {
+      if (isString(choice)) {
+        choices.push(choice);
+        continue;
+      }
+      if (!isRecord(choice) || !isString(choice.label) || !isString(choice.value)) {
+        continue;
+      }
+      choices.push({
+        label: choice.label,
+        value: choice.value,
+        isRecommended: choice.isRecommended === true,
+      });
+    }
+    result.choices = choices;
   }
   if (isString(value.answer)) {
     result.answer = value.answer;

@@ -6,6 +6,7 @@ import {
   scanAllUserFiles,
   cancelScanAllFiles,
   listMountRoots,
+  classifyApps,
   classifyDocuments,
 } from "./local-knowledge";
 import type { ModelProvider } from "./model-provider";
@@ -144,6 +145,67 @@ describe("local knowledge bridge", () => {
       ]);
       const r = await classifyDocuments([{ name: "a.txt", path: "/a.txt" }], p);
       expect(r).toHaveLength(1);
+    });
+
+    it("uses document fallback categories when document classification response cannot be parsed", async () => {
+      const p = mockProvider(["not json"]);
+      const r = await classifyDocuments([
+        { name: "附件1：生源地助学贷款学生在线系统和国家助学贷款APP毕业确认操作流程.docx", path: "/docs/loan-flow.docx", extension: "docx" },
+        { name: "javis-release-conflict.pdf", path: "/docs/javis-release-conflict.pdf", extension: "pdf" },
+        { name: "AdminRegionConfig.txt", path: "/docs/AdminRegionConfig.txt", extension: "txt" },
+      ], p);
+
+      expect(r.map((item) => [item.name, item.category])).toEqual([
+        ["附件1：生源地助学贷款学生在线系统和国家助学贷款APP毕业确认操作流程.docx", "行政"],
+        ["javis-release-conflict.pdf", "技术文档"],
+        ["AdminRegionConfig.txt", "技术文档"],
+      ]);
+    });
+
+    it("upgrades model Other document results with local filename rules", async () => {
+      const p = mockProvider([
+        JSON.stringify([
+          { name: "2026中国大学生计算机设计大赛评审结果公示.pdf", path: "/docs/contest.pdf", category: "其他", tags: [], confidence: 0.2 },
+        ]),
+      ]);
+      const r = await classifyDocuments([
+        { name: "2026中国大学生计算机设计大赛评审结果公示.pdf", path: "/docs/contest.pdf", extension: "pdf" },
+      ], p);
+
+      expect(r[0]?.category).toBe("研究");
+      expect(r[0]?.tags).toEqual(["研究"]);
+    });
+
+    it("matches classification results by path when filenames collide", async () => {
+      const p = mockProvider([
+        JSON.stringify([
+          { name: "same.txt", path: "/b/same.txt", category: "b", tags: [], confidence: 0.8 },
+          { name: "same.txt", path: "/a/same.txt", category: "a", tags: [], confidence: 0.9 },
+        ]),
+      ]);
+      const r = await classifyDocuments([
+        { name: "same.txt", path: "/a/same.txt" },
+        { name: "same.txt", path: "/b/same.txt" },
+      ], p);
+      expect(r.map((item) => [item.path, item.category])).toEqual([
+        ["/b/same.txt", "b"],
+        ["/a/same.txt", "a"],
+      ]);
+    });
+
+    it("uses app-specific fallback categories when app classification response cannot be parsed", async () => {
+      const p = mockProvider(["not json"]);
+      const r = await classifyApps([
+        { name: "UC浏览器", path: "C:/Apps/UCBrowser.exe" },
+        { name: "Trae CN", path: "C:/Apps/Trae.exe" },
+        { name: "Uninstall Redis Desktop Manager", path: "C:/Apps/uninstall-rdm.exe" },
+      ], p);
+
+      expect(r.map((item) => [item.name, item.category])).toEqual([
+        ["UC浏览器", "浏览器"],
+        ["Trae CN", "开发工具"],
+        ["Uninstall Redis Desktop Manager", "开发工具"],
+      ]);
     });
   });
 });

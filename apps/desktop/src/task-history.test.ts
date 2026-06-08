@@ -118,6 +118,28 @@ describe("task history persistence", () => {
     expect(loaded.map((task) => task.id)).toEqual(["task-1000"]);
   });
 
+  it("derives readable titles from Chinese answered chat history on load", () => {
+    const storage = createMemoryStorage();
+    storage.setItem(
+      TASK_HISTORY_STORAGE_KEY,
+      JSON.stringify([
+        {
+          ...createTask("task-1000"),
+          title: "已回答",
+          userGoal: "帮我解释这个使用按钮是不是没用",
+          conversationMessages: [
+            { role: "user", content: "帮我解释这个使用按钮是不是没用" },
+            { role: "assistant", content: "它会应用当前工作区路径。" },
+          ],
+        },
+      ]),
+    );
+
+    const loaded = loadTaskHistory(storage);
+
+    expect(loaded[0]?.title).toBe("帮我解释这个使用按钮是不是没用");
+  });
+
   it("ignores task history storage envelopes from unknown versions", () => {
     const storage = createMemoryStorage();
     storage.setItem(
@@ -261,6 +283,122 @@ describe("task history persistence", () => {
 
     expect(loaded[0]?.scheduledTaskId).toBe("st-1000");
     expect(storage.getItem(TASK_HISTORY_STORAGE_KEY)).toContain("st-1000");
+  });
+
+  it("keeps structured ask-user choices in completed task history", () => {
+    const storage = createMemoryStorage();
+    const task = {
+      ...createTask("task-1000"),
+      askUserQuestion: {
+        id: "ask-1",
+        question: "Which scope?",
+        choices: [
+          { label: "Current project", value: "current", isRecommended: true },
+          "All workspaces",
+        ],
+        status: "answered",
+        createdAt: "2026-06-07T00:00:00.000Z",
+        resolvedAt: "2026-06-07T00:00:01.000Z",
+        answer: "current",
+      },
+    } satisfies TaskSnapshot;
+
+    saveTaskHistory(storage, [task]);
+    const loaded = loadTaskHistory(storage);
+
+    expect(loaded[0]?.askUserQuestion?.choices).toEqual([
+      { label: "Current project", value: "current", isRecommended: true },
+      "All workspaces",
+    ]);
+  });
+
+  it("keeps structured conversation timeline messages in task history", () => {
+    const storage = createMemoryStorage();
+    const task = {
+      ...createTask("task-1000"),
+      conversationMessages: [
+        { id: "m1", kind: "user_text", role: "user", content: "Start", createdAt: "2026-06-07T00:00:00.000Z" },
+        {
+          id: "ask-1",
+          kind: "ask_user_question",
+          role: "assistant",
+          content: "Which scope?",
+          createdAt: "2026-06-07T00:00:01.000Z",
+          askUserQuestion: {
+            id: "ask-1",
+            question: "Which scope?",
+            status: "pending",
+            createdAt: "2026-06-07T00:00:01.000Z",
+            choices: [{ label: "Current project", value: "current", isRecommended: true }],
+          },
+        },
+      ],
+    } satisfies TaskSnapshot;
+
+    saveTaskHistory(storage, [task]);
+    const loaded = loadTaskHistory(storage);
+
+    expect(loaded[0]?.conversationMessages?.[1]).toMatchObject({
+      id: "ask-1",
+      kind: "ask_user_question",
+      askUserQuestion: {
+        question: "Which scope?",
+        choices: [{ label: "Current project", value: "current", isRecommended: true }],
+      },
+    });
+  });
+
+  it("restores structured conversation messages after repository restart", async () => {
+    const database = createMemoryTaskHistoryDatabase();
+    const firstRepository = createTaskHistoryRepository(database);
+    const task = {
+      ...createTask("task-1000"),
+      title: "Task completed",
+      conversationMessages: [
+        { id: "m1", kind: "user_text", role: "user", content: "Inspect the current project", createdAt: "2026-06-07T00:00:00.000Z" },
+        { id: "m2", kind: "assistant_text", role: "assistant", content: "Done.", createdAt: "2026-06-07T00:00:01.000Z" },
+      ],
+    } satisfies TaskSnapshot;
+
+    await firstRepository.upsert(task);
+    const restartedRepository = createTaskHistoryRepository(database);
+    const restored = await restartedRepository.list();
+
+    expect(restored[0]?.title).toBe("Inspect the current project");
+    expect(restored[0]?.conversationMessages).toEqual(task.conversationMessages);
+  });
+
+  it("derives generic history titles from the first user message", () => {
+    const task = {
+      ...createTask("task-1000"),
+      title: "Task completed",
+      conversationMessages: [
+        { role: "user", content: "Summarize the release plan and risks for the current workspace." },
+        { role: "assistant", content: "Done." },
+      ],
+    } satisfies TaskSnapshot;
+
+    const [saved] = upsertTaskHistory([], task);
+
+    expect(saved?.title).toBe("Summarize the release plan and...");
+  });
+
+  it("refreshes low-information chat titles from the latest substantive user message", () => {
+    const task = {
+      ...createTask("task-1000"),
+      title: "你好",
+      userGoal: "你好",
+      conversationMessages: [
+        { role: "user", content: "你好" },
+        { role: "assistant", content: "你好，有什么可以帮你？" },
+        { role: "user", content: "我想做一个读取本地 wallpaper 下载的视频壁纸播放器" },
+        { role: "assistant", content: "我来帮你规划。" },
+      ],
+    } satisfies TaskSnapshot;
+
+    const [saved] = upsertTaskHistory([], task);
+
+    expect(saved?.title).toBe("我想做一个读取本地 wallpaper 下载的视频壁纸播放器");
   });
 
   it("keeps Code Agent proposal and apply results in completed task history", () => {
@@ -437,6 +575,49 @@ describe("task history persistence", () => {
     expect(loaded[0]?.codeProposedEdit?.patch).toBe("");
     expect(database.rows[0]?.snapshot_json).not.toContain("permission-pending");
     expect(database.rows[0]?.snapshot_json).not.toContain("diff --git");
+  });
+
+  it("redacts image data URLs and strips attachments before repository persistence", async () => {
+    const database = createMemoryTaskHistoryDatabase();
+    const repository = createTaskHistoryRepository(database);
+    const task = {
+      ...createTask("task-1000"),
+      userGoal: "Describe [image: data:image/png;base64,AA==]",
+      commanderMessage: "Saw data:image/png;base64,BB==",
+      logs: [
+        {
+          id: "log-1",
+          kind: "event",
+          title: "image.received",
+          detail: "detail data:image/png;base64,CC==",
+          userMessage: "user data:image/png;base64,DD==",
+          devDetail: "dev data:image/png;base64,EE==",
+        },
+      ],
+      conversationMessages: [
+        {
+          role: "user",
+          content: "content data:image/png;base64,FF==",
+          attachments: ["data:image/png;base64,GG=="],
+        },
+        {
+          role: "assistant",
+          content: "Done.",
+        },
+      ],
+    } satisfies TaskSnapshot;
+
+    await repository.save([task]);
+    const loaded = await repository.list();
+
+    expect(database.rows[0]?.user_goal).not.toContain("data:image");
+    expect(database.rows[0]?.snapshot_json).not.toContain("data:image");
+    expect(database.rows[0]?.snapshot_json).not.toContain("attachments");
+    expect(loaded[0]?.userGoal).toContain("[redacted image data URL]");
+    expect(loaded[0]?.conversationMessages?.[0]?.attachments).toBeUndefined();
+    expect(loaded[0]?.logs[0]?.detail).toContain("[redacted image data URL]");
+    expect(loaded[0]?.logs[0]?.userMessage).toContain("[redacted image data URL]");
+    expect(loaded[0]?.logs[0]?.devDetail).toContain("[redacted image data URL]");
   });
 
   it("upserts repository entries with newest snapshots first", async () => {

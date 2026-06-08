@@ -11,6 +11,7 @@ import {
   createSharedTaskContext,
   createTaskEventBus,
   getAdapter,
+  isValidCapabilityTag,
   parseChineseReviewResult,
 } from "@javis/core";
 import type {
@@ -22,19 +23,15 @@ import { createDefaultAgentRegistry, demoAgents } from "@javis/core";
 import type { AgentKind, ModelRequirements, ProviderCapabilities } from "@javis/core";
 import type {
   BrowserClickRequest,
-  BrowserClickResult,
   BrowserEvaluateRequest,
-  BrowserEvaluateResult,
   BrowserGetContentRequest,
   BrowserGetContentResult,
   BrowserNavigateRequest,
   BrowserNavigateResult,
   BrowserRunTestRequest,
-  BrowserRunTestResult,
   BrowserScreenshotRequest,
   BrowserScreenshotResult,
   BrowserTypeRequest,
-  BrowserTypeResult,
   BrowserExtractLinksRequest,
   BrowserExtractLinksResult,
   BrowserUploadRequest,
@@ -71,6 +68,7 @@ import type {
   ComputerUseApprovalResult,
   ComputerWaitRequest,
   ComputerWaitResult,
+  AskUserChoice,
   CommanderPlanRequest,
   CommanderPlanResult,
   FileOrganizationExecution,
@@ -111,7 +109,14 @@ import {
   type ModelProfile,
   type ModelSettings,
 } from "./model-settings";
-import { scanUserDocuments, classifyDocuments } from "./local-knowledge";
+import {
+  listDirectory,
+  scanInstalledApps,
+  scanUserDocuments,
+  scanUserImages,
+  classifyDocuments,
+  classifyApps,
+} from "./local-knowledge";
 import {
   createScheduledTask,
 } from "./scheduled-tasks";
@@ -123,6 +128,15 @@ import {
 } from "./workspace-loader";
 import type { WorkspaceDefinition } from "@javis/core";
 import { runComputerUseLoop } from "./computer-use-loop";
+import { preprocessChineseInput, type PreprocessedInput } from "./input-preprocessor";
+
+const COMMANDER_PROMPT_TOOL_DESCRIPTORS = initialToolDescriptors.map((descriptor) => ({
+  name: descriptor.name,
+  permissionLevel: descriptor.permissionLevel,
+  summary: descriptor.summary,
+  capabilityTags: descriptor.capabilityTags,
+  ownerAgentKinds: descriptor.ownerAgentKinds,
+}));
 
 const WORKSPACE_SCAFFOLD_SCHEMA_JSON = JSON.stringify({
   id: "kebab-case-id",
@@ -392,6 +406,45 @@ function requireComputerTaskId(value: string | undefined, toolName: string): str
   return value;
 }
 
+const AGENT_PROMPT_CONTEXT_KINDS = new Set<AgentKind>([
+  "commander",
+  "file",
+  "shell",
+  "browser",
+  "scheduler",
+  "research",
+  "code",
+  "verifier",
+  "workspace",
+  "vision",
+]);
+
+function withAgentPromptContext(
+  provider: ModelProvider,
+  agentKind: string,
+  getWorkspacePath: () => string,
+): ModelProvider {
+  if (!AGENT_PROMPT_CONTEXT_KINDS.has(agentKind as AgentKind)) {
+    return provider;
+  }
+  const kind = agentKind as AgentKind;
+  const withContext = (options?: CompletionOptions): CompletionOptions => ({
+    ...options,
+    agentKind: options?.agentKind ?? kind,
+    workspacePath: options?.workspacePath ?? getWorkspacePath(),
+  });
+
+  return {
+    ...provider,
+    complete(prompt, options) {
+      return provider.complete(prompt, withContext(options));
+    },
+    stream(prompt, options) {
+      return provider.stream(prompt, withContext(options));
+    },
+  };
+}
+
 export function createJavisRuntime({
   getWorkspacePath,
   modelSettings,
@@ -405,14 +458,18 @@ export function createJavisRuntime({
 
   const providerFor = (agentKind: string): ModelProvider => {
     const config = getModelConfiguration?.();
-    if (!config) return fallbackProvider;
-    return resolveModelForAgent(agentKind, config, providerCache);
+    const provider = config ? resolveModelForAgent(agentKind, config, providerCache) : fallbackProvider;
+    return withAgentPromptContext(provider, agentKind, getWorkspacePath);
   };
 
   const sharedContext = createSharedTaskContext();
   const eventBus = createTaskEventBus();
   const taskIdRef: { current: string | null } = { current: null };
   const streamingAgentRef: { current: AgentKind } = { current: "commander" };
+  const preprocessingByTaskId = new Map<string, Promise<PreprocessedInput | undefined>>();
+  let preprocessingForNextTask:
+    | { promise: Promise<PreprocessedInput | undefined> }
+    | undefined;
   const runReadOnlyCommand = (request: ShellCommandRequest) => {
     const workspacePath = getWorkspacePath();
     return invoke<ShellCommandOutput>("run_read_only_command", {
@@ -434,8 +491,13 @@ export function createJavisRuntime({
         streamingAgentRef.current = "commander";
         eventBus.emit({ kind: "agent.chunk_start", taskId, agentKind: "commander" });
         try {
+          const preprocessedInput = await preprocessingByTaskId.get(taskId);
+          preprocessingByTaskId.delete(taskId);
+          if (preprocessedInput) {
+            sharedContext.set("preprocessedChineseInput", preprocessedInput);
+          }
           const result = await planWithModelProviderStreaming(
-            request,
+            withPreprocessedCommanderGoal(request, preprocessedInput),
             providerFor("commander"),
             (chunk) =>
               eventBus.emit({
@@ -573,6 +635,10 @@ export function createJavisRuntime({
           },
         });
       },
+      scanUserImages: (request) =>
+        scanUserImages(request?.maxResults),
+      scanInstalledApps: () =>
+        scanInstalledApps(),
       classifyDocuments: (files) =>
         classifyDocuments(files, providerFor("file")),
     },
@@ -590,6 +656,20 @@ export function createJavisRuntime({
             modifiedAt: entry.modifiedAt,
             extension: entry.extension,
           }));
+      },
+      listDirectory: async ({ path }) => {
+        if (!path) {
+          throw new Error("computer.listDirectory requires a path.");
+        }
+        const entries = await listDirectory(path);
+        return entries.map((entry): ComputerFileCandidate => ({
+          name: entry.name,
+          path: entry.path,
+          isDir: entry.isDir,
+          sizeBytes: entry.sizeBytes,
+          modifiedAt: entry.modifiedAt,
+          extension: entry.extension,
+        }));
       },
       screenshot: (request: ComputerScreenshotRequest) =>
         invoke<ComputerScreenshotResult>("computer_screenshot", { request }),
@@ -688,7 +768,7 @@ export function createJavisRuntime({
           paramsJson: JSON.stringify(action.params),
           sessionWide: sessionWide ?? false,
         });
-        return { approvalId, taskId };
+        return { approvalId, taskId, sessionWide: sessionWide ?? false };
       },
     },
     visionTool: {
@@ -758,8 +838,8 @@ export function createJavisRuntime({
           diff: diff.stdout,
         };
       },
-      proposeEdit: ({ userGoal, preview }) =>
-        proposeCodeEditWithModelProvider(userGoal, preview, providerFor("code")),
+      proposeEdit: ({ userGoal, preview, taskId }) =>
+        proposeCodeEditWithModelProvider(userGoal, preview, providerFor("code"), taskId),
       applyProposedEdit: (edit: CodeProposedEdit, approval) =>
         invoke("approve_code_patch", {
           request: {
@@ -768,6 +848,7 @@ export function createJavisRuntime({
             workspacePath: edit.workspacePath,
             changedFiles: edit.changedFiles,
             patchHash: edit.patchHash,
+            taskId: approval.taskId,
           },
         }).then(() =>
           invoke<CodeApplyResult>("apply_code_patch", {
@@ -779,6 +860,7 @@ export function createJavisRuntime({
               patch: edit.patch,
               patchHash: edit.patchHash,
               baseGitHead: edit.baseGitHead,
+              taskId: approval.taskId,
             },
           }),
         ),
@@ -879,60 +961,14 @@ export function createJavisRuntime({
         invoke<BrowserScreenshotResult>("browser_screenshot", { request }),
       getContent: (request: BrowserGetContentRequest) =>
         invoke<BrowserGetContentResult>("browser_get_content", { request }),
-      click: (request: BrowserClickRequest) =>
-        invoke<BrowserClickResult>("browser_click", { request: withBrowserWriteContext(request) }),
-      type: (request: BrowserTypeRequest) =>
-        invoke<BrowserTypeResult>("browser_type", { request: withBrowserWriteContext(request) }),
-      evaluate: (request: BrowserEvaluateRequest) =>
-        invoke<BrowserEvaluateResult>("browser_evaluate", { request: withBrowserWriteContext(request) }),
-      runTest: (request: BrowserRunTestRequest) =>
-        invoke<BrowserRunTestResult>("browser_run_test", { request }),
-      extractLinks: async (request: BrowserExtractLinksRequest): Promise<BrowserExtractLinksResult> => {
-        const { selector = "a[href]", maxResults = 50 } = request;
-        const safeSelector = JSON.stringify(selector);
-        const js = `Array.from(document.querySelectorAll(${safeSelector})).slice(0, ${maxResults}).map(el => ({href: el.href || '', text: (el.textContent || '').trim().slice(0, 200), tag: el.tagName?.toLowerCase(), rel: el.rel || ''}))`;
-        const result = await invoke<BrowserEvaluateResult>("browser_evaluate", {
-          request: withBrowserWriteContext({ expression: js }),
-        });
-        if (!result.result) {
-          return { links: [], count: 0 };
-        }
-        const links = (() => { try { return JSON.parse(result.result); } catch { return []; } })();
-        return { links, count: links.length };
-      },
-      upload: async (request: BrowserUploadRequest): Promise<BrowserUploadResult> => {
-        const { selector, filePaths } = request;
-        const safeSelector = JSON.stringify(selector);
-        const files: Array<{ name: string; dataUrl: string }> = [];
-        for (const fp of filePaths) {
-          try {
-            const resolved = await resolveImageDataUrl(fp, getWorkspacePath());
-            const name = fp.split(/[/\\]/).pop() ?? "file";
-            files.push({ name, dataUrl: resolved });
-          } catch {
-            // Skip files that can't be resolved
-          }
-        }
-        if (files.length === 0) {
-          return { success: false, uploadedCount: 0, message: "No valid files to upload" };
-        }
-        const filesJson = JSON.stringify(files);
-        const js = `(async () => { const input = document.querySelector(${safeSelector}); if (!input) return JSON.stringify({success:false,error:'input not found'}); const dt = new DataTransfer(); const files = ${filesJson}; for (const f of files) { const resp = await fetch(f.dataUrl); const blob = await resp.blob(); const file = new File([blob], f.name, {type: blob.type}); dt.items.add(file); } input.files = dt.files; input.dispatchEvent(new Event('change', {bubbles: true})); input.dispatchEvent(new Event('input', {bubbles: true})); return JSON.stringify({success:true,count:files.length}); })()`;
-        const result = await invoke<BrowserEvaluateResult>("browser_evaluate", {
-          request: withBrowserWriteContext({ expression: js }),
-        });
-        if (!result.result) {
-          return { success: false, uploadedCount: 0, message: "Browser evaluate returned no result" };
-        }
-        const parsed = (() => { try { return JSON.parse(result.result); } catch { return {}; } })();
-        return {
-          success: parsed.success ?? false,
-          uploadedCount: parsed.count ?? 0,
-          message: parsed.success
-            ? `Uploaded ${parsed.count} file(s) to ${selector}`
-            : (parsed.error ?? "Upload failed"),
-        };
-      },
+      click: (_request: BrowserClickRequest) => Promise.reject(createBrowserApprovalError()),
+      type: (_request: BrowserTypeRequest) => Promise.reject(createBrowserApprovalError()),
+      evaluate: (_request: BrowserEvaluateRequest) => Promise.reject(createBrowserApprovalError()),
+      runTest: (_request: BrowserRunTestRequest) => Promise.reject(createBrowserApprovalError()),
+      extractLinks: (request: BrowserExtractLinksRequest) =>
+        invoke<BrowserExtractLinksResult>("browser_extract_links", { request }),
+      upload: (_request: BrowserUploadRequest): Promise<BrowserUploadResult> =>
+        Promise.reject(createBrowserApprovalError()),
       followCandidateLinks: async (request: BrowserFollowCandidateLinksRequest): Promise<BrowserFollowCandidateLinksResult> => {
         const { candidateLinks, urlPattern, maxFollow = 3 } = request;
         let pattern: RegExp | null = null;
@@ -1007,16 +1043,22 @@ export function createJavisRuntime({
     eventBus,
     onTaskStarted: (taskId) => {
       taskIdRef.current = taskId;
+      if (preprocessingForNextTask) {
+        preprocessingByTaskId.set(taskId, preprocessingForNextTask.promise);
+        preprocessingForNextTask = undefined;
+      }
     },
     // P0-2: LLM-based ReAct decision maker for agent step execution loops
     reactDecideNext: async (request: ReActDecisionRequest): Promise<AgentReActDecision> => {
       const prompt = buildReActDecisionPrompt(request);
+      let resultText = "";
       try {
         const result = await providerFor(request.agentKind).complete(prompt, {
           maxTokens: 600,
           temperature: 0,
           locale: "zh-CN",
         });
+        resultText = result.text;
         const parsed = parseJsonObject(result.text) as Record<string, unknown>;
         const rawStatus = parsed.status as string;
         const status: AgentReActDecision["status"] =
@@ -1031,11 +1073,27 @@ export function createJavisRuntime({
         };
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
+        // When the LLM returns natural text instead of JSON (common for
+        // simple synthesis/greeting steps), treat the response as the
+        // completed step output rather than a failure.
+        if (msg.includes("did not contain a JSON object") && resultText.trim().length > 0) {
+          eventBus.emit({
+            kind: "tool.planned",
+            taskId: taskIdRef.current ?? "task-unknown",
+            toolName: "reactDecideNext",
+            detail: `ReAct decision LLM returned plain text — treating as completed output.`,
+          });
+          return {
+            status: "completed",
+            reason: "Step produced a natural-text response.",
+            output: resultText.trim(),
+          };
+        }
         eventBus.emit({
           kind: "tool.planned",
           taskId: taskIdRef.current ?? "task-unknown",
           toolName: "reactDecideNext",
-          detail: `ReAct decision LLM failed, falling back to single-shot: ${msg}`,
+          detail: `ReAct decision LLM failed: ${msg}`,
         });
         return {
           status: "failed",
@@ -1060,21 +1118,13 @@ export function createJavisRuntime({
             capabilities: reg?.capabilityTags ?? [],
           };
         });
-      const availableTools = initialToolDescriptors.map((td) => ({
-        name: td.name,
-        permissionLevel: td.permissionLevel,
-        summary: td.summary,
-        capabilityTags: [...td.capabilityTags],
-        ownerAgentKinds: [...td.ownerAgentKinds],
-      }));
-
       const prompt = buildCommanderReplanPrompt({
         userGoal,
         contextSnapshot,
         failedStepId,
         failureReason,
         availableAgents,
-        availableTools,
+        availableTools: COMMANDER_PROMPT_TOOL_DESCRIPTORS,
       });
 
       try {
@@ -1122,6 +1172,12 @@ export function createJavisRuntime({
     ) {
       return classifyDocuments(files, providerFor("file"), options);
     },
+    classifyAppsWithAgent(
+      apps: { name: string; path: string; publisher?: string; installLocation?: string }[],
+      options?: { onBatchProgress?: (completed: number, total: number, failed: number) => void; signal?: AbortSignal },
+    ) {
+      return classifyApps(apps, providerFor("file"), options);
+    },
     clearProviderCache() {
       providerCache.clear();
       providerCache.set("fallback", fallbackProvider);
@@ -1129,6 +1185,12 @@ export function createJavisRuntime({
     start(userGoal: string, options?: Parameters<typeof runtime.start>[1]) {
       sharedContext.clear();
       sharedContext.set(sharedContext.resolveKey(CONTEXT_KEYS.USER_GOAL, "zh-CN"), userGoal);
+      preprocessingByTaskId.clear();
+      preprocessingForNextTask = options?.mode === "chat"
+        ? undefined
+        : {
+            promise: preprocessChineseInput(userGoal, providerFor("commander")),
+          };
       runtime.start(userGoal, options);
     },
     stopTask() {
@@ -1425,29 +1487,58 @@ async function streamOrCompleteWithReview<T>(
     }
   } catch {
     // Provider doesn't support SSE — fall back to non-streaming complete()
-    const result = await completeWithChineseReview(
-      prompt,
-      { ...streamOptions, locale: "zh-CN" },
-      modelProvider,
-      "terms-only",
-    );
+    const result = await modelProvider.complete(prompt, { ...streamOptions, locale: "zh-CN" });
     onChunk({ text: result.text });
-    return normalize(parseJsonObject(result.text));
+    return parseNormalizeWithRepair(prompt, result.text, streamOptions, modelProvider, normalize);
   }
 
-  let resultText = fullText;
+  return parseNormalizeWithRepair(prompt, fullText, streamOptions, modelProvider, normalize);
+}
+
+async function parseNormalizeWithRepair<T>(
+  originalPrompt: string,
+  rawText: string,
+  streamOptions: { maxTokens: number; temperature: number },
+  modelProvider: ModelProvider,
+  normalize: (value: unknown) => T,
+): Promise<T> {
   try {
-    const reviewed = await reviewChineseStyle(
-      { text: fullText },
-      modelProvider,
-      "terms-only",
-    );
-    resultText = reviewed.text;
-  } catch {
-    // Fall back to unreviewed text
+    return normalize(parseJsonObject(rawText));
+  } catch (error) {
+    if (!isJsonParseFailure(error)) {
+      throw error;
+    }
+    const repaired = await modelProvider.complete(buildJsonRepairPrompt(originalPrompt, rawText), {
+      ...streamOptions,
+      locale: "zh-CN",
+    });
+    return normalize(parseJsonObject(repaired.text));
   }
+}
 
-  return normalize(parseJsonObject(resultText));
+function buildJsonRepairPrompt(originalPrompt: string, rawText: string): string {
+  return [
+    "Your previous output was not valid JSON for the required schema.",
+    "Convert it into one valid JSON object that satisfies the original instruction.",
+    "Return ONLY the JSON object. Do not use markdown fences. Do not explain.",
+    "",
+    "Original instruction:",
+    originalPrompt,
+    "",
+    "Previous invalid output:",
+    rawText,
+  ].join("\n");
+}
+
+function isJsonParseFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  return (
+    error.message.includes("JSON") ||
+    error.message.includes("Unexpected token") ||
+    error.message.includes("Unexpected end")
+  );
 }
 
 async function planWithModelProviderStreaming(
@@ -1471,7 +1562,7 @@ async function planWithModelProviderStreaming(
     userGoal: request.userGoal,
     workflowId: request.workflowId ?? "unknown",
     availableAgents: agentsWithCapabilities,
-    availableTools: request.availableTools,
+    availableTools: request.availableTools ?? COMMANDER_PROMPT_TOOL_DESCRIPTORS,
   });
 
   return streamOrCompleteWithReview(
@@ -1481,6 +1572,24 @@ async function planWithModelProviderStreaming(
     onChunk,
     (value) => normalizeCommanderPlan(value, request),
   );
+}
+
+function withPreprocessedCommanderGoal(
+  request: CommanderPlanRequest,
+  preprocessedInput: PreprocessedInput | undefined,
+): CommanderPlanRequest {
+  if (!preprocessedInput) {
+    return request;
+  }
+  return {
+    ...request,
+    userGoal: [
+      request.userGoal,
+      "",
+      "Chinese input preprocessing result for planning:",
+      JSON.stringify(preprocessedInput),
+    ].join("\n"),
+  };
 }
 
 async function verifyWithModelProviderStreaming(
@@ -1557,7 +1666,7 @@ function parseJsonObject(text: string): unknown {
   return JSON.parse(candidate.slice(start, end + 1));
 }
 
-async function resolveImageDataUrl(imagePath: string, workspacePath?: string): Promise<string> {
+export async function resolveImageDataUrl(imagePath: string, workspacePath?: string): Promise<string> {
   const trimmed = imagePath.trim();
   if (!trimmed) {
     throw new Error("Image path cannot be empty.");
@@ -1565,20 +1674,27 @@ async function resolveImageDataUrl(imagePath: string, workspacePath?: string): P
   if (/^data:image\//i.test(trimmed)) {
     return validateImageDataUrl(trimmed);
   }
+  const workspaceRoot = workspacePath?.trim();
+  if (!workspaceRoot) {
+    throw new Error("Local image paths require a selected workspace.");
+  }
   // Resolve relative paths against workspace
   const isAbsolute = /^[A-Za-z]:[\\/]/.test(trimmed) || trimmed.startsWith("/");
-  const resolved = isAbsolute || !workspacePath
+  const resolved = isAbsolute
     ? trimmed
-    : `${workspacePath.replace(/[\\/]$/, "")}/${trimmed}`;
-  // Verify containment for workspace-relative paths
-  if (workspacePath) {
-    const ws = workspacePath.replace(/\\/g, "/").replace(/\/$/, "").toLowerCase();
-    const target = resolved.replace(/\\/g, "/").toLowerCase();
-    if (!target.startsWith(ws + "/") && target !== ws) {
-      throw new Error(`Image path is outside the current workspace: ${trimmed}`);
-    }
+    : `${workspaceRoot.replace(/[\\/]$/, "")}/${trimmed}`;
+  // Verify containment before invoking the native reader; Rust repeats this
+  // with canonical paths so this check is only an early UX guard.
+  const ws = workspaceRoot.replace(/\\/g, "/").replace(/\/$/, "").toLowerCase();
+  const target = resolved.replace(/\\/g, "/").toLowerCase();
+  if (!target.startsWith(ws + "/") && target !== ws) {
+    throw new Error(`Image path is outside the current workspace: ${trimmed}`);
   }
-  return invoke<string>("read_image_data_url", { path: resolved });
+  return invoke<string>("read_image_data_url", {
+    path: resolved,
+    workspaceRoot,
+    allowedRootIds: null,
+  });
 }
 
 export function validateImageDataUrl(value: string): string {
@@ -1627,12 +1743,22 @@ function normalizeCommanderPlan(
   if (!isRecord(value)) {
     throw new Error("Commander plan response must be a JSON object with title, reasoning, and steps.");
   }
-  const steps = Array.isArray(value.steps)
-    ? value.steps.filter(isRecord).map((step, index) => normalizeCommanderStep(step, index, request))
+  const rawSteps = Array.isArray(value.steps)
+    ? value.steps
+    : Array.isArray(value.plan)
+      ? value.plan
+      : [];
+  const steps = rawSteps.length > 0
+    ? rawSteps.filter(isRecord).map((step, index) =>
+        normalizeCommanderStep(step, index, request, value.needsClarification === true),
+      )
     : [];
   return {
     title: stringValue(value.title, "Project workflow plan"),
-    reasoning: stringValue(value.reasoning, "Commander prepared a workflow plan."),
+    reasoning: stringValue(
+      value.reasoning,
+      stringValue(value.riskSummary, "Commander prepared a workflow plan."),
+    ),
     steps,
   };
 }
@@ -1641,27 +1767,109 @@ function normalizeCommanderStep(
   step: Record<string, unknown>,
   index: number,
   request: CommanderPlanRequest,
+  planNeedsClarification = false,
 ): CommanderPlanResult["steps"][number] {
-  const assignedAgentKind = stringValue(step.assignedAgentKind, "commander");
+  const assignedAgentKind = stringValue(step.assignedAgentKind, stringValue(step.agentKind, "commander"));
+  const isClarificationStep =
+    index === 0 &&
+    planNeedsClarification &&
+    assignedAgentKind === "commander" &&
+    typeof step.toolName !== "string" &&
+    typeof step.capability !== "string";
   const toolName = typeof step.toolName === "string" && step.toolName.trim()
     ? step.toolName.trim()
+    : isClarificationStep
+      ? "commander.askUser"
     : undefined;
   if (toolName) {
     validateCommanderStepToolName(assignedAgentKind, toolName, request);
   }
+
+  // Validate capability tag if present
+  const rawCapability = typeof step.capability === "string" && step.capability.trim()
+    ? step.capability.trim()
+    : undefined;
+  let capability: string | undefined;
+  if (rawCapability) {
+    if (!isValidCapabilityTag(rawCapability)) {
+      console.warn(
+        `[CommanderPlan] Step "${String(step.id || `step-${index + 1}`)}": ` +
+        `invalid capability tag "${rawCapability}" — ignored.`,
+      );
+    } else {
+      capability = rawCapability;
+    }
+  }
+
+  // Filter requiredCapabilities to only valid tags
+  const rawRequiredCaps = Array.isArray(step.requiredCapabilities)
+    ? step.requiredCapabilities.filter((c): c is string => typeof c === "string")
+    : [];
+  const requiredCapabilities = rawRequiredCaps.length > 0
+    ? rawRequiredCaps.filter((c) => {
+        if (!isValidCapabilityTag(c)) {
+          console.warn(
+            `[CommanderPlan] Step "${String(step.id || `step-${index + 1}`)}": ` +
+            `invalid requiredCapability "${c}" — removed.`,
+          );
+          return false;
+        }
+        return true;
+      })
+    : undefined;
+
   return {
     id: stringValue(step.id, `step-${index + 1}`),
-    title: stringValue(step.title, `Step ${index + 1}`),
+    title: isClarificationStep
+      ? stringValue(step.successCriteria, stringValue(step.title, "Please clarify your request."))
+      : stringValue(step.title, `Step ${index + 1}`),
     assignedAgentKind,
     toolName,
-    requiredCapabilities: Array.isArray(step.requiredCapabilities)
-      ? step.requiredCapabilities.filter((c): c is string => typeof c === "string")
-      : undefined,
+    capability,
+    requiredCapabilities,
     dependsOn: Array.isArray(step.dependsOn)
       ? step.dependsOn.filter((d): d is string => typeof d === "string")
       : undefined,
+    choices: normalizeAskUserChoices(step.choices),
+    executionMode: normalizeStepExecutionMode(step.executionMode),
     successCriteria: stringValue(step.successCriteria, "Step completed with evidence."),
   };
+}
+
+function normalizeStepExecutionMode(value: unknown): CommanderPlanResult["steps"][number]["executionMode"] | undefined {
+  return value === "direct_response" || value === "direct_tool_call" || value === "react"
+    ? value
+    : undefined;
+}
+
+function normalizeAskUserChoices(value: unknown): CommanderPlanResult["steps"][number]["choices"] {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const choices: Array<string | AskUserChoice> = [];
+  for (const choice of value) {
+    if (typeof choice === "string") {
+      const trimmed = choice.trim();
+      if (trimmed) {
+        choices.push(trimmed);
+      }
+      continue;
+    }
+    if (!isRecord(choice)) {
+      continue;
+    }
+    const label = typeof choice.label === "string" ? choice.label.trim() : "";
+    const choiceValue = typeof choice.value === "string" ? choice.value.trim() : "";
+    if (!label || !choiceValue) {
+      continue;
+    }
+    choices.push({
+      label,
+      value: choiceValue,
+      isRecommended: choice.isRecommended === true,
+    });
+  }
+  return choices.length > 0 ? choices : undefined;
 }
 
 function validateCommanderStepToolName(
@@ -1677,10 +1885,10 @@ function validateCommanderStepToolName(
     throw new Error(`Commander plan assigned tool ${toolName} outside ${assignedAgentKind} allowedToolNames.`);
   }
   const descriptor = request.availableTools?.find((item) => item.name === toolName);
-  if (!descriptor) {
+  if (request.availableTools && !descriptor) {
     throw new Error(`Commander plan assigned unknown tool ${toolName}.`);
   }
-  if (!descriptor.ownerAgentKinds.includes(assignedAgentKind)) {
+  if (descriptor && !descriptor.ownerAgentKinds.includes(assignedAgentKind)) {
     throw new Error(`Commander plan assigned tool ${toolName} to non-owner agent ${assignedAgentKind}.`);
   }
 }
@@ -1705,21 +1913,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function withBrowserWriteContext<T extends object>(request: T): T & {
-  sessionId: string;
-  permissionMode: "full_access";
-} {
-  return {
-    ...request,
-    sessionId: "agent-runtime-browser",
-    permissionMode: "full_access",
-  };
+function createBrowserApprovalError(): Error {
+  return new Error("Browser write operation requires native approval and is disabled until browser approvals are implemented.");
 }
 
 function proposeCodeEditWithModelProvider(
   userGoal: string,
   preview: CodeReviewPreview,
   modelProvider: ModelProvider,
+  taskId?: string,
 ): Promise<CodeProposedEdit> {
   return invoke<CodeProposedEdit>("propose_code_edit", {
     request: {
@@ -1727,6 +1929,7 @@ function proposeCodeEditWithModelProvider(
       userGoal,
       changedFiles: preview.changedFiles,
       diff: preview.diff,
+      taskId,
       providerId: modelProvider.settings.provider,
       model: modelProvider.settings.model,
       apiKeyReference: modelProvider.settings.apiKeyReference,

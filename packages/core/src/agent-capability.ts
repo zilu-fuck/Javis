@@ -15,37 +15,58 @@ import { initialToolDescriptors } from "@javis/tools";
 
 /** Concrete skills each agent can fulfill. Commander outputs these per step. */
 export type AgentCapabilityTag =
-  | "planning"           // Decompose user goals into workflow steps
-  | "synthesis"          // Merge evidence into user-facing conclusions
-  | "file_scan"          // Scan markdown/user documents (read-only)
-  | "file_execute"       // Execute confirmed file organization (write)
-  | "document_classify"  // Classify documents by type/purpose
-  | "shell_readonly"     // Run allowlisted read-only shell commands
-  | "git_inspect"        // Inspect git status, diff, changed files
-  | "code_propose"       // Propose code edits/patch from diff analysis
-  | "code_apply"         // Apply confirmed patches to workspace
-  | "web_search"         // Search public web sources
-  | "web_fetch"          // Fetch and extract public web page content
-  | "local_search"       // Search indexed local files by metadata
-  | "image_scan"         // Scan user image files
-  | "directory_list"     // List local directories
-  | "schedule_create"    // Create durable local scheduled tasks
-  | "evidence_check"     // Check collected evidence against success criteria
-  | "browser_navigate"   // Navigate to URLs, extract content, take screenshots
-  | "browser_interact"   // Click, type, evaluate in page context
-  | "browser_test"       // Run Playwright test scripts
-  | "workspace_list"     // List installed workspace definitions
-  | "workspace_scaffold" // Generate workspace definition from description
-  | "workspace_create"   // Save a new workspace definition
-  | "workspace_delete"  // Remove a workspace definition
-  | "image_analyze"     // Analyze image content and answer visual questions
-  | "image_describe"    // Generate textual description of an image
-  | "image_ocr"         // Extract text from images via OCR
-  | "clarification"     // Ask user for clarification when goals are ambiguous
-  | "desktop_screenshot"    // Capture desktop/window screenshots
-  | "desktop_list_windows"  // Enumerate OS windows
-  | "desktop_focus"         // Focus/foreground a window
-  | "desktop_input";        // Inject mouse/keyboard input events
+  | "planning"
+  | "synthesis"
+  | "file_scan"
+  | "file_execute"
+  | "document_classify"
+  | "shell_readonly"
+  | "git_inspect"
+  | "code_propose"
+  | "code_apply"
+  | "web_search"
+  | "web_fetch"
+  | "local_search"
+  | "image_scan"
+  | "directory_list"
+  | "schedule_create"
+  | "evidence_check"
+  | "browser_navigate"
+  | "browser_interact"
+  | "browser_test"
+  | "workspace_list"
+  | "workspace_scaffold"
+  | "workspace_create"
+  | "workspace_delete"
+  | "image_analyze"
+  | "image_describe"
+  | "image_ocr"
+  | "clarification"
+  | "desktop_screenshot"
+  | "desktop_list_windows"
+  | "desktop_ui_tree"
+  | "desktop_focus"
+  | "desktop_ui_input"
+  | "desktop_input";
+
+/** All valid capability tags — single source of truth for validation. */
+export const ALL_CAPABILITY_TAGS: ReadonlyArray<AgentCapabilityTag> = [
+  "planning", "synthesis", "file_scan", "file_execute", "document_classify",
+  "shell_readonly", "git_inspect", "code_propose", "code_apply",
+  "web_search", "web_fetch", "local_search", "image_scan", "directory_list",
+  "schedule_create", "evidence_check",
+  "browser_navigate", "browser_interact", "browser_test",
+  "workspace_list", "workspace_scaffold", "workspace_create", "workspace_delete",
+  "image_analyze", "image_describe", "image_ocr",
+  "clarification",
+  "desktop_screenshot", "desktop_list_windows", "desktop_ui_tree",
+  "desktop_focus", "desktop_ui_input", "desktop_input",
+];
+
+/** Check whether a string is a valid capability tag. */
+export function isValidCapabilityTag(value: string): value is AgentCapabilityTag {
+  return (ALL_CAPABILITY_TAGS as ReadonlyArray<string>).includes(value);
+}
 
 // ── Model Requirements ──────────────────────────────────────────────────────
 

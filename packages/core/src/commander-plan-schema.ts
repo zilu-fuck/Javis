@@ -1,4 +1,6 @@
 import type { AgentCapabilityTag } from "./agent-capability";
+import type { AskUserChoice } from "@javis/tools";
+import { ALL_CAPABILITY_TAGS } from "./agent-capability";
 
 /**
  * Commander Plan JSON Schema — strict structural contract for LLM output.
@@ -22,8 +24,13 @@ export interface CommanderDagStep {
   inputContextKeys?: string[];
   /** SharedContext key to write the step's output to. */
   outputContextKey?: string;
+  /** Suggested answers for clarification steps. */
+  choices?: Array<string | AskUserChoice>;
+  executionMode?: StepExecutionMode;
   successCriteria: string;
 }
+
+export type StepExecutionMode = "direct_response" | "direct_tool_call" | "react";
 
 export interface CommanderDagPlan {
   title: string;
@@ -93,6 +100,29 @@ export const COMMANDER_PLAN_SCHEMA_JSON = JSON.stringify({
             type: "string",
             description: "SharedContext key to write the step's result to for downstream steps",
           },
+          choices: {
+            type: "array",
+            description: "For clarification steps, provide 2-4 suggested answers. Use objects with label, value, and optional isRecommended.",
+            items: {
+              anyOf: [
+                { type: "string" },
+                {
+                  type: "object",
+                  required: ["label", "value"],
+                  properties: {
+                    label: { type: "string" },
+                    value: { type: "string" },
+                    isRecommended: { type: "boolean" },
+                  },
+                },
+              ],
+            },
+          },
+          executionMode: {
+            type: "string",
+            enum: ["direct_response", "direct_tool_call", "react"],
+            description: "How the executor should run this step. Use direct_tool_call for explicit tools/capabilities, direct_response for synthesis, and react only for exploratory steps.",
+          },
           successCriteria: {
             type: "string",
             description: "How to verify this step completed successfully",
@@ -131,14 +161,16 @@ export function buildCommanderPlanPrompt(params: {
     "Rules:",
     "- steps[].id must be kebab-case and unique within the plan.",
     "- steps[].dependsOn lists step IDs this step waits for. Use [] for the first step(s).",
-    "- steps[].capability MUST be set to the primary capability tag this step fulfills (from the available tools' capabilityTags). Every non-Commander step MUST include capability or requiredCapabilities so the executor can dispatch the correct tool.",
+    "- steps[].capability MUST be one of: " + JSON.stringify([...ALL_CAPABILITY_TAGS]),
+    "- steps[].requiredCapabilities must only contain tags from the same list: " + JSON.stringify([...ALL_CAPABILITY_TAGS]),
     "- steps[].inputContextKeys lists SharedContext keys this step reads from upstream steps' outputs.",
     "- steps[].outputContextKey is the SharedContext key where this step's result will be stored for downstream steps.",
     "- steps[].assignedAgentKind must match one of the Available agents' kind values.",
     "- steps[].toolName is optional, but when present it must be one of assignedAgentKind.allowedToolNames.",
-    "- When the user goal is ambiguous (missing path, unclear scope, multiple valid interpretations), DO NOT guess. Instead, add a step with assignedAgentKind=commander and toolName=commander.askUser BEFORE any other steps, and stop the plan there. The user's answer will be available in SharedContext for re-planning.",
+    "- steps[].executionMode must be direct_tool_call when a concrete tool/capability is known, direct_response for synthesis/summary, and react only when the agent must explore which tool to call.",
+    "- All user-facing strings (title, reasoning, steps[].title, steps[].choices labels, and successCriteria) must use the same natural language as the User goal. If the User goal is Chinese, ask and label choices in Chinese.",
+    "- When the user goal is ambiguous (missing path, unclear scope, multiple valid interpretations), DO NOT guess. Ask exactly ONE blocking question at a time. Add a single step with capability=\"clarification\" and assignedAgentKind=\"commander\" BEFORE any other steps; put the one question in steps[].title. steps[].choices must be 2-4 possible answers to that one question, NOT a list of additional questions. The user's answer will be available in SharedContext for re-planning.",
     "- Prefer read-only steps before write steps. Group independent steps together.",
-    "- Each step's capability tag determines which tool is invoked. Choose from capabilityTags in the tools list below.",
     "",
     `User goal: ${params.userGoal}`,
     `Workflow id: ${params.workflowId}`,

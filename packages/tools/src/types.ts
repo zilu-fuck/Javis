@@ -22,6 +22,23 @@ export interface MarkdownDocumentSummary extends MarkdownDocument {
   purpose: string;
 }
 
+export interface LocalFileEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+  sizeBytes?: number;
+  modifiedAt?: string;
+  extension?: string;
+}
+
+export interface InstalledAppEntry {
+  name: string;
+  path: string;
+  iconPath?: string;
+  publisher?: string;
+  installLocation?: string;
+}
+
 export interface PlannedPathOperation {
   source: string;
   target: string;
@@ -54,11 +71,17 @@ export interface AskUserQuestionRequest {
   id: string;
   question: string;
   /** Optional predefined choices. If absent, user types free-form text. */
-  choices?: string[];
+  choices?: Array<string | AskUserChoice>;
   status: "pending" | "answered" | "expired" | "cancelled";
   createdAt: string;
   resolvedAt?: string;
   answer?: string;
+}
+
+export interface AskUserChoice {
+  label: string;
+  value: string;
+  isRecommended?: boolean;
 }
 
 export interface FileOrganizationPlan {
@@ -127,6 +150,10 @@ export interface FileTool {
     extensions?: string[];
     maxResults?: number;
   }): Promise<MarkdownDocument[]>;
+  scanUserImages?(request?: {
+    maxResults?: number;
+  }): Promise<LocalFileEntry[]>;
+  scanInstalledApps?(): Promise<InstalledAppEntry[]>;
   classifyDocuments?(files: { name: string; path: string; extension?: string }[]): Promise<Array<{ name: string; path: string; extension?: string; tags: string[]; category: string; confidence: number }>>;
 }
 
@@ -229,9 +256,14 @@ export interface CommanderPlanResult {
     title: string;
     assignedAgentKind: string;
     toolName?: string;
+    /** Primary capability tag for capability-based dispatch. Must be a valid AgentCapabilityTag. */
+    capability?: string;
     requiredCapabilities?: string[];
     /** Step IDs that must complete before this step starts. Empty = can run immediately. */
     dependsOn?: string[];
+    /** Suggested answers for clarification steps. */
+    choices?: Array<string | AskUserChoice>;
+    executionMode?: "direct_response" | "direct_tool_call" | "react";
     successCriteria: string;
   }>;
 }
@@ -249,7 +281,7 @@ export interface CommanderSynthesizeResult {
 export interface CommanderTool {
   plan(request: CommanderPlanRequest): Promise<CommanderPlanResult>;
   synthesize?(request: CommanderSynthesizeRequest): Promise<CommanderSynthesizeResult>;
-  askUser?(question: string, choices?: string[]): Promise<string>;
+  askUser?(question: string, choices?: Array<string | AskUserChoice>): Promise<string>;
 }
 
 export interface VerifierCheckRequest {
@@ -273,6 +305,7 @@ export interface VerifierTool {
 }
 
 export interface CodeProposedEdit {
+  approvalId?: string;
   proposalId: string;
   workspacePath: string;
   summary: string;
@@ -302,11 +335,12 @@ export interface CodeApplyResult {
 
 export interface CodeApplyApproval {
   approvalId: string;
+  taskId?: string;
 }
 
 export interface CodeTool {
   inspectRepository(): Promise<CodeReviewPreview>;
-  proposeEdit?(request: { userGoal: string; preview: CodeReviewPreview }): Promise<CodeProposedEdit>;
+  proposeEdit?(request: { userGoal: string; preview: CodeReviewPreview; taskId?: string }): Promise<CodeProposedEdit>;
   applyProposedEdit?(edit: CodeProposedEdit, approval: CodeApplyApproval): Promise<CodeApplyResult>;
 }
 
@@ -511,6 +545,12 @@ export interface ComputerScreenshotResult {
   dataUrl: string;
   width: number;
   height: number;
+  sourceWidth?: number;
+  sourceHeight?: number;
+  sourceOriginX?: number;
+  sourceOriginY?: number;
+  scaleX?: number;
+  scaleY?: number;
   capturedAt: string;
   methodUsed?: "bitblt" | "printWindow";
 }
@@ -667,6 +707,7 @@ export interface ComputerUseApprovalRequest {
 export interface ComputerUseApprovalResult {
   approvalId: string;
   taskId?: string;
+  sessionWide?: boolean;
 }
 
 export interface ComputerTool {
@@ -674,6 +715,7 @@ export interface ComputerTool {
     query: string;
     maxResults?: number;
   }): Promise<ComputerFileCandidate[]>;
+  listDirectory(request: { path?: string }): Promise<ComputerFileCandidate[]>;
   screenshot(request: ComputerScreenshotRequest): Promise<ComputerScreenshotResult>;
   listWindows(request: ComputerListWindowsRequest): Promise<ComputerListWindowsResult>;
   inspectUi(request: ComputerInspectUiRequest): Promise<ComputerInspectUiResult>;

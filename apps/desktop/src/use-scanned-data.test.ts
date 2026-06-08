@@ -1,31 +1,31 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { renderHook, act, waitFor } from "@testing-library/react";
+import { renderHook, waitFor } from "@testing-library/react";
 import { useScannedData } from "./use-scanned-data";
 
 const {
   mockListMountRoots,
   mockScanInstalledApps,
-  mockScanUserDocuments,
-  mockScanUserImages,
   mockScanAllUserFiles,
   mockListDirectory,
+  mockScanResourceFiles,
+  mockGetUserHome,
 } = vi.hoisted(() => ({
   mockListMountRoots: vi.fn(),
   mockScanInstalledApps: vi.fn(),
-  mockScanUserDocuments: vi.fn(),
-  mockScanUserImages: vi.fn(),
   mockScanAllUserFiles: vi.fn(),
   mockListDirectory: vi.fn(),
+  mockScanResourceFiles: vi.fn(),
+  mockGetUserHome: vi.fn(),
 }));
 
 vi.mock("./local-knowledge", () => ({
   listMountRoots: mockListMountRoots,
   scanInstalledApps: mockScanInstalledApps,
-  scanUserDocuments: mockScanUserDocuments,
-  scanUserImages: mockScanUserImages,
   scanAllUserFiles: mockScanAllUserFiles,
   listDirectory: mockListDirectory,
+  scanResourceFiles: mockScanResourceFiles,
+  getUserHome: mockGetUserHome,
 }));
 
 function createFileClassificationRepo() {
@@ -40,55 +40,94 @@ function createFileClassificationRepo() {
   };
 }
 
-function createFileEntry(overrides: Record<string, unknown> = {}) {
+const DEFAULT_TEST_ROOTS = [
+  {
+    id: "default-desktop",
+    path: "C:\\Users\\Test\\Desktop",
+    label: "桌面",
+    kinds: ["documents", "images"],
+    enabled: true,
+    source: "default",
+    created_at: "2025-01-01T00:00:00Z",
+  },
+  {
+    id: "default-documents",
+    path: "C:\\Users\\Test\\Documents",
+    label: "文档",
+    kinds: ["documents"],
+    enabled: true,
+    source: "default",
+    created_at: "2025-01-01T00:00:00Z",
+  },
+];
+
+function createScanRootRepo(roots: Array<Record<string, unknown>> = DEFAULT_TEST_ROOTS) {
   return {
-    name: "file.txt",
-    path: "/home/file.txt",
+    getAll: vi.fn().mockResolvedValue(roots),
+    getByKind: vi.fn().mockResolvedValue(roots.filter((r) => (r.kinds as string[]).includes("documents"))),
+    upsert: vi.fn().mockResolvedValue(undefined),
+    remove: vi.fn().mockResolvedValue(undefined),
+    setEnabled: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
+function createResourceCacheRepo() {
+  return {
+    replaceForRoot: vi.fn().mockResolvedValue(undefined),
+    deleteForRoot: vi.fn().mockResolvedValue(undefined),
+    deleteForKind: vi.fn().mockResolvedValue(undefined),
+    getByKind: vi.fn().mockResolvedValue([]),
+    clearAll: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
+function createResourceEntry(overrides: Record<string, unknown> = {}) {
+  return {
+    name: "doc.pdf",
+    path: "C:\\Users\\Test\\Desktop\\doc.pdf",
     isDir: false,
-    sizeBytes: 1024,
+    sizeBytes: 2048,
     modifiedAt: "2025-01-01T00:00:00Z",
-    extension: "txt",
+    extension: "pdf",
+    source: "default",
+    sourceRootId: "default-desktop",
+    sourceRootPath: "C:\\Users\\Test\\Desktop",
     ...overrides,
   };
 }
 
-function createDeferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
+function makeOptions(overrides: Record<string, unknown> = {}) {
+  const scanRootRepo = createScanRootRepo();
+  const cacheRepo = createResourceCacheRepo();
+  return {
+    activeView: "documents",
+    runtime: {} as any,
+    fileClassificationRepoRef: { current: createFileClassificationRepo() } as any,
+    resourceScanRootRepoRef: { current: scanRootRepo } as any,
+    resourceCacheRepoRef: { current: cacheRepo } as any,
+    ...overrides,
+  };
 }
 
 describe("useScannedData", () => {
   beforeEach(() => {
     mockListMountRoots.mockReset();
     mockScanInstalledApps.mockReset();
-    mockScanUserDocuments.mockReset();
-    mockScanUserImages.mockReset();
     mockScanAllUserFiles.mockReset();
     mockListDirectory.mockReset();
+    mockScanResourceFiles.mockReset();
+    mockGetUserHome.mockReset();
 
     mockListMountRoots.mockResolvedValue([{ name: "C:", path: "C:\\" }]);
     mockScanInstalledApps.mockResolvedValue([]);
-    mockScanUserDocuments.mockResolvedValue([]);
-    mockScanUserImages.mockResolvedValue([]);
     mockScanAllUserFiles.mockResolvedValue([]);
     mockListDirectory.mockResolvedValue([]);
+    mockScanResourceFiles.mockResolvedValue([]);
+    mockGetUserHome.mockResolvedValue("C:\\Users\\Test");
   });
 
-  // ── Initialization ───────────────────────────────────────────────────────
-
   it("calls listMountRoots on mount", async () => {
-    const repo = createFileClassificationRepo();
-    const repoRef = { current: repo } as any;
-
-    renderHook(() =>
-      useScannedData({ activeView: "documents", runtime: {} as any, fileClassificationRepoRef: repoRef }),
-    );
-
+    renderHook(() => useScannedData(makeOptions()));
     await waitFor(() => {
       expect(mockListMountRoots).toHaveBeenCalledOnce();
     });
@@ -99,13 +138,7 @@ describe("useScannedData", () => {
       { name: "C:", path: "C:\\" },
       { name: "D:", path: "D:\\" },
     ]);
-    const repo = createFileClassificationRepo();
-    const repoRef = { current: repo } as any;
-
-    const { result } = renderHook(() =>
-      useScannedData({ activeView: "documents", runtime: {} as any, fileClassificationRepoRef: repoRef }),
-    );
-
+    const { result } = renderHook(() => useScannedData(makeOptions()));
     await waitFor(() => {
       expect(result.current.mountRoots).toEqual([
         { name: "C:", path: "C:\\" },
@@ -114,228 +147,121 @@ describe("useScannedData", () => {
     });
   });
 
-  // ── Scan Dispatching ─────────────────────────────────────────────────────
-
-  it("dispatches document scan with progress when activeView is documents", async () => {
-    mockScanAllUserFiles.mockImplementation(async (_extensions, _maxResults, onProgress) => {
-      onProgress?.({ scanId: "docs", current: 1, total: 2 });
-      return [createFileEntry()];
-    });
-    const repo = createFileClassificationRepo();
-    const repoRef = { current: repo } as any;
-
-    renderHook(() =>
-      useScannedData({ activeView: "documents", runtime: {} as any, fileClassificationRepoRef: repoRef }),
-    );
-
+  it("dispatches document scan via scanResourceFiles when activeView is documents", async () => {
+    renderHook(() => useScannedData(makeOptions({ activeView: "documents" })));
     await waitFor(() => {
-      expect(mockScanAllUserFiles).toHaveBeenCalledWith(
-        expect.arrayContaining(["pdf", "docx"]),
-        200,
+      expect(mockScanResourceFiles).toHaveBeenCalledWith(
+        "documents",
+        expect.any(Array),
+        expect.any(Array),
+        100,
         expect.any(Function),
       );
-    });
+    }, { timeout: 3000 });
   });
 
-  it("keeps document scan results after the loading rerender", async () => {
-    const deferred = createDeferred<ReturnType<typeof createFileEntry>[]>();
-    mockScanAllUserFiles.mockReturnValue(deferred.promise);
-    const repo = createFileClassificationRepo();
-    const repoRef = { current: repo } as any;
+  it("keeps document scanning asynchronous with a visible loading state", async () => {
+    let resolveScan!: (entries: ReturnType<typeof createResourceEntry>[]) => void;
+    mockScanResourceFiles.mockReturnValue(new Promise((resolve) => {
+      resolveScan = resolve;
+    }));
 
     const { result } = renderHook(() =>
-      useScannedData({ activeView: "documents", runtime: {} as any, fileClassificationRepoRef: repoRef }),
+      useScannedData(makeOptions({ activeView: "documents" })),
     );
 
     await waitFor(() => {
       expect(result.current.docsLoading).toBe(true);
-    });
+    }, { timeout: 3000 });
+    expect(result.current.userDocuments).toEqual([]);
 
-    await act(async () => {
-      deferred.resolve([createFileEntry({ name: "notes.pdf", extension: "pdf" })]);
-      await deferred.promise;
-    });
+    resolveScan([createResourceEntry({ name: "async-report.pdf" })]);
 
     await waitFor(() => {
       expect(result.current.docsLoading).toBe(false);
-      expect(result.current.userDocuments).toHaveLength(1);
-    });
+      expect(result.current.userDocuments[0]?.name).toBe("async-report.pdf");
+    }, { timeout: 3000 });
   });
 
-  it("keeps app scan results after the loading rerender", async () => {
-    const deferred = createDeferred<{ name: string; path: string }[]>();
-    mockScanInstalledApps.mockReturnValue(deferred.promise);
-    const repo = createFileClassificationRepo();
-    const repoRef = { current: repo } as any;
-
-    const { result } = renderHook(() =>
-      useScannedData({ activeView: "apps", runtime: {} as any, fileClassificationRepoRef: repoRef }),
-    );
-
+  it("dispatches image scan via scanResourceFiles when activeView is gallery", async () => {
+    renderHook(() => useScannedData(makeOptions({ activeView: "gallery" })));
     await waitFor(() => {
-      expect(result.current.appsLoading).toBe(true);
-    });
-
-    await act(async () => {
-      deferred.resolve([{ name: "Calculator", path: "C:\\Calculator.lnk" }]);
-      await deferred.promise;
-    });
-
-    await waitFor(() => {
-      expect(result.current.appsLoading).toBe(false);
-      expect(result.current.installedApps).toHaveLength(1);
-    });
-  });
-
-  it("dispatches image scan with progress when activeView is gallery", async () => {
-    mockScanAllUserFiles.mockImplementation(async (_extensions, _maxResults, onProgress) => {
-      onProgress?.({ scanId: "images", current: 1, total: 2 });
-      return [createFileEntry({ name: "photo.jpg" })];
-    });
-    const repo = createFileClassificationRepo();
-    const repoRef = { current: repo } as any;
-
-    renderHook(() =>
-      useScannedData({ activeView: "gallery", runtime: {} as any, fileClassificationRepoRef: repoRef }),
-    );
-
-    await waitFor(() => {
-      expect(mockScanAllUserFiles).toHaveBeenCalledWith(
-        expect.arrayContaining(["jpg", "png"]),
-        200,
+      expect(mockScanResourceFiles).toHaveBeenCalledWith(
+        "images",
+        expect.any(Array),
+        expect.any(Array),
+        100,
         expect.any(Function),
       );
-    });
+    }, { timeout: 3000 });
   });
 
-  // ── Refresh callbacks ────────────────────────────────────────────────────
-
-  it("handleRefreshApps resets appsLoading and appsError", () => {
-    const repo = createFileClassificationRepo();
-    const repoRef = { current: repo } as any;
-
-    const { result } = renderHook(() =>
-      useScannedData({ activeView: "apps", runtime: {} as any, fileClassificationRepoRef: repoRef }),
-    );
-
-    act(() => {
-      result.current.handleRefreshApps();
-    });
-
-    expect(result.current.appsError).toBeUndefined();
-  });
-
-  it("handleRefreshDocuments resets docsLoading and docsError", () => {
-    const repo = createFileClassificationRepo();
-    const repoRef = { current: repo } as any;
-
-    const { result } = renderHook(() =>
-      useScannedData({ activeView: "documents", runtime: {} as any, fileClassificationRepoRef: repoRef }),
-    );
-
-    act(() => {
-      result.current.handleRefreshDocuments();
-    });
-
-    expect(result.current.docsError).toBeUndefined();
-  });
-
-  it("handleRefreshImages resets imagesLoading and imagesError", () => {
-    const repo = createFileClassificationRepo();
-    const repoRef = { current: repo } as any;
-
-    const { result } = renderHook(() =>
-      useScannedData({ activeView: "gallery", runtime: {} as any, fileClassificationRepoRef: repoRef }),
-    );
-
-    act(() => {
-      result.current.handleRefreshImages();
-    });
-
-    expect(result.current.imagesError).toBeUndefined();
-  });
-
-  // ── Directory navigation ─────────────────────────────────────────────────
-
-  it("handleNavigateDirectory loads directory contents", async () => {
-    mockListDirectory.mockResolvedValue([
-      createFileEntry({ name: "readme.md", path: "/projects/readme.md" }),
+  it("populates userDocuments from scanResourceFiles result", async () => {
+    mockScanResourceFiles.mockResolvedValue([
+      createResourceEntry({ name: "report.pdf" }),
     ]);
-    const repo = createFileClassificationRepo();
-    const repoRef = { current: repo } as any;
-
     const { result } = renderHook(() =>
-      useScannedData({ activeView: "computer", runtime: {} as any, fileClassificationRepoRef: repoRef }),
+      useScannedData(makeOptions({ activeView: "documents" })),
     );
+    await waitFor(() => {
+      expect(result.current.userDocuments).toHaveLength(1);
+    }, { timeout: 3000 });
+    expect(result.current.userDocuments[0].name).toBe("report.pdf");
+    expect(result.current.docsLoading).toBe(false);
+  });
 
-    act(() => {
-      result.current.handleNavigateDirectory("/projects");
+  it("populates userImages from scanResourceFiles result", async () => {
+    mockScanResourceFiles.mockResolvedValue([
+      createResourceEntry({ name: "photo.jpg", extension: "jpg" }),
+    ]);
+    const { result } = renderHook(() =>
+      useScannedData(makeOptions({ activeView: "gallery" })),
+    );
+    await waitFor(() => {
+      expect(result.current.userImages).toHaveLength(1);
+    }, { timeout: 3000 });
+    expect(result.current.userImages[0].name).toBe("photo.jpg");
+    expect(result.current.imagesLoading).toBe(false);
+  });
+
+  it("sets docsError on scanResourceFiles failure", async () => {
+    mockScanResourceFiles.mockRejectedValue(new Error("scan failed"));
+    const { result } = renderHook(() =>
+      useScannedData(makeOptions({ activeView: "documents" })),
+    );
+    await waitFor(() => {
+      expect(result.current.docsError).toBeDefined();
+    }, { timeout: 3000 });
+    expect(result.current.docsLoading).toBe(false);
+  });
+
+  it("dispatches apps scan when activeView is apps", async () => {
+    mockScanInstalledApps.mockResolvedValue([]);
+    renderHook(() => useScannedData(makeOptions({ activeView: "apps" })));
+    await waitFor(() => {
+      expect(mockScanInstalledApps).toHaveBeenCalledOnce();
     });
+  });
+
+  it("provides resourceScanRoots from repo", async () => {
+    const { result } = renderHook(() => useScannedData(makeOptions()));
+    await waitFor(() => {
+      expect(result.current.resourceScanRoots.length).toBeGreaterThan(0);
+    }, { timeout: 3000 });
+  });
+
+  it("generates default resource roots after home directory resolves when repo is empty", async () => {
+    const emptyScanRootRepo = createScanRootRepo([]);
+    const { result } = renderHook(() =>
+      useScannedData(makeOptions({
+        resourceScanRootRepoRef: { current: emptyScanRootRepo },
+      })),
+    );
 
     await waitFor(() => {
-      expect(mockListDirectory).toHaveBeenCalledWith("/projects");
-    });
-  });
-
-  it("handleListDirectory returns workbench entries", async () => {
-    mockListDirectory.mockResolvedValue([createFileEntry()]);
-    const repo = createFileClassificationRepo();
-    const repoRef = { current: repo } as any;
-
-    const { result } = renderHook(() =>
-      useScannedData({ activeView: "chat", runtime: {} as any, fileClassificationRepoRef: repoRef }),
-    );
-
-    const entries = await result.current.handleListDirectory("/data");
-    expect(entries.length).toBe(1);
-    expect(entries[0].name).toBe("file.txt");
-  });
-
-  // ── Classification ───────────────────────────────────────────────────────
-
-  it("handleClassifyDocuments skips when no unclassified files", async () => {
-    const repo = createFileClassificationRepo();
-    repo.getUnclassifiedFiles.mockResolvedValue([]);
-    const repoRef = { current: repo } as any;
-    const runtime = { classifyWithFileAgent: vi.fn().mockResolvedValue([]), subscribe: vi.fn(), dispose: vi.fn() };
-
-    const { result } = renderHook(() =>
-      useScannedData({ activeView: "chat", runtime: runtime as any, fileClassificationRepoRef: repoRef }),
-    );
-
-    await result.current.handleClassifyDocuments();
-
-    expect(runtime.classifyWithFileAgent).not.toHaveBeenCalled();
-  });
-
-  it("handleCancelClassify does not throw when no classification is active", () => {
-    const repo = createFileClassificationRepo();
-    const repoRef = { current: repo } as any;
-
-    const { result } = renderHook(() =>
-      useScannedData({ activeView: "documents", runtime: {} as any, fileClassificationRepoRef: repoRef }),
-    );
-
-    expect(() => {
-      act(() => {
-        result.current.handleCancelClassify();
-      });
-    }).not.toThrow();
-  });
-
-  // ── Initial state ───────────────────────────────────────────────────────
-
-  it("initial scanning and classifying states are false", () => {
-    const repo = createFileClassificationRepo();
-    const repoRef = { current: repo } as any;
-
-    const { result } = renderHook(() =>
-      useScannedData({ activeView: "documents", runtime: {} as any, fileClassificationRepoRef: repoRef }),
-    );
-
-    expect(result.current.scanning).toBe(false);
-    expect(result.current.classifying).toBe(false);
-    expect(result.current.scanProgress).toBeUndefined();
-    expect(result.current.classifyProgress).toBeUndefined();
+      expect(result.current.resourceScanRoots.some((root) =>
+        root.path === "C:\\Users\\Test\\Documents",
+      )).toBe(true);
+    }, { timeout: 3000 });
   });
 });

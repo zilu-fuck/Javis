@@ -2,13 +2,14 @@ import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ModelSettings } from "./ModelSettings";
-import { zhCNWorkbenchLocale } from "../locale";
+import { defaultWorkbenchLocale, zhCNWorkbenchLocale } from "../locale";
 
 const labels = zhCNWorkbenchLocale.labels;
 
 describe("ModelSettings", () => {
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
   });
 
   it("renders settings trigger button", () => {
@@ -100,6 +101,33 @@ describe("ModelSettings", () => {
     expect(document.body.querySelector(".javis-ai-provider-console")).not.toBeNull();
     expect(document.body.querySelector(".javis-ai-model-grid")).not.toBeNull();
     expect(document.body.querySelectorAll(".javis-ai-model-card")).toHaveLength(3);
+  });
+
+  it("renders assignable agent labels from the translated agent catalog", () => {
+    const { container, getByText, queryByText } = render(
+      <ModelSettings
+        agentCatalog={[
+          { kind: "custom-agent", displayName: "Custom Agent" },
+          { kind: "chinese-reviewer", displayName: "Chinese Reviewer" },
+        ]}
+        labels={defaultWorkbenchLocale.labels}
+        locale={{
+          ...defaultWorkbenchLocale,
+          phrases: {
+            ...defaultWorkbenchLocale.phrases,
+            "Custom Agent": "Translated Agent",
+          },
+        }}
+        modelSettings={{ provider: "openai", model: "gpt-4.1", apiKey: "", apiKeyReference: "default", baseUrl: "" }}
+      />,
+    );
+
+    fireEvent.click(container.querySelector(".javis-settings-trigger")!);
+    fireEvent.click(getByText(defaultWorkbenchLocale.labels.aiModeSettings));
+
+    expect(getByText("Translated Agent")).toBeTruthy();
+    expect(queryByText("custom-agent")).toBeNull();
+    expect(queryByText("Chinese Reviewer")).toBeNull();
   });
 
   it("shows OpenAI-compatible providers from the built-in catalog", () => {
@@ -302,6 +330,63 @@ describe("ModelSettings", () => {
     });
   });
 
+  it("normalizes slot connection settings from the provider model before saving", () => {
+    const onModelConfigurationChange = vi.fn();
+    const { container, getByText } = render(
+      <ModelSettings
+        labels={labels}
+        modelSettings={{
+          provider: "mimo",
+          model: "mimo-v2.5-pro",
+          apiKey: "",
+          apiKeyReference: "default",
+          baseUrl: "https://api.deepseek.com",
+        }}
+        modelConfiguration={{
+          profiles: [
+            {
+              id: "mimo-mimo-v2-5-pro",
+              slot: null,
+              displayName: "mimo-v2.5-pro",
+              provider: "mimo",
+              model: "mimo-v2.5-pro",
+              apiKeyReference: "model.mimo",
+              baseUrl: "https://token-plan-cn.xiaomimimo.com/v1",
+              apiKey: "",
+              capabilities: { vision: true, code: true, longContext: true },
+            },
+            {
+              id: "primary",
+              slot: "primary",
+              displayName: "Primary",
+              provider: "mimo",
+              model: "mimo-v2.5-pro",
+              apiKeyReference: "default",
+              baseUrl: "https://api.deepseek.com",
+              apiKey: "",
+              capabilities: { vision: true, code: true, longContext: true },
+            },
+          ],
+          agentOverrides: {},
+        }}
+        onModelConfigurationChange={onModelConfigurationChange}
+      />,
+    );
+
+    fireEvent.click(container.querySelector(".javis-settings-trigger")!);
+    fireEvent.click(getByText(labels.aiModeSettings));
+    fireEvent.click(document.body.querySelector(".javis-settings-save-btn")!);
+
+    const savedConfig = onModelConfigurationChange.mock.calls[0][0];
+    expect(savedConfig.profiles.find((profile: { slot: string }) => profile.slot === "primary")).toMatchObject({
+      provider: "mimo",
+      model: "mimo-v2.5-pro",
+      apiKeyReference: "model.mimo",
+      baseUrl: "https://token-plan-cn.xiaomimimo.com/v1",
+      contextTokens: 1048576,
+    });
+  });
+
   it("adds provider models to the saved configuration", async () => {
     const onModelConfigurationChange = vi.fn();
     const onFetchProviderModels = vi.fn(async () => ["deepseek-v4-pro", "deepseek-v4-turbo"]);
@@ -337,6 +422,7 @@ describe("ModelSettings", () => {
           provider: "deepseek",
           model: "deepseek-v4-pro",
           baseUrl: "https://api.deepseek.com",
+          contextTokens: 1000000,
         }),
       ]),
     );

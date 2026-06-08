@@ -2,8 +2,8 @@ import type { ModelSettings } from "./model-settings";
 import { localeDefaultModelSettings } from "./model-settings";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { injectTerminologyPrompt, getAdapter } from "@javis/core";
-import type { ProviderAdapter } from "@javis/core";
+import { buildAgentSystemPrompt, injectTerminologyPrompt, getAdapter } from "@javis/core";
+import type { AgentKind, AgentStyleRecord, ProviderAdapter } from "@javis/core";
 
 export interface CompletionOptions {
   model?: string;
@@ -13,6 +13,9 @@ export interface CompletionOptions {
   temperature?: number;
   stopSequences?: string[];
   locale?: string;
+  streamMode?: "default" | "l1";
+  agentKind?: AgentKind;
+  workspacePath?: string;
 }
 
 export interface StreamOptions extends CompletionOptions {
@@ -78,7 +81,7 @@ export function createConfiguredModelProvider(settings: ModelSettings): ModelPro
     async complete(prompt, options) {
       try {
         return await invoke<CompletionResult>("complete_model_prompt", {
-          request: createModelRequest(prompt, providerSettings, options, adapter),
+          request: await createModelRequest(prompt, providerSettings, options, adapter),
         });
       } catch (error) {
         throw normalizeModelProviderError(error, providerSettings.provider);
@@ -107,7 +110,7 @@ export function createModelProviderFromProfile(
     async complete(prompt, options) {
       try {
         return await invoke<CompletionResult>("complete_model_prompt", {
-          request: createModelRequest(prompt, providerSettings, options, adapter),
+          request: await createModelRequest(prompt, providerSettings, options, adapter),
         });
       } catch (error) {
         throw normalizeModelProviderError(error, providerSettings.provider);
@@ -231,8 +234,11 @@ async function* streamModelPrompt(
 
     // Start streaming — listeners are already registered
     try {
-      await invoke("stream_model_prompt_start", {
-        request: createModelRequest(prompt, providerSettings, options, adapter),
+      const command = options?.streamMode === "l1"
+        ? "stream_model_prompt_l1_start"
+        : "stream_model_prompt_start";
+      await invoke(command, {
+        request: await createModelRequest(prompt, providerSettings, options, adapter),
         streamId,
       });
     } catch (error) {
@@ -271,7 +277,7 @@ function getPayloadStreamId(payload: {
   return payload.streamId ?? payload.stream_id;
 }
 
-function createModelRequest(
+async function createModelRequest(
   prompt: string,
   providerSettings: ModelProviderSettings,
   options?: CompletionOptions,
@@ -281,10 +287,16 @@ function createModelRequest(
     options?.locale ? localeDefaultModelSettings(options.locale).provider : undefined
   ) || "";
 
+  const assembledPrompt = await buildPromptForRequest(prompt, options);
+  const requestPrompt = shouldInjectTerminologyForRequest(assembledPrompt, options)
+    ? injectTerminologyPrompt(assembledPrompt, options?.locale)
+    : assembledPrompt;
+
   if (adapter) {
     return adapter.buildCompletionRequest({
-      prompt: injectTerminologyPrompt(prompt, options?.locale),
+      prompt: requestPrompt,
       imageDataUrl: options?.imageDataUrl,
+      images: options?.images,
       model: options?.model ?? providerSettings.model,
       providerId,
       baseUrl: providerSettings.baseUrl,
@@ -297,8 +309,9 @@ function createModelRequest(
   }
 
   return {
-    prompt: injectTerminologyPrompt(prompt, options?.locale),
+    prompt: requestPrompt,
     imageDataUrl: options?.imageDataUrl,
+    images: options?.images,
     providerId,
     model: options?.model ?? providerSettings.model,
     apiKeyReference: providerSettings.apiKeyReference,
@@ -308,6 +321,50 @@ function createModelRequest(
     stopSequences: options?.stopSequences,
     locale: options?.locale,
   };
+}
+
+function shouldInjectTerminologyForRequest(prompt: string, options?: CompletionOptions): boolean {
+  if (!options?.locale?.toLowerCase().startsWith("zh")) {
+    return false;
+  }
+  return !looksLikeStructuredOutputPrompt(prompt);
+}
+
+function looksLikeStructuredOutputPrompt(prompt: string): boolean {
+  return /json\s+only|return\s+only\s+(?:a\s+)?(?:valid\s+)?json|return\s+compact\s+json|json\s+(?:object|array)|output\s+must\s+match[\s\S]{0,80}json\s+schema|output\s+valid\s+json/i
+    .test(prompt);
+}
+
+async function buildPromptForRequest(prompt: string, options?: CompletionOptions): Promise<string> {
+  if (!options?.agentKind) {
+    return prompt;
+  }
+
+  const customStyle = await readAgentStyle(options.agentKind, options.workspacePath);
+  return buildAgentSystemPrompt({
+    kind: options.agentKind,
+    locale: options.locale,
+    customStyle,
+    runtimeContext: prompt,
+  });
+}
+
+async function readAgentStyle(
+  kind: AgentKind,
+  workspacePath?: string,
+): Promise<AgentStyleRecord | undefined> {
+  if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
+    return undefined;
+  }
+  try {
+    return await invoke<AgentStyleRecord>("read_agent_style", {
+      kind,
+      workspacePath: workspacePath?.trim() || null,
+    });
+  } catch (error) {
+    console.warn(`Failed to read custom style for ${kind}`, error);
+    return undefined;
+  }
 }
 
 function normalizeModelProviderError(error: unknown, provider: string): ModelProviderError {

@@ -2,15 +2,14 @@ use std::fs;
 
 use crate::error::JavisError;
 
-
 #[tauri::command]
 pub(crate) fn read_mcp_config() -> Result<Option<String>, String> {
     read_mcp_config_impl().map_err(|e| e.to_string())
 }
 
 fn read_mcp_config_impl() -> Result<Option<String>, JavisError> {
-    let config_dir =
-        dirs::config_dir().ok_or_else(|| JavisError::Io("Cannot determine config directory".into()))?;
+    let config_dir = dirs::config_dir()
+        .ok_or_else(|| JavisError::Io("Cannot determine config directory".into()))?;
     let config_path = config_dir.join("javis").join("mcp.json");
 
     if !config_path.exists() {
@@ -22,7 +21,6 @@ fn read_mcp_config_impl() -> Result<Option<String>, JavisError> {
         .map_err(|e| JavisError::Io(format!("Cannot read MCP config: {e}")))
 }
 
-
 #[tauri::command]
 pub(crate) fn write_mcp_config(json: String) -> Result<(), String> {
     write_mcp_config_impl(&json).map_err(|e| e.to_string())
@@ -33,8 +31,8 @@ fn write_mcp_config_impl(json: &str) -> Result<(), JavisError> {
     serde_json::from_str::<serde_json::Value>(json)
         .map_err(|e| JavisError::Validation(format!("Invalid JSON for MCP config: {e}")))?;
 
-    let config_dir =
-        dirs::config_dir().ok_or_else(|| JavisError::Io("Cannot determine config directory".into()))?;
+    let config_dir = dirs::config_dir()
+        .ok_or_else(|| JavisError::Io("Cannot determine config directory".into()))?;
     let javis_dir = config_dir.join("javis");
 
     fs::create_dir_all(&javis_dir)
@@ -71,8 +69,10 @@ mod tests {
         let result = write_mcp_config_impl(&json);
         // If it fails, it must NOT be a Validation error
         if let Err(e) = &result {
-            assert!(!e.to_string().contains("Invalid JSON"),
-                "Valid JSON should not trigger validation error: {e}");
+            assert!(
+                !e.to_string().contains("Invalid JSON"),
+                "Valid JSON should not trigger validation error: {e}"
+            );
         }
     }
 

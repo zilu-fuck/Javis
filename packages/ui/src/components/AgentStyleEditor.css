@@ -1,0 +1,156 @@
+.javis-agent-style-editor {
+  display: grid;
+  gap: 14px;
+  margin-top: 4px;
+  scroll-margin-top: 18px;
+}
+
+.javis-agent-style-card {
+  display: grid;
+  gap: 14px;
+  overflow: visible;
+  padding-top: 20px;
+}
+
+.javis-agent-style-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.javis-agent-style-grid label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.javis-agent-style-grid select {
+  min-width: 0;
+  height: 34px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  padding: 0 10px;
+  color: var(--color-ink);
+  background: var(--color-surface-raised);
+  font: inherit;
+}
+
+.javis-agent-style-help {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.javis-agent-style-path {
+  display: grid;
+  gap: 4px;
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.javis-agent-style-path code {
+  overflow: hidden;
+  border-radius: 6px;
+  padding: 5px 7px;
+  color: var(--color-accent-strong);
+  background: var(--color-accent-soft);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-agent-style-card textarea {
+  width: 100%;
+  min-height: 220px;
+  resize: vertical;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  padding: 12px;
+  color: var(--color-ink);
+  background: var(--color-surface-raised);
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.javis-agent-style-conflicts {
+  display: grid;
+  gap: 6px;
+  border: 1px solid rgba(183, 122, 25, 0.28);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--color-amber);
+  background: rgba(255, 248, 232, 0.78);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.javis-agent-style-conflicts strong {
+  color: #8a5a11;
+}
+
+.javis-agent-style-conflicts ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.javis-agent-style-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.javis-agent-style-footer span {
+  color: var(--color-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.javis-agent-style-footer span.limit {
+  color: var(--color-danger);
+}
+
+.javis-agent-style-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.javis-agent-style-actions button {
+  min-height: 32px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  padding: 0 12px;
+  color: var(--color-ink);
+  background: var(--color-surface-raised);
+}
+
+.javis-agent-style-actions button:last-child {
+  border-color: var(--color-accent);
+  color: #fff;
+  background: var(--color-accent);
+}
+
+.javis-agent-style-status {
+  margin: 0;
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.javis-agent-style-status.saved {
+  color: var(--color-accent-strong);
+}
+
+.javis-agent-style-status.error {
+  color: var(--color-danger);
+}
+
+@media (max-width: 760px) {
+  .javis-agent-style-grid {
+    grid-template-columns: 1fr;
+  }
+}

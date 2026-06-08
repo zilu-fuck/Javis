@@ -108,6 +108,7 @@ async function loadModelConfiguration(
     model: row.model,
     apiKeyReference: row.api_key_reference,
     baseUrl: row.base_url,
+    contextTokens: parseContextTokens(row.capabilities),
     capabilities: parseCapabilities(row.capabilities),
   }));
 
@@ -150,7 +151,7 @@ ON CONFLICT(id) DO UPDATE SET
         profile.model,
         profile.apiKeyReference,
         profile.baseUrl,
-        JSON.stringify(profile.capabilities),
+        serializeCapabilities(profile),
         now,
       ],
     );
@@ -223,4 +224,23 @@ function parseCapabilities(raw: string): ModelProfile["capabilities"] {
   } catch {
     return { vision: false, code: false, longContext: false };
   }
+}
+
+function parseContextTokens(raw: string): number | undefined {
+  try {
+    const parsed = JSON.parse(raw);
+    const value = parsed.contextTokens;
+    return typeof value === "number" && Number.isFinite(value) && value > 0
+      ? Math.round(value)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function serializeCapabilities(profile: ModelProfile): string {
+  return JSON.stringify({
+    ...profile.capabilities,
+    ...(profile.contextTokens ? { contextTokens: profile.contextTokens } : {}),
+  });
 }

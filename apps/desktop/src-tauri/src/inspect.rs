@@ -1,9 +1,8 @@
 use serde::Serialize;
 use std::{fs, path::Path};
 
-use crate::{resolve_workspace_path, normalize_path};
 use crate::error::JavisError;
-
+use crate::{normalize_path, resolve_workspace_path};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -15,14 +14,12 @@ pub(crate) struct ProjectInspection {
     recommended_test_command: Option<String>,
 }
 
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProjectScript {
     name: String,
     command: String,
 }
-
 
 #[tauri::command]
 pub(crate) fn inspect_project(workspace_path: Option<String>) -> Result<ProjectInspection, String> {
@@ -72,7 +69,6 @@ fn inspect_project_impl(workspace_path: Option<String>) -> Result<ProjectInspect
     })
 }
 
-
 pub(crate) fn detect_package_manager(workspace: &Path) -> Option<String> {
     if workspace.join("pnpm-lock.yaml").exists() {
         return Some("pnpm".to_string());
@@ -86,8 +82,11 @@ pub(crate) fn detect_package_manager(workspace: &Path) -> Option<String> {
     None
 }
 
-
-pub(crate) fn recommend_script(scripts: &[ProjectScript], runner: &str, names: &[&str]) -> Option<String> {
+pub(crate) fn recommend_script(
+    scripts: &[ProjectScript],
+    runner: &str,
+    names: &[&str],
+) -> Option<String> {
     names.iter().find_map(|name| {
         scripts
             .iter()
@@ -130,8 +129,14 @@ mod tests {
     #[test]
     fn recommend_script_finds_first_match() {
         let scripts = vec![
-            ProjectScript { name: "dev".into(), command: "vite".into() },
-            ProjectScript { name: "start".into(), command: "node index.js".into() },
+            ProjectScript {
+                name: "dev".into(),
+                command: "vite".into(),
+            },
+            ProjectScript {
+                name: "start".into(),
+                command: "node index.js".into(),
+            },
         ];
         assert_eq!(
             recommend_script(&scripts, "pnpm", &["dev", "start"]),
@@ -142,8 +147,14 @@ mod tests {
     #[test]
     fn recommend_script_falls_back_to_second() {
         let scripts = vec![
-            ProjectScript { name: "build".into(), command: "tsc".into() },
-            ProjectScript { name: "start".into(), command: "node index.js".into() },
+            ProjectScript {
+                name: "build".into(),
+                command: "tsc".into(),
+            },
+            ProjectScript {
+                name: "start".into(),
+                command: "node index.js".into(),
+            },
         ];
         assert_eq!(
             recommend_script(&scripts, "npm", &["dev", "start"]),
@@ -153,12 +164,10 @@ mod tests {
 
     #[test]
     fn recommend_script_returns_none_when_no_match() {
-        let scripts = vec![
-            ProjectScript { name: "build".into(), command: "tsc".into() },
-        ];
-        assert_eq!(
-            recommend_script(&scripts, "yarn", &["dev", "start"]),
-            None
-        );
+        let scripts = vec![ProjectScript {
+            name: "build".into(),
+            command: "tsc".into(),
+        }];
+        assert_eq!(recommend_script(&scripts, "yarn", &["dev", "start"]), None);
     }
 }

@@ -13,6 +13,12 @@ export interface WorkbenchStep {
   title: string;
   status: string;
   successCriteria?: string;
+  agentKind?: string;
+  agentId?: string;
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
+  errorSummary?: string;
 }
 
 export interface WorkbenchLogEntry {
@@ -20,6 +26,11 @@ export interface WorkbenchLogEntry {
   kind: string;
   title: string;
   detail: string;
+  createdAt?: string;
+  userMessage?: string;
+  devDetail?: string;
+  agentId?: string;
+  stepId?: string;
 }
 
 export interface WorkbenchDocument {
@@ -64,9 +75,15 @@ export type WorkbenchPermissionDecision = "approved" | "approved_always" | "deni
 export interface WorkbenchAskUserQuestion {
   id: string;
   question: string;
-  choices?: string[];
+  choices?: Array<string | WorkbenchAskUserChoice>;
   status: string;
   answer?: string;
+}
+
+export interface WorkbenchAskUserChoice {
+  label: string;
+  value: string;
+  isRecommended?: boolean;
 }
 
 export interface WorkbenchFileOrganizationExecution {
@@ -120,6 +137,7 @@ export interface WorkbenchCodeReviewPreview {
 }
 
 export interface WorkbenchCodeProposedEdit {
+  approvalId?: string;
   proposalId: string;
   workspacePath: string;
   summary: string;
@@ -199,6 +217,8 @@ export interface WorkbenchModelProfile {
   apiKey: string;  // only used in UI, never persisted
   /** Whether an API key is already stored in the OS credential store for this profile. */
   hasStoredApiKey?: boolean;
+  /** Explicit model context window in tokens when known. */
+  contextTokens?: number;
   capabilities: {
     vision: boolean;
     code: boolean;
@@ -210,6 +230,18 @@ export interface WorkbenchModelProfile {
 export interface WorkbenchModelConfiguration {
   profiles: WorkbenchModelProfile[];
   agentOverrides: Record<string, string>;
+}
+
+export interface WorkbenchAgentCatalogEntry {
+  kind: string;
+  displayName: string;
+}
+
+export interface WorkbenchAgentStyleState {
+  kind: string;
+  currentStyle: string;
+  source: "global" | "workspace" | "none";
+  filePath?: string;
 }
 
 export interface WorkbenchProgress {
@@ -229,10 +261,22 @@ export interface WorkbenchHistoryEntry {
   scheduledTaskId?: string;
 }
 
+export type WorkbenchConversationMessageKind =
+  | "user_text"
+  | "assistant_text"
+  | "ask_user_question"
+  | "permission_request";
+
 export interface WorkbenchChatMessage {
+  id?: string;
+  kind?: WorkbenchConversationMessageKind;
   role: "user" | "assistant";
   content: string;
+  parentMessageId?: string;
+  createdAt?: string;
   attachments?: string[];
+  askUserQuestion?: WorkbenchAskUserQuestion;
+  permissionRequest?: WorkbenchPermissionRequest;
 }
 
 export interface WorkbenchTask {
@@ -240,6 +284,7 @@ export interface WorkbenchTask {
   title: string;
   userGoal: string;
   status: string;
+  updatedAt?: string;
   originMode?: "chat" | "project";
   workspacePath?: string;
   commanderMessage: string;
@@ -264,6 +309,8 @@ export interface WorkbenchTask {
   streamingAgentKind?: WorkbenchStreamingAgentKind;
   isStreaming?: boolean;
   executionTrace?: WorkbenchExecutionTrace;
+  /** User-readable error message shown in recovery section when task fails. */
+  userFacingError?: string;
 }
 
 export interface WorkbenchExecutionTrace {
@@ -290,19 +337,25 @@ export interface SidebarNavSubItem {
   label: string;
   path?: string;
   viewId?: ActiveView;
+  category?: string;
   mode?: "chat" | "project";
   skillPage?: WorkbenchSkillPage;
   badge?: number;
+  meta?: string;
+  status?: "idle" | "running" | "completed" | "failed";
 }
 
 export interface SidebarNavItem {
   viewId: string;
   icon: string;
   label: string;
-  group: "primary" | "knowledge" | "custom";
+  group?: "primary" | "knowledge" | "custom";
   groupLabel?: string;
   order: number;
   badge?: number;
+  meta?: string;
+  status?: "idle" | "running" | "completed" | "failed";
+  children?: SidebarNavSubItem[];
   /** If true, renders as a collapsible nav item with subitems. */
   collapsible?: boolean;
   subitems?: SidebarNavSubItem[];
@@ -431,12 +484,26 @@ export interface WorkbenchFileEntry {
   name: string;
   path: string;
   isDir: boolean;
+  thumbnailUrl?: string;
   sizeBytes?: number;
   modifiedAt?: string;
   extension?: string;
   category?: string;
   tags?: string[];
   confidence?: number;
+  /** Resource scan root ID this entry belongs to. Used for per-root refresh dedup. */
+  sourceRootId?: string;
+  /** Canonical resource scan root path this entry belongs to. */
+  sourceRootPath?: string;
+}
+
+export interface ScanRootItem {
+  id: string;
+  path: string;
+  label?: string;
+  kinds: Array<"documents" | "images">;
+  enabled: boolean;
+  source: "default" | "custom";
 }
 
 export interface WorkbenchTrustedComputerApp {
@@ -450,6 +517,9 @@ export interface WorkbenchAppEntry {
   iconPath?: string;
   publisher?: string;
   installLocation?: string;
+  category?: string;
+  tags?: string[];
+  confidence?: number;
 }
 
 export interface BrowserQuickResult {
@@ -457,6 +527,17 @@ export interface BrowserQuickResult {
   url: string;
   content?: string;
   screenshotDataUrl?: string;
+  loadState?: string;
+  sidecarRunning?: boolean;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+}
+
+export type BrowserQuickAction = "status" | "navigate" | "refresh" | "back" | "forward";
+
+export interface BrowserQuickRequest {
+  action: BrowserQuickAction;
+  url?: string;
 }
 
 export interface ReviewQuickResult {
@@ -502,7 +583,7 @@ export interface WorkbenchTerminalService {
     rows: number,
     terminalId?: string,
   ): Promise<WorkbenchTerminalSession>;
-  input(terminalId: string, data: string): Promise<void>;
+  input(session: WorkbenchAgentSessionContext, terminalId: string, data: string): Promise<void>;
   resize(terminalId: string, cols: number, rows: number): Promise<void>;
   kill(terminalId: string): Promise<void>;
   subscribe(
@@ -532,6 +613,7 @@ export interface JavisWorkbenchProps {
   currentWorkspacePath?: string;
   historyEntries?: WorkbenchHistoryEntry[];
   locale?: WorkbenchLocale;
+  agentCatalog?: WorkbenchAgentCatalogEntry[];
   modelSettings?: WorkbenchModelSettings;
   modelConfiguration?: WorkbenchModelConfiguration;
   newChatRecommendations?: WorkbenchNewChatRecommendations;
@@ -572,10 +654,21 @@ export interface JavisWorkbenchProps {
   imagesProgress?: WorkbenchProgress;
   classifying?: boolean;
   classifyProgress?: WorkbenchProgress & { completed?: number };
+  appsClassifying?: boolean;
+  appsClassifyProgress?: WorkbenchProgress & { completed?: number };
   categoryStats?: { category: string; count: number }[];
+  appCategoryStats?: { category: string; count: number }[];
+  /** Resource scan roots (default + custom) for docs/images views. */
+  resourceScanRoots?: ScanRootItem[];
   onRefreshScan?: () => void;
   onClassifyDocuments?: () => void;
+  onClassifyApps?: () => void;
   onCancelClassify?: () => void;
+  onCancelClassifyApps?: () => void;
+  onToggleScanRoot?: (id: string, enabled: boolean) => void;
+  onRemoveScanRoot?: (id: string) => void;
+  onAddScanRoot?: (path: string, kinds: Array<"documents" | "images">, label?: string) => void;
+  onRefreshScanRoot?: (id: string) => void;
   onDraftGoalChange: (nextGoal: string) => void;
   onDeleteHistoryEntry?: (id: string) => void;
   onDeleteRecentWorkspacePath?: (path: string) => void;
@@ -585,6 +678,9 @@ export interface JavisWorkbenchProps {
   onModelConfigurationChange?: (config: WorkbenchModelConfiguration) => void;
   onRebuildUserProfileMemory?: () => void;
   onClearUserProfileMemory?: () => void;
+  onReadAgentStyle?: (kind: string) => Promise<WorkbenchAgentStyleState>;
+  onSaveAgentStyle?: (kind: string, content: string) => Promise<WorkbenchAgentStyleState | void>;
+  onResetAgentStyle?: (kind: string) => Promise<WorkbenchAgentStyleState | void>;
   onSaveProviderApiKey?: (keyReference: string, apiKey: string) => Promise<void>;
   onFetchProviderModels?: (params: {
     provider: string;
@@ -607,6 +703,7 @@ export interface JavisWorkbenchProps {
   onAskUserAnswer?: (answer: string) => void;
   onRetryTask?: () => void;
   onStopTask?: () => void;
+  onConversationMessagesChange?: (taskId: string | undefined, messages: WorkbenchChatMessage[]) => void;
   /** When user clicks an agent summary card in the chat, selected agent ID + open right sidebar. */
   onSelectAgent?: (agentId: string) => void;
   onSubmitGoal: (goal?: string, workspacePath?: string, scheduledTaskId?: string, attachments?: File[], imageDataUrls?: string[]) => void;
@@ -624,6 +721,7 @@ export interface JavisWorkbenchProps {
   onToggleScheduledTask?: (id: string) => void;
   onDeleteScheduledTask?: (id: string) => void;
   onRefreshApps?: () => void;
+  onUpdateAppCategory?: (path: string, category: string) => void;
   onRefreshDocuments?: () => void;
   onRefreshImages?: () => void;
   onNavigateDirectory?: (path: string) => void;
@@ -641,13 +739,13 @@ export interface JavisWorkbenchProps {
   workspaceToolTabs?: WorkbenchWorkspaceToolTab[];
   onActiveToolChange?: (tool: WorkbenchWorkspaceToolAction | null) => void;
   /** Browser tool — navigate to URL, returns page metadata. */
-  onQuickActionBrowser?: (url: string) => Promise<BrowserQuickResult>;
+  onQuickActionBrowser?: (session: WorkbenchAgentSessionContext, request: string | BrowserQuickRequest) => Promise<BrowserQuickResult>;
   /** Review tool — run git diff and return review data. */
-  onQuickActionReview?: () => Promise<ReviewQuickResult>;
+  onQuickActionReview?: (session: WorkbenchAgentSessionContext) => Promise<ReviewQuickResult>;
   /** Terminal tool — run a shell command and return output. */
-  onQuickActionTerminal?: (command: string) => Promise<TerminalQuickResult>;
+  onQuickActionTerminal?: (session: WorkbenchAgentSessionContext, command: string) => Promise<TerminalQuickResult>;
   /** SideChat tool — send a message and get AI response. */
-  onQuickActionSideChat?: (message: string) => Promise<string>;
+  onQuickActionSideChat?: (session: WorkbenchAgentSessionContext, message: string) => Promise<string>;
   initialSidebarWidth?: number;
   initialActivityHeight?: number;
   initialIsSidebarOpen?: boolean;

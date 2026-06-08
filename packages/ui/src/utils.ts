@@ -1,5 +1,74 @@
 import type { WorkbenchHistoryEntry, WorkbenchLocale, WorkbenchTask } from "./types";
 
+const TASK_STATUS_PROGRESS: Record<string, number> = {
+  created: 10,
+  planning: 20,
+  waiting_info: 35,
+  waiting_permission: 40,
+  running: 50,
+  generating: 75,
+  verifying: 75,
+  retrying: 45,
+  completed: 100,
+  failed: 100,
+  cancelled: 100,
+};
+
+const TASK_STATUS_LABELS_EN: Record<string, string> = {
+  created: "Created",
+  planning: "Planning",
+  waiting_info: "Waiting for info",
+  waiting_permission: "Waiting for permission",
+  running: "Running",
+  generating: "Generating",
+  verifying: "Verifying",
+  retrying: "Retrying",
+  completed: "Completed",
+  failed: "Failed",
+  cancelled: "Cancelled",
+  queued: "Queued",
+  pending: "Pending",
+  skipped: "Skipped",
+};
+
+const TASK_STATUS_LABELS_ZH: Record<string, string> = {
+  created: "已创建",
+  planning: "规划中",
+  waiting_info: "等待补充信息",
+  waiting_permission: "等待授权",
+  running: "运行中",
+  generating: "生成中",
+  verifying: "验证中",
+  retrying: "重试中",
+  completed: "已完成",
+  failed: "失败",
+  cancelled: "已取消",
+  queued: "排队中",
+  pending: "待处理",
+  skipped: "已跳过",
+};
+
+export function getTaskStatusProgress(status: string): number {
+  return TASK_STATUS_PROGRESS[status] ?? 0;
+}
+
+export function getTaskStatusLabel(status: string, locale: WorkbenchLocale): string {
+  const labels = locale.labels.newChat !== "New chat" ? TASK_STATUS_LABELS_ZH : TASK_STATUS_LABELS_EN;
+  return labels[status] ?? translateWorkbenchText(status, locale);
+}
+
+export function formatDurationMs(durationMs: number): string {
+  if (durationMs < 1000) {
+    return `${Math.max(0, Math.round(durationMs))}ms`;
+  }
+  if (durationMs < 60_000) {
+    return `${(durationMs / 1000).toFixed(durationMs < 10_000 ? 1 : 0)}s`;
+  }
+  const minutes = Math.floor(durationMs / 60_000);
+  const seconds = Math.round((durationMs % 60_000) / 1000);
+  return `${minutes}m ${seconds}s`;
+}
+
 export function isChineseLocale(locale: WorkbenchLocale): boolean {
   return locale.labels.aiModeSettings === "AI 模式";
 }
@@ -194,6 +263,7 @@ function translateWorkbenchPattern(value: string): string {
       "核心运行时已就绪，可以开始任务。",
     )
     .replace(/\bMoving files changes the local filesystem, so Javis needs explicit approval\./g, "移动文件会更改本地文件系统，因此 Javis 需要明确授权。")
+    .replace(/\bAllow this task\b/g, "允许本次任务")
     .replace(/\bApprove PDF move plan\b/g, "批准 PDF 移动计划")
     .replace(/\bOrganize PDF files by filename topic\b/g, "按文件名主题整理 PDF 文件")
     .replace(/\bTarget file already exists\./g, "目标文件已存在。")

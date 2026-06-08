@@ -1,11 +1,12 @@
 import {
   useState,
+  type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
-  type ReactNode,
 } from "react";
+import { FixedSizeList, type ListChildComponentProps } from "react-window";
 import type { WorkbenchLocale, WorkbenchPermissionDecision, WorkbenchTask } from "../types";
-import { translateWorkbenchText } from "../utils";
+import { getTaskStatusLabel, translateWorkbenchText } from "../utils";
 
 interface ActivityLogProps {
   activityCount: number;
@@ -23,6 +24,8 @@ interface ActivityLogProps {
   resizeValue?: number;
 }
 
+type LogFilter = "all" | "running" | "completed" | "waiting" | "failed";
+
 export function ActivityLog({
   activityCount,
   isActivityOpen,
@@ -39,16 +42,20 @@ export function ActivityLog({
   resizeValue,
 }: ActivityLogProps) {
   const [activeTab, setActiveTab] = useState<"activity" | "timeline">("activity");
-  const [levelFilter, setLevelFilter] = useState<"all" | "running" | "completed" | "waiting" | "failed">("all");
+  const [levelFilter, setLevelFilter] = useState<LogFilter>("all");
+  const [showDevDetails, setShowDevDetails] = useState(false);
   const [isCleared, setIsCleared] = useState(false);
-  const rows = isCleared ? [] : buildLogRows(task, locale, labels, onPermissionDecision, onAskUserAnswer);
+  void onPermissionDecision;
+  void onAskUserAnswer;
+  const rows = isCleared ? [] : buildLogRows(task, locale, labels, showDevDetails);
   const visibleRows = rows.filter((row) => levelFilter === "all" || row.status === levelFilter);
+  const isChinese = locale.labels.newChat !== "New chat";
 
   return (
     <section className="javis-activity" aria-label={labels.activityLog}>
       {isActivityOpen ? (
         <div
-          aria-label="调整底部日志高度"
+          aria-label={isChinese ? "调整底部日志高度" : "Resize bottom activity log"}
           aria-orientation="horizontal"
           aria-valuemax={resizeMax}
           aria-valuemin={resizeMin}
@@ -58,7 +65,7 @@ export function ActivityLog({
           onPointerDown={onResizeStart}
           role="separator"
           tabIndex={0}
-          title="拖拽调整底部日志高度"
+          title={isChinese ? "拖动调整底部日志高度" : "Drag to resize the bottom activity log"}
         />
       ) : null}
       <div className="javis-activity-bar">
@@ -89,7 +96,7 @@ export function ActivityLog({
         <div className="javis-activity-tools">
           <select
             aria-label={labels.logLevelFilter}
-            onChange={(event) => setLevelFilter(event.currentTarget.value as typeof levelFilter)}
+            onChange={(event) => setLevelFilter(event.currentTarget.value as LogFilter)}
             value={levelFilter}
           >
             <option value="all">{labels.allLevels}</option>
@@ -100,6 +107,15 @@ export function ActivityLog({
           </select>
           <button title={labels.filterLogs} type="button">
             <span className="javis-log-tool-icon filter" aria-hidden="true" />
+          </button>
+          <button
+            aria-pressed={showDevDetails}
+            aria-label={showDevDetails ? labels.hideProcessDetails : labels.showProcessDetails}
+            onClick={() => setShowDevDetails((value) => !value)}
+            title={showDevDetails ? labels.hideProcessDetails : labels.showProcessDetails}
+            type="button"
+          >
+            <span className="javis-log-tool-icon process" aria-hidden="true" />
           </button>
           <button onClick={() => setIsCleared(true)} title={labels.clearLogs} type="button">
             <span className="javis-log-tool-icon clear" aria-hidden="true" />
@@ -112,17 +128,7 @@ export function ActivityLog({
             <p className="javis-eyebrow">{labels.activityLog}</p>
             <h2 className="javis-title">{labels.executionTimeline}</h2>
           </header>
-          <div className="javis-activity-list">
-            {visibleRows.map((row) => (
-              <article className={`javis-log status-${row.status}${row.writeRiskLevel ? ` risk-${row.writeRiskLevel}` : ""}`} key={row.id}>
-                <span className="javis-log-time">{row.time}</span>
-                <span className="javis-log-agent">{row.agent}</span>
-                <span className="javis-log-kind">{row.statusLabel}</span>
-                <p className="javis-log-detail">{row.message}</p>
-                {row.actions}
-              </article>
-            ))}
-          </div>
+          <VirtualActivityRows rows={visibleRows} />
         </div>
       ) : null}
     </section>
@@ -136,17 +142,65 @@ interface ActivityRow {
   status: "running" | "completed" | "waiting" | "failed" | "idle";
   statusLabel: string;
   message: string;
-  actions?: ReactNode;
-  /** Risk classification for confirmed_write permission cards. */
+  fullTime: string;
   writeRiskLevel?: "safe" | "risky" | "dangerous";
+}
+
+function VirtualActivityRows({ rows }: { rows: ActivityRow[] }) {
+  if (rows.length === 0) {
+    return <div className="javis-activity-list empty" />;
+  }
+
+  if (rows.length <= 100) {
+    return (
+      <div className="javis-activity-list virtual">
+        {rows.map((row) => (
+          <ActivityRowItem key={row.id} row={row} />
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="javis-activity-list virtual">
+      <FixedSizeList
+        height={Math.min(220, Math.max(56, rows.length * 46))}
+        itemCount={rows.length}
+        itemData={rows}
+        itemKey={(index, data) => data[index].id}
+        itemSize={46}
+        width="100%"
+      >
+        {ActivityRowRenderer}
+      </FixedSizeList>
+    </div>
+  );
+}
+
+function ActivityRowRenderer({ index, style, data }: ListChildComponentProps<ActivityRow[]>) {
+  const row = data[index];
+  return <ActivityRowItem row={row} style={style} />;
+}
+
+function ActivityRowItem({ row, style }: { row: ActivityRow; style?: CSSProperties }) {
+  return (
+    <article
+      className={`javis-log status-${row.status}${row.writeRiskLevel ? ` risk-${row.writeRiskLevel}` : ""}`}
+      style={style}
+    >
+      <span className="javis-log-time" title={row.fullTime}>{row.time}</span>
+      <span className="javis-log-agent">{row.agent}</span>
+      <span className="javis-log-kind">{row.statusLabel}</span>
+      <p className="javis-log-detail">{row.message}</p>
+    </article>
+  );
 }
 
 function buildLogRows(
   task: WorkbenchTask,
   locale: WorkbenchLocale,
   labels: WorkbenchLocale["labels"],
-  onPermissionDecision?: (decision: WorkbenchPermissionDecision) => void,
-  onAskUserAnswer?: (answer: string) => void,
+  showDevDetails: boolean,
 ): ActivityRow[] {
   const rows: ActivityRow[] = [];
 
@@ -154,79 +208,42 @@ function buildLogRows(
     const risk = task.permissionRequest.writeRiskLevel;
     rows.push({
       id: `permission-${task.permissionRequest.id}`,
-      time: formatTime(),
+      ...formatLogTime(task.updatedAt),
       agent: labels.commander,
       status: normalizeLogStatus(task.permissionRequest.status),
       statusLabel: risk
-        ? `${translateWorkbenchText(task.permissionRequest.status, locale)} · ${riskLabel(risk)}`
-        : translateWorkbenchText(task.permissionRequest.status, locale),
+        ? `${getTaskStatusLabel(task.permissionRequest.status, locale)} · ${riskLabel(risk)}`
+        : getTaskStatusLabel(task.permissionRequest.status, locale),
       message: permissionLogDetail(task, locale),
       writeRiskLevel: risk,
-      actions: (
-        <div className="javis-confirmation-actions compact">
-          <button
-            disabled={task.permissionRequest.status !== "pending"}
-            onClick={() => onPermissionDecision?.("approved")}
-            type="button"
-          >
-            {labels.approve}
-          </button>
-          {isComputerPermission(task) ? (
-            <button
-              disabled={task.permissionRequest.status !== "pending"}
-              onClick={() => onPermissionDecision?.("approved_always")}
-              type="button"
-            >
-              {labels.alwaysAllow}
-            </button>
-          ) : null}
-          <button
-            disabled={task.permissionRequest.status !== "pending"}
-            onClick={() => onPermissionDecision?.("denied")}
-            type="button"
-          >
-            {labels.deny}
-          </button>
-        </div>
-      ),
     });
   }
 
   if (task.askUserQuestion) {
     rows.push({
       id: `ask-${task.askUserQuestion.id}`,
-      time: formatTime(),
+      ...formatLogTime(task.updatedAt),
       agent: labels.commander,
       status: normalizeLogStatus(task.askUserQuestion.status),
-      statusLabel: translateWorkbenchText(task.askUserQuestion.status, locale),
+      statusLabel: getTaskStatusLabel(task.askUserQuestion.status, locale),
       message: translateWorkbenchText(task.askUserQuestion.question, locale),
-      actions: task.askUserQuestion.choices && task.askUserQuestion.choices.length > 0 ? (
-        <div className="javis-confirmation-actions compact">
-          {task.askUserQuestion.choices.map((choice) => (
-            <button
-              key={choice}
-              disabled={task.askUserQuestion!.status !== "pending"}
-              onClick={() => onAskUserAnswer?.(choice)}
-              type="button"
-            >
-              {translateWorkbenchText(choice, locale)}
-            </button>
-          ))}
-        </div>
-      ) : task.askUserQuestion.status === "pending" ? (
-        <AskUserCompactInput onSubmit={(answer) => onAskUserAnswer?.(answer)} labels={labels} />
-      ) : undefined,
     });
   }
 
   task.logs.forEach((log, index) => {
+    const message = showDevDetails
+      ? log.devDetail ?? log.detail
+      : log.userMessage ?? log.detail;
+    if (!showDevDetails && !message.trim()) {
+      return;
+    }
     rows.push({
       id: log.id,
-      time: formatSyntheticTime(index),
+      ...formatLogTime(log.createdAt ?? task.updatedAt, index),
       agent: inferAgentName(log.title, labels.commander),
       status: normalizeLogStatus(`${log.kind} ${log.title} ${log.detail}`),
       statusLabel: translateWorkbenchText(log.kind, locale),
-      message: translateWorkbenchText(log.detail, locale),
+      message: translateWorkbenchText(message, locale),
     });
   });
 
@@ -235,28 +252,30 @@ function buildLogRows(
 
 function riskLabel(level: "safe" | "risky" | "dangerous"): string {
   switch (level) {
-    case "safe": return "🟢";
-    case "risky": return "🟡";
-    case "dangerous": return "🔴";
+    case "safe": return "safe";
+    case "risky": return "risky";
+    case "dangerous": return "dangerous";
   }
 }
 
-function formatTime(): string {
-  return new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-
-function formatSyntheticTime(index: number): string {
-  const seconds = Math.max(0, 20 - index);
-  return `10:42:${String(seconds).padStart(2, "0")}`;
+function formatLogTime(timestamp?: string, fallbackIndex = 0): { time: string; fullTime: string } {
+  const parsed = timestamp ? new Date(timestamp) : undefined;
+  const date = parsed && !Number.isNaN(parsed.getTime())
+    ? parsed
+    : new Date(Date.now() - fallbackIndex * 1000);
+  return {
+    time: date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+    fullTime: date.toLocaleString(),
+  };
 }
 
 function inferAgentName(text: string, fallback: string): string {
   const lower = text.toLowerCase();
-  if (lower.includes("file")) return "文件代理";
-  if (lower.includes("code")) return "代码代理";
-  if (lower.includes("research") || lower.includes("search")) return "研究代理";
-  if (lower.includes("computer") || lower.includes("desktop")) return "电脑代理";
-  if (lower.includes("command") || lower.includes("shell")) return "命令代理";
+  if (lower.includes("file")) return "File Agent";
+  if (lower.includes("code")) return "Code Agent";
+  if (lower.includes("research") || lower.includes("search")) return "Research Agent";
+  if (lower.includes("computer") || lower.includes("desktop")) return "Computer Agent";
+  if (lower.includes("command") || lower.includes("shell")) return "Shell Agent";
   return fallback;
 }
 
@@ -269,43 +288,10 @@ function normalizeLogStatus(text: string): ActivityRow["status"] {
   return "idle";
 }
 
-function AskUserCompactInput({
-  onSubmit,
-  labels,
-}: {
-  onSubmit: (answer: string) => void;
-  labels: WorkbenchLocale["labels"];
-}) {
-  const [value, setValue] = useState("");
-
-  function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    const trimmed = value.trim();
-    if (trimmed) {
-      onSubmit(trimmed);
-      setValue("");
-    }
-  }
-
-  return (
-    <form className="javis-ask-user-input compact" onSubmit={handleSubmit}>
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        placeholder={labels.submitAnswer}
-      />
-      <button type="submit" disabled={!value.trim()}>
-        {labels.submitAnswer}
-      </button>
-    </form>
-  );
-}
-
 function permissionLogDetail(task: WorkbenchTask, locale: WorkbenchLocale): string {
   const request = task.permissionRequest;
   if (!request) return "";
-  const isChinese = locale?.labels?.aiModeSettings === "AI 模式";
+  const isChinese = locale.labels.newChat !== "New chat";
   if (request.dryRun.operation.startsWith("computer.")) {
     return isChinese
       ? `桌面操作「${request.dryRun.operation}」需要确认：${request.dryRun.riskSummary}`
@@ -314,8 +300,4 @@ function permissionLogDetail(task: WorkbenchTask, locale: WorkbenchLocale): stri
   return isChinese
     ? `有 ${request.dryRun.affectedPaths.length} 个计划路径操作需要 ${request.level} 确认。`
     : `${request.dryRun.affectedPaths.length} planned path operation(s) require ${request.level}.`;
-}
-
-function isComputerPermission(task: WorkbenchTask): boolean {
-  return Boolean(task.permissionRequest?.dryRun.operation.startsWith("computer."));
 }

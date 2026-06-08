@@ -68,6 +68,17 @@ describe("parseModelAction", () => {
     expect(result).toEqual({ tool: "computer.focusWindow", params: { handle: 12345 } });
   });
 
+  it("parses a valid listWindows action", () => {
+    const raw = JSON.stringify({
+      observation: "Need current window handles",
+      action: { tool: "computer.listWindows", params: {} },
+      target: "List windows",
+      confidence: "medium",
+    });
+    const result = parseModelAction(raw);
+    expect(result).toEqual({ tool: "computer.listWindows", params: {} });
+  });
+
   it("parses a valid screenshot action", () => {
     const raw = JSON.stringify({
       observation: "Need to re-examine",

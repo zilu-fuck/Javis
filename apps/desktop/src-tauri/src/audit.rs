@@ -1,16 +1,18 @@
 use serde::Deserialize;
-use std::{fs, io::Write, path::{Path, PathBuf}};
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
 use tauri::{AppHandle, Manager};
 
 use crate::error::JavisError;
-
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AppendTaskAuditJsonLineRequest {
     line: String,
 }
-
 
 #[tauri::command]
 pub(crate) fn append_task_audit_jsonl_line(
@@ -21,7 +23,6 @@ pub(crate) fn append_task_audit_jsonl_line(
     append_jsonl_line_to_path(&path, &request.line, "Task audit").map_err(|e| e.to_string())
 }
 
-
 #[tauri::command]
 pub(crate) fn append_task_session_jsonl_line(
     app: AppHandle,
@@ -31,7 +32,6 @@ pub(crate) fn append_task_session_jsonl_line(
     append_jsonl_line_to_path(&path, &request.line, "Task session").map_err(|e| e.to_string())
 }
 
-
 pub(crate) fn task_audit_jsonl_path(app: &AppHandle) -> Result<PathBuf, String> {
     let data_dir = app
         .path()
@@ -39,7 +39,6 @@ pub(crate) fn task_audit_jsonl_path(app: &AppHandle) -> Result<PathBuf, String> 
         .map_err(|error| format!("Could not resolve app data directory: {error}"))?;
     Ok(data_dir.join("task-audit.jsonl"))
 }
-
 
 pub(crate) fn task_session_jsonl_path(app: &AppHandle) -> Result<PathBuf, String> {
     let data_dir = app
@@ -49,19 +48,25 @@ pub(crate) fn task_session_jsonl_path(app: &AppHandle) -> Result<PathBuf, String
     Ok(data_dir.join("task-session.jsonl"))
 }
 
-
-pub(crate) fn append_jsonl_line_to_path(path: &Path, line: &str, label: &str) -> Result<(), JavisError> {
+pub(crate) fn append_jsonl_line_to_path(
+    path: &Path,
+    line: &str,
+    label: &str,
+) -> Result<(), JavisError> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
-        return Err(JavisError::Validation(format!("{label} JSONL line cannot be empty.")));
+        return Err(JavisError::Validation(format!(
+            "{label} JSONL line cannot be empty."
+        )));
     }
     if trimmed.lines().count() != 1 {
         return Err(JavisError::Validation(format!(
             "{label} JSONL append accepts exactly one JSON line."
         )));
     }
-    serde_json::from_str::<serde_json::Value>(trimmed)
-        .map_err(|e| JavisError::Validation(format!("{label} JSONL line must be valid JSON: {e}")))?;
+    serde_json::from_str::<serde_json::Value>(trimmed).map_err(|e| {
+        JavisError::Validation(format!("{label} JSONL line must be valid JSON: {e}"))
+    })?;
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -95,7 +100,10 @@ mod tests {
         let path = tmp.path().join("test.jsonl");
         let result = append_jsonl_line_to_path(&path, "{\"a\":1}\n{\"b\":2}", "Test");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("exactly one JSON line"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exactly one JSON line"));
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createInitialTaskSnapshot, type TaskSnapshot } from "@javis/core";
 import {
   appendTaskSessionSnapshotJsonLine,
+  createTaskSessionSnapshotJsonLine,
   createFileBackedTaskSessionJsonLineWriter,
   createLocalStorageTaskSessionJsonLineWriter,
   parseTaskSessionJsonLines,
@@ -45,6 +46,37 @@ describe("task session JSONL", () => {
     const parsed = parseTaskSessionJsonLines(storage.getItem(TASK_SESSION_JSONL_STORAGE_KEY) ?? "");
     expect(parsed).toHaveLength(1);
     expect(parsed[0]?.snapshot.status).toBe("running");
+  });
+
+  it("redacts image data URLs before writing session snapshots", () => {
+    const line = createTaskSessionSnapshotJsonLine({
+      ...createSnapshot("task-1", "running"),
+      userGoal: "Describe data:image/png;base64,AA==",
+      commanderMessage: "Saw data:image/png;base64,BB==",
+      logs: [
+        {
+          id: "log-1",
+          kind: "event",
+          title: "image.received",
+          detail: "detail data:image/png;base64,CC==",
+          devDetail: "dev data:image/png;base64,DD==",
+        },
+      ],
+      conversationMessages: [
+        {
+          role: "user",
+          content: "content data:image/png;base64,EE==",
+          attachments: ["data:image/png;base64,FF=="],
+        },
+      ],
+    });
+
+    const serialized = JSON.stringify(line);
+
+    expect(serialized).not.toContain("data:image");
+    expect(serialized).not.toContain("attachments");
+    expect(line?.snapshot.userGoal).toContain("[redacted image data URL]");
+    expect(line?.snapshot.conversationMessages?.[0]?.attachments).toBeUndefined();
   });
 
   it("prefers file writes and falls back to localStorage", async () => {

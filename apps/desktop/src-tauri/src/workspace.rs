@@ -3,13 +3,16 @@ use tauri::Manager;
 
 use crate::error::JavisError;
 
-
 #[tauri::command]
-pub(crate) fn load_workspace_definitions(app_handle: tauri::AppHandle) -> Result<Vec<serde_json::Value>, String> {
+pub(crate) fn load_workspace_definitions(
+    app_handle: tauri::AppHandle,
+) -> Result<Vec<serde_json::Value>, String> {
     load_workspace_definitions_impl(&app_handle).map_err(|e| e.to_string())
 }
 
-fn load_workspace_definitions_impl(app_handle: &tauri::AppHandle) -> Result<Vec<serde_json::Value>, JavisError> {
+fn load_workspace_definitions_impl(
+    app_handle: &tauri::AppHandle,
+) -> Result<Vec<serde_json::Value>, JavisError> {
     let workspaces_dir = get_workspaces_dir(app_handle)?;
     if !workspaces_dir.exists() {
         return Ok(Vec::new());
@@ -34,7 +37,6 @@ fn load_workspace_definitions_impl(app_handle: &tauri::AppHandle) -> Result<Vec<
     Ok(defs)
 }
 
-
 #[tauri::command]
 pub(crate) fn save_workspace_definition(
     app_handle: tauri::AppHandle,
@@ -49,9 +51,9 @@ fn save_workspace_definition_impl(
 ) -> Result<(), JavisError> {
     let workspaces_dir = get_workspaces_dir(app_handle)?;
     std::fs::create_dir_all(&workspaces_dir)?;
-    let id = definition["id"]
-        .as_str()
-        .ok_or_else(|| JavisError::Validation("Missing 'id' field in workspace definition".into()))?;
+    let id = definition["id"].as_str().ok_or_else(|| {
+        JavisError::Validation("Missing 'id' field in workspace definition".into())
+    })?;
     validate_workspace_id(id)?;
     let path = workspaces_dir.join(format!("{id}.workspace.json"));
     let tmp_path = workspaces_dir.join(format!("{id}.workspace.json.tmp"));
@@ -60,7 +62,6 @@ fn save_workspace_definition_impl(
     std::fs::rename(&tmp_path, &path)?;
     Ok(())
 }
-
 
 #[tauri::command]
 pub(crate) fn delete_workspace_definition(
@@ -83,7 +84,6 @@ fn delete_workspace_definition_impl(
     Ok(())
 }
 
-
 // ── Workspace Definition CRUD ────────────────────────────────────────────────
 
 pub(crate) fn get_workspaces_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, JavisError> {
@@ -94,14 +94,20 @@ pub(crate) fn get_workspaces_dir(app_handle: &tauri::AppHandle) -> Result<PathBu
     Ok(dir.join("workspaces"))
 }
 
-
 pub(crate) fn validate_workspace_id(id: &str) -> Result<(), JavisError> {
     if id.is_empty() || id.contains('/') || id.contains('\\') || id.contains("..") {
-        return Err(JavisError::Validation("Invalid workspace id: path traversal not allowed".into()));
+        return Err(JavisError::Validation(
+            "Invalid workspace id: path traversal not allowed".into(),
+        ));
     }
     // Only allow lowercase alphanumeric and hyphens
-    if !id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
-        return Err(JavisError::Validation("Invalid workspace id: only [a-z0-9-] allowed".into()));
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        return Err(JavisError::Validation(
+            "Invalid workspace id: only [a-z0-9-] allowed".into(),
+        ));
     }
     Ok(())
 }
