@@ -7,6 +7,7 @@ target/
 *.local
 .DS_Store
 production/
+study/
 **/production/
 *apikey*.txt
 .codex-tmp/
