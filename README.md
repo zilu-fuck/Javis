@@ -1,215 +1,301 @@
 # Javis
 
-## 中文
+Javis 是一个本地优先的桌面 Agent 工作台，面向“让 AI 真正参与日常项目工作”这个目标构建。它不是只把聊天窗口搬到桌面上，而是把任务拆解、工具调用、证据记录、权限审批和结果恢复都放进同一个可观察的界面里。
 
-Javis 是一个桌面优先的多 Agent 助手原型，基于 TypeScript、React 和 Tauri 构建。项目关注一个可见、可审计的任务循环：
+当前版本仍处在产品化打磨阶段，但已经具备一个可运行的 Windows 桌面原型：你可以选择项目目录，发起研究、项目检查、文档扫描、代码审查和文件整理任务，并在写入本地文件之前看到明确的 dry-run / approval 流程。
 
 ```text
-用户目标 -> Commander 计划 -> worker 工具 -> verifier 校验 -> 桌面 UI 结果
+用户目标 -> Commander 规划 -> Agent / Tool 执行 -> Verifier 校验 -> 桌面 UI 展示结果
 ```
 
-当前项目目标是做成一个完整可用的桌面产品。已经验证过的 MVP workbench 是基础，不是终点。Javis 保持 local-first，并且对文件系统写入采取保守策略：高风险操作必须先生成 dry-run 计划，并等待用户明确批准后才能执行。
+## 截图预览
 
-### 当前状态
+<table>
+  <tr>
+    <td width="50%">
+      <img src="docs/assets/readme/01-current-workbench.png" alt="Javis current workbench" width="100%">
+      <br>
+      <sub>当前工作台：侧边栏、任务入口、快捷提示和 Inspector 入口集中在一个桌面界面里。</sub>
+    </td>
+    <td width="50%">
+      <img src="docs/assets/readme/02-current-settings.png" alt="Javis current settings" width="100%">
+      <br>
+      <sub>运行设置：主题、启动模式、任务队列策略、Computer Use 和本地视觉相关选项。</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src="docs/assets/readme/03-current-agent-graph.png" alt="Javis current agent graph" width="100%">
+      <br>
+      <sub>Agent 图谱：展示当前任务状态、Agent 数量、日志数量和各 Agent 的运行状态。</sub>
+    </td>
+    <td width="50%">
+      <img src="docs/assets/readme/04-current-activity-log.png" alt="Javis current activity log" width="100%">
+      <br>
+      <sub>活动日志：底部日志区和右侧 Inspector 能同时展示事件、资源和任务执行细节。</sub>
+    </td>
+  </tr>
+</table>
 
-已实现的基础能力：
+这些截图来自当前代码运行后的前端界面，README 专用截图保存在 [docs/assets/readme](docs/assets/readme)。
 
-- 桌面 workbench 布局，包括侧边栏、主会话、Agent inspector、活动记录和确认区域。
-- 只读 Markdown 文档扫描，支持摘要和验证。
-- 项目检查能力，可检测 package scripts、推荐启动/检查命令，并运行 allowlist 内的只读检查。
-- 基于 URL 的研究资料收集，输出带来源的报告，并明确标注未知或未验证的信息。
-- `Downloads` PDF 整理 dry-run、确认卡片、批准后的移动执行、冲突跳过和执行验证。
+## 为什么做 Javis
 
-当前产品就绪缺口：
+很多 Agent 工具的问题不是“不会生成答案”，而是下面这些日常细节没有被认真处理：
 
-- Search-backed research 已通过 `github-cli` 和 Agent Chrome fallback 接入，但产品 QA 证据仍不完整。
-- Code Agent / opencode 尚未集成。
-- 已完成、失败和取消的任务历史会在本地保存，并支持侧边栏恢复和删除；更完整的持久化 QA 仍需补齐。
-- Workspace 选择和最近 workspace 恢复已经实现；更广的持久化 QA、发布签名/版本管理、写工具权限强制执行仍需加固。
-- Core runtime 正在拆分为更聚焦的模块。Agent definitions、plans、route detection 和 research report helpers 已抽出；主 runtime flow 仍在 `packages/core/src/index.ts` 中。
+- 它读了哪些文件、跑了哪些命令，很难追踪。
+- 它要写入文件时，用户很难知道具体会改什么。
+- 失败之后没有清晰的状态、证据和恢复路径。
+- 项目上下文、任务历史、审批记录经常随着会话结束而消失。
+- 多个 Agent 的分工像黑盒，用户只能看到最后一段文字。
 
-更多信息见 [Product Readiness](docs/PRODUCT_READINESS.md) 和 [MVP Status](docs/MVP_STATUS.md)。
+Javis 的设计重心是可见、可审计、可恢复。界面里同时展示主线程、计划步骤、Agent 状态、活动日志、权限卡片和结果快照，让用户知道 AI 在做什么、依据是什么、下一步会不会影响本地状态。
+
+## 当前能力
+
+### 桌面工作台
+
+- 基于 Tauri + React 的桌面应用。
+- 左侧管理对话、项目、历史、本地知识库、应用和设置。
+- 中间主线程展示用户目标、计划、执行结果和输入框。
+- 右侧 Inspector 展示 Agent 图谱、上下文、能力分数和资源状态。
+- 底部活动区记录任务事件、工具调用、审批状态和执行时间线。
+
+### 项目与文件理解
+
+- 选择或恢复工作区路径。
+- 扫描 Markdown / 文档类资源并生成摘要。
+- 检查项目环境，识别 package scripts、推荐启动/测试命令。
+- 通过只读 allowlist 运行环境检查，例如 Node、pnpm、git status 等。
+- 仓库搜索和调用链追踪正在产品化：核心合约、rg 后端、证据报告和 UI 展示已接入，完整 packaged QA 仍在补齐。
+
+### 研究与资料收集
+
+- 支持基于用户提供 URL 的资料收集。
+- 研究报告会保留来源、摘录、时间戳和 verifier 结果。
+- 对来源之间的重合、差异和未知项做显式标注。
+- 搜索型研究已接入 GitHub CLI 和 Agent Chrome 路径，部分 live / packaged QA 仍在进行。
+
+### Code Agent
+
+- 读取当前 git diff 和变更文件。
+- 生成代码审查计划和候选 patch。
+- 使用 opencode / OpenAI-compatible provider 作为 proposal backend。
+- 应用补丁前需要经过 confirmed-write 审批。
+- Native 层会检查 proposal hash、approval id、文件路径、当前文件 hash 和一次性消费状态。
+
+Code Agent 已有 fixture QA 覆盖拒绝和批准路径；真实 provider 的 live smoke 仍是产品化 blocker，所以不要把它当成完全稳定的自动改代码工具。
+
+### 本地状态与持久化
+
+- 任务历史存储在本地 SQLite。
+- 已完成、失败和取消任务可以在侧边栏恢复或删除。
+- recent workspace、model settings、approval records、user preferences、task-session JSONL 等存储已完成迁移。
+- Durable approval 已覆盖 PDF、Code Patch、Git stage / commit / push、PR create / comment 等路径的源级逻辑，部分 packaged QA 证据仍在补齐。
+
+### 本地视觉与 Computer Use
+
+- 仓库中包含 local-vision worker、ONNX Runtime 准备脚本和 Computer Use QA 入口。
+- 目标是让桌面 Agent 能理解截图、UI 元素和操作反馈。
+- 这部分仍在严格 QA 和发布资源打包阶段，不建议视为稳定公共接口。
+
+## 安全模型
+
+Javis 默认把“看见”和“改变”分开处理：
+
+| 等级 | 含义 | 当前策略 |
+| --- | --- | --- |
+| `read` | 读取文件、列目录、运行安全的只读检查 | 可直接执行，但必须记录结果 |
+| `preview` | 生成计划、diff、dry-run、候选操作 | 不改变本地状态 |
+| `confirmed_write` | 写文件、移动文件、应用补丁、git 写操作 | 必须有当前可见审批 |
+| `dangerous` | 高风险或难以恢复的操作 | 默认拒绝或需要更强约束 |
+
+一个典型例子是 PDF 整理流程：
+
+1. File Agent 先扫描 `Downloads` 并生成移动计划。
+2. UI 展示源路径、目标路径、冲突和风险说明。
+3. 用户点击批准后，native 层只执行这一次 dry-run 中列出的操作。
+4. Verifier 再检查执行结果，并把证据写入任务记录。
+
+API key 也不应该进入仓库。桌面端应使用系统凭据存储或 model profile 的 key reference；QA 脚本需要临时凭据时，使用环境变量，例如 `DEEPSEEK_API_KEY` 或 `JAVIS_OPENCODE_LIVE_API_KEY`。
+
+## 技术栈
+
+```text
+TypeScript + React + Vite + Tauri + Rust
+```
+
+| 层 | 技术 | 职责 |
+| --- | --- | --- |
+| Desktop UI | React, TypeScript, Vite | 工作台布局、任务输入、结果展示、审批控件 |
+| Core Runtime | TypeScript | 路由、计划、Agent 快照、权限状态、验证摘要 |
+| Tool Contracts | TypeScript | 文件、Shell、Web、Git、Browser、Computer 等工具契约 |
+| Native Bridge | Tauri, Rust | 文件系统、进程、HTTP、凭据和权限强制执行 |
+| Code Proposal | opencode, provider adapters | 生成候选补丁，不直接绕过审批写入 |
+| Persistence | SQLite, JSONL | 任务历史、审批记录、工作区和运行日志 |
+| Tests / QA | Vitest, Cargo test, PowerShell QA | 源级测试、native 测试、打包应用证据 |
+
+## 仓库结构
+
+```text
+apps/desktop
+  Tauri + React 桌面应用，包含 UI 接入、native commands、sidecar 和图标资源。
+
+packages/core
+  Agent runtime、任务规划、工作流执行、权限状态、研究报告和恢复逻辑。
+
+packages/tools
+  工具描述、工具输入输出类型、权限等级和共享契约。
+
+packages/ui
+  可复用的工作台组件，例如 ThreadView、Inspector、ModelSettings、Workspace panels。
+
+docs
+  产品状态、架构、安全模型、QA 证据、发布流程和路线图。
+
+scripts
+  本地视觉、发布、QA、证据检查和辅助脚本。
+```
+
+## 快速开始
 
 ### 环境要求
 
-- Node.js 和 pnpm
-- Rust toolchain
-- Windows 是当前 Tauri 桌面构建的主要目标平台
+- Windows 是当前桌面构建的主要目标平台。
+- Node.js 20+ 或 22+。
+- Corepack / pnpm 10.x。
+- Rust stable toolchain。
+- 构建安装包时需要 Tauri 2 对应的 Windows 构建依赖。
 
-### 快速开始
-
-安装依赖：
-
-```sh
-pnpm install
-```
-
-运行 Tauri 桌面应用：
-
-```sh
-pnpm dev
-```
-
-运行仅前端的 Vite 预览：
-
-```sh
-pnpm --filter @javis/desktop dev
-```
-
-### 验证
-
-运行完整本地检查：
-
-```sh
-pnpm check
-```
-
-单项检查：
-
-```sh
-pnpm typecheck
-pnpm --filter @javis/desktop build
-pnpm rust:check
-pnpm rust:test
-```
-
-### 仓库结构
-
-```text
-apps/desktop          Tauri + React 桌面外壳
-packages/core         任务 runtime、计划、Agent 状态和验证
-packages/tools        工具契约和共享工具结果类型
-packages/ui           可复用的 workbench UI 组件
-docs                  产品、架构、安全和状态文档
-```
-
-### 安全模型
-
-Javis 将预览动作和写入动作分开：
-
-- `read`：可以立即执行，并且必须记录结果。
-- `preview`：创建计划或 dry-run，不改变本地状态。
-- `confirmed_write`：需要当前明确的权限请求。
-- `dangerous`：首个版本默认拒绝。
-
-PDF 整理流程展示了这个模型：它会先列出源路径和目标路径，标记冲突，等待批准，然后只移动已批准 dry-run 计划中的文件。
-
-### 文档
-
-- [文档索引](docs/README.md)
-- [开发指南](docs/DEVELOPMENT.md)
-- [故障排查](docs/TROUBLESHOOTING.md)
-- [产品就绪状态](docs/PRODUCT_READINESS.md)
-- [MVP 状态](docs/MVP_STATUS.md)
-- [安全模型](docs/SECURITY_MODEL.md)
-- [手动 QA 清单](docs/QA_CHECKLIST.md)
-- [发布指南](docs/RELEASE.md)
-- [路线图](docs/ROADMAP.md)
-- [贡献指南](CONTRIBUTING.md)
-
-## English
-
-Javis is a desktop-first multi-agent assistant prototype built with TypeScript, React, and Tauri. The project focuses on a visible, auditable task loop:
-
-```text
-user goal -> Commander plan -> worker tools -> verifier -> desktop UI result
-```
-
-The current project goal is a complete usable desktop product. The verified MVP workbench is the foundation, not the finish line. Javis remains local-first and conservative around filesystem writes: high-risk actions must create a dry-run plan and wait for explicit user approval before execution.
-
-### Current Status
-
-Implemented foundation:
-
-- Desktop workbench layout with sidebar, main thread, agent inspector, and activity / confirmations area.
-- Read-only Markdown document scan with summaries and verification.
-- Project inspection that detects package scripts, recommends start/check commands, and runs allowlisted read-only checks.
-- URL-based research collection with a source-backed report and explicit unknown/unverified notes.
-- PDF organization dry-run for `Downloads`, confirmation cards, approved move execution, conflict skipping, and execution verification.
-
-Current product-readiness gaps:
-
-- Search-backed research is wired through `github-cli` and Agent Chrome fallback; product QA evidence is still incomplete.
-- Code Agent / opencode is not integrated yet.
-- Completed, failed, and cancelled task history is stored locally with sidebar restore and deletion; broader persistence QA is still needed.
-- Workspace selection and recent workspace restore are implemented; broader persistence QA, release signing/versioning, and write-tool permission enforcement still need hardening.
-- Core runtime is being split into focused modules. Agent definitions, plans, route detection, and research report helpers have been extracted; the main runtime flow still lives in `packages/core/src/index.ts`.
-
-See [Product Readiness](docs/PRODUCT_READINESS.md) for the current target and [MVP Status](docs/MVP_STATUS.md) for the completed baseline acceptance matrix.
-
-### Requirements
-
-- Node.js and pnpm
-- Rust toolchain
-- Windows is the primary target for the current Tauri desktop build
-
-### Quick Start
-
-Install dependencies:
+### 安装依赖
 
 ```sh
 pnpm install
 ```
 
-Run the Tauri desktop app:
+如果你的 Node 环境启用了 Corepack，也可以显式使用：
+
+```sh
+corepack pnpm install
+```
+
+### 运行桌面应用
 
 ```sh
 pnpm dev
 ```
 
-Run a frontend-only Vite preview:
+这会启动 Tauri 桌面壳和 Vite 开发服务。
+
+### 只运行前端
 
 ```sh
 pnpm --filter @javis/desktop dev
 ```
 
-### Verification
+适合只调 UI，不需要 native command 的场景。
 
-Run the full local check:
+### 构建前端包
+
+```sh
+pnpm --filter @javis/desktop build
+```
+
+### 构建 Windows 桌面安装包
+
+```sh
+pnpm desktop:build
+```
+
+该命令会准备 local-vision 发布资源，然后通过 Tauri 生成 Windows bundle。
+
+## 验证命令
+
+完整检查：
 
 ```sh
 pnpm check
 ```
 
-Individual checks:
+常用单项检查：
 
 ```sh
 pnpm typecheck
-pnpm --filter @javis/desktop build
+pnpm test
 pnpm rust:check
 pnpm rust:test
+pnpm --filter @javis/desktop build
 ```
 
-### Repository Layout
+产品工作流 QA：
 
-```text
-apps/desktop          Tauri + React desktop shell
-packages/core         task runtime, planning, agent state, verification
-packages/tools        tool contracts and shared tool result types
-packages/ui           reusable workbench UI components
-docs                  product, architecture, security, and status docs
+```sh
+pnpm qa:product-workflows
+pnpm qa:computer-use
 ```
 
-### Safety Model
+这些 QA 命令会检查截图、日志和结构化证据。部分 live provider 场景需要临时环境变量或人工打包应用证据。
 
-Javis separates preview actions from writes:
+## 配置模型与密钥
 
-- `read`: may execute immediately and must log results.
-- `preview`: creates a plan or dry-run without changing local state.
-- `confirmed_write`: requires an explicit current permission request.
-- `dangerous`: rejected by default for the first version.
+Javis 支持多个模型 provider / profile。配置入口在桌面应用的模型设置中，核心原则是：
 
-The PDF organization flow demonstrates this model: it first lists source and target paths, marks conflicts, waits for approval, then moves only the files in the approved dry-run plan.
+- 不把 API key 写入源码、README、脚本或提交历史。
+- 桌面应用通过 native secret storage 保存密钥。
+- 测试脚本只读取环境变量。
+- provider 报错、日志和诊断信息需要经过 redaction。
 
-### Documentation
+示例：
+
+```powershell
+$env:DEEPSEEK_API_KEY = "your-temporary-key"
+powershell -File scripts/qa/verify-deepseek-proposal.ps1
+```
+
+运行结束后建议清理当前 shell 里的临时变量。
+
+## 当前阶段
+
+Javis 当前不是“完成品发布版”，而是一个可运行、可验证、正在收敛到完整产品的桌面 Agent 项目。
+
+已经比较扎实的部分：
+
+- 桌面工作台和任务可视化。
+- 本地项目检查、资料收集、PDF dry-run 审批。
+- SQLite 持久化迁移。
+- 多类 confirmed-write 的源级安全绑定。
+- Windows 打包路径和 QA 证据目录。
+
+仍在补齐的部分：
+
+- 真实 provider 下 Code Agent live proposal / apply QA。
+- Git remote / PR 写操作的 packaged QA。
+- Browser 写操作和 Terminal 交互审批的 packaged QA。
+- repo intelligence、trend hot list、agent memory embeddings 的 live / packaged evidence。
+- 签名发布、版本校验和 rollback evidence。
+
+最权威的状态以 [Product Readiness](docs/PRODUCT_READINESS.md) 为准。
+
+## 文档入口
 
 - [Documentation Index](docs/README.md)
-- [Development Guide](docs/DEVELOPMENT.md)
-- [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Product Readiness](docs/PRODUCT_READINESS.md)
 - [MVP Status](docs/MVP_STATUS.md)
 - [Security Model](docs/SECURITY_MODEL.md)
+- [Development Guide](docs/DEVELOPMENT.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Manual QA Checklist](docs/QA_CHECKLIST.md)
 - [Release Guide](docs/RELEASE.md)
+- [Build / Sign / Release Runbook](docs/BUILD_SIGN_RELEASE_RUNBOOK.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Contributing](CONTRIBUTING.md)
+
+## English Summary
+
+Javis is a local-first desktop Agent workbench built with TypeScript, React, Tauri, and Rust. It focuses on visible and auditable task execution: plans, tool calls, verifier results, permission cards, logs, and task history are shown in the desktop UI instead of being hidden behind a chat-only interface.
+
+The project already has a runnable Windows desktop prototype with project inspection, source-backed research, document scanning, Code Agent proposal flows, local persistence, and confirmed-write approval paths. It is still under active product hardening, especially around live provider QA, packaged workflow evidence, browser / terminal approvals, and signed release operations.
+
+## License
+
+GPL-3.0-only. See [LICENSE](LICENSE).
