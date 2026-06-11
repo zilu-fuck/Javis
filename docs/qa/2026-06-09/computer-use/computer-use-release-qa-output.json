@@ -1,0 +1,135 @@
+{
+    "startedAt":  "2026-06-09T13:12:18.7410043Z",
+    "repoRoot":  "E:\\Javis",
+    "exe":  "E:\\Javis\\apps\\desktop\\src-tauri\\target\\release\\javis-desktop.exe",
+    "devtoolsPort":  9341,
+    "screenshotEvidence":  "E:\\Javis\\docs\\qa\\2026-06-09\\computer-use\\01-computer-use-release-app.png",
+    "basic":  {
+                  "bodyTextChars":  435,
+                  "screenshot":  {
+                                     "hasPngDataUrl":  true,
+                                     "dataUrlChars":  1702278,
+                                     "width":  1920,
+                                     "height":  1080,
+                                     "sourceWidth":  1920,
+                                     "sourceHeight":  1080,
+                                     "methodUsed":  "bitblt",
+                                     "health":  {
+                                                    "sampledPixels":  4096,
+                                                    "dominantColorRatio":  0.813720703125,
+                                                    "darkPixelRatio":  0.001220703125,
+                                                    "suspiciousBlank":  false,
+                                                    "reason":  null
+                                                }
+                                 },
+                  "windows":  {
+                                  "count":  16,
+                                  "foregroundPresent":  true,
+                                  "foregroundHandle":  3873404
+                              },
+                  "approval":  {
+                                   "leaseCreated":  true,
+                                   "sensitiveSessionWideRejected":  true,
+                                   "dangerousKeyComboRejected":  true
+                               },
+                  "emergencyHotkey":  {
+                                          "toggled":  true
+                                      },
+                  "missingLocalVision":  {
+                                             "returned":  true,
+                                             "detections":  0,
+                                             "timedOut":  true,
+                                             "error":  "local vision worker timed out after 50ms",
+                                             "latencyMs":  55,
+                                             "runtime":  "onnxruntime"
+                                         }
+              },
+    "localVision":  {
+                        "model":  "yolo26n-ui.onnx",
+                        "runtime":  "onnxruntime",
+                        "latencyMs":  291,
+                        "wallMs":  1085,
+                        "timedOut":  false,
+                        "error":  "",
+                        "detections":  1,
+                        "diagnosticsKeys":  [
+                                                "adaptedDetectionCount",
+                                                "adapter",
+                                                "decodedCount",
+                                                "desktopWorkerMode",
+                                                "desktopWorkerReused",
+                                                "filteredCount",
+                                                "inputDims",
+                                                "inputName",
+                                                "inputSize",
+                                                "inputSizeSource",
+                                                "minConfidence",
+                                                "outputDims",
+                                                "outputElementCount",
+                                                "outputLayout",
+                                                "outputName",
+                                                "rawDetectionCount",
+                                                "rawRowCount",
+                                                "requestedInputSize",
+                                                "sessionCacheHit"
+                                            ]
+                    },
+    "checks":  [
+                   {
+                       "id":  "release-app-start",
+                       "passed":  true,
+                       "detail":  "release executable launched and DevTools target attached"
+                   },
+                   {
+                       "id":  "release-app-screenshot",
+                       "passed":  true,
+                       "detail":  "captured app evidence image"
+                   },
+                   {
+                       "id":  "computer-screenshot-read",
+                       "passed":  true,
+                       "detail":  "desktop screenshot returned 1920x1080 via bitblt"
+                   },
+                   {
+                       "id":  "computer-screenshot-health",
+                       "passed":  true,
+                       "detail":  "screenshot health reason: "
+                   },
+                   {
+                       "id":  "computer-list-windows",
+                       "passed":  true,
+                       "detail":  "listed 16 windows; foregroundPresent=True"
+                   },
+                   {
+                       "id":  "computer-approval-lease",
+                       "passed":  true,
+                       "detail":  "created and cancelled a scoped Computer Use task approval lease"
+                   },
+                   {
+                       "id":  "computer-sensitive-approval",
+                       "passed":  true,
+                       "detail":  "session-wide approval for computer.type was rejected"
+                   },
+                   {
+                       "id":  "computer-dangerous-key-combo",
+                       "passed":  true,
+                       "detail":  "approval preflight rejected computer.keyCombo Win+R without executing it"
+                   },
+                   {
+                       "id":  "computer-emergency-hotkey-command",
+                       "passed":  true,
+                       "detail":  "global Escape hotkey command enabled and disabled"
+                   },
+                   {
+                       "id":  "local-vision-missing-model-fail-open",
+                       "passed":  true,
+                       "detail":  "missing model returned structured empty result: timedOut=True, error=\u0027local vision worker timed out after 50ms\u0027"
+                   },
+                   {
+                       "id":  "local-vision-real-model",
+                       "passed":  true,
+                       "detail":  "runtime=onnxruntime, detections=1, latency=291ms, wall=1085ms, error=\u0027\u0027"
+                   }
+               ],
+    "finishedAt":  "2026-06-09T13:12:32.7020232Z"
+}

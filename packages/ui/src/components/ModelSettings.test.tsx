@@ -3,6 +3,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ModelSettings } from "./ModelSettings";
 import { defaultWorkbenchLocale, zhCNWorkbenchLocale } from "../locale";
+import type {
+  WorkbenchComputerUseLocalVisionSettings,
+  WorkbenchComputerUseSettings,
+  WorkbenchRuntimePreferences,
+} from "../types";
 
 const labels = zhCNWorkbenchLocale.labels;
 
@@ -188,6 +193,590 @@ describe("ModelSettings", () => {
 
     expect(onRebuildUserProfileMemory).toHaveBeenCalledOnce();
     expect(onClearUserProfileMemory).toHaveBeenCalledOnce();
+  });
+
+  it("renders agent memory controls in privacy settings", () => {
+    const onAgentMemoryEnabledChange = vi.fn();
+    const onClearAgentMemory = vi.fn();
+    const onClearWorkspaceAgentMemory = vi.fn();
+    const onDeleteAgentMemoryFact = vi.fn();
+    const { container, getByText, getByLabelText } = render(
+      <ModelSettings
+        labels={labels}
+        modelSettings={{ provider: "openai", model: "gpt-4.1", apiKey: "", apiKeyReference: "default", baseUrl: "" }}
+        agentMemorySummary={{
+          enabled: true,
+          totalFactCount: 4,
+          workspaceFactCount: 2,
+          sessionSummaryCount: 1,
+          injectionLogCount: 3,
+          lastUpdatedAt: 1_700_000_000_000,
+          recentFacts: [{
+            id: "mem-1",
+            fact: "用户希望 Javis 记忆本地优先",
+            kind: "design_principle",
+            tags: ["Javis", "memory"],
+            scopeType: "workspace",
+            scopeId: "workspace:abc",
+            confidence: 0.95,
+            importance: 5,
+            updatedAt: 1_700_000_000_000,
+          }],
+        }}
+        onAgentMemoryEnabledChange={onAgentMemoryEnabledChange}
+        onClearAgentMemory={onClearAgentMemory}
+        onClearWorkspaceAgentMemory={onClearWorkspaceAgentMemory}
+        onDeleteAgentMemoryFact={onDeleteAgentMemoryFact}
+      />,
+    );
+
+    fireEvent.click(container.querySelector(".javis-settings-trigger")!);
+    fireEvent.click(getByText(labels.privacySecuritySettings));
+
+    expect(getByText("Agent 记忆")).toBeTruthy();
+    expect(getByText("用户希望 Javis 记忆本地优先")).toBeTruthy();
+    fireEvent.click(getByLabelText("Agent 记忆范围"));
+    fireEvent.click(getByText("关闭"));
+    fireEvent.click(getByLabelText("Delete memory fact mem-1"));
+    fireEvent.click(getByText("清空当前工作区"));
+    fireEvent.click(getByText("清空全部 Agent 记忆"));
+
+    expect(onAgentMemoryEnabledChange).toHaveBeenCalledWith(false);
+    expect(onDeleteAgentMemoryFact).toHaveBeenCalledWith("mem-1");
+    expect(onClearWorkspaceAgentMemory).toHaveBeenCalledOnce();
+    expect(onClearAgentMemory).toHaveBeenCalledOnce();
+  });
+
+  it("edits Computer Use local vision settings from the general tab", () => {
+    const onComputerUseLocalVisionSettingsChange = vi.fn();
+    const degradationDefaults = {
+      disableAfterConsecutiveTimeouts: 2,
+      disableAfterConsecutiveErrors: 2,
+      disableAfterConsecutiveActionFailures: 2,
+    };
+    let localVisionSettings: WorkbenchComputerUseLocalVisionSettings = {
+      mode: "off",
+      modelPath: "",
+      runtime: "auto",
+      runtimeAdapterPath: "",
+      imgsz: 640,
+      timeoutMs: 120,
+      maxDetections: 20,
+      minConfidence: 0.75,
+      iouThreshold: 0.45,
+      promptTopK: 8,
+      ...degradationDefaults,
+      reuseWorker: false,
+    };
+    const renderSettings = () => (
+      <ModelSettings
+        labels={defaultWorkbenchLocale.labels}
+        modelSettings={{ provider: "openai", model: "gpt-4.1", apiKey: "", apiKeyReference: "default", baseUrl: "" }}
+        computerUseLocalVisionSettings={localVisionSettings}
+        onComputerUseLocalVisionSettingsChange={(settings) => {
+          localVisionSettings = settings;
+          onComputerUseLocalVisionSettingsChange(settings);
+          rerender(renderSettings());
+        }}
+      />
+    );
+    const { container, getByText, getByLabelText, rerender } = render(renderSettings());
+
+    fireEvent.click(container.querySelector(".javis-settings-trigger")!);
+    fireEvent.click(getByLabelText("Local vision acceleration"));
+    fireEvent.click(getByText("Prompt hints"));
+    fireEvent.change(getByLabelText("YOLO ONNX model path"), {
+      target: { value: "E:/models/yolo26n-ui.onnx" },
+    });
+    fireEvent.click(getByLabelText("Local vision runtime"));
+    fireEvent.click(getByText("ONNX Runtime"));
+    fireEvent.change(getByLabelText("Runtime adapter path"), {
+      target: { value: "E:/models/yolo26-ui-adapter.mjs" },
+    });
+    fireEvent.change(getByLabelText("Detection timeout"), {
+      target: { value: "80" },
+    });
+    fireEvent.change(getByLabelText("Local vision image size"), {
+      target: { value: "960" },
+    });
+    fireEvent.change(getByLabelText("Minimum confidence"), {
+      target: { value: "0.6" },
+    });
+    fireEvent.change(getByLabelText("Maximum detections"), {
+      target: { value: "12" },
+    });
+    fireEvent.change(getByLabelText("IoU threshold"), {
+      target: { value: "0.3" },
+    });
+    fireEvent.change(getByLabelText("Prompt candidate limit"), {
+      target: { value: "0" },
+    });
+    fireEvent.change(getByLabelText("Disable after timeouts"), {
+      target: { value: "1" },
+    });
+    fireEvent.change(getByLabelText("Disable after errors"), {
+      target: { value: "0" },
+    });
+    fireEvent.change(getByLabelText("Disable after action failures"), {
+      target: { value: "3" },
+    });
+    fireEvent.click(getByLabelText("Reuse local vision worker"));
+
+    expect(onComputerUseLocalVisionSettingsChange).toHaveBeenCalledWith({
+      mode: "prompt_hint",
+      modelPath: "",
+      runtime: "auto",
+      runtimeAdapterPath: "",
+      imgsz: 640,
+      timeoutMs: 120,
+      maxDetections: 20,
+      minConfidence: 0.75,
+      iouThreshold: 0.45,
+      promptTopK: 8,
+      ...degradationDefaults,
+      reuseWorker: false,
+    });
+    expect(onComputerUseLocalVisionSettingsChange).toHaveBeenCalledWith({
+      mode: "prompt_hint",
+      modelPath: "E:/models/yolo26n-ui.onnx",
+      runtime: "auto",
+      runtimeAdapterPath: "",
+      imgsz: 640,
+      timeoutMs: 120,
+      maxDetections: 20,
+      minConfidence: 0.75,
+      iouThreshold: 0.45,
+      promptTopK: 8,
+      ...degradationDefaults,
+      reuseWorker: false,
+    });
+    expect(onComputerUseLocalVisionSettingsChange).toHaveBeenCalledWith({
+      mode: "prompt_hint",
+      modelPath: "E:/models/yolo26n-ui.onnx",
+      runtime: "onnxruntime",
+      runtimeAdapterPath: "",
+      imgsz: 640,
+      timeoutMs: 120,
+      maxDetections: 20,
+      minConfidence: 0.75,
+      iouThreshold: 0.45,
+      promptTopK: 8,
+      ...degradationDefaults,
+      reuseWorker: false,
+    });
+    expect(onComputerUseLocalVisionSettingsChange).toHaveBeenCalledWith({
+      mode: "prompt_hint",
+      modelPath: "E:/models/yolo26n-ui.onnx",
+      runtime: "onnxruntime",
+      runtimeAdapterPath: "E:/models/yolo26-ui-adapter.mjs",
+      imgsz: 640,
+      timeoutMs: 120,
+      maxDetections: 20,
+      minConfidence: 0.75,
+      iouThreshold: 0.45,
+      promptTopK: 8,
+      ...degradationDefaults,
+      reuseWorker: false,
+    });
+    expect(onComputerUseLocalVisionSettingsChange).toHaveBeenCalledWith({
+      mode: "prompt_hint",
+      modelPath: "E:/models/yolo26n-ui.onnx",
+      runtime: "onnxruntime",
+      runtimeAdapterPath: "E:/models/yolo26-ui-adapter.mjs",
+      imgsz: 640,
+      timeoutMs: 80,
+      maxDetections: 20,
+      minConfidence: 0.75,
+      iouThreshold: 0.45,
+      promptTopK: 8,
+      ...degradationDefaults,
+      reuseWorker: false,
+    });
+    expect(onComputerUseLocalVisionSettingsChange).toHaveBeenCalledWith({
+      mode: "prompt_hint",
+      modelPath: "E:/models/yolo26n-ui.onnx",
+      runtime: "onnxruntime",
+      runtimeAdapterPath: "E:/models/yolo26-ui-adapter.mjs",
+      imgsz: 960,
+      timeoutMs: 80,
+      maxDetections: 20,
+      minConfidence: 0.75,
+      iouThreshold: 0.45,
+      promptTopK: 8,
+      ...degradationDefaults,
+      reuseWorker: false,
+    });
+    expect(onComputerUseLocalVisionSettingsChange).toHaveBeenCalledWith({
+      mode: "prompt_hint",
+      modelPath: "E:/models/yolo26n-ui.onnx",
+      runtime: "onnxruntime",
+      runtimeAdapterPath: "E:/models/yolo26-ui-adapter.mjs",
+      imgsz: 960,
+      timeoutMs: 80,
+      maxDetections: 20,
+      minConfidence: 0.6,
+      iouThreshold: 0.45,
+      promptTopK: 8,
+      ...degradationDefaults,
+      reuseWorker: false,
+    });
+    expect(onComputerUseLocalVisionSettingsChange).toHaveBeenCalledWith({
+      mode: "prompt_hint",
+      modelPath: "E:/models/yolo26n-ui.onnx",
+      runtime: "onnxruntime",
+      runtimeAdapterPath: "E:/models/yolo26-ui-adapter.mjs",
+      imgsz: 960,
+      timeoutMs: 80,
+      maxDetections: 12,
+      minConfidence: 0.6,
+      iouThreshold: 0.45,
+      promptTopK: 8,
+      ...degradationDefaults,
+      reuseWorker: false,
+    });
+    expect(onComputerUseLocalVisionSettingsChange).toHaveBeenCalledWith({
+      mode: "prompt_hint",
+      modelPath: "E:/models/yolo26n-ui.onnx",
+      runtime: "onnxruntime",
+      runtimeAdapterPath: "E:/models/yolo26-ui-adapter.mjs",
+      imgsz: 960,
+      timeoutMs: 80,
+      maxDetections: 12,
+      minConfidence: 0.6,
+      iouThreshold: 0.3,
+      promptTopK: 8,
+      ...degradationDefaults,
+      reuseWorker: false,
+    });
+    expect(onComputerUseLocalVisionSettingsChange).toHaveBeenCalledWith({
+      mode: "prompt_hint",
+      modelPath: "E:/models/yolo26n-ui.onnx",
+      runtime: "onnxruntime",
+      runtimeAdapterPath: "E:/models/yolo26-ui-adapter.mjs",
+      imgsz: 960,
+      timeoutMs: 80,
+      maxDetections: 12,
+      minConfidence: 0.6,
+      iouThreshold: 0.3,
+      promptTopK: 0,
+      ...degradationDefaults,
+      reuseWorker: false,
+    });
+    expect(onComputerUseLocalVisionSettingsChange).toHaveBeenCalledWith({
+      mode: "prompt_hint",
+      modelPath: "E:/models/yolo26n-ui.onnx",
+      runtime: "onnxruntime",
+      runtimeAdapterPath: "E:/models/yolo26-ui-adapter.mjs",
+      imgsz: 960,
+      timeoutMs: 80,
+      maxDetections: 12,
+      minConfidence: 0.6,
+      iouThreshold: 0.3,
+      promptTopK: 0,
+      disableAfterConsecutiveTimeouts: 1,
+      disableAfterConsecutiveErrors: 2,
+      disableAfterConsecutiveActionFailures: 2,
+      reuseWorker: false,
+    });
+    expect(onComputerUseLocalVisionSettingsChange).toHaveBeenCalledWith({
+      mode: "prompt_hint",
+      modelPath: "E:/models/yolo26n-ui.onnx",
+      runtime: "onnxruntime",
+      runtimeAdapterPath: "E:/models/yolo26-ui-adapter.mjs",
+      imgsz: 960,
+      timeoutMs: 80,
+      maxDetections: 12,
+      minConfidence: 0.6,
+      iouThreshold: 0.3,
+      promptTopK: 0,
+      disableAfterConsecutiveTimeouts: 1,
+      disableAfterConsecutiveErrors: 0,
+      disableAfterConsecutiveActionFailures: 2,
+      reuseWorker: false,
+    });
+    expect(onComputerUseLocalVisionSettingsChange).toHaveBeenCalledWith({
+      mode: "prompt_hint",
+      modelPath: "E:/models/yolo26n-ui.onnx",
+      runtime: "onnxruntime",
+      runtimeAdapterPath: "E:/models/yolo26-ui-adapter.mjs",
+      imgsz: 960,
+      timeoutMs: 80,
+      maxDetections: 12,
+      minConfidence: 0.6,
+      iouThreshold: 0.3,
+      promptTopK: 0,
+      disableAfterConsecutiveTimeouts: 1,
+      disableAfterConsecutiveErrors: 0,
+      disableAfterConsecutiveActionFailures: 3,
+      reuseWorker: false,
+    });
+    expect(onComputerUseLocalVisionSettingsChange).toHaveBeenCalledWith({
+      mode: "prompt_hint",
+      modelPath: "E:/models/yolo26n-ui.onnx",
+      runtime: "onnxruntime",
+      runtimeAdapterPath: "E:/models/yolo26-ui-adapter.mjs",
+      imgsz: 960,
+      timeoutMs: 80,
+      maxDetections: 12,
+      minConfidence: 0.6,
+      iouThreshold: 0.3,
+      promptTopK: 0,
+      disableAfterConsecutiveTimeouts: 1,
+      disableAfterConsecutiveErrors: 0,
+      disableAfterConsecutiveActionFailures: 3,
+      reuseWorker: true,
+    });
+  });
+
+  it("edits Computer Use base settings from the general tab", () => {
+    const onComputerUseSettingsChange = vi.fn();
+    const onRemoveTrustedComputerApp = vi.fn();
+    let computerUseSettings: WorkbenchComputerUseSettings = {
+      enabled: false,
+      maxStepsPerTask: 20,
+      mouseSpeed: "instant",
+      mouseDurationMs: 200,
+      typeDelayMs: 50,
+      deniedWindowPatterns: [],
+    };
+    const renderSettings = () => (
+      <ModelSettings
+        labels={defaultWorkbenchLocale.labels}
+        modelSettings={{ provider: "openai", model: "gpt-4.1", apiKey: "", apiKeyReference: "default", baseUrl: "" }}
+        computerUseSettings={computerUseSettings}
+        trustedComputerApps={[{ title: "Calculator", trustedAt: "2026-06-09T00:00:00.000Z" }]}
+        onComputerUseSettingsChange={(settings) => {
+          computerUseSettings = settings;
+          onComputerUseSettingsChange(settings);
+          rerender(renderSettings());
+        }}
+        onRemoveTrustedComputerApp={onRemoveTrustedComputerApp}
+      />
+    );
+    const { container, getByLabelText, getByText, rerender } = render(renderSettings());
+
+    fireEvent.click(container.querySelector(".javis-settings-trigger")!);
+    fireEvent.click(getByLabelText("Enable Computer Use"));
+    fireEvent.change(getByLabelText("Maximum Computer Use steps"), {
+      target: { value: "12" },
+    });
+    fireEvent.click(getByLabelText("Computer Use mouse speed"));
+    fireEvent.click(getByText("Linear"));
+    fireEvent.change(getByLabelText("Computer Use mouse duration"), {
+      target: { value: "300" },
+    });
+    fireEvent.change(getByLabelText("Computer Use type delay"), {
+      target: { value: "15" },
+    });
+    fireEvent.change(getByLabelText("Denied Computer Use window patterns"), {
+      target: { value: "Task Manager\nAdmin Console" },
+    });
+    expect(getByText("Calculator")).toBeTruthy();
+    fireEvent.click(getByText("Remove"));
+
+    expect(onComputerUseSettingsChange).toHaveBeenCalledWith({
+      enabled: true,
+      maxStepsPerTask: 20,
+      mouseSpeed: "instant",
+      mouseDurationMs: 200,
+      typeDelayMs: 50,
+      deniedWindowPatterns: [],
+    });
+    expect(onComputerUseSettingsChange).toHaveBeenCalledWith({
+      enabled: true,
+      maxStepsPerTask: 12,
+      mouseSpeed: "instant",
+      mouseDurationMs: 200,
+      typeDelayMs: 50,
+      deniedWindowPatterns: [],
+    });
+    expect(onComputerUseSettingsChange).toHaveBeenCalledWith({
+      enabled: true,
+      maxStepsPerTask: 12,
+      mouseSpeed: "linear",
+      mouseDurationMs: 300,
+      typeDelayMs: 15,
+      deniedWindowPatterns: ["Task Manager", "Admin Console"],
+    });
+    expect(onRemoveTrustedComputerApp).toHaveBeenCalledWith("Calculator");
+  });
+
+  it("edits runtime preferences from the general, AI, and privacy tabs", () => {
+    const onRuntimePreferencesChange = vi.fn();
+    let runtimePreferences: WorkbenchRuntimePreferences = {
+      appearanceTheme: "light",
+      defaultStartupMode: "chat",
+      contextStrategy: "auto",
+      agentMaxRoundsPreset: "8",
+      agentMaxRoundsCustom: 8,
+      taskTimeoutPreset: "standard",
+      taskTimeoutCustomMs: 90_000,
+      agentMemoryScope: "workspace",
+      agentMemoryEmbeddingMode: "local",
+      agentMemoryEmbeddingProvider: "openai",
+      agentMemoryEmbeddingModel: "text-embedding-3-small",
+      agentMemoryEmbeddingBaseUrl: "https://api.openai.com/v1",
+      agentMemoryEmbeddingApiKeyReference: "model.embedding",
+      agentMemoryEmbeddingDimensions: 1536,
+      taskQueuePolicy: "queue",
+      failureRecoveryPolicy: "replan",
+      userWaitTimeoutPreset: "standard",
+      userWaitTimeoutCustomMs: 5 * 60_000,
+    };
+    const renderSettings = () => (
+      <ModelSettings
+        labels={defaultWorkbenchLocale.labels}
+        modelSettings={{ provider: "openai", model: "gpt-4.1", apiKey: "", apiKeyReference: "default", baseUrl: "" }}
+        runtimePreferences={runtimePreferences}
+        agentMemorySummary={{
+          enabled: runtimePreferences.agentMemoryScope !== "off",
+          totalFactCount: 0,
+          workspaceFactCount: 0,
+          sessionSummaryCount: 0,
+          injectionLogCount: 0,
+          recentFacts: [],
+        }}
+        onRuntimePreferencesChange={(preferences) => {
+          runtimePreferences = preferences;
+          onRuntimePreferencesChange(preferences);
+          rerender(renderSettings());
+        }}
+      />
+    );
+    const { container, getByText, getByLabelText, rerender } = render(renderSettings());
+
+    fireEvent.click(container.querySelector(".javis-settings-trigger")!);
+    fireEvent.click(getByLabelText("Theme color"));
+    fireEvent.click(getByText("Dark"));
+    fireEvent.click(getByLabelText("Default startup mode"));
+    fireEvent.click(getByText("Agent task"));
+    fireEvent.click(getByLabelText("Task queue policy"));
+    fireEvent.click(getByText("Interrupt with new task"));
+
+    fireEvent.click(getByText(defaultWorkbenchLocale.labels.aiModeSettings));
+    fireEvent.click(getByLabelText("Context strategy"));
+    fireEvent.click(getByText("Long"));
+    fireEvent.click(getByLabelText("Agent max rounds"));
+    fireEvent.click(getByText("Custom"));
+    fireEvent.change(getByLabelText("Custom rounds"), { target: { value: "10" } });
+    fireEvent.click(getByLabelText("Task timeout strategy"));
+    fireEvent.click(getByText("Long task"));
+    fireEvent.click(getByLabelText("Failure recovery"));
+    fireEvent.click(getByText("Stop on failure"));
+    fireEvent.click(getByLabelText("User wait timeout"));
+    fireEvent.click(document.body.querySelector('[role="listbox"] button:last-child')!);
+    fireEvent.change(getByLabelText("Custom wait minutes"), { target: { value: "20" } });
+
+    fireEvent.click(getByText(defaultWorkbenchLocale.labels.privacySecuritySettings));
+    fireEvent.click(getByLabelText("Agent memory scope"));
+    fireEvent.click(getByText("Global + workspace"));
+    fireEvent.click(getByLabelText("Agent memory semantic recall"));
+    fireEvent.click(getByText("OpenAI compatible"));
+    fireEvent.change(getByLabelText("Model"), { target: { value: "text-embedding-3-large" } });
+    fireEvent.change(getByLabelText("Key reference"), { target: { value: "model.openai" } });
+
+    expect(onRuntimePreferencesChange).toHaveBeenCalledWith(expect.objectContaining({
+      appearanceTheme: "dark",
+    }));
+    expect(onRuntimePreferencesChange).toHaveBeenCalledWith(expect.objectContaining({
+      defaultStartupMode: "project",
+    }));
+    expect(onRuntimePreferencesChange).toHaveBeenCalledWith(expect.objectContaining({
+      taskQueuePolicy: "interrupt",
+    }));
+    expect(onRuntimePreferencesChange).toHaveBeenCalledWith(expect.objectContaining({
+      contextStrategy: "long",
+    }));
+    expect(onRuntimePreferencesChange).toHaveBeenCalledWith(expect.objectContaining({
+      agentMaxRoundsPreset: "custom",
+    }));
+    expect(onRuntimePreferencesChange).toHaveBeenCalledWith(expect.objectContaining({
+      agentMaxRoundsCustom: 10,
+    }));
+    expect(onRuntimePreferencesChange).toHaveBeenCalledWith(expect.objectContaining({
+      taskTimeoutPreset: "long",
+    }));
+    expect(onRuntimePreferencesChange).toHaveBeenCalledWith(expect.objectContaining({
+      failureRecoveryPolicy: "stop",
+    }));
+    expect(onRuntimePreferencesChange).toHaveBeenCalledWith(expect.objectContaining({
+      userWaitTimeoutPreset: "custom",
+    }));
+    expect(onRuntimePreferencesChange).toHaveBeenCalledWith(expect.objectContaining({
+      userWaitTimeoutCustomMs: 20 * 60_000,
+    }));
+    expect(onRuntimePreferencesChange).toHaveBeenCalledWith(expect.objectContaining({
+      agentMemoryScope: "global_workspace",
+    }));
+    expect(onRuntimePreferencesChange).toHaveBeenCalledWith(expect.objectContaining({
+      agentMemoryEmbeddingMode: "openai_compatible",
+    }));
+    expect(onRuntimePreferencesChange).toHaveBeenCalledWith(expect.objectContaining({
+      agentMemoryEmbeddingModel: "text-embedding-3-large",
+    }));
+    expect(onRuntimePreferencesChange).toHaveBeenCalledWith(expect.objectContaining({
+      agentMemoryEmbeddingApiKeyReference: "model.openai",
+    }));
+  });
+
+  it("can source agent memory embedding settings from configured OpenAI-compatible profiles", () => {
+    const onRuntimePreferencesChange = vi.fn();
+    const runtimePreferences: WorkbenchRuntimePreferences = {
+      appearanceTheme: "light",
+      defaultStartupMode: "chat",
+      contextStrategy: "auto",
+      agentMaxRoundsPreset: "8",
+      agentMaxRoundsCustom: 8,
+      taskTimeoutPreset: "standard",
+      taskTimeoutCustomMs: 90_000,
+      agentMemoryScope: "workspace",
+      agentMemoryEmbeddingMode: "openai_compatible",
+      agentMemoryEmbeddingProvider: "openai",
+      agentMemoryEmbeddingModel: "text-embedding-3-small",
+      agentMemoryEmbeddingBaseUrl: "https://api.openai.com/v1",
+      agentMemoryEmbeddingApiKeyReference: "model.embedding",
+      agentMemoryEmbeddingDimensions: 1536,
+      taskQueuePolicy: "queue",
+      failureRecoveryPolicy: "replan",
+      userWaitTimeoutPreset: "standard",
+      userWaitTimeoutCustomMs: 5 * 60_000,
+    };
+    const { container, getByLabelText, getByText } = render(
+      <ModelSettings
+        labels={defaultWorkbenchLocale.labels}
+        modelSettings={{ provider: "openai", model: "", apiKey: "", apiKeyReference: "default", baseUrl: "" }}
+        modelConfiguration={{
+          profiles: [
+            {
+              id: "embedding-profile",
+              slot: null,
+              displayName: "Embedding",
+              provider: "openrouter",
+              model: "text-embedding-model",
+              apiKeyReference: "model.openrouter",
+              baseUrl: "https://openrouter.ai/api/v1",
+              apiKey: "",
+              capabilities: { vision: false, code: false, longContext: false },
+            },
+          ],
+          agentOverrides: {},
+        }}
+        runtimePreferences={runtimePreferences}
+        onRuntimePreferencesChange={onRuntimePreferencesChange}
+      />,
+    );
+
+    fireEvent.click(container.querySelector(".javis-settings-trigger")!);
+    fireEvent.click(getByText(defaultWorkbenchLocale.labels.privacySecuritySettings));
+    fireEvent.click(getByLabelText("Agent memory embedding configured source"));
+    fireEvent.click(getByText("OpenRouter / text-embedding-model (model.openrouter)"));
+
+    expect(onRuntimePreferencesChange).toHaveBeenCalledWith(expect.objectContaining({
+      agentMemoryEmbeddingProvider: "openrouter",
+      agentMemoryEmbeddingModel: "text-embedding-model",
+      agentMemoryEmbeddingBaseUrl: "https://openrouter.ai/api/v1",
+      agentMemoryEmbeddingApiKeyReference: "model.openrouter",
+    }));
   });
 
   it("runs the API connection test from the AI settings page", async () => {

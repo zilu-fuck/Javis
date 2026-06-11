@@ -147,6 +147,24 @@ describe("local knowledge bridge", () => {
       expect(r).toHaveLength(1);
     });
 
+    it("asks app classification to avoid invented purposes on weak hints", async () => {
+      const prompts: string[] = [];
+      const p: ModelProvider = {
+        ...mockProvider([
+          JSON.stringify([{ name: "unknown.exe", path: "/unknown.exe", category: "其他", tags: [], confidence: 0.2 }]),
+        ]),
+        async complete(prompt) {
+          prompts.push(prompt);
+          return { text: JSON.stringify([{ name: "unknown.exe", path: "/unknown.exe", category: "其他", tags: [], confidence: 0.2 }]) };
+        },
+      };
+
+      await classifyApps([{ name: "unknown.exe", path: "/unknown.exe" }], p);
+
+      expect(prompts[0]).toContain("If those hints are weak or ambiguous");
+      expect(prompts[0]).toContain("instead of inventing a purpose");
+    });
+
     it("uses document fallback categories when document classification response cannot be parsed", async () => {
       const p = mockProvider(["not json"]);
       const r = await classifyDocuments([

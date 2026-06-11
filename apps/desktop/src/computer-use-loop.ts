@@ -12,14 +12,17 @@
 
 import type { ModelProvider } from "./model-provider";
 import type {
+  ComputerDetectUiObjectsResult,
   ComputerListWindowsResult,
   ComputerScreenshotResult,
   ComputerTool,
+  ComputerUiDetection,
 } from "@javis/tools";
 import type {
   ComputerUseLoopConfig,
   ComputerUseStep,
   ComputerUseAction,
+  ComputerScreenshotRegion,
   ComputerUsePhase,
   ComputerUseStepTrace,
 } from "@javis/core";
@@ -30,17 +33,103 @@ import {
   DEFAULT_COMPUTER_USE_CONFIG,
 } from "@javis/core";
 
+const IMAGE_DATA_URL_PATTERN = /data:image(?:\/|\\\/)[a-z0-9.+-]+;base64,[a-z0-9+/=_-]+/gi;
+const LOCAL_VISION_PATH_PATTERN = /(?:file:\/\/\/[^\r\n"'`<>()\[\]{}]+|[A-Za-z]:[\\/][^\r\n"'`<>()\[\]{}]+|\/(?:Users|home|tmp|var|mnt|Volumes|opt|workspace|private|run|data)\/[^\r\n"'`<>()\[\]{}]+)/g;
+const LOCAL_VISION_PATH_EXTENSIONS = [".onnx", ".engine", ".xml", ".bin", ".mjs", ".js", ".json", ".png", ".jpg", ".jpeg", ".webp", ".txt"];
+const LOCAL_VISION_PROMPT_TEXT_MAX_LENGTH = 80;
+const PROMPT_INLINE_TEXT_MAX_LENGTH = 120;
+const RECORDED_TEXT_MAX_LENGTH = 4_000;
+const RECORDED_ARRAY_MAX_ITEMS = 50;
+const RECORDED_OBJECT_MAX_ENTRIES = 80;
+const STEP_HISTORY_LINE_MAX_LENGTH = 6_000;
+const PROMPT_USER_GOAL_MAX_LENGTH = 4_000;
+const PROMPT_CORRECTION_HINT_MAX_LENGTH = 1_000;
+const LOCAL_VISION_PATH_INPUT_MAX_LENGTH = 1_024;
+const LOCAL_VISION_IMAGE_DATA_URL_PATTERN = /data:image(?:\/|\\\/)[a-z0-9.+-]+;base64,/i;
+const LOCAL_VISION_OBSERVE_WAIT_MAX_MS = 160;
+const AUTO_CROP_MIN_SCORE = 0.88;
+const AUTO_CROP_PADDING_PX = 24;
+const AUTO_CROP_MAX_AREA_RATIO = 0.45;
+const AUTO_CROP_OPTIONAL_WAIT_MAX_MS = 160;
+const TASK_APPROVAL_LEASE_TTL_MS = 2 * 60 * 1000;
+const TASK_APPROVAL_LEASE_MAX_ACTIONS = 12;
+const LOCAL_VISION_SLOW_LATENCY_RATIO = 0.85;
+const LOCAL_VISION_SLOW_DETECTION_THRESHOLD = 2;
+const LOCAL_VISION_MIN_DYNAMIC_IMGSZ = 512;
+const COMPUTER_WAIT_MAX_MS = 10_000;
+const COMPUTER_WAIT_MIN_TIMEOUT_MS = 250;
+const COMPUTER_WAIT_TIMEOUT_OVERHEAD_MS = 250;
+const POST_APPROVAL_PREFLIGHT_REFRESH_THRESHOLD_MS = 1_000;
+const SUSPICIOUS_SCREENSHOT_MIN_AREA = 300_000;
+const SUSPICIOUS_SCREENSHOT_MAX_BYTES_PER_PIXEL = 0.01;
+const MAX_COMPUTER_USE_STEPS = 60;
+const MAX_COMPUTER_USE_HISTORY_STEPS = 20;
+const MAX_STEP_DEADLINE_MS = 300_000;
+const TIMEOUT_LIMITS = {
+  listWindowsMs: { min: 1, max: 5_000 },
+  inspectUiMs: { min: 1, max: 5_000 },
+  screenshotMs: { min: 1, max: 10_000 },
+  lowRiskWriteMs: { min: 1, max: 10_000 },
+  textWriteMs: { min: 1, max: 15_000 },
+  modelMs: { min: 1, max: 120_000 },
+  approvalMs: { min: 1, max: 180_000 },
+  verificationMs: { min: 1, max: 10_000 },
+} satisfies Record<keyof ComputerUseLoopConfig["timeouts"], { min: number; max: number }>;
+let observationIdSequence = 0;
+
+type ScreenshotVisionSource = "full" | "crop";
+
+type TaskApprovalLease = {
+  approvalId: string;
+  taskId?: string;
+  createdAtMs: number;
+  remainingActions: number;
+  windowHandle?: number;
+  allowedTools: Set<ComputerUseAction["tool"]>;
+};
+
+type ComputerApprovalResult = {
+  approvalId: string;
+  taskId?: string;
+  sessionWide?: boolean;
+};
+
+interface PendingScreenshotObservation {
+  screenshot: ComputerScreenshotResult;
+  source: ScreenshotVisionSource;
+  windowHandle?: number;
+}
+
+interface PendingAutoCropObservation {
+  promise: Promise<PendingScreenshotObservation | undefined>;
+  candidateId: string;
+  region: ComputerScreenshotRegion;
+  reason: string;
+}
+
 // ── Public API ──────────────────────────────────────────────────────────────
 
 export interface ComputerUseLoopOptions {
   modelProvider: ModelProvider;
   computerTool: ComputerTool;
   userGoal: string;
-  config?: Partial<Omit<ComputerUseLoopConfig, "timeouts">> & {
+  allowedToolNames?: string[];
+  config?: Partial<Omit<ComputerUseLoopConfig, "timeouts" | "localVision">> & {
     timeouts?: Partial<ComputerUseLoopConfig["timeouts"]>;
+    localVision?: Partial<ComputerUseLoopConfig["localVision"]>;
   };
   /** Supplies a confirmed-write approval binding for each write action. */
-  approveAction?: (action: ComputerUseAction) => Promise<{ approvalId: string; taskId?: string; sessionWide?: boolean }>;
+  approveAction?: (
+    action: ComputerUseAction,
+    options?: {
+      requiresFreshApproval?: boolean;
+      screenshotDataUrl?: string;
+      trustedWindowTitle?: string;
+      timeoutMs?: number;
+    },
+  ) => Promise<ComputerApprovalResult>;
+  /** Include the current screenshot in live approval cards. */
+  includeApprovalScreenshotPreview?: boolean;
   /** Called after each step is recorded, for real-time UI progress updates. */
   onStep?: (step: ComputerUseStep) => void;
   /** Called during long-running steps so the UI can stay visibly alive. */
@@ -58,25 +147,27 @@ export interface ComputerUseLoopOptions {
 export async function runComputerUseLoop(
   options: ComputerUseLoopOptions,
 ): Promise<ComputerUseStep[]> {
-  const { modelProvider, computerTool, userGoal, approveAction, onStep, onProgress, signal } = options;
-  const config: ComputerUseLoopConfig = {
-    ...DEFAULT_COMPUTER_USE_CONFIG,
-    ...options.config,
-    timeouts: {
-      ...DEFAULT_COMPUTER_USE_CONFIG.timeouts,
-      ...options.config?.timeouts,
-    },
-  };
+  const { modelProvider, computerTool, userGoal, allowedToolNames, approveAction, onStep, onProgress, signal } = options;
+  const config = normalizeComputerUseLoopConfig(options.config);
+  const allowedToolNameSet = allowedToolNames?.length ? new Set(allowedToolNames) : undefined;
 
   const steps: ComputerUseStep[] = [];
   let correctionHint = "";
   let lastActionSignature = "";
   let repeatedActionCount = 0;
   const lockedScreenshotMethods = new Map<number, "bitblt" | "printWindow">();
-  let nextScreenshot: ComputerScreenshotResult | undefined;
-  let taskLease: { approvalId: string; taskId?: string } | undefined;
+  let nextScreenshot: PendingScreenshotObservation | undefined;
+  let pendingAutoCrop: PendingAutoCropObservation | undefined;
+  let taskLease: TaskApprovalLease | undefined;
   let preferredUiWindowHandle: number | undefined;
   const uiCache = new Map<number, { context: UiPromptContext; expiresAt: number }>();
+  const localVisionState: LocalVisionRuntimeState = {
+    consecutiveTimeouts: 0,
+    consecutiveErrors: 0,
+    consecutiveActionFailures: 0,
+    consecutiveSlowDetections: 0,
+    disabled: false,
+  };
 
   for (let i = 0; i < config.maxSteps; i++) {
     throwIfAborted(signal);
@@ -89,6 +180,29 @@ export async function runComputerUseLoop(
       config,
       getTrace: () => trace,
     });
+    let autoCropTrace: Pick<NonNullable<ComputerUseStepTrace["localVision"]>, "autoCropCandidateId" | "autoCropRegion" | "autoCropReason"> | undefined;
+    if (!nextScreenshot && pendingAutoCrop) {
+      const pending = pendingAutoCrop;
+      pendingAutoCrop = undefined;
+      emitProgress("observing", "Waiting for cropped desktop state");
+      nextScreenshot = await withHeartbeat(
+        () => withTimeout(
+          pending.promise,
+          autoCropOptionalWaitMs(config),
+          "computer.screenshot.autoCrop",
+          stepController.signal,
+        ),
+        () => emitProgress("observing", "Still waiting for cropped desktop state"),
+        config.heartbeatMs,
+      ).catch(() => undefined);
+      if (nextScreenshot) {
+        autoCropTrace = {
+          autoCropCandidateId: pending.candidateId,
+          autoCropRegion: pending.region,
+          autoCropReason: pending.reason,
+        };
+      }
+    }
 
     // 1. Take screenshot and refresh lightweight window context.
     emitProgress("observing", "Reading desktop state");
@@ -98,32 +212,54 @@ export async function runComputerUseLoop(
       preferredUiWindowHandle,
       uiCache,
       config,
+      localVisionDetector: computerTool.detectUiObjects,
+      localVisionState,
       signal: stepController.signal,
     });
     nextScreenshot = undefined;
-    if (!observation.screenshot && !observation.windowList && !observation.uiContext) {
-      const errorStep = createErrorStep(i, "observing", observation.error ?? "Computer Use observation failed.", trace, stepStartedAt);
-      steps.push(errorStep);
-      onStep?.(errorStep);
-      stepController.dispose();
-      break;
-    }
     const { screenshot, windowList, uiContext } = observation;
     trace.freshAt = observation.freshAt;
-    if (screenshot) trace.screenshot = summarizeScreenshotTrace(screenshot);
+    trace.observation = { id: observation.id };
+    if (screenshot) trace.screenshot = summarizeScreenshotTrace(
+      screenshot,
+      observation.screenshotId,
+      observation.screenshotVisionSource,
+    );
+    if (observation.localVision) {
+      trace.localVision = {
+        ...summarizeLocalVisionTrace(observation.localVision),
+        ...autoCropTrace,
+      };
+    }
+    updateLocalVisionRuntimeState(localVisionState, observation.localVision, config.localVision);
+    updateLocalVisionRuntimeTrace(trace, localVisionState);
     if (windowList) trace.windows = summarizeWindowListTrace(windowList, observation.freshAt);
     if (uiContext) trace.ui = {
       freshAt: uiContext.freshAt,
       windowHandle: uiContext.windowHandle,
-      title: uiContext.title,
+      title: uiContext.title ? redactImageDataUrlsForRecord(uiContext.title) : undefined,
       nodeCount: uiContext.nodeCount,
       cacheHit: uiContext.cacheHit,
     };
     const recordStep = (step: ComputerUseStep): void => {
-      steps.push(step);
-      onStep?.(step);
+      const recordedStep = sanitizeStepForRecord(step);
+      steps.push(recordedStep);
+      onStep?.(recordedStep);
       stepController.dispose();
     };
+    if (!observation.screenshot && !observation.windowList && !observation.uiContext) {
+      const errorStep = createErrorStep(i, "observing", observation.error ?? "Computer Use observation failed.", trace, stepStartedAt);
+      recordStep(errorStep);
+      break;
+    }
+    const screenshotHealthIssue = screenshot
+      ? detectSuspiciousFullScreenshot(screenshot, observation.screenshotVisionSource)
+      : undefined;
+    if (screenshotHealthIssue) {
+      const errorStep = createErrorStep(i, "observing", screenshotHealthIssue, trace, stepStartedAt);
+      recordStep(errorStep);
+      break;
+    }
 
     // 2. Build prompt
     emitProgress("planning", "Preparing desktop action prompt");
@@ -132,19 +268,68 @@ export async function runComputerUseLoop(
         height: screenshot?.height,
         sourceWidth: screenshot?.sourceWidth,
         sourceHeight: screenshot?.sourceHeight,
+        visionSource: observation.screenshotVisionSource,
         screenshotUnavailableReason: screenshot ? undefined : observation.error ?? "screenshot unavailable",
         windowList,
         uiContext,
+        localVision: observation.localVision,
       });
     correctionHint = "";
+    const prepareAutoCrop = () => {
+      if (!pendingAutoCrop && !nextScreenshot && i + 1 < config.maxSteps && screenshot && observation.screenshotVisionSource !== "crop") {
+        const autoCrop = selectAutoCropCandidate({
+          userGoal,
+          screenshot,
+          localVision: observation.localVision,
+        });
+        if (autoCrop) {
+          if (trace.localVision) {
+            trace.localVision.autoCropCandidateId = autoCrop.candidate.id;
+            trace.localVision.autoCropRegion = autoCrop.region;
+            trace.localVision.autoCropReason = autoCrop.reason;
+          }
+          pendingAutoCrop = {
+            candidateId: autoCrop.candidate.id,
+            region: autoCrop.region,
+            reason: autoCrop.reason,
+            promise: captureAutoCropScreenshot({
+              computerTool,
+              windowHandle: observation.screenshotWindowHandle,
+              region: autoCrop.region,
+              config,
+              signal: signal ?? stepController.signal,
+            }),
+          };
+        }
+      }
+    };
 
     // 3. Call vision model — with context overflow recovery
     let rawResponse: { text: string };
+    const noteScreenshotModelCall = () => {
+      if (screenshot && trace.localVision) {
+        if (observation.screenshotVisionSource === "crop") {
+          trace.localVision.cropVlmCalled = true;
+          trace.localVision.fullScreenshotVlmCalled = false;
+          trace.localVision.fullScreenshotVlmSkipped = true;
+        } else {
+          trace.localVision.fullScreenshotVlmCalled = true;
+          trace.localVision.fullScreenshotVlmSkipped = false;
+        }
+      }
+    };
+    let createdTaskLeaseThisStep = false;
+    let createdTaskLeaseDuringRetry = false;
     try {
       emitProgress("waiting_model", "Waiting for model action");
+      noteScreenshotModelCall();
       rawResponse = await withHeartbeat(
         () => withTimeout(
-          modelProvider.complete(prompt, screenshot ? { imageDataUrl: screenshot.dataUrl } : undefined),
+          modelProvider.complete(prompt, {
+            ...(screenshot ? { imageDataUrl: screenshot.dataUrl } : {}),
+            skipAgentMemory: true,
+            skipSkillContext: true,
+          }),
           config.timeouts.modelMs,
           "Computer Use model call",
           stepController.signal,
@@ -162,14 +347,21 @@ export async function runComputerUseLoop(
           height: screenshot?.height,
           sourceWidth: screenshot?.sourceWidth,
           sourceHeight: screenshot?.sourceHeight,
+          visionSource: observation.screenshotVisionSource,
           screenshotUnavailableReason: screenshot ? undefined : observation.error ?? "screenshot unavailable",
           windowList,
           uiContext,
+          localVision: observation.localVision,
         });
         try {
+          noteScreenshotModelCall();
           rawResponse = await withHeartbeat(
             () => withTimeout(
-              modelProvider.complete(minimalPrompt, screenshot ? { imageDataUrl: screenshot.dataUrl } : undefined),
+              modelProvider.complete(minimalPrompt, {
+                ...(screenshot ? { imageDataUrl: screenshot.dataUrl } : {}),
+                skipAgentMemory: true,
+                skipSkillContext: true,
+              }),
               config.timeouts.modelMs,
               "Computer Use model retry",
               stepController.signal,
@@ -189,11 +381,13 @@ export async function runComputerUseLoop(
             trace: finishTrace(trace, stepStartedAt),
             error: `上下文溢出（${errMsg.slice(0, 120)}）`,
           };
+          pendingAutoCrop = undefined;
           recordStep(overflowStep);
           break;
         }
       } else {
         const modelErrorStep = createErrorStep(i, "waiting_model", err instanceof Error ? err.message : String(err), trace, stepStartedAt);
+        pendingAutoCrop = undefined;
         recordStep(modelErrorStep);
         break;
       }
@@ -207,9 +401,14 @@ export async function runComputerUseLoop(
       // Retry with explicit JSON instruction
       try {
         const retryPrompt = prompt + "\n\nYour previous output was not valid JSON. Output valid JSON only — no markdown fences, no commentary.";
+        noteScreenshotModelCall();
         const retryResponse = await withHeartbeat(
           () => withTimeout(
-            modelProvider.complete(retryPrompt, screenshot ? { imageDataUrl: screenshot.dataUrl } : undefined),
+            modelProvider.complete(retryPrompt, {
+              ...(screenshot ? { imageDataUrl: screenshot.dataUrl } : {}),
+              skipAgentMemory: true,
+              skipSkillContext: true,
+            }),
             config.timeouts.modelMs,
             "Computer Use JSON retry",
             stepController.signal,
@@ -231,22 +430,24 @@ export async function runComputerUseLoop(
           trace: finishTrace(trace, stepStartedAt),
           error: "模型输出连续解析失败",
         };
+        pendingAutoCrop = undefined;
         recordStep(errorStep);
         correctionHint = "Your last output was invalid JSON. Output only valid JSON matching the schema.";
         continue;
       }
     }
 
+    const rawOutput = tryParseOutput(rawResponse.text);
     // 5. Completion signal
     if (action === null) {
-      const rawOutput = tryParseOutput(rawResponse.text);
+      pendingAutoCrop = undefined;
       const completionStep: ComputerUseStep = {
         stepIndex: i,
         screenshotDataUrl: screenshot?.dataUrl ?? "",
         observation: rawOutput?.observation ?? "目标已完成",
         action: { tool: "computer.wait", params: { ms: 0 } },
         target: rawOutput?.target ?? "完成",
-        confidence: "high",
+        confidence: rawOutput?.confidence ?? "high",
         phase: "completed",
         trace: finishTrace(trace, stepStartedAt),
       };
@@ -254,8 +455,25 @@ export async function runComputerUseLoop(
       break;
     }
 
+    if (allowedToolNameSet && !allowedToolNameSet.has(action.tool)) {
+      pendingAutoCrop = undefined;
+      const disabledToolStep: ComputerUseStep = {
+        stepIndex: i,
+        screenshotDataUrl: screenshot?.dataUrl ?? "",
+        observation: rawOutput?.observation ?? "",
+        action,
+        target: rawOutput?.target ?? "",
+        confidence: rawOutput?.confidence ?? "low",
+        phase: "failed",
+        trace: finishTrace(trace, stepStartedAt),
+        error: `Computer Use tool is disabled: ${action.tool}`,
+      };
+      recordStep(disabledToolStep);
+      correctionHint = `The tool ${action.tool} is disabled. Choose one of the enabled tools: ${[...allowedToolNameSet].join(", ")}.`;
+      continue;
+    }
+
     // 6. Execute the action
-    const rawOutput = tryParseOutput(rawResponse.text);
     let result: unknown;
     let error: string | undefined;
     const requestedAction = lockScreenshotMethod(removeVerificationOnlyParams(action), lockedScreenshotMethods);
@@ -264,6 +482,19 @@ export async function runComputerUseLoop(
       : requestedAction;
     const strategyResult = preferStructuredAction(mappedAction, observation, rawOutput);
     const executedAction = strategyResult.action;
+    const localVisionPreflightAction = isCoordinateAction(executedAction) ? requestedAction : executedAction;
+    const actionRequiresFreshApproval = requiresFreshApprovalForCurrentAction(
+      executedAction,
+      observation.localVision,
+      requestedAction,
+    );
+    if (actionRequiresFreshApproval) {
+      taskLease = undefined;
+    }
+    const canPrepareAutoCropAfterSuccess = shouldKeepPendingAutoCropAfterAction(executedAction);
+    if (!canPrepareAutoCropAfterSuccess) {
+      pendingAutoCrop = undefined;
+    }
     trace.action = {
       tool: executedAction.tool,
       approvalMode: "none",
@@ -273,6 +504,7 @@ export async function runComputerUseLoop(
     };
 
     if (isWriteAction(executedAction) && !approveAction) {
+      pendingAutoCrop = undefined;
       const missingApprovalStep: ComputerUseStep = {
         stepIndex: i,
         screenshotDataUrl: screenshot?.dataUrl ?? "",
@@ -297,6 +529,7 @@ export async function runComputerUseLoop(
     }
 
     if (repeatedActionCount >= 3) {
+      pendingAutoCrop = undefined;
       const repeatStep: ComputerUseStep = {
         stepIndex: i,
         screenshotDataUrl: screenshot?.dataUrl ?? "",
@@ -314,9 +547,11 @@ export async function runComputerUseLoop(
 
     try {
       let approval: { approvalId: string; taskId?: string } | undefined;
+      let approvalWaitMs: number | undefined;
       if (isWriteAction(executedAction)) {
         emitProgress("preflight", "Checking desktop state before action");
         const preflight = await runPreflightCheck(executedAction, observation, {
+          candidateAction: localVisionPreflightAction,
           refreshUiContext: (windowHandle) => getUiContext({
             computerTool,
             windowList: observation.windowList,
@@ -332,44 +567,107 @@ export async function runComputerUseLoop(
         if (!preflight.passed) {
           throw new Error(`Preflight failed: ${preflight.reason}`);
         }
-        if (taskLease && !requiresFreshApproval(executedAction)) {
+        const deniedWindow = findDeniedWindowForAction(executedAction, observation, config);
+        if (deniedWindow) {
+          throw new Error(
+            `Preflight failed: target window "${deniedWindow.title}" matches denied pattern "${deniedWindow.pattern}"`,
+          );
+        }
+        const reusableLease = reusableTaskApprovalLeaseForAction(taskLease, executedAction, observation);
+        if (reusableLease && !actionRequiresFreshApproval) {
           trace.action.approvalMode = "task_lease";
-          approval = taskLease;
+          approval = leaseApproval(reusableLease);
         } else {
+          if (taskLease && !reusableLease) {
+            taskLease = undefined;
+          }
           trace.action.approvalMode = "per_action";
           emitProgress("waiting_permission", "Waiting for desktop action approval");
+          const approvalStartedAt = Date.now();
           const result = await withHeartbeat(
             () => withTimeout(
-              approveAction?.(executedAction) ?? Promise.resolve(undefined),
-              config.timeouts.approvalMs,
+              approveAction?.(executedAction, {
+                requiresFreshApproval: actionRequiresFreshApproval,
+                timeoutMs: config.timeouts.approvalMs,
+                ...(options.includeApprovalScreenshotPreview && screenshot?.dataUrl
+                  ? { screenshotDataUrl: screenshot.dataUrl }
+                  : {}),
+                trustedWindowTitle: inferTrustedWindowTitleForAction(executedAction, observation),
+              }) ?? Promise.resolve(undefined),
+              getApprovalCallbackTimeoutMs(config),
               "Computer Use approval",
               stepController.signal,
             ),
             () => emitProgress("waiting_permission", "Still waiting for desktop action approval"),
             config.heartbeatMs,
           );
+          approvalWaitMs = Date.now() - approvalStartedAt;
           if (result) {
             approval = { approvalId: result.approvalId, taskId: result.taskId };
-            if (result.sessionWide && !requiresFreshApproval(executedAction)) {
-              taskLease = approval;
+            if (result.sessionWide && !actionRequiresFreshApproval) {
+              taskLease = createTaskApprovalLease(result, executedAction, observation);
+              createdTaskLeaseThisStep = taskLease !== undefined;
             }
           }
         }
       }
+      if (
+        approval &&
+        approvalWaitMs !== undefined &&
+        approvalWaitMs >= POST_APPROVAL_PREFLIGHT_REFRESH_THRESHOLD_MS
+      ) {
+        if (requiresFreshObservationAfterSlowApproval(executedAction)) {
+          throw new Error(
+            "Post-approval preflight failed: keyboard target may have changed during approval; observe the current desktop before executing this action.",
+          );
+        }
+        emitProgress("preflight", "Rechecking desktop state after approval");
+        const refreshedObservation = await refreshObservationForPostApprovalPreflight({
+          action: executedAction,
+          computerTool,
+          config,
+          observation,
+          signal: stepController.signal,
+        });
+        const postApprovalPreflight = await runPreflightCheck(executedAction, refreshedObservation, {
+          candidateAction: localVisionPreflightAction,
+          refreshUiContext: (windowHandle) => getUiContext({
+            computerTool,
+            windowList: refreshedObservation.windowList,
+            preferredHandle: windowHandle,
+            uiCache,
+            config,
+            signal: stepController.signal,
+            freshAt: new Date().toISOString(),
+            bypassCache: true,
+          }),
+        });
+        trace.preflight = combinePreflightTrace(trace.preflight, postApprovalPreflight);
+        if (!postApprovalPreflight.passed) {
+          throw new Error(`Post-approval preflight failed: ${postApprovalPreflight.reason}`);
+        }
+      }
       emitProgress("executing", `Executing ${executedAction.tool}`);
       result = await withTimeout(
-        dispatchAction(computerTool, executedAction, approval),
+        dispatchAction(computerTool, executedAction, config, approval),
         getActionTimeoutMs(executedAction, config),
         executedAction.tool,
         stepController.signal,
       );
+      if (trace.action?.approvalMode === "task_lease" && taskLease) {
+        taskLease = consumeTaskApprovalLease(taskLease);
+      }
       if (requestedAction.tool === "computer.screenshot") {
         if (requestedAction.params.windowHandle !== undefined) {
           preferredUiWindowHandle = requestedAction.params.windowHandle;
         }
         rememberScreenshotMethod(requestedAction, result, lockedScreenshotMethods);
         if (isScreenshotResult(result)) {
-          nextScreenshot = result;
+          nextScreenshot = {
+            screenshot: result,
+            source: requestedAction.params.region ? "crop" : "full",
+            windowHandle: requestedAction.params.windowHandle,
+          };
         }
       }
       preferredUiWindowHandle = getPreferredUiHandleAfterAction(executedAction) ?? preferredUiWindowHandle;
@@ -384,9 +682,12 @@ export async function runComputerUseLoop(
               preferredUiWindowHandle,
               uiCache,
               config,
+              localVisionDetector: computerTool.detectUiObjects,
+              localVisionState,
               signal: stepController.signal,
               bypassUiCache: true,
               includeUiValues: shouldInspectValuesForVerification(executedAction),
+              skipLocalVision: true,
             }),
           }),
           config.timeouts.verificationMs,
@@ -398,22 +699,37 @@ export async function runComputerUseLoop(
           let passedAfterRetry = false;
           if (canRetryAfterVerificationFailure(executedAction, result)) {
             emitProgress("recovering", "Retrying desktop action once after verification failure");
+            const retryInvalidatesTaskLease = trace.action?.approvalMode === "task_lease" || createdTaskLeaseThisStep;
+            if (retryInvalidatesTaskLease) {
+              taskLease = undefined;
+            }
             const retryApproval = await getRetryApproval({
               action: executedAction,
-              taskLease,
+              taskLease: retryInvalidatesTaskLease ? undefined : taskLease,
               approval,
               approveAction,
+              observation,
               config,
               signal: stepController.signal,
               emitProgress,
+              requiresFreshApproval: actionRequiresFreshApproval,
+              screenshotDataUrl: options.includeApprovalScreenshotPreview ? screenshot?.dataUrl : undefined,
+              trustedWindowTitle: inferTrustedWindowTitleForAction(executedAction, observation),
             });
             await delayBeforeRetry(stepController.signal);
             result = await withTimeout(
-              dispatchAction(computerTool, executedAction, retryApproval),
+              dispatchAction(computerTool, executedAction, config, retryApproval),
               getActionTimeoutMs(executedAction, config),
               `${executedAction.tool} retry`,
               stepController.signal,
             );
+            if (retryApproval?.approvalId === taskLease?.approvalId && taskLease) {
+              taskLease = consumeTaskApprovalLease(taskLease);
+            } else if (retryApproval?.sessionWide && !actionRequiresFreshApproval) {
+              const retryLease = createTaskApprovalLease(retryApproval, executedAction, observation);
+              taskLease = retryLease ? consumeTaskApprovalLease(retryLease) : undefined;
+              createdTaskLeaseDuringRetry = taskLease !== undefined;
+            }
             const retryBase = verifyRetryToolResult(executedAction, result);
             const retryVerification = await withTimeout(
               verifyActionResult(executedAction, result, {
@@ -424,9 +740,12 @@ export async function runComputerUseLoop(
                   preferredUiWindowHandle,
                   uiCache,
                   config,
+                  localVisionDetector: computerTool.detectUiObjects,
+                  localVisionState,
                   signal: stepController.signal,
                   bypassUiCache: true,
                   includeUiValues: shouldInspectValuesForVerification(executedAction),
+                  skipLocalVision: true,
                 }),
               }),
               config.timeouts.verificationMs,
@@ -442,6 +761,8 @@ export async function runComputerUseLoop(
             };
             if (retryPassed) {
               passedAfterRetry = true;
+            } else if (createdTaskLeaseDuringRetry) {
+              taskLease = undefined;
             }
           }
           if (!passedAfterRetry) {
@@ -451,12 +772,23 @@ export async function runComputerUseLoop(
       }
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
-      if (trace.action?.approvalMode === "task_lease" && isTaskLeaseFailure(error)) {
+      if (trace.action?.approvalMode === "task_lease" || createdTaskLeaseThisStep || createdTaskLeaseDuringRetry) {
         taskLease = undefined;
       }
     }
+    if (!error && canPrepareAutoCropAfterSuccess) {
+      prepareAutoCrop();
+    }
+    if (error) {
+      updateLocalVisionActionFailureState(localVisionState, observation.localVision, config.localVision, requestedAction);
+      updateLocalVisionRuntimeTrace(trace, localVisionState);
+    } else {
+      localVisionState.consecutiveActionFailures = 0;
+      updateLocalVisionRuntimeTrace(trace, localVisionState);
+    }
 
     // 7. Record the step
+    updateLocalVisionActionTrace(trace, observation.localVision, executedAction, error, requestedAction);
     const step: ComputerUseStep = {
       stepIndex: i,
       screenshotDataUrl: screenshot?.dataUrl ?? "",
@@ -473,6 +805,7 @@ export async function runComputerUseLoop(
 
     // Add correction hint so the model can adapt instead of repeating the failure.
     if (error) {
+      pendingAutoCrop = undefined;
       if (/denied by user|permission denied/i.test(error)) {
         break;
       }
@@ -492,8 +825,13 @@ export async function runComputerUseLoop(
 export function formatStepHistory(steps: ComputerUseStep[], maxSteps: number): string {
   if (steps.length === 0) return "";
 
-  const recent = steps.slice(-maxSteps);
-  const lines = recent.map((step) => {
+  const normalizedMaxSteps = typeof maxSteps === "number" && Number.isFinite(maxSteps)
+    ? Math.trunc(maxSteps)
+    : 0;
+  if (normalizedMaxSteps <= 0) return "";
+
+  const recent = steps.slice(-normalizedMaxSteps);
+  const lines = recent.map((step) => sanitizeStepForRecord(step)).map((step) => {
     const toolName = step.action.tool;
     const params = JSON.stringify(redactActionParamsForHistory(step.action));
     const resultStr = step.error
@@ -501,7 +839,10 @@ export function formatStepHistory(steps: ComputerUseStep[], maxSteps: number): s
       : step.result !== undefined
         ? `result: ${JSON.stringify(redactResultForHistory(step.result))}`
         : "";
-    return `Step ${step.stepIndex + 1}: saw "${step.observation}" → ${toolName}(${params}) ${resultStr}`.trim();
+    return truncateRecordedText(
+      `Step ${step.stepIndex + 1}: saw "${step.observation}" → ${toolName}(${params}) ${resultStr}`.trim(),
+      STEP_HISTORY_LINE_MAX_LENGTH,
+    );
   });
 
   return `PREVIOUS STEPS (most recent ${recent.length}):\n${lines.join("\n")}`;
@@ -510,24 +851,77 @@ export function formatStepHistory(steps: ComputerUseStep[], maxSteps: number): s
 function redactActionParamsForHistory(action: ComputerUseAction): Record<string, unknown> {
   if (action.tool === "computer.type") {
     return {
-      ...action.params,
-      text: `[redacted:${action.params.text.length} chars]`,
+      ...(redactResultForHistory(action.params) as typeof action.params),
+      text: isRedactedTextPlaceholder(action.params.text)
+        ? action.params.text
+        : `[redacted:${action.params.text.length} chars]`,
     };
   }
   if (action.tool === "computer.setUiValue") {
     return {
-      ...action.params,
-      value: `[redacted:${action.params.value.length} chars]`,
+      ...(redactResultForHistory(action.params) as typeof action.params),
+      value: isRedactedTextPlaceholder(action.params.value)
+        ? action.params.value
+        : `[redacted:${action.params.value.length} chars]`,
     };
   }
-  return action.params;
+  return redactResultForHistory(action.params) as Record<string, unknown>;
+}
+
+function isRedactedTextPlaceholder(value: string): boolean {
+  return /^\[redacted:\d+ chars\]$/.test(value);
+}
+
+function containsImageDataUrl(value: string): boolean {
+  IMAGE_DATA_URL_PATTERN.lastIndex = 0;
+  const hasMatch = IMAGE_DATA_URL_PATTERN.test(value);
+  IMAGE_DATA_URL_PATTERN.lastIndex = 0;
+  return hasMatch;
+}
+
+function redactImageDataUrlsForRecord(value: string): string {
+  IMAGE_DATA_URL_PATTERN.lastIndex = 0;
+  const redacted = value.replace(IMAGE_DATA_URL_PATTERN, (match) => `[redacted:image data URL:${match.length} chars]`);
+  IMAGE_DATA_URL_PATTERN.lastIndex = 0;
+  return redacted;
+}
+
+function redactImageDataUrlFieldForRecord(value: string): string {
+  const redacted = redactImageDataUrlsForRecord(value);
+  return redacted === value
+    ? `[redacted:image data URL:${value.length} chars]`
+    : redacted;
+}
+
+function truncateRecordedText(value: string, maxLength = RECORDED_TEXT_MAX_LENGTH): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return `${value.slice(0, maxLength)}\n...[truncated:${value.length - maxLength} chars]`;
+}
+
+function sanitizePromptInlineText(value: string | undefined, maxLength = PROMPT_INLINE_TEXT_MAX_LENGTH): string | undefined {
+  if (!value) return undefined;
+  const redacted = redactImageDataUrlsForRecord(value)
+    .replace(/\s+/g, " ")
+    .replace(/"/g, "'");
+  const trimmed = redacted.trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > maxLength
+    ? `${trimmed.slice(0, maxLength - 3)}...`
+    : trimmed;
+}
+
+function sanitizePromptBlockText(value: string, maxLength: number): string {
+  const redacted = redactImageDataUrlsForRecord(value);
+  return redacted.length > maxLength
+    ? `${redacted.slice(0, maxLength)}\n...`
+    : redacted;
 }
 
 function redactResultForHistory(result: unknown, seen = new WeakSet<object>()): unknown {
   if (typeof result === "string") {
-    return result.startsWith("data:image/")
-      ? `[redacted:image data URL:${result.length} chars]`
-      : result;
+    return truncateRecordedText(redactImageDataUrlsForRecord(result));
   }
   if (!result || typeof result !== "object") {
     return result;
@@ -537,14 +931,21 @@ function redactResultForHistory(result: unknown, seen = new WeakSet<object>()): 
   }
   seen.add(result);
   if (Array.isArray(result)) {
-    return result.map((entry) => redactResultForHistory(entry, seen));
+    const entries = result
+      .slice(0, RECORDED_ARRAY_MAX_ITEMS)
+      .map((entry) => redactResultForHistory(entry, seen));
+    if (result.length > RECORDED_ARRAY_MAX_ITEMS) {
+      entries.push(`[truncated:${result.length - RECORDED_ARRAY_MAX_ITEMS} array items]`);
+    }
+    return entries;
   }
   const record = result as Record<string, unknown>;
   const redacted: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(record)) {
+  const entries = Object.entries(record);
+  for (const [key, value] of entries.slice(0, RECORDED_OBJECT_MAX_ENTRIES)) {
     const lowerKey = key.toLowerCase();
-    if (typeof value === "string" && (lowerKey.endsWith("dataurl") || value.startsWith("data:image/"))) {
-      redacted[key] = `[redacted:image data URL:${value.length} chars]`;
+    if (typeof value === "string" && (lowerKey.endsWith("dataurl") || containsImageDataUrl(value))) {
+      redacted[key] = truncateRecordedText(redactImageDataUrlFieldForRecord(value));
     } else if (lowerKey.includes("value") && typeof value === "string") {
       redacted[key] = `[redacted:${value.length} chars]`;
     } else if (key === "tree" && typeof value === "string") {
@@ -553,10 +954,104 @@ function redactResultForHistory(result: unknown, seen = new WeakSet<object>()): 
       redacted[key] = redactResultForHistory(value, seen);
     }
   }
+  if (entries.length > RECORDED_OBJECT_MAX_ENTRIES) {
+    redacted.__truncated = `${entries.length - RECORDED_OBJECT_MAX_ENTRIES} object fields`;
+  }
   return redacted;
 }
 
 // ── Internal helpers ─────────────────────────────────────────────────────────
+
+function sanitizeStepForRecord(step: ComputerUseStep): ComputerUseStep {
+  return {
+    ...step,
+    screenshotDataUrl: "",
+    observation: truncateRecordedText(redactImageDataUrlsForRecord(step.observation)),
+    target: truncateRecordedText(redactImageDataUrlsForRecord(step.target)),
+    action: sanitizeActionForRecord(step.action),
+    result: sanitizeRecordedValue(step.result),
+    trace: sanitizeRecordedValue(step.trace) as ComputerUseStepTrace | undefined,
+    error: step.error ? truncateRecordedText(redactImageDataUrlsForRecord(step.error)) : undefined,
+  };
+}
+
+function sanitizeActionForRecord(action: ComputerUseAction): ComputerUseAction {
+  if (action.tool === "computer.type") {
+    return {
+      ...action,
+      params: {
+        ...(sanitizeRecordedValue(action.params) as typeof action.params),
+        text: isRedactedTextPlaceholder(action.params.text)
+          ? action.params.text
+          : `[redacted:${action.params.text.length} chars]`,
+      },
+    };
+  }
+  if (action.tool === "computer.setUiValue") {
+    return {
+      ...action,
+      params: {
+        ...(sanitizeRecordedValue(action.params) as typeof action.params),
+        value: isRedactedTextPlaceholder(action.params.value)
+          ? action.params.value
+          : `[redacted:${action.params.value.length} chars]`,
+      },
+    };
+  }
+  return {
+    ...action,
+    params: sanitizeRecordedValue(action.params) as ComputerUseAction["params"],
+  } as ComputerUseAction;
+}
+
+function sanitizeRecordedValue(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (typeof value === "string") {
+    return truncateRecordedText(redactImageDataUrlsForRecord(value));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  if (seen.has(value)) {
+    return "[redacted:circular]";
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    const entries = value
+      .slice(0, RECORDED_ARRAY_MAX_ITEMS)
+      .map((entry) => sanitizeRecordedValue(entry, seen));
+    if (value.length > RECORDED_ARRAY_MAX_ITEMS) {
+      entries.push(`[truncated:${value.length - RECORDED_ARRAY_MAX_ITEMS} array items]`);
+    }
+    return entries;
+  }
+  const record = value as Record<string, unknown>;
+  const sanitized: Record<string, unknown> = {};
+  const entries = Object.entries(record);
+  for (const [key, entry] of entries.slice(0, RECORDED_OBJECT_MAX_ENTRIES)) {
+    const lowerKey = key.toLowerCase();
+    const sanitizedKey = truncateRecordedText(redactImageDataUrlsForRecord(key), 240);
+    if (
+      typeof entry === "string" &&
+      (containsImageDataUrl(entry) || lowerKey === "dataurl" || lowerKey.endsWith("dataurl"))
+    ) {
+      sanitized[sanitizedKey] = truncateRecordedText(redactImageDataUrlFieldForRecord(entry));
+      continue;
+    }
+    if ((lowerKey === "text" || lowerKey === "value") && typeof entry === "string") {
+      sanitized[sanitizedKey] = `[redacted:${entry.length} chars]`;
+      continue;
+    }
+    if (key === "tree" && typeof entry === "string") {
+      sanitized[sanitizedKey] = redactUiTreeValues(entry);
+      continue;
+    }
+    sanitized[sanitizedKey] = sanitizeRecordedValue(entry, seen);
+  }
+  if (entries.length > RECORDED_OBJECT_MAX_ENTRIES) {
+    sanitized.__truncated = `${entries.length - RECORDED_OBJECT_MAX_ENTRIES} object fields`;
+  }
+  return sanitized;
+}
 
 function removeVerificationOnlyParams(action: ComputerUseAction): ComputerUseAction {
   if (action.tool !== "computer.inspectUi" || action.params.includeValues === undefined) {
@@ -580,22 +1075,29 @@ function buildPrompt(
     height?: number;
     sourceWidth?: number;
     sourceHeight?: number;
+    visionSource?: ScreenshotVisionSource;
     screenshotUnavailableReason?: string;
     windowList?: ComputerListWindowsResult;
     uiContext?: UiPromptContext;
+    localVision?: LocalVisionObservation;
   },
 ): string {
   const parts: string[] = [
     COMPUTER_USE_SYSTEM_PROMPT.en,
-    `USER GOAL: ${userGoal}`,
+    `USER GOAL: ${sanitizePromptBlockText(userGoal, PROMPT_USER_GOAL_MAX_LENGTH)}`,
   ];
   if (screenshot.width !== undefined && screenshot.height !== undefined) {
     parts.push(
       `SCREENSHOT: ${screenshot.width}x${screenshot.height}. Coordinates start at (0,0) in the top-left corner; x increases right, y increases down.`,
     );
+    if (screenshot.visionSource === "crop") {
+      parts.push(
+        "This is a cropped screenshot requested by a previous action. Output coordinates in this cropped image only; Javis maps them back to the original screen.",
+      );
+    }
   } else {
     parts.push(
-      `SCREENSHOT: unavailable (${screenshot.screenshotUnavailableReason ?? "unknown reason"}). Use WINDOWS/UIA context only; do not output coordinate mouse actions unless a later screenshot succeeds.`,
+      `SCREENSHOT: unavailable (${sanitizePromptInlineText(screenshot.screenshotUnavailableReason, PROMPT_INLINE_TEXT_MAX_LENGTH) ?? "unknown reason"}). Use WINDOWS/UIA context only; do not output coordinate mouse actions unless a later screenshot succeeds.`,
     );
   }
   if (
@@ -615,6 +1117,10 @@ function buildPrompt(
   if (uiPromptContext) {
     parts.push(uiPromptContext);
   }
+  const localVisionPromptContext = formatLocalVisionCandidates(screenshot.localVision);
+  if (localVisionPromptContext) {
+    parts.push(localVisionPromptContext);
+  }
 
   const history = formatStepHistory(steps, historySteps);
   if (history) {
@@ -622,7 +1128,7 @@ function buildPrompt(
   }
 
   if (correctionHint) {
-    parts.push(`IMPORTANT: ${correctionHint}`);
+    parts.push(`IMPORTANT: ${sanitizePromptBlockText(correctionHint, PROMPT_CORRECTION_HINT_MAX_LENGTH)}`);
   }
 
   parts.push(
@@ -631,6 +1137,77 @@ function buildPrompt(
 
   return parts.join("\n\n");
 }
+
+interface LocalVisionObservation {
+  observationId: string;
+  screenshotId: string;
+  enabled: boolean;
+  used: boolean;
+  skipRuntimeStateUpdate?: boolean;
+  mode: "off" | "passive" | "prompt_hint" | "timeout" | "error" | "disabled" | "not_available";
+  model?: string;
+  configuredModel?: string;
+  runtime?: string;
+  reuseWorker?: boolean;
+  imgsz?: number;
+  timeoutMs?: number;
+  latencyMs?: number;
+  detections: ComputerUiDetection[];
+  candidates: LocalUiCandidate[];
+  promptCandidates: LocalUiCandidate[];
+  diagnostics?: Record<string, unknown>;
+  error?: string;
+}
+
+interface LocalVisionRuntimeState {
+  consecutiveTimeouts: number;
+  consecutiveErrors: number;
+  consecutiveActionFailures: number;
+  consecutiveSlowDetections: number;
+  effectiveImgSize?: number;
+  disabled: boolean;
+  disabledReason?: "timeout" | "error" | "action_failure";
+}
+
+type LocalUiCandidateKind =
+  | "possible_button"
+  | "possible_input"
+  | "possible_checkbox"
+  | "possible_dropdown"
+  | "possible_menu_item"
+  | "possible_dialog"
+  | "possible_icon"
+  | "possible_table_cell"
+  | "possible_link"
+  | "unknown_region";
+
+interface LocalUiCandidate {
+  id: string;
+  kind: LocalUiCandidateKind;
+  box?: ComputerUiDetection["box"];
+  center?: ComputerUiDetection["center"];
+  text?: string;
+  nearbyText?: string;
+  score: number;
+  evidence: {
+    uia?: {
+      windowHandle: number;
+      controlType?: string;
+      name?: string;
+      automationId?: string;
+      confidence: number;
+    };
+    yolo?: {
+      detectionIds: string[];
+      confidence: number;
+    };
+  };
+  riskHint: "low" | "medium" | "high";
+  executionMode?: "uia_only" | "uia_or_vlm_confirmed" | "user_confirmation_required" | "not_allowed";
+  rankReason?: string;
+}
+
+type ComputerUseActionSelector = Extract<ComputerUseAction, { tool: "computer.invokeUi" }>["params"]["selector"];
 
 interface UiPromptContext {
   windowHandle: number;
@@ -642,9 +1219,14 @@ interface UiPromptContext {
 }
 
 interface ComputerObservation {
+  id: string;
   screenshot?: ComputerScreenshotResult;
+  screenshotVisionSource?: ScreenshotVisionSource;
+  screenshotId?: string;
+  screenshotWindowHandle?: number;
   windowList?: ComputerListWindowsResult;
   uiContext?: UiPromptContext;
+  localVision?: LocalVisionObservation;
   preferredUiWindowHandle?: number;
   coordinateTargetWindowHandle?: number;
   freshAt: string;
@@ -654,20 +1236,25 @@ interface ComputerObservation {
 
 async function observeComputerState(options: {
   computerTool: ComputerTool;
-  nextScreenshot: ComputerScreenshotResult | undefined;
+  nextScreenshot: PendingScreenshotObservation | undefined;
   preferredUiWindowHandle: number | undefined;
   uiCache: Map<number, { context: UiPromptContext; expiresAt: number }>;
   config: ComputerUseLoopConfig;
+  localVisionDetector: ComputerTool["detectUiObjects"];
+  localVisionState: LocalVisionRuntimeState;
   signal: AbortSignal;
   bypassUiCache?: boolean;
   includeUiValues?: boolean;
+  skipLocalVision?: boolean;
 }): Promise<ComputerObservation> {
   const freshAt = new Date().toISOString();
+  const observationId = createObservationId(freshAt);
   const screenshotPromise = options.nextScreenshot
-    ? Promise.resolve(options.nextScreenshot)
-    : withTimeout(Promise.resolve(options.computerTool.screenshot({})), options.config.timeouts.screenshotMs, "computer.screenshot", options.signal);
+    ? Promise.resolve(options.nextScreenshot.screenshot)
+    : withTimeout(invokeTool(() => options.computerTool.screenshot({})), options.config.timeouts.screenshotMs, "computer.screenshot", options.signal);
+  const screenshotVisionSource: ScreenshotVisionSource = options.nextScreenshot?.source ?? "full";
   const windowPromise = withTimeout(
-    Promise.resolve(options.computerTool.listWindows({})),
+    invokeTool(() => options.computerTool.listWindows({})),
     options.config.timeouts.listWindowsMs,
     "computer.listWindows",
     options.signal,
@@ -689,6 +1276,40 @@ async function observeComputerState(options: {
       bypassCache: options.bypassUiCache,
       includeValues: options.includeUiValues,
     });
+  const earlyLocalVisionPromise = options.skipLocalVision
+    ? Promise.resolve(undefined)
+    : screenshotPromise
+    .then((resolvedScreenshot) => {
+      const resolvedScreenshotId = createScreenshotId(observationId, freshAt, resolvedScreenshot);
+      if (screenshotVisionSource === "crop" && !options.localVisionState.disabled) {
+        return createSkippedLocalVisionObservation({
+          screenshotId: resolvedScreenshotId,
+          observationId,
+          config: options.config,
+          error: "local vision skipped for cropped screenshot",
+        });
+      }
+      return detectLocalVisionForObservation({
+        screenshot: resolvedScreenshot,
+        screenshotId: resolvedScreenshotId,
+        observationId,
+        windowHandle: options.preferredUiWindowHandle,
+        detector: options.localVisionDetector,
+        state: options.localVisionState,
+        config: options.config,
+        signal: options.signal,
+      });
+    })
+    .catch(() => detectLocalVisionForObservation({
+      screenshot: undefined,
+      screenshotId: createScreenshotId(observationId, freshAt, undefined),
+      observationId,
+      windowHandle: options.preferredUiWindowHandle,
+      detector: options.localVisionDetector,
+      state: options.localVisionState,
+      config: options.config,
+      signal: options.signal,
+    }));
   const [screenshotResult, windowResult, preferredUiResult] = await Promise.allSettled([
     screenshotPromise,
     windowPromise,
@@ -698,6 +1319,7 @@ async function observeComputerState(options: {
   const screenshot = screenshotResult.status === "fulfilled" ? screenshotResult.value : undefined;
   const windowList = windowResult.status === "fulfilled" ? windowResult.value : undefined;
   const preferredUiContext = preferredUiResult.status === "fulfilled" ? preferredUiResult.value : undefined;
+  const screenshotId = createScreenshotId(observationId, freshAt, screenshot);
   const screenshotError = resultErrorMessage(screenshotResult);
   const coordinateTargetWindowHandle = resolveCoordinateTargetWindowHandle(
     screenshot,
@@ -708,15 +1330,14 @@ async function observeComputerState(options: {
     const recoveredScreenshot = await recoverWindowScreenshot({
       computerTool: options.computerTool,
       windowHandle: options.preferredUiWindowHandle,
-      failedMethod: options.nextScreenshot?.methodUsed,
+      failedMethod: options.nextScreenshot?.screenshot.methodUsed,
       config: options.config,
       signal: options.signal,
     });
     if (recoveredScreenshot) {
-      return {
-        screenshot: recoveredScreenshot,
-        windowList,
-        uiContext: preferredUiContext ?? await getUiContext({
+      const recoveredScreenshotId = createScreenshotId(observationId, freshAt, recoveredScreenshot);
+      const [recoveredUiContext, recoveredLocalVision] = await Promise.all([
+        preferredUiContext ?? getUiContext({
           computerTool: options.computerTool,
           windowList,
           preferredHandle: options.preferredUiWindowHandle,
@@ -727,6 +1348,32 @@ async function observeComputerState(options: {
           bypassCache: options.bypassUiCache,
           includeValues: options.includeUiValues,
         }),
+        options.skipLocalVision ? Promise.resolve(undefined) : detectLocalVisionForObservation({
+          screenshot: recoveredScreenshot,
+          screenshotId: recoveredScreenshotId,
+          observationId,
+          windowHandle: options.preferredUiWindowHandle,
+          detector: options.localVisionDetector,
+          state: options.localVisionState,
+          config: options.config,
+          signal: options.signal,
+        }),
+      ]);
+  const fusedRecoveredLocalVision = fuseLocalVisionWithUiContext(
+        recoveredLocalVision,
+        recoveredUiContext,
+        recoveredScreenshot,
+        options.config.localVision,
+      );
+      return {
+        screenshot: recoveredScreenshot,
+        screenshotVisionSource: "full",
+        id: observationId,
+        screenshotId: recoveredScreenshotId,
+        windowList,
+        uiContext: recoveredUiContext,
+        localVision: fusedRecoveredLocalVision,
+        screenshotWindowHandle: options.preferredUiWindowHandle,
         preferredUiWindowHandle: options.preferredUiWindowHandle,
         coordinateTargetWindowHandle: resolveCoordinateTargetWindowHandle(
           recoveredScreenshot,
@@ -738,28 +1385,1366 @@ async function observeComputerState(options: {
       };
     }
   }
-  const uiContext = preferredUiContext ?? await getUiContext({
-    computerTool: options.computerTool,
-    windowList,
-    preferredHandle: options.preferredUiWindowHandle,
-    uiCache: options.uiCache,
-    config: options.config,
-    signal: options.signal,
-    freshAt,
-    bypassCache: options.bypassUiCache,
-    includeValues: options.includeUiValues,
-  });
+  const [uiContext, localVision] = await Promise.all([
+    preferredUiContext ?? getUiContext({
+      computerTool: options.computerTool,
+      windowList,
+      preferredHandle: options.preferredUiWindowHandle,
+      uiCache: options.uiCache,
+      config: options.config,
+      signal: options.signal,
+      freshAt,
+      bypassCache: options.bypassUiCache,
+      includeValues: options.includeUiValues,
+    }),
+    earlyLocalVisionPromise,
+  ]);
+  const fusedLocalVision = fuseLocalVisionWithUiContext(
+    localVision,
+    uiContext,
+    screenshot,
+    options.config.localVision,
+  );
 
   return {
     screenshot,
+    screenshotVisionSource: screenshot ? screenshotVisionSource : undefined,
+    screenshotWindowHandle: screenshot ? options.nextScreenshot?.windowHandle : undefined,
+    id: observationId,
+    screenshotId,
     windowList,
     uiContext,
+    localVision: fusedLocalVision,
     preferredUiWindowHandle: options.preferredUiWindowHandle,
     coordinateTargetWindowHandle,
     freshAt,
     error: screenshot || windowList || uiContext ? undefined : screenshotError,
     screenshotError,
   };
+}
+
+function normalizeComputerUseLoopConfig(
+  input: ComputerUseLoopOptions["config"],
+): ComputerUseLoopConfig {
+  const mergedLocalVision = {
+    ...DEFAULT_COMPUTER_USE_CONFIG.localVision,
+    ...input?.localVision,
+  };
+  const timeouts = normalizeTimeouts(input?.timeouts);
+  return {
+    ...DEFAULT_COMPUTER_USE_CONFIG,
+    ...input,
+    maxSteps: clampInteger(
+      input?.maxSteps,
+      1,
+      MAX_COMPUTER_USE_STEPS,
+      DEFAULT_COMPUTER_USE_CONFIG.maxSteps,
+    ),
+    historySteps: clampInteger(
+      input?.historySteps,
+      0,
+      MAX_COMPUTER_USE_HISTORY_STEPS,
+      DEFAULT_COMPUTER_USE_CONFIG.historySteps,
+    ),
+    stepDeadlineMs: normalizeStepDeadlineMs(input, timeouts),
+    heartbeatMs: clampInteger(
+      input?.heartbeatMs,
+      0,
+      5_000,
+      DEFAULT_COMPUTER_USE_CONFIG.heartbeatMs,
+    ),
+    uiCacheMs: clampInteger(
+      input?.uiCacheMs,
+      0,
+      60_000,
+      DEFAULT_COMPUTER_USE_CONFIG.uiCacheMs,
+    ),
+    mouseSpeed: normalizeMouseSpeed(input?.mouseSpeed),
+    mouseDurationMs: clampInteger(
+      input?.mouseDurationMs,
+      0,
+      1_000,
+      DEFAULT_COMPUTER_USE_CONFIG.mouseDurationMs,
+    ),
+    typeDelayMs: clampInteger(
+      input?.typeDelayMs,
+      0,
+      500,
+      DEFAULT_COMPUTER_USE_CONFIG.typeDelayMs,
+    ),
+    deniedWindowPatterns: normalizeDeniedWindowPatterns(input?.deniedWindowPatterns),
+    timeouts,
+    localVision: normalizeLocalVisionConfig(mergedLocalVision),
+  };
+}
+
+function normalizeMouseSpeed(value: unknown): ComputerUseLoopConfig["mouseSpeed"] {
+  return value === "linear" ? "linear" : "instant";
+}
+
+function normalizeDeniedWindowPatterns(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const normalized = item.replace(/\s+/g, " ").trim().slice(0, 120);
+    const key = normalized.toLowerCase();
+    if (!normalized || seen.has(key)) continue;
+    seen.add(key);
+    output.push(normalized);
+    if (output.length >= 32) break;
+  }
+  return output;
+}
+
+function normalizeTimeouts(
+  input: NonNullable<ComputerUseLoopOptions["config"]>["timeouts"] | undefined,
+): ComputerUseLoopConfig["timeouts"] {
+  const merged = {
+    ...DEFAULT_COMPUTER_USE_CONFIG.timeouts,
+    ...(input ?? {}),
+  };
+  return {
+    listWindowsMs: clampTimeout("listWindowsMs", merged.listWindowsMs),
+    inspectUiMs: clampTimeout("inspectUiMs", merged.inspectUiMs),
+    screenshotMs: clampTimeout("screenshotMs", merged.screenshotMs),
+    lowRiskWriteMs: clampTimeout("lowRiskWriteMs", merged.lowRiskWriteMs),
+    textWriteMs: clampTimeout("textWriteMs", merged.textWriteMs),
+    modelMs: clampTimeout("modelMs", merged.modelMs),
+    approvalMs: clampTimeout("approvalMs", merged.approvalMs),
+    verificationMs: clampTimeout("verificationMs", merged.verificationMs),
+  };
+}
+
+function clampTimeout(
+  key: keyof ComputerUseLoopConfig["timeouts"],
+  value: unknown,
+): number {
+  const limits = TIMEOUT_LIMITS[key];
+  return clampInteger(value, limits.min, limits.max, DEFAULT_COMPUTER_USE_CONFIG.timeouts[key]);
+}
+
+function normalizeStepDeadlineMs(
+  input: ComputerUseLoopOptions["config"],
+  timeouts: ComputerUseLoopConfig["timeouts"],
+): number {
+  const observationBudget = Math.max(
+    timeouts.screenshotMs,
+    timeouts.listWindowsMs,
+    timeouts.inspectUiMs,
+  );
+  const actionBudget = Math.max(
+    timeouts.lowRiskWriteMs,
+    timeouts.textWriteMs,
+    timeouts.screenshotMs,
+    timeouts.listWindowsMs,
+    timeouts.inspectUiMs,
+  );
+  const computedDeadline = Math.max(
+    DEFAULT_COMPUTER_USE_CONFIG.stepDeadlineMs,
+    observationBudget + timeouts.modelMs + timeouts.approvalMs + actionBudget + timeouts.verificationMs + 1_000,
+  );
+  return clampInteger(input?.stepDeadlineMs, 250, MAX_STEP_DEADLINE_MS, computedDeadline);
+}
+
+function normalizeLocalVisionConfig(
+  input: ComputerUseLoopConfig["localVision"],
+): ComputerUseLoopConfig["localVision"] {
+  const mode = input.mode === "passive" || input.mode === "prompt_hint" ? input.mode : "off";
+  const modelPath = typeof input.modelPath === "string" ? sanitizeLocalVisionPathInput(input.modelPath) : "";
+  const enabled = input.enabled === true && mode !== "off" && modelPath.length > 0;
+  const runtimeAdapterPath = typeof input.runtimeAdapterPath === "string" ? sanitizeLocalVisionPathInput(input.runtimeAdapterPath) : "";
+  return {
+    enabled,
+    mode: enabled ? mode : "off",
+    modelPath: modelPath || undefined,
+    runtime: normalizeLocalVisionRuntime(input.runtime),
+    runtimeAdapterPath: runtimeAdapterPath || undefined,
+    reuseWorker: input.reuseWorker === true,
+    imgsz: clampInteger(input.imgsz, 320, 1280, DEFAULT_COMPUTER_USE_CONFIG.localVision.imgsz),
+    timeoutMs: clampInteger(input.timeoutMs, 20, 2_000, DEFAULT_COMPUTER_USE_CONFIG.localVision.timeoutMs),
+    maxDetections: clampInteger(input.maxDetections, 1, 100, DEFAULT_COMPUTER_USE_CONFIG.localVision.maxDetections),
+    promptTopK: clampInteger(input.promptTopK, 0, 20, DEFAULT_COMPUTER_USE_CONFIG.localVision.promptTopK),
+    minConfidence: clampNumber(input.minConfidence, 0, 1, DEFAULT_COMPUTER_USE_CONFIG.localVision.minConfidence),
+    iouThreshold: normalizeIouThreshold(input.iouThreshold),
+    labelMap: sanitizeLocalVisionLabelMap(input.labelMap),
+    disableAfterConsecutiveTimeouts: clampInteger(
+      input.disableAfterConsecutiveTimeouts,
+      0,
+      10,
+      DEFAULT_COMPUTER_USE_CONFIG.localVision.disableAfterConsecutiveTimeouts,
+    ),
+    disableAfterConsecutiveErrors: clampInteger(
+      input.disableAfterConsecutiveErrors,
+      0,
+      10,
+      DEFAULT_COMPUTER_USE_CONFIG.localVision.disableAfterConsecutiveErrors,
+    ),
+    disableAfterConsecutiveActionFailures: clampInteger(
+      input.disableAfterConsecutiveActionFailures,
+      0,
+      10,
+      DEFAULT_COMPUTER_USE_CONFIG.localVision.disableAfterConsecutiveActionFailures,
+    ),
+  };
+}
+
+function normalizeLocalVisionRuntime(value: unknown): ComputerUseLoopConfig["localVision"]["runtime"] {
+  return value === "onnxruntime" || value === "openvino" || value === "tensorrt" ? value : "auto";
+}
+
+function effectiveLocalVisionImgSize(
+  state: LocalVisionRuntimeState,
+  config: ComputerUseLoopConfig["localVision"],
+): number {
+  return clampLocalVisionImgSize(state.effectiveImgSize ?? config.imgsz);
+}
+
+function clampLocalVisionImgSize(value: number): number {
+  return Math.min(1280, Math.max(320, Math.trunc(value)));
+}
+
+function clampInteger(value: unknown, min: number, max: number, fallback: number): number {
+  const numberValue = typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : fallback;
+  return Math.min(max, Math.max(min, numberValue));
+}
+
+function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
+  const numberValue = typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  return Math.min(max, Math.max(min, numberValue));
+}
+
+function normalizeIouThreshold(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1
+    ? value
+    : DEFAULT_COMPUTER_USE_CONFIG.localVision.iouThreshold;
+}
+
+function sanitizeLocalVisionLabelMap(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const output: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value).slice(0, 256)) {
+    if (typeof entry !== "string") continue;
+    const normalizedKey = sanitizeLocalVisionLabelMapText(key, 32);
+    const normalizedValue = sanitizeLocalVisionLabelMapText(entry, 80);
+    if (normalizedKey && normalizedValue) {
+      output[normalizedKey] = normalizedValue;
+    }
+  }
+  return Object.keys(output).length > 0 ? output : undefined;
+}
+
+function sanitizeLocalVisionLabelMapText(value: string, maxLength: number): string {
+  return sanitizeLocalVisionText(value.trim(), maxLength);
+}
+
+function sanitizeLocalVisionPathInput(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed || LOCAL_VISION_IMAGE_DATA_URL_PATTERN.test(trimmed)) {
+    return "";
+  }
+  return trimmed.slice(0, LOCAL_VISION_PATH_INPUT_MAX_LENGTH);
+}
+
+function autoCropOptionalWaitMs(config: ComputerUseLoopConfig): number {
+  return Math.max(
+    1,
+    Math.min(
+      config.timeouts.screenshotMs,
+      config.localVision.timeoutMs,
+      AUTO_CROP_OPTIONAL_WAIT_MAX_MS,
+    ),
+  );
+}
+
+function localVisionObserveWaitMs(config: ComputerUseLoopConfig): number {
+  return Math.max(1, Math.min(config.localVision.timeoutMs, LOCAL_VISION_OBSERVE_WAIT_MAX_MS));
+}
+
+async function detectLocalVisionForObservation(
+  options: Parameters<typeof detectLocalVision>[0],
+): Promise<LocalVisionObservation | undefined> {
+  const { localVision } = options.config;
+  if (!localVision.enabled || localVision.mode === "off") {
+    return undefined;
+  }
+  const waitMs = localVisionObserveWaitMs(options.config);
+  const controller = createLocalVisionObserveAbortController(options.signal, waitMs);
+  try {
+    return await detectLocalVision({
+      ...options,
+      signal: controller.signal,
+      timeoutMsOverride: waitMs,
+    });
+  } finally {
+    controller.dispose();
+  }
+}
+
+function createLocalVisionObserveAbortController(parentSignal: AbortSignal, waitMs: number) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    controller.abort(new Error(`local vision observe wait timed out after ${waitMs}ms`));
+  }, waitMs);
+  const abortFromParent = () => controller.abort(parentSignal.reason ?? new Error("Computer Use cancelled."));
+  if (parentSignal.aborted) {
+    abortFromParent();
+  } else {
+    parentSignal.addEventListener("abort", abortFromParent, { once: true });
+  }
+  return {
+    signal: controller.signal,
+    dispose() {
+      clearTimeout(timeoutId);
+      parentSignal.removeEventListener("abort", abortFromParent);
+    },
+  };
+}
+
+function createObservationId(freshAt: string): string {
+  observationIdSequence += 1;
+  return `obs_${freshAt}_${observationIdSequence}`;
+}
+
+function createScreenshotId(
+  observationId: string,
+  freshAt: string,
+  screenshot: ComputerScreenshotResult | undefined,
+): string {
+  const capturedAt = screenshot?.capturedAt ?? freshAt;
+  const size = screenshot ? `${screenshot.width}x${screenshot.height}` : "unavailable";
+  const source = screenshot
+    ? `${screenshot.sourceOriginX ?? 0},${screenshot.sourceOriginY ?? 0},${screenshot.sourceWidth ?? screenshot.width}x${screenshot.sourceHeight ?? screenshot.height},${screenshot.scaleX ?? 1},${screenshot.scaleY ?? 1},${screenshot.methodUsed ?? "unknown"}`
+    : "unavailable";
+  return `shot_${observationId}_${freshAt}_${capturedAt}_${size}_${source}`;
+}
+
+function createSkippedLocalVisionObservation(options: {
+  screenshotId: string;
+  observationId: string;
+  config: ComputerUseLoopConfig;
+  error: string;
+}): LocalVisionObservation | undefined {
+  const { localVision } = options.config;
+  if (!localVision.enabled || localVision.mode === "off") {
+    return undefined;
+  }
+  return {
+    screenshotId: options.screenshotId,
+    observationId: options.observationId,
+    enabled: true,
+    used: false,
+    skipRuntimeStateUpdate: true,
+    mode: "disabled",
+    detections: [],
+    candidates: [],
+    promptCandidates: [],
+    timeoutMs: options.config.localVision.timeoutMs,
+    error: options.error,
+  };
+}
+
+async function detectLocalVision(options: {
+  screenshot: ComputerScreenshotResult | undefined;
+  screenshotId: string;
+  observationId: string;
+  windowHandle: number | undefined;
+  detector: ComputerTool["detectUiObjects"];
+  state: LocalVisionRuntimeState;
+  config: ComputerUseLoopConfig;
+  signal: AbortSignal;
+  timeoutMsOverride?: number;
+}): Promise<LocalVisionObservation | undefined> {
+  const { localVision } = options.config;
+  const detectionTimeoutMs = options.timeoutMsOverride ?? localVision.timeoutMs;
+  const effectiveImgSize = effectiveLocalVisionImgSize(options.state, localVision);
+  const configuredModel = sanitizeLocalVisionModelName(localVision.modelPath);
+  if (!localVision.enabled || localVision.mode === "off") {
+    return undefined;
+  }
+  if (options.state.disabled) {
+    const error = localVisionDisabledReason(options.state);
+    return {
+      screenshotId: options.screenshotId,
+      observationId: options.observationId,
+      enabled: true,
+      used: false,
+      mode: "disabled",
+      configuredModel,
+      reuseWorker: localVision.reuseWorker,
+      imgsz: effectiveImgSize,
+      timeoutMs: detectionTimeoutMs,
+      detections: [],
+      candidates: [],
+      promptCandidates: [],
+      error,
+    };
+  }
+  if (!options.screenshot) {
+    return {
+      screenshotId: options.screenshotId,
+      observationId: options.observationId,
+      enabled: true,
+      used: false,
+      mode: "disabled",
+      configuredModel,
+      reuseWorker: localVision.reuseWorker,
+      imgsz: effectiveImgSize,
+      timeoutMs: detectionTimeoutMs,
+      detections: [],
+      candidates: [],
+      promptCandidates: [],
+      error: "screenshot unavailable",
+    };
+  }
+  if (!options.detector) {
+    return {
+      screenshotId: options.screenshotId,
+      observationId: options.observationId,
+      enabled: true,
+      used: false,
+      mode: "not_available",
+      configuredModel,
+      reuseWorker: localVision.reuseWorker,
+      imgsz: effectiveImgSize,
+      timeoutMs: detectionTimeoutMs,
+      detections: [],
+      candidates: [],
+      promptCandidates: [],
+      error: "local vision detector is not available",
+    };
+  }
+  if (!localVision.modelPath?.trim()) {
+    return {
+      screenshotId: options.screenshotId,
+      observationId: options.observationId,
+      enabled: true,
+      used: false,
+      mode: "not_available",
+      configuredModel,
+      reuseWorker: localVision.reuseWorker,
+      imgsz: effectiveImgSize,
+      timeoutMs: detectionTimeoutMs,
+      detections: [],
+      candidates: [],
+      promptCandidates: [],
+      error: "local vision modelPath is not configured",
+    };
+  }
+
+  try {
+    const result = await withTimeout(
+      Promise.resolve(options.detector({
+        imageDataUrl: options.screenshot.dataUrl,
+        screenshotId: options.screenshotId,
+        observationId: options.observationId,
+        windowHandle: options.windowHandle,
+        modelPath: localVision.modelPath,
+        runtime: localVision.runtime,
+        runtimeAdapterPath: localVision.runtimeAdapterPath,
+        reuseWorker: localVision.reuseWorker,
+        imgsz: effectiveImgSize,
+        maxDetections: localVision.maxDetections,
+        minConfidence: localVision.minConfidence,
+        iouThreshold: localVision.iouThreshold,
+        timeoutMs: detectionTimeoutMs,
+        labelMap: localVision.labelMap,
+      })),
+      detectionTimeoutMs,
+      "computer.detectUiObjects",
+      options.signal,
+    );
+    if (result.screenshotId !== options.screenshotId) {
+      return {
+        screenshotId: options.screenshotId,
+        observationId: options.observationId,
+        enabled: true,
+        used: false,
+        mode: "disabled",
+        model: result.model,
+        configuredModel,
+        runtime: result.runtime,
+        reuseWorker: localVision.reuseWorker,
+        imgsz: effectiveImgSize,
+        timeoutMs: detectionTimeoutMs,
+        latencyMs: result.latencyMs,
+        detections: [],
+        candidates: [],
+        promptCandidates: [],
+        diagnostics: sanitizeLocalVisionDiagnostics(result.diagnostics),
+        error: sanitizeLocalVisionText(`discarded stale local vision result for ${result.screenshotId}`),
+      };
+    }
+    if (result.timedOut) {
+      return {
+        screenshotId: options.screenshotId,
+        observationId: options.observationId,
+        enabled: true,
+        used: false,
+        mode: "timeout",
+        model: result.model,
+        configuredModel,
+        runtime: result.runtime,
+        reuseWorker: localVision.reuseWorker,
+        imgsz: effectiveImgSize,
+        timeoutMs: detectionTimeoutMs,
+        latencyMs: result.latencyMs,
+        detections: [],
+        candidates: [],
+        promptCandidates: [],
+        diagnostics: sanitizeLocalVisionDiagnostics(result.diagnostics),
+        error: sanitizeLocalVisionError(result.error),
+      };
+    }
+    if (result.error) {
+      return {
+        screenshotId: options.screenshotId,
+        observationId: options.observationId,
+        enabled: true,
+        used: false,
+        mode: "error",
+        model: result.model,
+        configuredModel,
+        runtime: result.runtime,
+        reuseWorker: localVision.reuseWorker,
+        imgsz: effectiveImgSize,
+        timeoutMs: detectionTimeoutMs,
+        latencyMs: result.latencyMs,
+        detections: [],
+        candidates: [],
+        promptCandidates: [],
+        diagnostics: sanitizeLocalVisionDiagnostics(result.diagnostics),
+        error: sanitizeLocalVisionError(result.error),
+      };
+    }
+    const detections = sanitizeLocalVisionDetections(
+      result,
+      options.screenshot,
+      localVision.maxDetections,
+      localVision.minConfidence,
+    );
+    const canUseUiCandidates = canUseLocalVisionModelForUiCandidates(result.model, localVision.modelPath);
+    const candidates = canUseUiCandidates
+      ? buildUiCandidatesFromDetections(detections)
+      : [];
+    return {
+      screenshotId: options.screenshotId,
+      observationId: options.observationId,
+      enabled: true,
+      used: canUseUiCandidates && detections.length > 0,
+      mode: result.timedOut ? "timeout" : localVision.mode,
+      model: result.model,
+      configuredModel,
+      runtime: result.runtime,
+      reuseWorker: localVision.reuseWorker,
+      imgsz: effectiveImgSize,
+      timeoutMs: detectionTimeoutMs,
+      latencyMs: result.latencyMs,
+      detections,
+      candidates,
+      promptCandidates: canUseUiCandidates && localVision.mode === "prompt_hint"
+        ? selectPromptCandidates(candidates, localVision.minConfidence, localVision.promptTopK)
+        : [],
+      diagnostics: sanitizeLocalVisionDiagnostics(result.diagnostics),
+      error: sanitizeLocalVisionError(result.error),
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      screenshotId: options.screenshotId,
+      observationId: options.observationId,
+      enabled: true,
+      used: false,
+      mode: /timed out/i.test(message) ? "timeout" : "error",
+      configuredModel,
+      reuseWorker: localVision.reuseWorker,
+      imgsz: effectiveImgSize,
+      timeoutMs: detectionTimeoutMs,
+      detections: [],
+      candidates: [],
+      promptCandidates: [],
+      error: sanitizeLocalVisionText(message),
+    };
+  }
+}
+
+function sanitizeLocalVisionDiagnostics(value: unknown, depth = 0): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const output: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value).slice(0, 24)) {
+    const sanitized = sanitizeLocalVisionDiagnosticValue(entry, depth + 1);
+    if (sanitized !== undefined) {
+      output[sanitizeLocalVisionDiagnosticKey(key)] = sanitized;
+    }
+  }
+  return Object.keys(output).length > 0 ? output : undefined;
+}
+
+function sanitizeLocalVisionModelName(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = redactImageDataUrlsForRecord(value.trim());
+  if (!trimmed) return undefined;
+  const filename = trimmed.replace(/\\/g, "/").split("/").filter(Boolean).pop();
+  return (filename || "[redacted local path]").slice(0, 160);
+}
+
+function canUseLocalVisionModelForUiCandidates(...models: Array<string | undefined>): boolean {
+  return models.every((model) =>
+    localVisionModelPurposeWarning(sanitizeLocalVisionModelName(model)) === undefined
+  );
+}
+
+function sanitizeLocalVisionError(value: string | undefined): string | undefined {
+  return value ? sanitizeLocalVisionText(value, 320) : undefined;
+}
+
+function sanitizeLocalVisionText(value: string, maxLength = 160): string {
+  const redacted = redactImageDataUrlsForRecord(redactLocalVisionPaths(value));
+  return redacted.length > maxLength ? `${redacted.slice(0, maxLength - 3)}...` : redacted;
+}
+
+function redactLocalVisionPaths(value: string): string {
+  LOCAL_VISION_PATH_PATTERN.lastIndex = 0;
+  const redacted = value.replace(LOCAL_VISION_PATH_PATTERN, (match) => {
+    const { path, suffix } = splitLocalVisionPathMatch(match);
+    const filename = localVisionPathFilename(path);
+    const redaction = filename ? `[redacted local path:${filename}]` : "[redacted local path]";
+    return `${redaction}${suffix}`;
+  });
+  LOCAL_VISION_PATH_PATTERN.lastIndex = 0;
+  return redacted;
+}
+
+function splitLocalVisionPathMatch(match: string): { path: string; suffix: string } {
+  const lower = match.toLowerCase();
+  let end = match.length;
+  for (const extension of LOCAL_VISION_PATH_EXTENSIONS) {
+    const extensionEnd = lower.lastIndexOf(extension);
+    if (extensionEnd < 0) continue;
+    const candidateEnd = extensionEnd + extension.length;
+    if (!/[\\/]/.test(match.slice(candidateEnd)) && candidateEnd < end) {
+      end = candidateEnd;
+    }
+  }
+  while (end > 0 && /[)\]}.;:,]/.test(match[end - 1] ?? "")) {
+    end -= 1;
+  }
+  return {
+    path: match.slice(0, end),
+    suffix: match.slice(end),
+  };
+}
+
+function localVisionPathFilename(value: string): string | undefined {
+  const normalized = value
+    .replace(/^file:\/\/\/?/i, "")
+    .replace(/\\/g, "/")
+    .replace(/[)\]}.;:,]+$/g, "");
+  return normalized.split("/").filter(Boolean).pop();
+}
+
+function sanitizeLocalVisionDiagnosticKey(value: string): string {
+  if (containsImageDataUrl(value)) {
+    return "[redacted image key]";
+  }
+  return sanitizeLocalVisionText(value, 80);
+}
+
+function sanitizeLocalVisionDiagnosticValue(value: unknown, depth: number): unknown {
+  if (value === null || value === undefined || depth > 3) return undefined;
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    if (containsImageDataUrl(value)) {
+      return "[redacted image data]";
+    }
+    return sanitizeLocalVisionText(value, 160);
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 24)
+      .map((entry) => sanitizeLocalVisionDiagnosticValue(entry, depth + 1))
+      .filter((entry) => entry !== undefined);
+  }
+  if (typeof value === "object") {
+    return sanitizeLocalVisionDiagnostics(value, depth);
+  }
+  return undefined;
+}
+
+function sanitizeLocalVisionDetections(
+  result: ComputerDetectUiObjectsResult,
+  screenshot: ComputerScreenshotResult,
+  maxDetections: number,
+  minConfidence: number,
+): ComputerUiDetection[] {
+  return result.detections
+    .filter((detection) =>
+      Number.isFinite(detection.confidence) &&
+      detection.confidence >= minConfidence &&
+      detection.box.coordinateSpace === "screenshot" &&
+      detection.center.coordinateSpace === "screenshot" &&
+      isFiniteDetectionBox(detection.box) &&
+      isFiniteDetectionPoint(detection.center) &&
+      detectionCenterInsideScreenshot(detection, screenshot) &&
+      detectionBoxOverlapsScreenshot(detection.box, screenshot)
+    )
+    .sort((left, right) => right.confidence - left.confidence)
+    .slice(0, Math.max(maxDetections, 0))
+    .map((detection, index) => ({
+      ...detection,
+      id: sanitizeLocalVisionDetectionText(detection.id, 120) || `det_${index + 1}`,
+      label: sanitizeLocalVisionDetectionText(detection.label, 120) || "unknown_region",
+      box: clampDetectionBoxToScreenshot(detection.box, screenshot),
+    }))
+    .filter((detection) => isFiniteDetectionBox(detection.box));
+}
+
+function sanitizeLocalVisionDetectionText(value: string, maxLength: number): string {
+  return sanitizeLocalVisionText(value.trim(), maxLength);
+}
+
+function isFiniteDetectionBox(box: ComputerUiDetection["box"]): boolean {
+  return Number.isFinite(box.x) &&
+    Number.isFinite(box.y) &&
+    Number.isFinite(box.width) &&
+    Number.isFinite(box.height) &&
+    box.width > 0 &&
+    box.height > 0;
+}
+
+function isFiniteDetectionPoint(point: ComputerUiDetection["center"]): boolean {
+  return Number.isFinite(point.x) && Number.isFinite(point.y);
+}
+
+function detectionCenterInsideScreenshot(
+  detection: ComputerUiDetection,
+  screenshot: ComputerScreenshotResult,
+): boolean {
+  return detection.center.x >= 0 &&
+    detection.center.y >= 0 &&
+    detection.center.x <= screenshot.width &&
+    detection.center.y <= screenshot.height;
+}
+
+function detectionBoxOverlapsScreenshot(
+  box: ComputerUiDetection["box"],
+  screenshot: ComputerScreenshotResult,
+): boolean {
+  return box.x < screenshot.width &&
+    box.y < screenshot.height &&
+    box.x + box.width > 0 &&
+    box.y + box.height > 0;
+}
+
+function clampDetectionBoxToScreenshot(
+  box: ComputerUiDetection["box"],
+  screenshot: ComputerScreenshotResult,
+): ComputerUiDetection["box"] {
+  const x = Math.max(0, Math.min(screenshot.width, box.x));
+  const y = Math.max(0, Math.min(screenshot.height, box.y));
+  const right = Math.max(x, Math.min(screenshot.width, box.x + box.width));
+  const bottom = Math.max(y, Math.min(screenshot.height, box.y + box.height));
+  return {
+    ...box,
+    x,
+    y,
+    width: right - x,
+    height: bottom - y,
+    screenshotSize: {
+      width: screenshot.width,
+      height: screenshot.height,
+    },
+  };
+}
+
+function mapScreenRectToScreenshotBox(
+  rect: { x: number; y: number; width: number; height: number },
+  screenshot: ComputerScreenshotResult,
+  windowHandle: number,
+): ComputerUiDetection["box"] | undefined {
+  const scaleX = positiveNumberOrDefault(screenshot.scaleX, 1);
+  const scaleY = positiveNumberOrDefault(screenshot.scaleY, 1);
+  const originX = finiteNumberOrDefault(screenshot.sourceOriginX, 0);
+  const originY = finiteNumberOrDefault(screenshot.sourceOriginY, 0);
+  const x = (rect.x - originX) * scaleX;
+  const y = (rect.y - originY) * scaleY;
+  const width = rect.width * scaleX;
+  const height = rect.height * scaleY;
+  const box: ComputerUiDetection["box"] = {
+    x,
+    y,
+    width,
+    height,
+    coordinateSpace: "screenshot",
+    screenshotSize: {
+      width: screenshot.width,
+      height: screenshot.height,
+    },
+    windowHandle,
+  };
+  if (!isFiniteDetectionBox(box) || !detectionBoxOverlapsScreenshot(box, screenshot)) {
+    return undefined;
+  }
+  return clampDetectionBoxToScreenshot(box, screenshot);
+}
+
+function buildUiCandidatesFromDetections(detections: ComputerUiDetection[]): LocalUiCandidate[] {
+  return detections
+    .map((detection): LocalUiCandidate => ({
+      id: `candidate_${detection.id}`,
+      kind: mapDetectionLabelToCandidateKind(detection.label),
+      box: detection.box,
+      center: detection.center,
+      text: detection.label,
+      score: detection.confidence,
+      evidence: {
+        yolo: {
+          detectionIds: [detection.id],
+          confidence: detection.confidence,
+        },
+      },
+      riskHint: riskHintForDetectionLabel(detection.label),
+    }))
+    .map(applyExecutionPolicy)
+    .sort((left, right) => right.score - left.score);
+}
+
+function mapDetectionLabelToCandidateKind(label: string): LocalUiCandidateKind {
+  const normalized = label.toLowerCase().replace(/[\s-]+/g, "_");
+  switch (normalized) {
+    case "button":
+    case "possible_button":
+      return "possible_button";
+    case "input":
+    case "text_input":
+    case "possible_input":
+    case "possible_text_area":
+      return "possible_input";
+    case "checkbox":
+    case "possible_checkbox":
+      return "possible_checkbox";
+    case "radio":
+      return "possible_checkbox";
+    case "dropdown":
+    case "possible_dropdown":
+      return "possible_dropdown";
+    case "menu":
+    case "menu_item":
+    case "possible_menu_item":
+      return "possible_menu_item";
+    case "dialog":
+    case "modal":
+    case "possible_dialog":
+      return "possible_dialog";
+    case "icon":
+    case "possible_icon":
+      return "possible_icon";
+    case "table_cell":
+    case "possible_table_cell":
+      return "possible_table_cell";
+    case "link":
+    case "possible_link":
+      return "possible_link";
+    default:
+      return "unknown_region";
+  }
+}
+
+const LOCAL_VISION_HIGH_RISK_TEXT_PATTERN =
+  /dialog|modal|submit|delete|remove|pay|purchase|overwrite|send|publish|install|grant|permission|password|token|secret|credential|删除|移除|付款|支付|购买|转账|提交|发送|发布|覆盖|安装|授权|权限|密码|令牌|密钥|凭据|凭证/i;
+
+function riskHintForDetectionLabel(label: string): "low" | "medium" | "high" {
+  if (LOCAL_VISION_HIGH_RISK_TEXT_PATTERN.test(label)) {
+    return "high";
+  }
+  const normalized = label.toLowerCase();
+  if (/input|text|dropdown|table/.test(normalized)) {
+    return "medium";
+  }
+  return "low";
+}
+
+function selectPromptCandidates(
+  candidates: LocalUiCandidate[],
+  minConfidence: number,
+  promptTopK: number,
+): LocalUiCandidate[] {
+  return candidates
+    .filter((candidate) => candidate.score >= minConfidence && candidate.evidence.yolo)
+    .map(rankPromptCandidate)
+    .sort((left, right) => right.promptRankScore - left.promptRankScore)
+    .map(({ promptRankScore: _promptRankScore, ...candidate }) => candidate)
+    .slice(0, Math.max(promptTopK, 0));
+}
+
+function selectAutoCropCandidate(options: {
+  userGoal: string;
+  screenshot: ComputerScreenshotResult;
+  localVision: LocalVisionObservation | undefined;
+}): { candidate: LocalUiCandidate; region: ComputerScreenshotRegion; reason: string } | undefined {
+  const localVision = options.localVision;
+  if (
+    !localVision ||
+    localVision.mode !== "prompt_hint" ||
+    localVision.promptCandidates.length === 0
+  ) {
+    return undefined;
+  }
+  const goalText = normalizeMatchText(options.userGoal);
+  if (!goalText) return undefined;
+  for (const candidate of localVision.promptCandidates) {
+    const region = candidate.box
+      ? paddedScreenshotRegion(candidate.box, options.screenshot, AUTO_CROP_PADDING_PX)
+      : undefined;
+    if (
+      !region ||
+      candidate.riskHint === "high" ||
+      candidate.score < AUTO_CROP_MIN_SCORE ||
+      !candidateMatchesGoal(candidate, goalText) ||
+      isOversizedCrop(region, options.screenshot, AUTO_CROP_MAX_AREA_RATIO)
+    ) {
+      continue;
+    }
+    const source = candidate.evidence.uia && candidate.evidence.yolo
+      ? "uia+yolo"
+      : candidate.evidence.uia
+        ? "uia"
+        : "yolo";
+    return {
+      candidate,
+      region,
+      reason: `auto crop for ${source} candidate ${candidate.id}`,
+    };
+  }
+  return undefined;
+}
+
+function candidateMatchesGoal(candidate: LocalUiCandidate, normalizedGoal: string): boolean {
+  return candidateMatchTokens(candidate).some((token) =>
+    token.length >= 3 && (normalizedGoal.includes(token) || token.includes(normalizedGoal))
+  );
+}
+
+function paddedScreenshotRegion(
+  box: ComputerUiDetection["box"],
+  screenshot: ComputerScreenshotResult,
+  padding: number,
+): ComputerScreenshotRegion | undefined {
+  const x = Math.max(0, Math.floor(box.x - padding));
+  const y = Math.max(0, Math.floor(box.y - padding));
+  const right = Math.min(screenshot.width, Math.ceil(box.x + box.width + padding));
+  const bottom = Math.min(screenshot.height, Math.ceil(box.y + box.height + padding));
+  const width = right - x;
+  const height = bottom - y;
+  return width > 0 && height > 0 ? { x, y, width, height } : undefined;
+}
+
+function isOversizedCrop(
+  region: ComputerScreenshotRegion,
+  screenshot: ComputerScreenshotResult,
+  maxAreaRatio: number,
+): boolean {
+  const screenshotArea = screenshot.width * screenshot.height;
+  if (screenshotArea <= 0) return true;
+  return (region.width * region.height) / screenshotArea > maxAreaRatio;
+}
+
+async function captureAutoCropScreenshot(options: {
+  computerTool: ComputerTool;
+  windowHandle: number | undefined;
+  region: ComputerScreenshotRegion;
+  config: ComputerUseLoopConfig;
+  signal: AbortSignal;
+}): Promise<PendingScreenshotObservation | undefined> {
+  try {
+    const screenshot = await withTimeout(
+      invokeTool(() => options.computerTool.screenshot({
+        ...(options.windowHandle === undefined ? {} : { windowHandle: options.windowHandle }),
+        region: options.region,
+        method: "auto",
+      })),
+      options.config.timeouts.screenshotMs,
+      "computer.screenshot.autoCrop",
+      options.signal,
+    );
+    return { screenshot, source: "crop", windowHandle: options.windowHandle };
+  } catch {
+    return undefined;
+  }
+}
+
+function rankPromptCandidate(candidate: LocalUiCandidate): LocalUiCandidate & { promptRankScore: number } {
+  const policyCandidate = applyExecutionPolicy(candidate);
+  const hasUia = Boolean(policyCandidate.evidence.uia);
+  const hasYolo = Boolean(policyCandidate.evidence.yolo);
+  const sourceCount = localVisionCandidateSources(policyCandidate).length;
+  const riskPenalty = policyCandidate.riskHint === "high" ? 0.18 : policyCandidate.riskHint === "medium" ? 0.06 : 0;
+  const evidenceBoost = hasUia && hasYolo ? 0.36 : hasUia ? 0.2 : 0;
+  const yoloOnlyPenalty = hasYolo && !hasUia ? 0.18 : 0;
+  return {
+    ...policyCandidate,
+    rankReason: rankReasonForCandidate(policyCandidate, sourceCount),
+    promptRankScore: policyCandidate.score + evidenceBoost - riskPenalty - yoloOnlyPenalty,
+  };
+}
+
+function applyExecutionPolicy(candidate: LocalUiCandidate): LocalUiCandidate {
+  const sourceCount = localVisionCandidateSources(candidate).length;
+  return {
+    ...candidate,
+    executionMode: executionModeForCandidate(candidate),
+    rankReason: rankReasonForCandidate(candidate, sourceCount),
+  };
+}
+
+function executionModeForCandidate(candidate: LocalUiCandidate): NonNullable<LocalUiCandidate["executionMode"]> {
+  if (candidate.riskHint === "high") {
+    return candidate.evidence.uia ? "user_confirmation_required" : "not_allowed";
+  }
+  if (candidate.evidence.uia) {
+    return candidate.evidence.yolo ? "uia_or_vlm_confirmed" : "uia_only";
+  }
+  if (candidate.evidence.yolo) {
+    return "user_confirmation_required";
+  }
+  return "uia_or_vlm_confirmed";
+}
+
+function rankReasonForCandidate(candidate: LocalUiCandidate, sourceCount: number): string {
+  if (candidate.evidence.uia && candidate.evidence.yolo) {
+    return "uia+yolo evidence; prefer selector for execution";
+  }
+  if (candidate.evidence.uia) {
+    return "uia evidence; selector-capable candidate";
+  }
+  if (candidate.evidence.yolo) {
+    return sourceCount > 1
+      ? "visual candidate with supporting evidence"
+      : "yolo-only visual region; coordinate hint requires confirmation";
+  }
+  return "weak candidate; verify before action";
+}
+
+function fuseLocalVisionWithUiContext(
+  localVision: LocalVisionObservation | undefined,
+  uiContext: UiPromptContext | undefined,
+  screenshot: ComputerScreenshotResult | undefined,
+  config: ComputerUseLoopConfig["localVision"],
+): LocalVisionObservation | undefined {
+  if (!localVision || !uiContext) {
+    return localVision;
+  }
+  const uiCandidates = buildUiCandidatesFromUiContext(uiContext, screenshot);
+  if (uiCandidates.length === 0) {
+    return localVision;
+  }
+  const merged = mergeLocalCandidates(localVision.candidates, uiCandidates);
+  const canUsePromptCandidates = localVision.mode === "prompt_hint";
+  return {
+    ...localVision,
+    candidates: merged,
+    promptCandidates: canUsePromptCandidates
+      ? selectPromptCandidates(merged, config.minConfidence, config.promptTopK)
+      : [],
+  };
+}
+
+function updateLocalVisionRuntimeState(
+  state: LocalVisionRuntimeState,
+  localVision: LocalVisionObservation | undefined,
+  config: ComputerUseLoopConfig["localVision"],
+): void {
+  if (!localVision || !localVision.enabled || localVision.skipRuntimeStateUpdate) {
+    return;
+  }
+  if (localVision.mode === "timeout") {
+    state.consecutiveTimeouts += 1;
+    state.consecutiveErrors = 0;
+    state.consecutiveActionFailures = 0;
+    state.consecutiveSlowDetections = 0;
+    if (
+      config.disableAfterConsecutiveTimeouts > 0 &&
+      state.consecutiveTimeouts >= config.disableAfterConsecutiveTimeouts
+    ) {
+      state.disabled = true;
+      state.disabledReason = "timeout";
+    }
+    return;
+  }
+  if (
+    config.disableAfterConsecutiveErrors > 0 &&
+    localVision.error &&
+    localVision.detections.length === 0 &&
+    localVision.mode !== "disabled" &&
+    localVision.mode !== "not_available"
+  ) {
+    state.consecutiveErrors += 1;
+    state.consecutiveTimeouts = 0;
+    state.consecutiveActionFailures = 0;
+    state.consecutiveSlowDetections = 0;
+    if (state.consecutiveErrors >= config.disableAfterConsecutiveErrors) {
+      state.disabled = true;
+      state.disabledReason = "error";
+    }
+    return;
+  }
+  if (localVision.mode !== "disabled" || !state.disabled) {
+    state.consecutiveTimeouts = 0;
+    state.consecutiveErrors = 0;
+  }
+  updateLocalVisionPerformanceState(state, localVision, config);
+}
+
+function updateLocalVisionPerformanceState(
+  state: LocalVisionRuntimeState,
+  localVision: LocalVisionObservation,
+  config: ComputerUseLoopConfig["localVision"],
+): void {
+  if (state.disabled || localVision.mode !== "passive" && localVision.mode !== "prompt_hint") {
+    return;
+  }
+  const latencyMs = localVision.latencyMs;
+  if (typeof latencyMs !== "number" || !Number.isFinite(latencyMs)) {
+    return;
+  }
+  const timeoutBudgetMs = localVision.timeoutMs ?? config.timeoutMs;
+  const slowThresholdMs = Math.max(1, timeoutBudgetMs * LOCAL_VISION_SLOW_LATENCY_RATIO);
+  if (
+    latencyMs >= slowThresholdMs &&
+    config.imgsz > LOCAL_VISION_MIN_DYNAMIC_IMGSZ
+  ) {
+    state.consecutiveSlowDetections += 1;
+    if (state.consecutiveSlowDetections >= LOCAL_VISION_SLOW_DETECTION_THRESHOLD) {
+      state.effectiveImgSize = Math.min(config.imgsz, LOCAL_VISION_MIN_DYNAMIC_IMGSZ);
+    }
+    return;
+  }
+  state.consecutiveSlowDetections = 0;
+}
+
+function updateLocalVisionRuntimeTrace(
+  trace: ComputerUseStepTrace,
+  state: LocalVisionRuntimeState,
+): void {
+  if (!trace.localVision) return;
+  trace.localVision.consecutiveTimeouts = state.consecutiveTimeouts;
+  trace.localVision.consecutiveErrors = state.consecutiveErrors;
+  trace.localVision.consecutiveActionFailures = state.consecutiveActionFailures;
+  trace.localVision.consecutiveSlowDetections = state.consecutiveSlowDetections;
+  trace.localVision.effectiveImgSize = state.effectiveImgSize ?? trace.localVision.imgsz;
+  trace.localVision.disabledReason = state.disabledReason;
+}
+
+function updateLocalVisionActionFailureState(
+  state: LocalVisionRuntimeState,
+  localVision: LocalVisionObservation | undefined,
+  config: ComputerUseLoopConfig["localVision"],
+  action: ComputerUseAction,
+): void {
+  const selectedCandidate = selectCandidateForAction(localVision?.candidates ?? [], action);
+  if (
+    state.disabled ||
+    !localVision ||
+    localVision.mode !== "prompt_hint" ||
+    !selectedCandidate?.candidate.evidence.yolo ||
+    config.disableAfterConsecutiveActionFailures <= 0
+  ) {
+    return;
+  }
+  state.consecutiveActionFailures += 1;
+  if (state.consecutiveActionFailures >= config.disableAfterConsecutiveActionFailures) {
+    state.disabled = true;
+    state.disabledReason = "action_failure";
+  }
+}
+
+function localVisionDisabledReason(state: LocalVisionRuntimeState): string {
+  if (state.disabledReason === "error") {
+    return `local vision disabled after ${state.consecutiveErrors} consecutive errors`;
+  }
+  if (state.disabledReason === "action_failure") {
+    return `local vision disabled after ${state.consecutiveActionFailures} consecutive action failures`;
+  }
+  return `local vision disabled after ${state.consecutiveTimeouts} consecutive timeouts`;
+}
+
+function buildUiCandidatesFromUiContext(
+  context: UiPromptContext,
+  screenshot: ComputerScreenshotResult | undefined,
+): LocalUiCandidate[] {
+  return parseUiCandidates(context.tree)
+    .filter((candidate) => candidate.automationId || candidate.name)
+    .filter((candidate) => isPromptableUiControl(candidate.controlType))
+    .slice(0, 24)
+    .map((candidate, index): LocalUiCandidate => {
+      const kind = mapUiControlTypeToCandidateKind(candidate.controlType);
+      const box = candidate.bounds && screenshot
+        ? mapScreenRectToScreenshotBox(candidate.bounds, screenshot, context.windowHandle)
+        : undefined;
+      return {
+        id: `uia_${context.windowHandle}_${candidate.automationId || candidate.name || index}`,
+        kind,
+        ...(box ? {
+          box,
+          center: {
+            x: box.x + box.width / 2,
+            y: box.y + box.height / 2,
+            coordinateSpace: "screenshot" as const,
+          },
+        } : {}),
+        text: candidate.name || candidate.automationId || undefined,
+        score: 0.82,
+        evidence: {
+          uia: {
+            windowHandle: context.windowHandle,
+            controlType: candidate.controlType,
+            name: candidate.name || undefined,
+            automationId: candidate.automationId || undefined,
+            confidence: 0.82,
+          },
+        },
+        riskHint: riskHintForUiControl(candidate.controlType, candidate.name),
+      };
+    })
+    .map(applyExecutionPolicy);
+}
+
+function mergeLocalCandidates(
+  visualCandidates: LocalUiCandidate[],
+  uiCandidates: LocalUiCandidate[],
+): LocalUiCandidate[] {
+  const merged = [...visualCandidates];
+  for (const uiCandidate of uiCandidates) {
+    const existing = merged.find((candidate) => candidatesLikelyMatch(candidate, uiCandidate));
+    if (!existing) {
+      merged.push(uiCandidate);
+      continue;
+    }
+    existing.kind = existing.kind === "unknown_region" ? uiCandidate.kind : existing.kind;
+    existing.text = uiCandidate.evidence.uia?.name ?? existing.text ?? uiCandidate.text;
+    existing.nearbyText = existing.nearbyText ?? uiCandidate.nearbyText;
+    existing.score = Math.min(1, Math.max(existing.score, uiCandidate.score) + 0.08);
+    existing.box = existing.box ?? uiCandidate.box;
+    existing.center = existing.center ?? uiCandidate.center;
+    existing.evidence = {
+      ...existing.evidence,
+      uia: uiCandidate.evidence.uia,
+    };
+    existing.riskHint = highestRiskHint(existing.riskHint, uiCandidate.riskHint);
+  }
+  return merged.map(applyExecutionPolicy).sort((left, right) => right.score - left.score);
+}
+
+function candidatesLikelyMatch(left: LocalUiCandidate, right: LocalUiCandidate): boolean {
+  if (left.box && right.box && boxesLikelyOverlap(left.box, right.box)) {
+    return true;
+  }
+  const leftTokens = candidateMatchTokens(left);
+  const rightTokens = candidateMatchTokens(right);
+  return leftTokens.some((leftToken) =>
+    rightTokens.some((rightToken) => leftToken.length >= 3 && (leftToken.includes(rightToken) || rightToken.includes(leftToken)))
+  );
+}
+
+function boxesLikelyOverlap(
+  left: ComputerUiDetection["box"],
+  right: ComputerUiDetection["box"],
+): boolean {
+  const intersection = boxIntersectionArea(left, right);
+  if (intersection <= 0) return false;
+  const smallerArea = Math.min(left.width * left.height, right.width * right.height);
+  return smallerArea > 0 && intersection / smallerArea >= 0.45;
+}
+
+function boxIntersectionArea(
+  left: ComputerUiDetection["box"],
+  right: ComputerUiDetection["box"],
+): number {
+  const x1 = Math.max(left.x, right.x);
+  const y1 = Math.max(left.y, right.y);
+  const x2 = Math.min(left.x + left.width, right.x + right.width);
+  const y2 = Math.min(left.y + left.height, right.y + right.height);
+  return Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+}
+
+function candidateMatchTokens(candidate: LocalUiCandidate): string[] {
+  return [
+    candidate.text,
+    candidate.nearbyText,
+    candidate.evidence.uia?.name,
+    candidate.evidence.uia?.automationId,
+  ]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .flatMap((value) => tokenizeCandidateText(value))
+    .filter((value) => value.length > 0 && !isGenericCandidateMatchToken(value));
+}
+
+function tokenizeCandidateText(value: string): string[] {
+  const spaced = value.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
+  const normalized = normalizeMatchText(spaced);
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  return [...tokens, normalized.replace(/\s+/g, "")].filter((token) => token.length > 0);
+}
+
+function isGenericCandidateMatchToken(value: string): boolean {
+  return [
+    "possible",
+    "control",
+    "button",
+    "input",
+    "icon",
+    "menu",
+    "item",
+    "region",
+    "unknown",
+    "data",
+    "image",
+    "png",
+    "jpg",
+    "jpeg",
+    "webp",
+    "base64",
+    "redacted",
+    "chars",
+  ].includes(value);
+}
+
+function isPromptableUiControl(controlType: string): boolean {
+  return /button|menuitem|tabitem|hyperlink|checkbox|radio|splitbutton|edit|combobox|listitem/i.test(controlType);
+}
+
+function mapUiControlTypeToCandidateKind(controlType: string): LocalUiCandidateKind {
+  if (/edit/i.test(controlType)) return "possible_input";
+  if (/checkbox|radio/i.test(controlType)) return "possible_checkbox";
+  if (/combobox/i.test(controlType)) return "possible_dropdown";
+  if (/menuitem/i.test(controlType)) return "possible_menu_item";
+  if (/hyperlink/i.test(controlType)) return "possible_link";
+  if (/listitem/i.test(controlType)) return "possible_table_cell";
+  return "possible_button";
+}
+
+function riskHintForUiControl(controlType: string, name: string): "low" | "medium" | "high" {
+  const text = `${controlType} ${name}`.toLowerCase();
+  if (LOCAL_VISION_HIGH_RISK_TEXT_PATTERN.test(text)) {
+    return "high";
+  }
+  if (/edit|combobox|input|listitem/.test(text)) {
+    return "medium";
+  }
+  return "low";
+}
+
+function highestRiskHint(
+  left: "low" | "medium" | "high",
+  right: "low" | "medium" | "high",
+): "low" | "medium" | "high" {
+  const order = { low: 0, medium: 1, high: 2 };
+  return order[right] > order[left] ? right : left;
 }
 
 async function recoverWindowScreenshot(options: {
@@ -775,7 +2760,7 @@ async function recoverWindowScreenshot(options: {
   for (const method of methods) {
     try {
       return await withTimeout(
-        Promise.resolve(options.computerTool.screenshot({
+        invokeTool(() => options.computerTool.screenshot({
           windowHandle: options.windowHandle,
           method,
         })),
@@ -822,7 +2807,7 @@ async function getUiContext(
   }
   try {
     const result = await withTimeout(
-      Promise.resolve(options.computerTool.inspectUi({
+      invokeTool(() => options.computerTool.inspectUi({
         windowHandle: window.handle,
         maxDepth: 4,
         maxNodes: 120,
@@ -869,11 +2854,10 @@ function selectUiWindow(
 function formatUiContext(context: UiPromptContext | undefined): string {
   if (!context) return "";
   const safeTree = redactUiTreeValues(context.tree);
-  const tree = safeTree.length > 6000
-    ? `${safeTree.slice(0, 6000)}\n...`
-    : safeTree;
+  const tree = sanitizePromptBlockText(safeTree, 6000);
+  const title = sanitizePromptInlineText(context.title);
   return [
-    `UIA CONTEXT (fresh inspectUi for handle=${context.windowHandle}${context.title ? `, title="${context.title}"` : ""}; ${context.nodeCount} nodes):`,
+    `UIA CONTEXT (fresh inspectUi for handle=${context.windowHandle}${title ? `, title="${title}"` : ""}; ${context.nodeCount} nodes):`,
     tree,
     "Prefer invokeUi/setUiValue with automationId or name from this tree before coordinate clicks.",
   ].join("\n");
@@ -886,10 +2870,41 @@ function formatWindowList(windowList: ComputerListWindowsResult | undefined): st
     .slice(0, 12)
     .map((window) => {
       const foreground = window.isForeground ? " foreground" : "";
-      return `- handle=${window.handle}${foreground}; title="${window.title}"; rect=${window.rect.x},${window.rect.y},${window.rect.width}x${window.rect.height}`;
+      const title = sanitizePromptInlineText(window.title) ?? "";
+      return `- handle=${window.handle}${foreground}; title="${title}"; rect=${window.rect.x},${window.rect.y},${window.rect.width}x${window.rect.height}`;
     });
   if (windows.length === 0) return "";
   return `WINDOWS (fresh list; prefer these handles for inspectUi/focusWindow):\n${windows.join("\n")}`;
+}
+
+function formatLocalVisionCandidates(localVision: LocalVisionObservation | undefined): string {
+  if (!localVision || localVision.mode !== "prompt_hint" || localVision.promptCandidates.length === 0) {
+    return "";
+  }
+  const lines = localVision.promptCandidates.map((candidate) => {
+    const box = candidate.box;
+    const boxText = box
+      ? `[${Math.round(box.x)},${Math.round(box.y)},${Math.round(box.width)},${Math.round(box.height)}]`
+      : "unavailable";
+    const evidence: string[] = [];
+    if (candidate.evidence.uia) {
+      const label = candidate.evidence.uia.automationId || candidate.evidence.uia.name || candidate.evidence.uia.controlType || "control";
+      evidence.push(`uia:${sanitizePromptInlineText(label, LOCAL_VISION_PROMPT_TEXT_MAX_LENGTH) ?? "control"}`);
+    }
+    const yoloEvidence = candidate.evidence.yolo
+      ? `yolo:${candidate.evidence.yolo.confidence.toFixed(2)}`
+      : undefined;
+    if (yoloEvidence) evidence.push(yoloEvidence);
+    const text = sanitizePromptInlineText(candidate.text, LOCAL_VISION_PROMPT_TEXT_MAX_LENGTH);
+    const executionMode = candidate.executionMode ? `, mode=${candidate.executionMode}` : "";
+    const reason = sanitizePromptInlineText(candidate.rankReason, LOCAL_VISION_PROMPT_TEXT_MAX_LENGTH);
+    return `- ${sanitizePromptInlineText(candidate.id, LOCAL_VISION_PROMPT_TEXT_MAX_LENGTH) ?? "candidate"}: ${candidate.kind}${text ? `, text="${text}"` : ""}, score=${candidate.score.toFixed(2)}, risk=${candidate.riskHint}${executionMode}, box=${boxText}, evidence=${evidence.join("+") || "none"}${reason ? `, reason="${reason}"` : ""}`;
+  });
+  return [
+    "LOCAL_UI_CANDIDATES (local vision hints; use as candidates, not proof of semantics):",
+    "Treat yolo-only candidates as location hints only. Do not click them directly unless another source such as UIA or a later visual check confirms the target.",
+    ...lines,
+  ].join("\n");
 }
 
 function createProgressEmitter(options: {
@@ -904,7 +2919,7 @@ function createProgressEmitter(options: {
     const now = Date.now();
     if (now - lastEmittedAt < options.config.heartbeatMs) return;
     lastEmittedAt = now;
-    options.onProgress({
+    options.onProgress(sanitizeStepForRecord({
       stepIndex: options.stepIndex,
       screenshotDataUrl: "",
       observation,
@@ -913,7 +2928,7 @@ function createProgressEmitter(options: {
       confidence: "medium",
       phase,
       trace: options.getTrace(),
-    });
+    }));
   };
 }
 
@@ -983,9 +2998,68 @@ async function withTimeout<T>(
   }
 }
 
+function invokeTool<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return Promise.resolve(operation());
+  } catch (error) {
+    return Promise.reject(error);
+  }
+}
+
 function resultErrorMessage(result: PromiseSettledResult<unknown>): string | undefined {
   if (result.status === "fulfilled") return undefined;
   return result.reason instanceof Error ? result.reason.message : String(result.reason);
+}
+
+function detectSuspiciousFullScreenshot(
+  screenshot: ComputerScreenshotResult,
+  visionSource: ScreenshotVisionSource | undefined,
+): string | undefined {
+  if (visionSource !== "full") {
+    return undefined;
+  }
+  const area = screenshot.width * screenshot.height;
+  if (!Number.isFinite(area) || area < SUSPICIOUS_SCREENSHOT_MIN_AREA) {
+    return undefined;
+  }
+  if (screenshot.health?.suspiciousBlank) {
+    return createSuspiciousScreenshotMessage(screenshot.health.reason);
+  }
+  const byteLength = estimatePngDataUrlByteLength(screenshot.dataUrl);
+  if (byteLength === undefined) {
+    return undefined;
+  }
+  const bytesPerPixel = byteLength / area;
+  if (bytesPerPixel > SUSPICIOUS_SCREENSHOT_MAX_BYTES_PER_PIXEL) {
+    return undefined;
+  }
+  return createSuspiciousScreenshotMessage();
+}
+
+function createSuspiciousScreenshotMessage(reason?: string): string {
+  const detail = reason === "dark"
+    ? "dark"
+    : reason === "solid"
+      ? "mostly one color"
+      : "blank or locked";
+  return `Computer Use paused because the desktop screenshot appears ${detail}. Check that the active desktop is visible, the session is not locked, and remote desktop is connected before trying again.`;
+}
+
+function estimatePngDataUrlByteLength(dataUrl: string): number | undefined {
+  const marker = "data:image/png;base64,";
+  if (!dataUrl.toLowerCase().startsWith(marker)) {
+    return undefined;
+  }
+  const payload = dataUrl.slice(marker.length).trim();
+  if (!payload.startsWith("iVBORw0KGgo")) {
+    return undefined;
+  }
+  const sanitized = payload.replace(/\s/g, "");
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(sanitized) || sanitized.length === 0) {
+    return undefined;
+  }
+  const padding = sanitized.endsWith("==") ? 2 : sanitized.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((sanitized.length * 3) / 4) - padding);
 }
 
 function createErrorStep(
@@ -1016,8 +3090,14 @@ function finishTrace(trace: ComputerUseStepTrace, startedAt: number): ComputerUs
   };
 }
 
-function summarizeScreenshotTrace(screenshot: ComputerScreenshotResult): NonNullable<ComputerUseStepTrace["screenshot"]> {
+function summarizeScreenshotTrace(
+  screenshot: ComputerScreenshotResult,
+  screenshotId: string | undefined,
+  visionSource: ScreenshotVisionSource | undefined,
+): NonNullable<ComputerUseStepTrace["screenshot"]> {
   return {
+    id: screenshotId,
+    visionSource,
     width: screenshot.width,
     height: screenshot.height,
     sourceWidth: screenshot.sourceWidth,
@@ -1028,6 +3108,189 @@ function summarizeScreenshotTrace(screenshot: ComputerScreenshotResult): NonNull
     scaleY: screenshot.scaleY,
     methodUsed: screenshot.methodUsed,
   };
+}
+
+function summarizeLocalVisionTrace(
+  localVision: LocalVisionObservation,
+): NonNullable<ComputerUseStepTrace["localVision"]> {
+  const model = sanitizeLocalVisionModelName(localVision.model);
+  const configuredModel = sanitizeLocalVisionModelName(localVision.configuredModel);
+  return {
+    observationId: localVision.observationId,
+    screenshotId: localVision.screenshotId,
+    enabled: localVision.enabled,
+    used: localVision.used,
+    mode: localVision.mode,
+    model,
+    configuredModel,
+    runtime: localVision.runtime,
+    reuseWorker: localVision.reuseWorker,
+    imgsz: localVision.imgsz,
+    timeoutMs: localVision.timeoutMs,
+    latencyMs: localVision.latencyMs,
+    detectionCount: localVision.detections.length,
+    promptCandidateCount: localVision.promptCandidates.length,
+    diagnostics: withLocalVisionModelPurposeDiagnostics(localVision.diagnostics, model, configuredModel),
+    fullScreenshotVlmCalled: false,
+    cropVlmCalled: false,
+    fullScreenshotVlmSkipped: false,
+    error: localVision.error,
+  };
+}
+
+function withLocalVisionModelPurposeDiagnostics(
+  diagnostics: Record<string, unknown> | undefined,
+  ...models: Array<string | undefined>
+): Record<string, unknown> | undefined {
+  const warnings = models
+    .map((model) => localVisionModelPurposeWarning(model))
+    .filter((warning): warning is string => warning !== undefined);
+  if (warnings.length === 0) return diagnostics;
+  const existingWarnings = Array.isArray(diagnostics?.warnings)
+    ? diagnostics.warnings.filter((value): value is string => typeof value === "string")
+    : [];
+  return {
+    ...(diagnostics ?? {}),
+    warnings: Array.from(new Set([...existingWarnings, ...warnings])),
+  };
+}
+
+function localVisionModelPurposeWarning(model: string | undefined): string | undefined {
+  if (!model || !/^yolo26[nsmlx]\.(?:pt|onnx)$/i.test(model)) return undefined;
+  return `${model} matches an official Ultralytics YOLO26 COCO weight name; use it for smoke/benchmark only, not as a UI-trained production model`;
+}
+
+function updateLocalVisionActionTrace(
+  trace: ComputerUseStepTrace,
+  localVision: LocalVisionObservation | undefined,
+  action: ComputerUseAction,
+  error: string | undefined,
+  candidateAction?: ComputerUseAction,
+): void {
+  if (!trace.localVision || !localVision) {
+    return;
+  }
+  const selectedCandidate = selectCandidateForAction(localVision.candidates, candidateAction ?? action);
+  trace.localVision.selectedCandidateId = selectedCandidate?.candidate.id;
+  trace.localVision.selectedCandidateRank = selectedCandidate?.rank;
+  trace.localVision.selectedCandidateSource = selectedCandidate
+    ? localVisionCandidateSources(selectedCandidate.candidate)
+    : undefined;
+  trace.localVision.actionType = action.tool;
+  trace.localVision.actionRisk = selectedCandidate
+    ? highestRiskHint(actionRiskHint(action), selectedCandidate.candidate.riskHint)
+    : actionRiskHint(action);
+  trace.localVision.actionSucceeded = !error;
+  trace.localVision.fallbackReason = error ? classifyComputerUseFailureReason(error) : undefined;
+}
+
+function selectCandidateForAction(
+  candidates: LocalUiCandidate[],
+  action: ComputerUseAction,
+): { candidate: LocalUiCandidate; rank: number } | undefined {
+  const selector = actionSelector(action);
+  const rankedCandidates = candidates.map((candidate, index) => ({ candidate, rank: index + 1 }));
+  if (selector) {
+    const selectorMatches = rankedCandidates
+      .filter(({ candidate }) => localUiCandidateMatchesSelector(selector, candidate))
+      .sort((left, right) =>
+        candidateRiskRank(right.candidate.riskHint) - candidateRiskRank(left.candidate.riskHint) ||
+        right.candidate.score - left.candidate.score
+      );
+    if (selectorMatches[0]) return selectorMatches[0];
+  }
+
+  const point = actionPoint(action);
+  if (!point) return undefined;
+  return rankedCandidates
+    .filter(({ candidate }) => candidate.box && pointInsideBox(point, candidate.box))
+    .sort((left, right) =>
+      candidateRiskRank(right.candidate.riskHint) - candidateRiskRank(left.candidate.riskHint) ||
+      right.candidate.score - left.candidate.score
+    )[0];
+}
+
+function actionSelector(
+  action: ComputerUseAction,
+): ComputerUseActionSelector | undefined {
+  switch (action.tool) {
+    case "computer.invokeUi":
+    case "computer.setUiValue":
+      return action.params.selector;
+    default:
+      return undefined;
+  }
+}
+
+function localUiCandidateMatchesSelector(
+  selector: ComputerUseActionSelector,
+  candidate: LocalUiCandidate,
+): boolean {
+  const uia = candidate.evidence.uia;
+  if (!uia || uia.windowHandle !== selector.windowHandle) return false;
+  const automationIdMatches = selector.automationId === undefined ||
+    uia.automationId === selector.automationId;
+  const nameMatches = selector.name === undefined ||
+    Boolean(uia.name?.includes(selector.name));
+  const controlTypeMatches = selector.controlType === undefined ||
+    uia.controlType?.toLowerCase() === selector.controlType.toLowerCase() ||
+    selector.controlType.toLowerCase().startsWith("controltype");
+  return automationIdMatches && nameMatches && controlTypeMatches;
+}
+
+function candidateRiskRank(risk: LocalUiCandidate["riskHint"]): number {
+  return risk === "high" ? 2 : risk === "medium" ? 1 : 0;
+}
+
+function actionPoint(action: ComputerUseAction): { x: number; y: number } | undefined {
+  switch (action.tool) {
+    case "computer.click":
+    case "computer.moveMouse":
+    case "computer.scroll":
+      return { x: action.params.x, y: action.params.y };
+    default:
+      return undefined;
+  }
+}
+
+function pointInsideBox(point: { x: number; y: number }, box: ComputerUiDetection["box"]): boolean {
+  return point.x >= box.x &&
+    point.y >= box.y &&
+    point.x <= box.x + box.width &&
+    point.y <= box.y + box.height;
+}
+
+function localVisionCandidateSources(candidate: LocalUiCandidate): string[] {
+  const sources: string[] = [];
+  if (candidate.evidence.uia) sources.push("uia");
+  if (candidate.evidence.yolo) sources.push("yolo");
+  return sources;
+}
+
+function actionRiskHint(action: ComputerUseAction): "low" | "medium" | "high" {
+  switch (action.tool) {
+    case "computer.type":
+    case "computer.keyCombo":
+    case "computer.setUiValue":
+      return "high";
+    case "computer.invokeUi":
+    case "computer.click":
+    case "computer.scroll":
+      return "medium";
+    default:
+      return "low";
+  }
+}
+
+function classifyComputerUseFailureReason(error: string): string {
+  if (/timed out|timeout/i.test(error)) return "yolo_timeout";
+  if (/stale/i.test(error)) return "stale_screenshot";
+  if (/Preflight failed|window.*changed|not visible/i.test(error)) return "window_changed";
+  if (/UIA|selector|automation/i.test(error)) return "uia_missing";
+  if (/permission|approval|denied/i.test(error)) return "permission_required";
+  if (/no screenshot|coordinate|outside|mouse|click|no .*change/i.test(error)) return "coordinate_mismatch";
+  if (/blocked|failed/i.test(error)) return "action_blocked";
+  return "unknown";
 }
 
 function summarizeWindowListTrace(
@@ -1041,7 +3304,7 @@ function summarizeWindowListTrace(
     titles: windowList.windows
       .filter((window) => window.isVisible && window.title.trim())
       .slice(0, 6)
-      .map((window) => window.title),
+      .map((window) => redactImageDataUrlsForRecord(window.title)),
   };
 }
 
@@ -1064,6 +3327,7 @@ function tryParseOutput(raw: string) {
 async function dispatchAction(
   computerTool: ComputerTool,
   action: ComputerUseAction,
+  config: ComputerUseLoopConfig,
   approval?: { approvalId: string; taskId?: string },
 ): Promise<unknown> {
   switch (action.tool) {
@@ -1079,14 +3343,25 @@ async function dispatchAction(
     case "computer.wait":
       return computerTool.wait(action.params);
 
-    case "computer.moveMouse":
-      return computerTool.moveMouse({ ...action.params, ...requireApproval(action, approval) });
+    case "computer.moveMouse": {
+      const speed = action.params.speed ?? config.mouseSpeed;
+      return computerTool.moveMouse({
+        ...action.params,
+        speed,
+        ...(speed === "linear" ? { durationMs: action.params.durationMs ?? config.mouseDurationMs } : {}),
+        ...requireApproval(action, approval),
+      });
+    }
 
     case "computer.click":
       return computerTool.click({ ...action.params, ...requireApproval(action, approval) });
 
     case "computer.type":
-      return computerTool.type({ ...action.params, ...requireApproval(action, approval) });
+      return computerTool.type({
+        ...action.params,
+        delayMs: config.typeDelayMs,
+        ...requireApproval(action, approval),
+      });
 
     case "computer.keyCombo":
       return computerTool.keyCombo({ ...action.params, ...requireApproval(action, approval) });
@@ -1123,24 +3398,245 @@ function isWriteAction(action: ComputerUseAction): boolean {
   return WRITE_ACTIONS.has(action.tool);
 }
 
+function shouldKeepPendingAutoCropAfterAction(action: ComputerUseAction): boolean {
+  return action.tool === "computer.wait" ||
+    action.tool === "computer.listWindows" ||
+    action.tool === "computer.inspectUi";
+}
+
 function requiresFreshApproval(action: ComputerUseAction): boolean {
   return action.tool === "computer.type" ||
     action.tool === "computer.keyCombo" ||
-    action.tool === "computer.setUiValue" ||
+    action.tool === "computer.setUiValue" && (
+      selectorLooksSensitive(action.params.selector) ||
+      textLooksSensitive(action.params.value)
+    ) ||
     action.tool === "computer.invokeUi" && selectorLooksSensitive(action.params.selector);
 }
+
+function requiresFreshApprovalForCurrentAction(
+  action: ComputerUseAction,
+  localVision: LocalVisionObservation | undefined,
+  candidateAction: ComputerUseAction,
+): boolean {
+  if (requiresFreshApproval(action)) {
+    return true;
+  }
+  const selectedCandidate = selectCandidateForAction(localVision?.candidates ?? [], candidateAction);
+  return selectedCandidate?.candidate.riskHint === "high" ||
+    selectedCandidate?.candidate.executionMode === "user_confirmation_required" ||
+    selectedCandidate?.candidate.executionMode === "not_allowed";
+}
+
+const SENSITIVE_SELECTOR_TEXT_PATTERN =
+  /delete|remove|pay|purchase|submit|send|publish|overwrite|install|grant|permission|password|passcode|token|secret|credential|api[_\s-]?key|private[_\s-]?key|删除|移除|付款|支付|购买|转账|提交|发送|发布|覆盖|安装|授权|权限|密码|口令|令牌|密钥|私钥|凭据|凭证/i;
+
+const SENSITIVE_VALUE_TEXT_PATTERN =
+  /password|passcode|pin|otp|2fa|mfa|token|secret|credential|api[_\s-]?key|private[_\s-]?key|\bsk-[a-z0-9_-]+|ghp_[a-z0-9_]+|xox[abprs]-[a-z0-9-]+|akia[0-9a-z]{12,}|eyj[a-z0-9_-]+|credit\s*card|card\s*number|cvv|ssn|passport|密码|口令|验证码|动态码|令牌|密钥|私钥|凭据|凭证|信用卡|银行卡|身份证|护照/i;
 
 function selectorLooksSensitive(selector: unknown): boolean {
   if (!selector || typeof selector !== "object") return false;
   const record = selector as Record<string, unknown>;
-  return [record.name, record.automationId]
-    .filter((value): value is string => typeof value === "string")
-    .some((value) => /password|token|secret|credential|密码|令牌|密钥/i.test(value));
+  const textValues = [record.name, record.automationId]
+    .filter((value): value is string => typeof value === "string");
+  return textValues.some((value) => SENSITIVE_SELECTOR_TEXT_PATTERN.test(value));
 }
 
-function isTaskLeaseFailure(error: string | undefined): boolean {
-  if (!error) return false;
-  return /Computer Use task approval/i.test(error);
+function textLooksSensitive(value: string): boolean {
+  return SENSITIVE_VALUE_TEXT_PATTERN.test(value);
+}
+
+function createTaskApprovalLease(
+  approval: { approvalId: string; taskId?: string },
+  action: ComputerUseAction,
+  observation: ComputerObservation,
+): TaskApprovalLease | undefined {
+  const windowHandle = inferActionWindowHandle(action, observation);
+  if (windowHandle === undefined) {
+    return undefined;
+  }
+  const allowedTools = reusableTaskApprovalToolsFor(action.tool);
+  if (allowedTools.size === 0) {
+    return undefined;
+  }
+  return {
+    approvalId: approval.approvalId,
+    taskId: approval.taskId,
+    createdAtMs: Date.now(),
+    remainingActions: TASK_APPROVAL_LEASE_MAX_ACTIONS - 1,
+    windowHandle,
+    allowedTools,
+  };
+}
+
+function reusableTaskApprovalLease(lease: TaskApprovalLease | undefined): TaskApprovalLease | undefined {
+  if (!lease) return undefined;
+  if (lease.remainingActions <= 0) return undefined;
+  if (Date.now() - lease.createdAtMs > TASK_APPROVAL_LEASE_TTL_MS) return undefined;
+  return lease;
+}
+
+function reusableTaskApprovalLeaseForAction(
+  lease: TaskApprovalLease | undefined,
+  action: ComputerUseAction,
+  observation: ComputerObservation,
+): TaskApprovalLease | undefined {
+  const reusableLease = reusableTaskApprovalLease(lease);
+  if (!reusableLease) return undefined;
+  if (!reusableLease.allowedTools.has(action.tool)) {
+    return undefined;
+  }
+  if (!taskLeaseMatchesCurrentWindow(reusableLease, action, observation)) {
+    return undefined;
+  }
+  return reusableLease;
+}
+
+function consumeTaskApprovalLease(lease: TaskApprovalLease): TaskApprovalLease | undefined {
+  const remainingActions = lease.remainingActions - 1;
+  return remainingActions > 0
+    ? { ...lease, remainingActions }
+    : undefined;
+}
+
+function reusableTaskApprovalToolsFor(tool: ComputerUseAction["tool"]): Set<ComputerUseAction["tool"]> {
+  switch (tool) {
+    case "computer.focusWindow":
+      return new Set([
+        "computer.focusWindow",
+        "computer.moveMouse",
+        "computer.click",
+        "computer.scroll",
+      ]);
+    case "computer.moveMouse":
+    case "computer.click":
+    case "computer.scroll":
+      return new Set([
+        "computer.moveMouse",
+        "computer.click",
+        "computer.scroll",
+      ]);
+    case "computer.invokeUi":
+      return new Set(["computer.invokeUi"]);
+    case "computer.setUiValue":
+      return new Set(["computer.setUiValue"]);
+    default:
+      return new Set();
+  }
+}
+
+function leaseApproval(lease: TaskApprovalLease): { approvalId: string; taskId?: string } {
+  return {
+    approvalId: lease.approvalId,
+    taskId: lease.taskId,
+  };
+}
+
+function taskLeaseMatchesCurrentWindow(
+  lease: TaskApprovalLease,
+  action: ComputerUseAction,
+  observation: ComputerObservation,
+): boolean {
+  const actionWindowHandle = inferActionWindowHandle(action, observation);
+  return actionWindowHandle !== undefined && actionWindowHandle === lease.windowHandle;
+}
+
+function inferActionWindowHandle(
+  action: ComputerUseAction,
+  observation: ComputerObservation,
+): number | undefined {
+  switch (action.tool) {
+    case "computer.focusWindow":
+      return action.params.handle;
+    case "computer.inspectUi":
+      return action.params.windowHandle;
+    case "computer.invokeUi":
+    case "computer.setUiValue":
+      return action.params.selector.windowHandle;
+    case "computer.screenshot":
+      return action.params.windowHandle;
+    case "computer.click":
+    case "computer.moveMouse":
+    case "computer.scroll":
+      return inferCoordinateActionWindowHandle(action, observation);
+    default:
+      return undefined;
+  }
+}
+
+function inferTrustedWindowTitleForAction(
+  action: ComputerUseAction,
+  observation: ComputerObservation,
+): string | undefined {
+  const handle = inferActionWindowHandle(action, observation);
+  const title = handle === undefined
+    ? observation.uiContext?.title
+    : findWindowByHandle(observation.windowList, handle)?.title ?? observation.uiContext?.title;
+  return normalizeTrustedWindowTitle(title);
+}
+
+function findDeniedWindowForAction(
+  action: ComputerUseAction,
+  observation: ComputerObservation,
+  config: ComputerUseLoopConfig,
+): { title: string; pattern: string } | undefined {
+  if (!isWriteAction(action) || config.deniedWindowPatterns.length === 0) {
+    return undefined;
+  }
+  const title = inferWindowTitleForAction(action, observation);
+  if (!title) return undefined;
+  const lowerTitle = title.toLowerCase();
+  const pattern = config.deniedWindowPatterns.find((entry) =>
+    lowerTitle.includes(entry.toLowerCase())
+  );
+  return pattern ? { title, pattern } : undefined;
+}
+
+function inferWindowTitleForAction(
+  action: ComputerUseAction,
+  observation: ComputerObservation,
+): string | undefined {
+  const handle = inferActionWindowHandle(action, observation);
+  if (handle !== undefined) {
+    return findWindowByHandle(observation.windowList, handle)?.title ?? observation.uiContext?.title;
+  }
+  if (action.tool === "computer.type" || action.tool === "computer.keyCombo") {
+    return observation.windowList?.windows.find((window) => window.isForeground)?.title ??
+      observation.uiContext?.title;
+  }
+  return observation.uiContext?.title;
+}
+
+function normalizeTrustedWindowTitle(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = redactImageDataUrlsForRecord(value)
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+  return normalized || undefined;
+}
+
+function inferCoordinateActionWindowHandle(
+  action: Extract<ComputerUseAction, { params: { x: number; y: number } }>,
+  observation: ComputerObservation,
+): number | undefined {
+  const visibleWindows = observation.windowList?.windows.filter((window) =>
+    window.isVisible && window.rect.width > 0 && window.rect.height > 0
+  ) ?? [];
+  if (visibleWindows.length === 0) {
+    return observation.coordinateTargetWindowHandle;
+  }
+  const targetWindow = selectTargetWindowForCoordinateAction(
+    visibleWindows,
+    observation.coordinateTargetWindowHandle,
+  );
+  if (targetWindow && pointInRect(action.params.x, action.params.y, targetWindow.rect)) {
+    return targetWindow.handle;
+  }
+  return visibleWindows.find((window) => pointInRect(action.params.x, action.params.y, window.rect))?.handle;
 }
 
 function requireApproval(
@@ -1155,24 +3651,38 @@ function requireApproval(
 
 async function getRetryApproval(options: {
   action: ComputerUseAction;
-  taskLease: { approvalId: string; taskId?: string } | undefined;
+  taskLease: TaskApprovalLease | undefined;
   approval: { approvalId: string; taskId?: string } | undefined;
   approveAction: ComputerUseLoopOptions["approveAction"];
+  observation: ComputerObservation;
   config: ComputerUseLoopConfig;
   signal: AbortSignal;
   emitProgress: (phase: ComputerUsePhase, observation: string) => void;
-}): Promise<{ approvalId: string; taskId?: string } | undefined> {
-  if (options.taskLease && !requiresFreshApproval(options.action)) {
-    return options.taskLease;
+  requiresFreshApproval?: boolean;
+  screenshotDataUrl?: string;
+  trustedWindowTitle?: string;
+}): Promise<ComputerApprovalResult | undefined> {
+  const reusableLease = reusableTaskApprovalLeaseForAction(
+    options.taskLease,
+    options.action,
+    options.observation,
+  );
+  if (reusableLease && !options.requiresFreshApproval && !requiresFreshApproval(options.action)) {
+    return leaseApproval(reusableLease);
   }
   if (!options.approveAction) {
-    return options.approval;
+    return undefined;
   }
   options.emitProgress("waiting_permission", "Waiting for retry approval");
   const result = await withHeartbeat(
     () => withTimeout(
-      options.approveAction?.(options.action) ?? Promise.resolve(undefined),
-      options.config.timeouts.approvalMs,
+      options.approveAction?.(options.action, {
+        requiresFreshApproval: options.requiresFreshApproval,
+        timeoutMs: options.config.timeouts.approvalMs,
+        ...(options.screenshotDataUrl ? { screenshotDataUrl: options.screenshotDataUrl } : {}),
+        trustedWindowTitle: options.trustedWindowTitle,
+      }) ?? Promise.resolve(undefined),
+      getApprovalCallbackTimeoutMs(options.config),
       "Computer Use retry approval",
       options.signal,
     ),
@@ -1180,8 +3690,8 @@ async function getRetryApproval(options: {
     options.config.heartbeatMs,
   );
   return result
-    ? { approvalId: result.approvalId, taskId: result.taskId }
-    : options.approval;
+    ? { approvalId: result.approvalId, taskId: result.taskId, sessionWide: result.sessionWide }
+    : undefined;
 }
 
 async function delayBeforeRetry(signal: AbortSignal): Promise<void> {
@@ -1228,6 +3738,7 @@ interface UiCandidate {
   controlType: string;
   name: string;
   automationId: string;
+  bounds?: { x: number; y: number; width: number; height: number };
 }
 
 function resolveUiCandidate(context: UiPromptContext, targetText: string): UiCandidate | undefined {
@@ -1245,17 +3756,7 @@ function resolveUiCandidate(context: UiPromptContext, targetText: string): UiCan
 }
 
 function parseUiCandidates(tree: string): UiCandidate[] {
-  const candidates: UiCandidate[] = [];
-  const pattern = /<([A-Za-z][\w-]*)\s+name="([^"]*)"\s+automationId="([^"]*)"/g;
-  let match: RegExpExecArray | null;
-  while ((match = pattern.exec(tree)) !== null) {
-    candidates.push({
-      controlType: unescapeUiTreeText(match[1] ?? ""),
-      name: unescapeUiTreeText(match[2] ?? ""),
-      automationId: unescapeUiTreeText(match[3] ?? ""),
-    });
-  }
-  return candidates;
+  return parseUiElementCandidates(tree).map(({ value: _value, ...candidate }) => candidate);
 }
 
 interface UiValueCandidate extends UiCandidate {
@@ -1263,19 +3764,38 @@ interface UiValueCandidate extends UiCandidate {
 }
 
 function parseUiValueCandidates(tree: string): UiValueCandidate[] {
-  const candidates: UiValueCandidate[] = [];
-  const pattern = /<([A-Za-z][\w-]*)\s+name="([^"]*)"\s+automationId="([^"]*)"(?:\s+value="([^"]*)")?/g;
+  return parseUiElementCandidates(tree)
+    .filter((candidate): candidate is UiValueCandidate => candidate.value !== undefined);
+}
+
+function parseUiElementCandidates(tree: string): Array<UiCandidate & { value?: string }> {
+  return tree
+    .split(/\r?\n/)
+    .map(parseUiElementLine)
+    .filter((candidate): candidate is UiCandidate & { value?: string } => candidate !== undefined);
+}
+
+function parseUiElementLine(line: string): (UiCandidate & { value?: string }) | undefined {
+  const match = line.match(/^\s*<?([A-Za-z][\w-]*)\b([^>]*)>?/);
+  if (!match) return undefined;
+  const attributes = parseUiElementAttributes(match[2] ?? "");
+  return {
+    controlType: unescapeUiTreeText(match[1] ?? ""),
+    name: unescapeUiTreeText(attributes.name ?? ""),
+    automationId: unescapeUiTreeText(attributes.automationId ?? attributes.automation_id ?? ""),
+    ...(attributes.bounds === undefined ? {} : { bounds: parseUiBounds(attributes.bounds) }),
+    ...(attributes.value === undefined ? {} : { value: unescapeUiTreeText(attributes.value) }),
+  };
+}
+
+function parseUiElementAttributes(raw: string): Record<string, string> {
+  const attributes: Record<string, string> = {};
+  const pattern = /([A-Za-z][\w-]*)="([^"]*)"/g;
   let match: RegExpExecArray | null;
-  while ((match = pattern.exec(tree)) !== null) {
-    if (match[4] === undefined) continue;
-    candidates.push({
-      controlType: unescapeUiTreeText(match[1] ?? ""),
-      name: unescapeUiTreeText(match[2] ?? ""),
-      automationId: unescapeUiTreeText(match[3] ?? ""),
-      value: unescapeUiTreeText(match[4] ?? ""),
-    });
+  while ((match = pattern.exec(raw)) !== null) {
+    attributes[match[1] ?? ""] = match[2] ?? "";
   }
-  return candidates;
+  return attributes;
 }
 
 function selectorMatchesValueCandidate(
@@ -1290,6 +3810,18 @@ function selectorMatchesValueCandidate(
     candidate.controlType.toLowerCase() === selector.controlType.toLowerCase() ||
     selector.controlType.toLowerCase().startsWith("controltype");
   return automationIdMatches && nameMatches && controlTypeMatches;
+}
+
+function parseUiBounds(value: string): UiCandidate["bounds"] | undefined {
+  const parts = value.split(",").map((part) => Number(part.trim()));
+  if (parts.length !== 4 || parts.some((part) => !Number.isFinite(part))) {
+    return undefined;
+  }
+  const [x, y, width, height] = parts;
+  if (width <= 0 || height <= 0) {
+    return undefined;
+  }
+  return { x, y, width, height };
 }
 
 function isActionableControl(controlType: string): boolean {
@@ -1336,7 +3868,7 @@ function getActionTimeoutMs(action: ComputerUseAction, config: ComputerUseLoopCo
     case "computer.setUiValue":
       return config.timeouts.textWriteMs;
     case "computer.wait":
-      return Math.min(Math.max(action.params.ms, 0), config.stepDeadlineMs);
+      return getWaitActionTimeoutMs(action.params.ms, config);
     case "computer.moveMouse":
     case "computer.click":
     case "computer.scroll":
@@ -1348,15 +3880,97 @@ function getActionTimeoutMs(action: ComputerUseAction, config: ComputerUseLoopCo
   }
 }
 
+function getWaitActionTimeoutMs(requestedMs: number, config: ComputerUseLoopConfig): number {
+  const waitMs = Math.min(Math.max(requestedMs, 0), COMPUTER_WAIT_MAX_MS);
+  const timeoutMs = Math.max(
+    COMPUTER_WAIT_MIN_TIMEOUT_MS,
+    waitMs + COMPUTER_WAIT_TIMEOUT_OVERHEAD_MS,
+  );
+  return Math.min(timeoutMs, config.stepDeadlineMs);
+}
+
+function getApprovalCallbackTimeoutMs(config: ComputerUseLoopConfig): number {
+  return Math.min(config.timeouts.approvalMs + 1_000, config.stepDeadlineMs);
+}
+
+function requiresFreshObservationAfterSlowApproval(action: ComputerUseAction): boolean {
+  return action.tool === "computer.type" || action.tool === "computer.keyCombo";
+}
+
+async function refreshObservationForPostApprovalPreflight(options: {
+  action: ComputerUseAction;
+  computerTool: ComputerTool;
+  config: ComputerUseLoopConfig;
+  observation: ComputerObservation;
+  signal: AbortSignal;
+}): Promise<ComputerObservation> {
+  if (!shouldRefreshWindowListForPostApprovalPreflight(options.action)) {
+    return {
+      ...options.observation,
+      freshAt: new Date().toISOString(),
+    };
+  }
+
+  let windowList = options.observation.windowList;
+  try {
+    windowList = await withTimeout(
+      invokeTool(() => options.computerTool.listWindows({})),
+      options.config.timeouts.listWindowsMs,
+      "computer.listWindows.postApproval",
+      options.signal,
+    );
+  } catch {
+    windowList = options.observation.windowList;
+  }
+
+  return {
+    ...options.observation,
+    windowList,
+    coordinateTargetWindowHandle: resolveCoordinateTargetWindowHandle(
+      options.observation.screenshot,
+      windowList,
+      options.observation.preferredUiWindowHandle,
+    ),
+    freshAt: new Date().toISOString(),
+  };
+}
+
+function shouldRefreshWindowListForPostApprovalPreflight(action: ComputerUseAction): boolean {
+  return isCoordinateAction(action) ||
+    action.tool === "computer.focusWindow" ||
+    action.tool === "computer.invokeUi" ||
+    action.tool === "computer.setUiValue";
+}
+
+function combinePreflightTrace(
+  before: NonNullable<ComputerUseStepTrace["preflight"]> | undefined,
+  after: NonNullable<ComputerUseStepTrace["preflight"]>,
+): NonNullable<ComputerUseStepTrace["preflight"]> {
+  const beforeReason = before?.reason ? `${before.reason}; ` : "";
+  return {
+    passed: before?.passed !== false && after.passed,
+    reason: `${beforeReason}post-approval: ${after.reason ?? "passed"}`,
+  };
+}
+
 async function runPreflightCheck(
   action: ComputerUseAction,
   observation: ComputerObservation,
   options?: {
+    candidateAction?: ComputerUseAction;
     refreshUiContext?: (windowHandle: number) => Promise<UiPromptContext | undefined>;
   },
 ): Promise<NonNullable<ComputerUseStepTrace["preflight"]>> {
   if (!isWriteAction(action)) {
     return { passed: true, reason: "read-only action" };
+  }
+
+  const localVisionCheck = checkLocalVisionCandidatePreflight(
+    options?.candidateAction ?? action,
+    observation.localVision,
+  );
+  if (!localVisionCheck.passed) {
+    return localVisionCheck;
   }
 
   if (isCoordinateAction(action)) {
@@ -1379,6 +3993,26 @@ async function runPreflightCheck(
   }
 
   return { passed: true, reason: "no preflight rule for action" };
+}
+
+function checkLocalVisionCandidatePreflight(
+  action: ComputerUseAction,
+  localVision: LocalVisionObservation | undefined,
+): NonNullable<ComputerUseStepTrace["preflight"]> {
+  const selectedCandidate = selectCandidateForAction(localVision?.candidates ?? [], action);
+  if (selectedCandidate?.candidate.executionMode === "not_allowed") {
+    return {
+      passed: false,
+      reason: `local vision candidate ${selectedCandidate.candidate.id} is not allowed for direct execution`,
+    };
+  }
+  if (isCoordinateAction(action) && selectedCandidate?.candidate.riskHint === "high") {
+    return {
+      passed: false,
+      reason: `local vision candidate ${selectedCandidate.candidate.id} is high risk and requires selector or fresh user-confirmed execution`,
+    };
+  }
+  return { passed: true, reason: "local vision candidate preflight passed" };
 }
 
 function checkCoordinatePreflight(
@@ -1702,7 +4336,7 @@ function summarizeObservationChange(before: ComputerObservation, after: Computer
 function observationComparableParts(observation: ComputerObservation): string[] {
   const parts: string[] = [];
   if (observation.screenshot) {
-    parts.push(`screenshot:${observation.screenshot.dataUrl.slice(0, 96)}:${observation.screenshot.width}x${observation.screenshot.height}`);
+    parts.push(`screenshot:${stableStringHash(observation.screenshot.dataUrl)}:${observation.screenshot.width}x${observation.screenshot.height}`);
   }
   if (observation.windowList) {
     parts.push(`windows:${observation.windowList.windows.map((window) =>
@@ -1713,6 +4347,15 @@ function observationComparableParts(observation: ComputerObservation): string[] 
     parts.push(`ui:${observation.uiContext.windowHandle}:${stripUiTreeValues(observation.uiContext.tree).slice(0, 4000)}`);
   }
   return parts;
+}
+
+function stableStringHash(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 function findWindowByHandle(

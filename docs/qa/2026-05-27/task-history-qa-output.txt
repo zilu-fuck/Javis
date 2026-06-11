@@ -1,0 +1,18 @@
+# Task History QA Output
+
+generatedAt: 2026-06-10T07:48:09.0123376Z
+dbPath: C:\Users\s1897\AppData\Roaming\app.javis.desktop\javis.db
+qa task id: qa-task-history-9eba58f7f09646e08d9a6b0f85ce9fa9
+qa title: QA Task History Restore Delete 85ce9fa9
+count before: 3
+count after: 4
+count restart: 4
+count after delete: 3
+exists after insert: True
+exists after restart: True
+exists after delete: False
+delete result: clicked
+
+restore: PASS
+delete: PASS
+verdict: PASS

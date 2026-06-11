@@ -7,20 +7,26 @@ import type {
   CodeTool,
   CommanderTool,
   FileTool,
+  GitTool,
   MarkdownDocumentSummary,
+  MemoryTool,
+  McpTool,
   ProjectInspection,
   ProjectTool,
+  ResearchReport,
   ShellCommandOutput,
   ShellTool,
   SchedulerTool,
   ToolDescriptor,
+  TrendHotListResult,
+  TrendTool,
   WebSource,
   WebTool,
   VerifierCheckResult,
   VerifierTool,
   WorkspaceTool,
 } from "@javis/tools";
-import { initialToolDescriptors } from "@javis/tools";
+import { decodeMcpToolServerName, initialToolDescriptors, isDisabledBrowserWriteToolName } from "@javis/tools";
 import { summarizeMarkdownDocuments } from "@javis/tools";
 import {
   createDefaultAgentRegistry,
@@ -28,10 +34,15 @@ import {
 } from "./agents";
 import { createAgentStateTracker } from "./agent-state-tracker";
 import type { FlowController } from "./flow-controller";
-import type { ID, TaskSnapshot, TaskStep, AgentKind, Agent } from "./index";
+import type { ChatMessage, ID, TaskSnapshot, TaskStep, AgentKind, Agent, StepTrace } from "./index";
 import { markStep } from "./plans";
 import { createSourceBackedReport } from "./research";
-import { createSharedTaskContext } from "./shared-context";
+import { buildHandoffReport, createSharedTaskContext } from "./shared-context";
+import {
+  buildRecoveryReport,
+  createRecoveryAttempt,
+  type RecoveryAttemptRecord,
+} from "./recovery-report";
 import { inferImagePath, isVisionGoal } from "./vision-utils";
 import { appendLog } from "./snapshot-utils";
 import {
@@ -40,6 +51,11 @@ import {
   type TaskRuntimeEvent,
 } from "./task-event-bus";
 import { createEmptyTokenUsageSummary } from "./token-usage";
+import {
+  createRecoveredContextMessages,
+  isContextOverflowError,
+  type ContextSummaryTool,
+} from "./context-recovery";
 import { executeWorkflow } from "./workflow-dag-executor";
 import {
   getWorkbenchWorkflow,
@@ -64,12 +80,99 @@ import {
   resolvePermissionRequest,
   type PermissionDecision,
 } from "./permission-state";
-import type { ComputerUseStep } from "./computer-use-types";
+import type { ComputerUseStep, ComputerUseStepTrace } from "./computer-use-types";
+
+interface RuntimeExecutionConfig {
+  contextStrategy?: "auto" | "short" | "long";
+  agentMaxIterations?: number;
+  taskTimeoutMs?: number;
+  failureRecoveryEnabled?: boolean;
+  userWaitTimeoutMs?: number;
+}
 
 const COMMANDER_MODEL_TIMEOUT_MS = 90_000;
 const COMMANDER_TOOL_TIMEOUT_MS = 90_000;
 const COMMANDER_USER_WAIT_TIMEOUT_MS = 5 * 60_000;
 const COMMANDER_REPLAN_TIMEOUT_MS = 60_000;
+const MCP_LIST_TOOLS_TIMEOUT_MS = 5_000;
+const DEFAULT_AGENT_MAX_ITERATIONS = 4;
+const MAX_REACT_MCP_SUBTOOLS = 40;
+const MAX_REACT_MCP_SUBTOOLS_PER_SERVER = 8;
+
+const DEFAULT_AVAILABLE_TOOL_DESCRIPTORS = initialToolDescriptors.filter((descriptor) =>
+  !isDisabledBrowserWriteToolName(descriptor.name)
+);
+
+function normalizeAvailableToolDescriptors(
+  toolDescriptors: readonly ToolDescriptor[] | undefined,
+): ToolDescriptor[] {
+  const source = toolDescriptors ?? DEFAULT_AVAILABLE_TOOL_DESCRIPTORS;
+  const seen = new Set<string>();
+  const normalized: ToolDescriptor[] = [];
+  for (const descriptor of source) {
+    if (seen.has(descriptor.name) || isDisabledBrowserWriteToolName(descriptor.name)) {
+      continue;
+    }
+    seen.add(descriptor.name);
+    normalized.push(descriptor);
+  }
+  return normalized;
+}
+
+function filterAvailableToolDescriptorsForRuntime(
+  toolDescriptors: readonly ToolDescriptor[],
+  tools: { codeTool?: CodeTool; trendTool?: TrendTool },
+): ToolDescriptor[] {
+  return toolDescriptors.filter((descriptor) => {
+    if (descriptor.name === "code.searchRepository") {
+      return Boolean(tools.codeTool?.searchRepository);
+    }
+    if (descriptor.name === "code.traceCallChain") {
+      return Boolean(tools.codeTool?.traceCallChain);
+    }
+    if (descriptor.name === "trend.fetchHotList") {
+      return Boolean(tools.trendTool?.fetchHotList);
+    }
+    return true;
+  });
+}
+
+function resolveCommanderTimeouts(config?: RuntimeExecutionConfig): {
+  modelTimeoutMs: number;
+  toolTimeoutMs: number;
+  replanTimeoutMs: number;
+  userWaitTimeoutMs: number;
+  agentMaxIterations: number;
+} {
+  const taskTimeoutMs = clampRuntimeNumber(config?.taskTimeoutMs, 30_000, 900_000, COMMANDER_MODEL_TIMEOUT_MS);
+  return {
+    modelTimeoutMs: taskTimeoutMs,
+    toolTimeoutMs: taskTimeoutMs,
+    replanTimeoutMs: clampRuntimeNumber(
+      config?.taskTimeoutMs,
+      30_000,
+      600_000,
+      COMMANDER_REPLAN_TIMEOUT_MS,
+    ),
+    userWaitTimeoutMs: clampRuntimeNumber(
+      config?.userWaitTimeoutMs,
+      60_000,
+      120 * 60_000,
+      COMMANDER_USER_WAIT_TIMEOUT_MS,
+    ),
+    agentMaxIterations: clampRuntimeNumber(
+      config?.agentMaxIterations,
+      1,
+      24,
+      DEFAULT_AGENT_MAX_ITERATIONS,
+    ),
+  };
+}
+
+function clampRuntimeNumber(value: unknown, min: number, max: number, fallback: number): number {
+  const parsed = typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
 
 type WaitLogPhase = "waiting_model" | "waiting_tool" | "waiting_user";
 
@@ -181,6 +284,7 @@ interface ReadCurrentProjectWorkflowOptions {
   verifierTool?: VerifierTool;
   taskId: ID;
   userGoal: string;
+  availableToolDescriptors?: ToolDescriptor[];
 }
 
 export function isReadCurrentProjectGoal(userGoal: string): boolean {
@@ -197,6 +301,7 @@ export async function runReadCurrentProjectWorkflow({
   verifierTool,
   taskId,
   userGoal,
+  availableToolDescriptors,
 }: ReadCurrentProjectWorkflowOptions) {
   const workflow = getWorkbenchWorkflow("read-current-project");
   if (!workflow) {
@@ -248,7 +353,17 @@ export async function runReadCurrentProjectWorkflow({
   await controller.wait();
 
   try {
-    const commanderPlan = await safePlanWorkflow(commanderTool, userGoal, "read-current-project");
+    const availableTools = filterAvailableToolDescriptorsForRuntime(
+      normalizeAvailableToolDescriptors(availableToolDescriptors),
+      { codeTool },
+    );
+    const availableToolNames = new Set(availableTools.map((descriptor) => descriptor.name));
+    const requireAvailableTool = (toolName: string) => {
+      if (!availableToolNames.has(toolName)) {
+        throw new Error(`Tool ${toolName} is not available.`);
+      }
+    };
+    const commanderPlan = await safePlanWorkflow(commanderTool, userGoal, "read-current-project", availableTools);
     if (commanderPlan) {
       context.set("commanderPlan", commanderPlan);
       emit({
@@ -293,21 +408,26 @@ export async function runReadCurrentProjectWorkflow({
     const capabilityExecutors = new Map<string, () => Promise<unknown>>([
       // ── Read-only capabilities (dedicated step runners) ──
       ["file_scan", async () => runScanFilesStep({
+        availableToolNames,
         agentTracker, controller, emit, emitEvent, fileTool, taskId,
       })],
       ["shell_readonly", async () => runInspectProjectStep({
+        availableToolNames,
         agentTracker, controller, emit, emitEvent, projectTool, shellTool, taskId,
       })],
       ["git_inspect", async () => runAnalyzeCodeStep({
+        availableToolNames,
         agentTracker, controller, emit, emitEvent, codeTool, taskId,
       })],
       ["evidence_check", async () => {
+        requireAvailableTool("verifier.check");
         return runSummarizeProjectStep({
           agentTracker, controller, emit, emitEvent, verifierTool, taskId,
           contextSnapshot: ctx(),
         });
       }],
       ["synthesis", async () => {
+        requireAvailableTool("commander.synthesize");
         return runCommanderSynthesisStep({
           agentTracker, controller, emit, emitEvent, commanderTool, taskId, userGoal,
           workflowTitle: workflow.title, contextSnapshot: ctx(),
@@ -387,22 +507,26 @@ export async function runReadCurrentProjectWorkflow({
           case "scan-files":
             return {
               output: await runScanFilesStep({
+                availableToolNames,
                 agentTracker, controller, emit, emitEvent, fileTool, taskId,
               }),
             };
           case "inspect-project":
             return {
               output: await runInspectProjectStep({
+                availableToolNames,
                 agentTracker, controller, emit, emitEvent, projectTool, shellTool, taskId,
               }),
             };
           case "analyze-code":
             return {
               output: await runAnalyzeCodeStep({
+                availableToolNames,
                 agentTracker, controller, emit, emitEvent, codeTool, taskId,
               }),
             };
           case "summarize-project":
+            requireAvailableTool("verifier.check");
             return {
               output: await runSummarizeProjectStep({
                 agentTracker, controller, emit, emitEvent, verifierTool, taskId,
@@ -410,6 +534,7 @@ export async function runReadCurrentProjectWorkflow({
               }),
             };
           case "commander-synthesize":
+            requireAvailableTool("commander.synthesize");
             return {
               output: await runCommanderSynthesisStep({
                 agentTracker, controller, emit, emitEvent, commanderTool, taskId,
@@ -545,12 +670,14 @@ interface GenericWorkbenchWorkflowOptions {
   computerTool?: ComputerTool;
   fileTool?: FileTool;
   schedulerTool?: SchedulerTool;
+  trendTool?: TrendTool;
   webTool?: WebTool;
   browserTool?: BrowserTool;
   verifierTool?: VerifierTool;
   taskId: ID;
   userGoal: string;
   workflowId: Exclude<WorkbenchWorkflowId, "read-current-project"> | Exclude<WorkbenchWorkflowId, "read-current-project">[];
+  availableToolDescriptors?: ToolDescriptor[];
 }
 
 export async function runGenericWorkbenchWorkflow({
@@ -560,12 +687,14 @@ export async function runGenericWorkbenchWorkflow({
   computerTool,
   fileTool,
   schedulerTool,
+  trendTool,
   webTool,
   browserTool,
   verifierTool,
   taskId,
   userGoal,
   workflowId,
+  availableToolDescriptors,
 }: GenericWorkbenchWorkflowOptions) {
   const workflow = Array.isArray(workflowId)
     ? createCombinedWorkflow(workflowId)
@@ -621,7 +750,12 @@ export async function runGenericWorkbenchWorkflow({
 
   const unsupportedStepIds = new Set<string>();
   try {
-    const commanderPlan = await safePlanWorkflow(commanderTool, userGoal, workflow.id);
+    const availableTools = filterAvailableToolDescriptorsForRuntime(
+      normalizeAvailableToolDescriptors(availableToolDescriptors),
+      { codeTool },
+    );
+    const availableToolNames = new Set(availableTools.map((descriptor) => descriptor.name));
+    const commanderPlan = await safePlanWorkflow(commanderTool, userGoal, workflow.id, availableTools);
     if (commanderPlan) {
       context.set("commanderPlan", commanderPlan);
       emit({
@@ -651,9 +785,12 @@ export async function runGenericWorkbenchWorkflow({
           emit,
           emitEvent,
           schedulerTool,
+          trendTool,
           step,
           taskId,
           userGoal,
+          availableToolNames,
+          availableTools,
           webTool,
           workflow,
           contextSnapshot: context.snapshot(),
@@ -788,27 +925,114 @@ export async function runGenericWorkbenchWorkflow({
   }
 }
 
-export function getAvailableAgentsForPlanning(): Array<{ kind: string; allowedToolNames: string[] }> {
+export function getAvailableAgentsForPlanning(
+  availableToolDescriptors?: readonly ToolDescriptor[],
+): Array<{ kind: string; allowedToolNames: string[] }> {
+  const normalizedToolDescriptors = availableToolDescriptors
+    ? normalizeAvailableToolDescriptors(availableToolDescriptors)
+    : undefined;
+  const availableToolNames = normalizedToolDescriptors
+    ? new Set(normalizedToolDescriptors.map((descriptor) => descriptor.name))
+    : undefined;
   return createDefaultAgentRegistry().list().map((reg) => ({
     kind: reg.agent.kind,
-    allowedToolNames: reg.agent.allowedToolNames,
+    allowedToolNames: normalizedToolDescriptors
+      ? getAllowedToolNamesForAgent(reg.agent.kind, normalizedToolDescriptors)
+          .filter((toolName) => availableToolNames?.has(toolName))
+      : reg.agent.allowedToolNames,
   }));
+}
+
+function getAllowedToolNamesForAgent(
+  agentKind: string,
+  availableToolDescriptors: readonly ToolDescriptor[],
+): string[] {
+  const agentDef = demoAgents.find((agent) => agent.kind === agentKind);
+  const allowed = new Set(agentDef?.allowedToolNames ?? []);
+  for (const descriptor of availableToolDescriptors) {
+    if (descriptor.ownerAgentKinds.includes(agentKind)) {
+      allowed.add(descriptor.name);
+    }
+  }
+  return [...allowed];
+}
+
+function toolDescriptorsForPlanner(
+  toolDescriptors: readonly ToolDescriptor[],
+): ToolDescriptor[] {
+  return toolDescriptors.map((descriptor) => ({
+    name: descriptor.name,
+    permissionLevel: descriptor.permissionLevel,
+    ...(descriptor.writeRiskLevel ? { writeRiskLevel: descriptor.writeRiskLevel } : {}),
+    summary: descriptor.summary,
+    capabilityTags: descriptor.capabilityTags,
+    ownerAgentKinds: descriptor.ownerAgentKinds,
+  }));
+}
+
+async function planCommanderDagWithContextRecovery(input: {
+  commanderTool: CommanderTool;
+  contextSummaryTool?: ContextSummaryTool;
+  userGoal: string;
+  priorMessages: ChatMessage[];
+  fullPriorMessages: ChatMessage[];
+  omittedPriorMessageCount: number;
+  availableAgents: Array<{ kind: string; allowedToolNames: string[] }>;
+  availableTools: ToolDescriptor[];
+  workflowId: string;
+  context: SharedTaskContext;
+}): Promise<CommanderPlanResult> {
+  const request = {
+    userGoal: input.userGoal,
+    priorMessages: input.priorMessages,
+    omittedPriorMessageCount: input.omittedPriorMessageCount,
+    availableAgents: input.availableAgents,
+    availableTools: input.availableTools,
+    workflowId: input.workflowId,
+  };
+  try {
+    return await input.commanderTool.plan(request);
+  } catch (error) {
+    if (
+      !input.contextSummaryTool ||
+      !isContextOverflowError(error) ||
+      input.fullPriorMessages.length === 0
+    ) {
+      throw error;
+    }
+    const recoveredPriorMessages = await createRecoveredContextMessages({
+      messages: input.fullPriorMessages,
+      summaryTool: input.contextSummaryTool,
+      locale: /[\u3400-\u9fff]/u.test(input.userGoal) ? "zh-CN" : "en",
+      recentRounds: 5,
+    });
+    input.context.set("priorMessages", recoveredPriorMessages);
+    input.context.set("omittedPriorMessageCount", 0);
+    input.context.set("contextRecovery", "summary_recent5");
+    return input.commanderTool.plan({
+      ...request,
+      priorMessages: recoveredPriorMessages,
+      omittedPriorMessageCount: 0,
+    });
+  }
 }
 
 async function safePlanWorkflow(
   commanderTool: CommanderTool | undefined,
   userGoal: string,
   workflowId: string,
+  availableToolDescriptors?: ToolDescriptor[],
 ): Promise<CommanderPlanResult | undefined> {
   if (!commanderTool) {
     return undefined;
   }
   try {
+    const availableTools = normalizeAvailableToolDescriptors(availableToolDescriptors);
     return await commanderTool.plan({
       userGoal,
       workflowId,
-      availableAgents: getAvailableAgentsForPlanning(),
-      availableTools: initialToolDescriptors,
+      availableAgents: getAvailableAgentsForPlanning(availableTools),
+      availableTools: toolDescriptorsForPlanner(availableTools),
     });
   } catch {
     return undefined;
@@ -905,9 +1129,12 @@ async function runGenericWorkflowStep({
   emit,
   emitEvent,
   schedulerTool,
+  trendTool,
   step,
   taskId,
   userGoal,
+  availableToolNames,
+  availableTools,
   webTool,
   workflow,
   contextSnapshot,
@@ -921,9 +1148,12 @@ async function runGenericWorkflowStep({
   emit: SnapshotEmitter;
   emitEvent: RuntimeEventEmitter;
   schedulerTool?: SchedulerTool;
+  trendTool?: TrendTool;
   step: WorkbenchWorkflowStep;
   taskId: ID;
   userGoal: string;
+  availableToolNames: ReadonlySet<string>;
+  availableTools: readonly ToolDescriptor[];
   webTool?: WebTool;
   workflow: WorkbenchWorkflow;
   contextSnapshot: Record<string, unknown>;
@@ -963,8 +1193,11 @@ async function runGenericWorkflowStep({
     computerTool,
     fileTool,
     schedulerTool,
+    trendTool,
     step,
     userGoal,
+    availableToolNames,
+    availableTools,
     webTool,
     workflow,
     contextSnapshot,
@@ -1008,8 +1241,9 @@ function dispatchGenericByCapability(
     browserTool?: BrowserTool;
     codeTool?: CodeTool;
     computerTool?: ComputerTool;
-    schedulerTool?: SchedulerTool;
-    webTool?: WebTool;
+  schedulerTool?: SchedulerTool;
+  trendTool?: TrendTool;
+  webTool?: WebTool;
     userGoal: string;
     workflow: WorkbenchWorkflow;
     contextSnapshot: Record<string, unknown>;
@@ -1142,14 +1376,82 @@ function dispatchGenericByCapability(
   return undefined;
 }
 
+function getGenericStepToolNames(step: WorkbenchWorkflowStep): string[] {
+  switch (getWorkflowStepKey(step.id)) {
+    case "search-trends":
+    case "retrieve-guidance":
+      return ["web.search"];
+    case "fetch-details":
+      return ["web.fetchSource"];
+    case "search-computer":
+      return ["computer.searchLocalDocuments"];
+    case "persist-reminder":
+      return ["scheduler.createTask"];
+    case "navigate-page":
+      return ["browser.navigate"];
+    case "extract-content":
+      return ["browser.getContent", "browser.screenshot"];
+    case "run-tests":
+      return ["browser.runTest"];
+    case "scan-documents":
+    case "scan-pdfs":
+      return ["file.scanMarkdownDocuments"];
+    case "generate-plan":
+    case "inspect-changes":
+      return ["code.inspectRepository"];
+    case "commander-synthesize":
+    case "clarify-requirements":
+    case "parse-query":
+    case "parse-schedule":
+    case "preview-organization":
+      return ["commander.synthesize"];
+    case "merge-trends":
+    case "rank-results":
+    case "verify-reminder":
+    case "verify-extraction":
+    case "verify-results":
+    case "verify-scan":
+    case "verify-organization":
+    case "verify-review":
+      return ["verifier.check"];
+    default:
+      return [];
+  }
+}
+
+function findDisabledRequiredToolName(
+  step: WorkbenchWorkflowStep,
+  availableToolNames: ReadonlySet<string>,
+  availableTools: readonly ToolDescriptor[],
+): string | undefined {
+  const directTool = getGenericStepToolNames(step).find((toolName) => !availableToolNames.has(toolName));
+  if (directTool) {
+    return directTool;
+  }
+  for (const capability of step.requiredCapabilities ?? []) {
+    const hasAvailableCapability = availableTools.some((descriptor) =>
+      availableToolNames.has(descriptor.name) &&
+      descriptor.capabilityTags.includes(capability) &&
+      descriptor.ownerAgentKinds.includes(step.agentKind)
+    );
+    if (!hasAvailableCapability) {
+      return String(capability);
+    }
+  }
+  return undefined;
+}
+
 async function executeConcreteGenericStep({
   browserTool,
   codeTool,
   computerTool,
   fileTool,
   schedulerTool,
+  trendTool,
   step,
   userGoal,
+  availableToolNames,
+  availableTools,
   webTool,
   workflow,
   contextSnapshot,
@@ -1159,12 +1461,20 @@ async function executeConcreteGenericStep({
   computerTool?: ComputerTool;
   fileTool?: FileTool;
   schedulerTool?: SchedulerTool;
+  trendTool?: TrendTool;
   step: WorkbenchWorkflowStep;
   userGoal: string;
+  availableToolNames: ReadonlySet<string>;
+  availableTools: readonly ToolDescriptor[];
   webTool?: WebTool;
   workflow: WorkbenchWorkflow;
   contextSnapshot: Record<string, unknown>;
 }): Promise<GenericStepOutput> {
+  const disabledToolName = findDisabledRequiredToolName(step, availableToolNames, availableTools);
+  if (disabledToolName) {
+    return unsupportedOutput(workflow, step, `Required tool or capability is disabled: ${disabledToolName}`);
+  }
+
   if (isApprovalGatedPermissionLevel(step.permissionLevel)) {
     return unsupportedOutput(workflow, step);
   }
@@ -1181,8 +1491,26 @@ async function executeConcreteGenericStep({
 
   const stepKey = getWorkflowStepKey(step.id);
   if (stepKey === "search-trends" && webTool?.searchWeb) {
+    const trendRequest = inferTrendHotListRequest(userGoal);
+    if (trendTool?.fetchHotList && trendRequest) {
+      const hotList = await trendTool.fetchHotList(trendRequest);
+      const sources = trendHotListToSources(hotList);
+      return concreteOutput(workflow, step, `Fetched ${hotList.items.length}/${hotList.expectedCount} ${formatTrendProviderLabel(hotList.provider)} trend item(s).`, {
+        trendHotList: hotList,
+        sources,
+      });
+    }
     const sources = await webTool.searchWeb({ query: userGoal, maxResults: 5 });
     return concreteOutput(workflow, step, `Search returned ${sources.length} source candidate(s).`, { sources });
+  }
+  const trendRequest = inferTrendHotListRequest(userGoal);
+  if (stepKey === "search-trends" && trendTool?.fetchHotList && trendRequest) {
+    const hotList = await trendTool.fetchHotList(trendRequest);
+    const sources = trendHotListToSources(hotList);
+    return concreteOutput(workflow, step, `Fetched ${hotList.items.length}/${hotList.expectedCount} ${formatTrendProviderLabel(hotList.provider)} trend item(s).`, {
+      trendHotList: hotList,
+      sources,
+    });
   }
   if (stepKey === "fetch-details" && webTool) {
     const candidates = getSourcesFromContext(contextSnapshot).slice(0, 5);
@@ -1196,6 +1524,15 @@ async function executeConcreteGenericStep({
     });
   }
   if (stepKey === "merge-trends") {
+    const hotList = getTrendHotListFromContext(contextSnapshot);
+    if (hotList) {
+      const sources = trendHotListToSources(hotList);
+      const report = createTrendHotListResearchReport(hotList);
+      return concreteOutput(workflow, step, `Verifier ranked ${hotList.items.length} structured ${formatTrendProviderLabel(hotList.provider)} trend item(s).`, {
+        sources,
+        researchReport: report,
+      });
+    }
     const sources = getSourcesFromContext(contextSnapshot);
     const report = createSourceBackedReport(sources, { sourceMode: "search" });
     return concreteOutput(workflow, step, `Verifier merged ${sources.length} source-backed trend item(s).`, {
@@ -1418,10 +1755,14 @@ interface AllCapabilityTools {
   codeTool?: CodeTool;
   computerTool?: ComputerTool;
   fileTool?: FileTool;
+  gitTool?: GitTool;
   shellTool?: ShellTool;
   schedulerTool?: SchedulerTool;
   workspaceTool?: WorkspaceTool;
   webTool?: WebTool;
+  trendTool?: TrendTool;
+  memoryTool?: MemoryTool;
+  mcpTool?: McpTool;
   commanderTool?: CommanderTool;
   verifierTool?: VerifierTool;
   visionTool?: import("@javis/tools").VisionTool;
@@ -1496,25 +1837,43 @@ function containsChinese(value: string): boolean {
   return /[\u3400-\u9fff]/u.test(value);
 }
 
-function findToolDescriptorByCapability(capability: string, agentKind?: string) {
-  return initialToolDescriptors.find((td) =>
+function findToolDescriptorByCapabilityIn(
+  toolDescriptors: readonly ToolDescriptor[],
+  capability: string,
+  agentKind?: string,
+) {
+  return toolDescriptors.find((td) =>
+    !isMcpListToolsDescriptor(td) &&
     td.capabilityTags.includes(capability) &&
     (!agentKind || td.ownerAgentKinds.includes(agentKind))
   );
 }
 
-function findToolDescriptorByName(toolName: string) {
-  return initialToolDescriptors.find((td) => td.name === toolName);
+function isMcpListToolsDescriptor(descriptor: ToolDescriptor): boolean {
+  return descriptor.metadata?.mcpAction === "listTools" || descriptor.name.endsWith(".listTools");
 }
 
-function findToolDescriptorForDagStep(step: CommanderDagStep): ToolDescriptor | undefined {
-  if (step.toolName) return findToolDescriptorByName(step.toolName);
+function findToolDescriptorByNameIn(
+  toolDescriptors: readonly ToolDescriptor[],
+  toolName: string,
+) {
+  return toolDescriptors.find((td) => td.name === toolName);
+}
+
+function findToolDescriptorForDagStep(
+  step: CommanderDagStep,
+  toolDescriptors: readonly ToolDescriptor[] = DEFAULT_AVAILABLE_TOOL_DESCRIPTORS,
+): ToolDescriptor | undefined {
+  if (step.toolName) return findToolDescriptorByNameIn(toolDescriptors, step.toolName);
   const capability = step.capability ?? step.requiredCapabilities?.[0];
-  return capability ? findToolDescriptorByCapability(capability, step.assignedAgentKind) : undefined;
+  return capability ? findToolDescriptorByCapabilityIn(toolDescriptors, capability, step.assignedAgentKind) : undefined;
 }
 
-function getDagStepPermissionLevel(step: CommanderDagStep): WorkbenchWorkflowStep["permissionLevel"] {
-  return findToolDescriptorForDagStep(step)?.permissionLevel ?? "read";
+function getDagStepPermissionLevel(
+  step: CommanderDagStep,
+  toolDescriptors: readonly ToolDescriptor[] = DEFAULT_AVAILABLE_TOOL_DESCRIPTORS,
+): WorkbenchWorkflowStep["permissionLevel"] {
+  return findToolDescriptorForDagStep(step, toolDescriptors)?.permissionLevel ?? "read";
 }
 
 function isApprovalGatedPermissionLevel(
@@ -1527,17 +1886,27 @@ function isApprovalGatedToolDescriptor(descriptor: ToolDescriptor): boolean {
   return descriptor.permissionLevel === "confirmed_write" || descriptor.permissionLevel === "dangerous";
 }
 
-function assertToolCanDispatchWithoutApproval(toolName: string): void {
-  const descriptor = findToolDescriptorByName(toolName);
+function assertToolCanDispatchWithoutApproval(
+  toolName: string,
+  toolDescriptors: readonly ToolDescriptor[] = DEFAULT_AVAILABLE_TOOL_DESCRIPTORS,
+): void {
+  const descriptor = findToolDescriptorByNameIn(toolDescriptors, toolName);
   if (!descriptor || !isApprovalGatedToolDescriptor(descriptor)) return;
   throw new Error(
     `Tool ${toolName} requires ${descriptor.permissionLevel} approval and cannot be dispatched by the generic DAG executor.`,
   );
 }
 
-function assertToolOwnedByAgent(toolName: string, agentKind: string): void {
-  const descriptor = findToolDescriptorByName(toolName);
-  if (!descriptor || descriptor.ownerAgentKinds.includes(agentKind)) return;
+function assertToolOwnedByAgent(
+  toolName: string,
+  agentKind: string,
+  toolDescriptors: readonly ToolDescriptor[] = DEFAULT_AVAILABLE_TOOL_DESCRIPTORS,
+): void {
+  const descriptor = findToolDescriptorByNameIn(toolDescriptors, toolName);
+  if (!descriptor) {
+    throw new Error(`Tool ${toolName} is not available.`);
+  }
+  if (descriptor.ownerAgentKinds.includes(agentKind)) return;
   throw new Error(`Tool ${toolName} is not owned by agent ${agentKind}.`);
 }
 
@@ -1570,8 +1939,48 @@ async function dispatchToolByName(
   toolName: string,
   input: Record<string, unknown>,
   tools: AllCapabilityTools,
+  toolDescriptors: readonly ToolDescriptor[] = DEFAULT_AVAILABLE_TOOL_DESCRIPTORS,
 ): Promise<unknown> {
-  assertToolCanDispatchWithoutApproval(toolName);
+  if (!findToolDescriptorByNameIn(toolDescriptors, toolName)) {
+    throw new Error(`Tool ${toolName} is not available.`);
+  }
+  assertToolCanDispatchWithoutApproval(toolName, toolDescriptors);
+
+  if (toolName.startsWith("mcp.")) {
+    if (!tools.mcpTool) throw new Error("MCP tool bridge is not available");
+    const descriptor = findToolDescriptorByNameIn(toolDescriptors, toolName);
+    const parsedMcpTool = parseMcpToolName(toolName, descriptor);
+    if (!parsedMcpTool) {
+      throw new Error(`Invalid MCP tool name: ${toolName}`);
+    }
+    const mcpToolName = parsedMcpTool.action === "callTool"
+      ? getAllowlistedMcpToolName(descriptor)
+      : undefined;
+    if (parsedMcpTool.action === "callTool" && !mcpToolName) {
+      throw new Error(`MCP callTool descriptor ${toolName} is missing allowlisted mcpToolName metadata.`);
+    }
+    if (
+      parsedMcpTool.action === "callTool" &&
+      (!parsedMcpTool.toolName || parsedMcpTool.toolName !== mcpToolName)
+    ) {
+      throw new Error(`MCP callTool descriptor ${toolName} must encode the allowlisted mcpToolName in its tool name.`);
+    }
+    const mcpArguments = parsedMcpTool.action === "callTool"
+      ? extractMcpToolArguments(input)
+      : undefined;
+    const mcpInput = parsedMcpTool.action === "callTool" && mcpToolName
+      ? { ...input, toolName: mcpToolName }
+      : input;
+    return tools.mcpTool.call({
+      serverName: parsedMcpTool.serverName,
+      source: parsedMcpTool.source,
+      action: parsedMcpTool.action,
+      toolName: mcpToolName,
+      arguments: mcpArguments,
+      input: mcpInput,
+      ...(parsedMcpTool.action === "listTools" ? { timeoutMs: MCP_LIST_TOOLS_TIMEOUT_MS } : {}),
+    });
+  }
 
   switch (toolName) {
     // ── Web tools ─────────────────────────────────────────────────────────
@@ -1588,6 +1997,28 @@ async function dispatchToolByName(
     case "web.fetchSource": {
       if (!tools.webTool) throw new Error("web.fetchSource tool not available");
       return tools.webTool.fetchWebSource({ url: input.url as string });
+    }
+    case "trend.fetchHotList": {
+      if (!tools.trendTool?.fetchHotList) throw new Error("trend.fetchHotList tool not available");
+      return tools.trendTool.fetchHotList({
+        provider: parseTrendProvider(input.provider),
+        fallbackProviders: Array.isArray(input.fallbackProviders)
+          ? input.fallbackProviders.filter((provider): provider is string => typeof provider === "string" && provider.trim().length > 0)
+          : undefined,
+        limit: typeof input.limit === "number" ? input.limit : undefined,
+      });
+    }
+    case "memory.search": {
+      if (!tools.memoryTool) throw new Error("memory.search tool not available");
+      const query = (input.query as string) ?? (input.userGoal as string) ?? "";
+      return tools.memoryTool.search({
+        query,
+        tags: input.tags as string[] | undefined,
+        kind: input.kind as string[] | undefined,
+        scopeType: input.scopeType as "global" | "workspace" | "session" | undefined,
+        scopeId: input.scopeId as string | undefined,
+        limit: input.limit as number | undefined,
+      });
     }
     // ── File tools ────────────────────────────────────────────────────────
     case "file.scanMarkdownDocuments": {
@@ -1704,6 +2135,43 @@ async function dispatchToolByName(
     case "code.inspectRepository": {
       if (!tools.codeTool) throw new Error("code.inspectRepository tool not available");
       return tools.codeTool.inspectRepository();
+    }
+    case "code.searchRepository": {
+      if (!tools.codeTool?.searchRepository) throw new Error("code.searchRepository tool not available");
+      return tools.codeTool.searchRepository({
+        goal: String(input.goal ?? input.query ?? input.userGoal ?? ""),
+        knownTerms: Array.isArray(input.knownTerms)
+          ? input.knownTerms.filter((term): term is string => typeof term === "string")
+          : undefined,
+        entryFile: typeof input.entryFile === "string" ? input.entryFile : undefined,
+        priorityPaths: Array.isArray(input.priorityPaths)
+          ? input.priorityPaths.filter((path): path is string => typeof path === "string" && path.trim().length > 0)
+          : undefined,
+        maxAttempts: typeof input.maxAttempts === "number" ? input.maxAttempts : undefined,
+        maxKeyFiles: typeof input.maxKeyFiles === "number" ? input.maxKeyFiles : undefined,
+      });
+    }
+    case "code.traceCallChain": {
+      if (!tools.codeTool?.traceCallChain) throw new Error("code.traceCallChain tool not available");
+      return tools.codeTool.traceCallChain({
+        goal: String(input.goal ?? input.query ?? input.userGoal ?? ""),
+        target: String(input.target ?? input.symbol ?? input.query ?? input.userGoal ?? ""),
+        entrypoints: Array.isArray(input.entrypoints)
+          ? input.entrypoints.filter((entrypoint): entrypoint is string => typeof entrypoint === "string")
+          : undefined,
+        workspaceModulePrefixes: Array.isArray(input.workspaceModulePrefixes)
+          ? input.workspaceModulePrefixes.filter((prefix): prefix is string => typeof prefix === "string")
+          : undefined,
+        direction: input.direction === "forward" || input.direction === "backward" || input.direction === "bidirectional"
+          ? input.direction
+          : undefined,
+        maxDepth: typeof input.maxDepth === "number" ? input.maxDepth : undefined,
+        maxEdges: typeof input.maxEdges === "number" ? input.maxEdges : undefined,
+        knownTerms: Array.isArray(input.knownTerms)
+          ? input.knownTerms.filter((term): term is string => typeof term === "string")
+          : undefined,
+        maxAttempts: typeof input.maxAttempts === "number" ? input.maxAttempts : undefined,
+      });
     }
     case "code.proposeEdit": {
       if (!tools.codeTool?.proposeEdit) throw new Error("code.proposeEdit tool not available");
@@ -1889,15 +2357,27 @@ export async function executeCapabilityStep(
   step: CommanderDagStep,
   context: SharedTaskContext,
   tools: AllCapabilityTools,
-  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  options: {
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    availableToolDescriptors?: readonly ToolDescriptor[];
+  } = {},
 ): Promise<{ output: unknown; toolName: string }> {
-  const { signal, timeoutMs = COMMANDER_TOOL_TIMEOUT_MS } = options;
+  const {
+    signal,
+    timeoutMs = COMMANDER_TOOL_TIMEOUT_MS,
+    availableToolDescriptors = DEFAULT_AVAILABLE_TOOL_DESCRIPTORS,
+  } = options;
+  const effectiveToolDescriptors = filterAvailableToolDescriptorsForRuntime(
+    normalizeAvailableToolDescriptors(availableToolDescriptors),
+    tools,
+  );
   throwIfTaskAborted(signal, `tool ${step.toolName ?? step.capability ?? step.id}`);
   if (step.toolName) {
-    assertToolOwnedByAgent(step.toolName, step.assignedAgentKind);
-    const input = resolveStepInput(step.inputContextKeys, context);
+    assertToolOwnedByAgent(step.toolName, step.assignedAgentKind, effectiveToolDescriptors);
+    const input = mergeStepInput(step, context);
     const output = await withTaskTimeout(
-      () => dispatchToolByName(step.toolName!, input, tools),
+      () => dispatchToolByName(step.toolName!, input, tools, effectiveToolDescriptors),
       {
         label: `tool ${step.toolName}`,
         timeoutMs,
@@ -1914,7 +2394,11 @@ export async function executeCapabilityStep(
       `Set step.capability or step.requiredCapabilities[0].`);
   }
 
-  const descriptor = findToolDescriptorByCapability(capability, step.assignedAgentKind);
+  const descriptor = findToolDescriptorByCapabilityIn(
+    effectiveToolDescriptors,
+    capability,
+    step.assignedAgentKind,
+  );
   if (!descriptor) {
     throw new Error(
       `No tool registered for capability "${capability}" owned by agent "${step.assignedAgentKind}" (step: ${step.id}). ` +
@@ -1927,9 +2411,9 @@ export async function executeCapabilityStep(
     );
   }
 
-  const input = resolveStepInput(step.inputContextKeys, context);
+  const input = mergeStepInput(step, context);
   const output = await withTaskTimeout(
-    () => dispatchToolByName(descriptor.name, input, tools),
+    () => dispatchToolByName(descriptor.name, input, tools, effectiveToolDescriptors),
     {
       label: `tool ${descriptor.name}`,
       timeoutMs,
@@ -1942,18 +2426,95 @@ export async function executeCapabilityStep(
   return { output, toolName: descriptor.name };
 }
 
+function isCodeRepositorySearchResult(value: unknown): value is import("@javis/tools").CodeRepositorySearchResult {
+  if (!isPlainRecord(value)) return false;
+  return Array.isArray(value.actualFound) &&
+    Array.isArray(value.inferred) &&
+    Array.isArray(value.needsConfirmation) &&
+    Array.isArray(value.keyFiles) &&
+    Array.isArray(value.relatedTestFiles) &&
+    Array.isArray(value.testFileCandidates) &&
+    Array.isArray(value.clusters) &&
+    Array.isArray(value.attempts);
+}
+
+function isCodeRepositoryTraceResult(value: unknown): value is import("@javis/tools").CodeRepositoryTraceResult {
+  if (!isPlainRecord(value)) return false;
+  return typeof value.target === "string" &&
+    typeof value.direction === "string" &&
+    Array.isArray(value.actualFound) &&
+    Array.isArray(value.nodes) &&
+    Array.isArray(value.edges) &&
+    Array.isArray(value.moduleLinks) &&
+    Array.isArray(value.inferred) &&
+    Array.isArray(value.needsConfirmation) &&
+    Array.isArray(value.keyFiles) &&
+    Array.isArray(value.attempts);
+}
+
 function filterToolDescriptorsForStep(
   step: CommanderDagStep,
   allowedToolNames: string[],
-): typeof initialToolDescriptors {
+  toolDescriptors: readonly ToolDescriptor[] = DEFAULT_AVAILABLE_TOOL_DESCRIPTORS,
+): ToolDescriptor[] {
   const capability = step.capability ?? step.requiredCapabilities?.[0];
-  return initialToolDescriptors.filter((descriptor) => {
+  const filtered = toolDescriptors.filter((descriptor) => {
     if (!allowedToolNames.includes(descriptor.name)) return false;
     if (isApprovalGatedToolDescriptor(descriptor)) return false;
     if (step.toolName) return descriptor.name === step.toolName;
     if (capability) return descriptor.capabilityTags.includes(capability);
     return true;
   });
+  return limitReactMcpSubtoolDescriptors(filtered);
+}
+
+function limitReactMcpSubtoolDescriptors(
+  toolDescriptors: readonly ToolDescriptor[],
+): ToolDescriptor[] {
+  const output: ToolDescriptor[] = [];
+  const mcpSubtools: ToolDescriptor[] = [];
+  for (const descriptor of toolDescriptors) {
+    if (isMcpCallToolDescriptorForPrompt(descriptor)) {
+      mcpSubtools.push(descriptor);
+    } else {
+      output.push(descriptor);
+    }
+  }
+  const perServerCount = new Map<string, number>();
+  const selectedSubtools = mcpSubtools
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .filter((descriptor) => {
+      const serverKey = mcpPromptServerKey(descriptor);
+      const count = perServerCount.get(serverKey) ?? 0;
+      if (count >= MAX_REACT_MCP_SUBTOOLS_PER_SERVER) return false;
+      perServerCount.set(serverKey, count + 1);
+      return true;
+    })
+    .slice(0, MAX_REACT_MCP_SUBTOOLS);
+  return [...output, ...selectedSubtools];
+}
+
+function isMcpCallToolDescriptorForPrompt(descriptor: ToolDescriptor): boolean {
+  return descriptor.metadata?.mcpAction === "callTool" || /^mcp\.[^.]+\.tool\.[^.]+$/u.test(descriptor.name);
+}
+
+function mcpPromptServerKey(descriptor: ToolDescriptor): string {
+  const metadataKey = `${descriptor.metadata?.mcpSource ?? ""}:${descriptor.metadata?.mcpServerName ?? ""}`;
+  if (metadataKey !== ":") return metadataKey;
+  const match = /^mcp\.([^.]+)\.tool\.[^.]+$/u.exec(descriptor.name);
+  return match?.[1] ?? descriptor.name;
+}
+
+function mergeStepInput(
+  step: CommanderDagStep,
+  context: SharedTaskContext,
+  extraInput?: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ...resolveStepInput(step.inputContextKeys, context),
+    ...(isPlainRecord(step.toolInput) ? step.toolInput : {}),
+    ...(extraInput ?? {}),
+  };
 }
 
 function resolveStepExecutionMode(
@@ -1971,6 +2532,1150 @@ function resolveStepExecutionMode(
     return "direct_tool_call";
   }
   return "react";
+}
+
+const GIT_STAGE_TOOL_NAME = "git.stageFiles";
+const GIT_COMMIT_TOOL_NAME = "git.createCommit";
+const GIT_CREATE_PR_TOOL_NAME = "git.createPullRequest";
+const GIT_COMMENT_PR_TOOL_NAME = "git.commentPullRequest";
+
+function isGitStageDagStep(step: CommanderDagStep, capability: string | undefined): boolean {
+  return step.toolName === GIT_STAGE_TOOL_NAME ||
+    capability === "git_stage" ||
+    step.requiredCapabilities?.includes("git_stage") === true;
+}
+
+function isGitCommitDagStep(step: CommanderDagStep, capability: string | undefined): boolean {
+  return step.toolName === GIT_COMMIT_TOOL_NAME ||
+    capability === "git_commit" ||
+    step.requiredCapabilities?.includes("git_commit") === true;
+}
+
+function isGitCreatePullRequestDagStep(step: CommanderDagStep, capability: string | undefined): boolean {
+  return step.toolName === GIT_CREATE_PR_TOOL_NAME ||
+    capability === "git_pr_create" ||
+    step.requiredCapabilities?.includes("git_pr_create") === true;
+}
+
+function isGitCommentPullRequestDagStep(step: CommanderDagStep, capability: string | undefined): boolean {
+  return step.toolName === GIT_COMMENT_PR_TOOL_NAME ||
+    capability === "git_pr_comment" ||
+    step.requiredCapabilities?.includes("git_pr_comment") === true;
+}
+
+function extractGitStagePaths(input: Record<string, unknown>): string[] {
+  const paths = input.paths;
+  if (!Array.isArray(paths) || paths.length === 0) {
+    throw new Error("git.stageFiles requires explicit toolInput.paths: string[].");
+  }
+  const normalizedPaths = paths.map((path) => (typeof path === "string" ? path.trim() : ""));
+  if (normalizedPaths.some((path) => path.length === 0)) {
+    throw new Error("git.stageFiles requires non-empty string paths.");
+  }
+  return [...new Set(normalizedPaths)];
+}
+
+function extractGitCommitInput(input: Record<string, unknown>): { message: string; paths?: string[] } {
+  const rawMessage = input.message ?? input.commitMessage;
+  if (typeof rawMessage !== "string" || rawMessage.trim().length === 0) {
+    throw new Error("git.createCommit requires explicit toolInput.message: string.");
+  }
+  const message = rawMessage.trim();
+  if (message.length > 500) {
+    throw new Error("git.createCommit message must be 500 characters or fewer.");
+  }
+  if (input.paths === undefined) {
+    return { message };
+  }
+  const paths = input.paths;
+  if (!Array.isArray(paths) || paths.length === 0) {
+    throw new Error("git.createCommit paths must be a non-empty string[] when provided.");
+  }
+  const normalizedPaths = paths.map((path) => (typeof path === "string" ? path.trim() : ""));
+  if (normalizedPaths.some((path) => path.length === 0)) {
+    throw new Error("git.createCommit requires non-empty string paths.");
+  }
+  return { message, paths: [...new Set(normalizedPaths)] };
+}
+
+function extractGitCreatePullRequestInput(input: Record<string, unknown>): {
+  title: string;
+  body?: string;
+  baseBranch: string;
+  draft: boolean;
+} {
+  const rawTitle = input.title ?? input.prTitle;
+  if (typeof rawTitle !== "string" || rawTitle.trim().length === 0) {
+    throw new Error("git.createPullRequest requires explicit toolInput.title: string.");
+  }
+  const title = rawTitle.trim();
+  if (title.length > 200) {
+    throw new Error("git.createPullRequest title must be 200 characters or fewer.");
+  }
+
+  const rawBaseBranch = input.baseBranch ?? input.base ?? input.targetBranch;
+  if (typeof rawBaseBranch !== "string" || rawBaseBranch.trim().length === 0) {
+    throw new Error("git.createPullRequest requires explicit toolInput.baseBranch: string.");
+  }
+  const baseBranch = rawBaseBranch.trim();
+
+  const rawBody = input.body ?? input.description;
+  if (rawBody !== undefined && typeof rawBody !== "string") {
+    throw new Error("git.createPullRequest body must be a string when provided.");
+  }
+  const body = rawBody?.trim() ?? "";
+  if (body.length > 10_000) {
+    throw new Error("git.createPullRequest body must be 10000 characters or fewer.");
+  }
+
+  const draftInput = input.draft;
+  if (draftInput !== undefined && typeof draftInput !== "boolean") {
+    throw new Error("git.createPullRequest draft must be a boolean when provided.");
+  }
+
+  return { title, body, baseBranch, draft: draftInput ?? true };
+}
+
+function extractGitCommentPullRequestInput(input: Record<string, unknown>): {
+  pullRequest: string;
+  body: string;
+} {
+  const rawPullRequest = input.pullRequest ?? input.pr ?? input.prNumber ?? input.number;
+  if (typeof rawPullRequest !== "string" && typeof rawPullRequest !== "number") {
+    throw new Error("git.commentPullRequest requires explicit toolInput.pullRequest: string.");
+  }
+  const pullRequest = String(rawPullRequest).trim();
+  if (pullRequest.length === 0) {
+    throw new Error("git.commentPullRequest requires non-empty toolInput.pullRequest.");
+  }
+  if (pullRequest.length > 200) {
+    throw new Error("git.commentPullRequest pullRequest must be 200 characters or fewer.");
+  }
+
+  const rawBody = input.body ?? input.comment;
+  if (typeof rawBody !== "string" || rawBody.trim().length === 0) {
+    throw new Error("git.commentPullRequest requires explicit toolInput.body: string.");
+  }
+  const body = rawBody.trim();
+  if (body.length > 10_000) {
+    throw new Error("git.commentPullRequest body must be 10000 characters or fewer.");
+  }
+
+  return { pullRequest, body };
+}
+
+async function executeGitStageDagStep(options: {
+  dagStep: CommanderDagStep;
+  agentId: string;
+  taskId: string;
+  context: SharedTaskContext;
+  gitTool?: GitTool;
+  getSnapshot: () => TaskSnapshot;
+  emitSnapshot: (snapshot: TaskSnapshot) => void;
+  emitEvent: (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number];
+  agentTracker: ReturnType<typeof createAgentStateTracker>;
+  setPendingPermissionHandler?: (
+    requestId: string,
+    handler: ((decision: string) => void | Promise<void>) | undefined,
+  ) => void;
+  signal?: AbortSignal;
+  toolTimeoutMs: number;
+  userWaitTimeoutMs: number;
+}): Promise<unknown> {
+  const {
+    dagStep,
+    agentId,
+    taskId,
+    context,
+    gitTool,
+    getSnapshot,
+    emitSnapshot,
+    emitEvent,
+    agentTracker,
+    setPendingPermissionHandler,
+    signal,
+    toolTimeoutMs,
+    userWaitTimeoutMs,
+  } = options;
+
+  if (!gitTool?.planStageFiles || !gitTool.executeStageFiles) {
+    throw new Error("git.stageFiles tool is not available.");
+  }
+  if (!setPendingPermissionHandler) {
+    throw new Error("git.stageFiles requires a permission handler for confirmed-write staging.");
+  }
+
+  const input = mergeStepInput(dagStep, context);
+  const paths = extractGitStagePaths(input);
+
+  if (agentTracker.getState(agentId)) {
+    agentTracker.setState(agentId, {
+      status: "running",
+      task: dagStep.title,
+      currentStepId: dagStep.id,
+    });
+  }
+  emitSnapshot({
+    ...getSnapshot(),
+    plan: markStep(getSnapshot().plan, dagStep.id, "running"),
+    agents: agentTracker.getSnapshots(),
+    logs: appendLog(getSnapshot(), emitEvent({
+      kind: "tool.planned",
+      taskId,
+      toolName: GIT_STAGE_TOOL_NAME,
+      detail: `Step ${dagStep.id}: preparing Git stage preview for ${paths.length} file(s).`,
+    })),
+  });
+
+  const plan = await withTaskTimeout(
+    () => gitTool.planStageFiles!({ paths, taskId }),
+    {
+      label: `tool ${GIT_STAGE_TOOL_NAME} plan`,
+      timeoutMs: toolTimeoutMs,
+      signal,
+    },
+  );
+
+  const permissionRequest = createPendingPermissionRequest({
+    id: plan.approvalId,
+    level: "confirmed_write",
+    writeRiskLevel: "risky",
+    title: "Approve Git stage",
+    reason: "Staging updates the Git index for selected workspace files.",
+    dryRun: plan.preview.dryRun,
+    allowAlways: false,
+  });
+
+  const approved = await withTaskTimeout(
+    new Promise<boolean>((resolve, reject) => {
+      if (agentTracker.getState(agentId)) {
+        agentTracker.setState(agentId, {
+          status: "waiting_permission",
+          task: `Waiting for Git stage approval for ${paths.length} file(s)`,
+          currentStepId: dagStep.id,
+        });
+      }
+      emitSnapshot({
+        ...getSnapshot(),
+        status: "waiting_permission",
+        commanderMessage: `Git stage needs approval for ${paths.length} file(s).`,
+        permissionRequest,
+        agents: agentTracker.getSnapshots(),
+        logs: [
+          ...getSnapshot().logs,
+          emitEvent({
+            kind: "permission.requested",
+            taskId,
+            request: permissionRequest,
+          }),
+          emitEvent({
+            kind: "task.waiting",
+            taskId,
+            phase: "waiting_user",
+            label: `Git stage approval ${permissionRequest.id}`,
+            detail: `Waiting for permission decision for ${paths.length} Git stage path(s).`,
+            stepId: dagStep.id,
+            agentKind: dagStep.assignedAgentKind as AgentKind,
+            toolName: GIT_STAGE_TOOL_NAME,
+          }),
+        ],
+      });
+
+      setPendingPermissionHandler(permissionRequest.id, async (decision) => {
+        try {
+          resolvePermissionRequest(permissionRequest, decision as PermissionDecision);
+          setPendingPermissionHandler(permissionRequest.id, undefined);
+          emitSnapshot({
+            ...getSnapshot(),
+            permissionRequest: undefined,
+            logs: appendLog(getSnapshot(), emitEvent({
+              kind: "permission.resolved",
+              taskId,
+              requestId: permissionRequest.id,
+              decision: decision === "denied" ? "denied" : "approved",
+            })),
+          });
+          resolve(decision !== "denied");
+        } catch (error) {
+          setPendingPermissionHandler(permissionRequest.id, undefined);
+          reject(error);
+        }
+      });
+    }),
+    {
+      label: `Git stage approval ${permissionRequest.id}`,
+      timeoutMs: userWaitTimeoutMs,
+      signal,
+      onTimeout: () => {
+        setPendingPermissionHandler(permissionRequest.id, undefined);
+        emitSnapshot({
+          ...getSnapshot(),
+          permissionRequest: undefined,
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "task.timeout",
+            taskId,
+            phase: "waiting_user",
+            label: `Git stage approval ${permissionRequest.id}`,
+            timeoutMs: userWaitTimeoutMs,
+            detail: "Git stage approval timed out.",
+            stepId: dagStep.id,
+            agentKind: dagStep.assignedAgentKind as AgentKind,
+            toolName: GIT_STAGE_TOOL_NAME,
+          })),
+        });
+      },
+      onAbort: () => {
+        setPendingPermissionHandler(permissionRequest.id, undefined);
+        emitSnapshot({
+          ...getSnapshot(),
+          permissionRequest: undefined,
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "task.cancelled",
+            taskId,
+            label: `Git stage approval ${permissionRequest.id}`,
+            detail: "Git stage approval cancelled.",
+            stepId: dagStep.id,
+            agentKind: dagStep.assignedAgentKind as AgentKind,
+          })),
+        });
+      },
+    },
+  );
+
+  if (!approved) {
+    const output = {
+      approvalId: plan.approvalId,
+      staged: false,
+      stagedPaths: [],
+      fileCount: 0,
+      denied: true,
+    };
+    if (agentTracker.getState(agentId)) {
+      agentTracker.setState(agentId, {
+        status: "completed",
+        task: `Skipped: ${dagStep.title}`,
+      });
+    }
+    emitSnapshot({
+      ...getSnapshot(),
+      status: "running",
+      commanderMessage: "Git stage was denied; no files were staged.",
+      plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
+      agents: agentTracker.getSnapshots(),
+      verificationSummary: "verified: Git stage denied by user; no files were staged.",
+      logs: appendLog(getSnapshot(), emitEvent({
+        kind: "tool.completed",
+        taskId,
+        toolName: GIT_STAGE_TOOL_NAME,
+        detail: `Step ${dagStep.id}: Git stage denied by user; no files staged.`,
+      })),
+    });
+    return output;
+  }
+
+  if (agentTracker.getState(agentId)) {
+    agentTracker.setState(agentId, {
+      status: "running",
+      task: `Executing Git stage for ${paths.length} file(s)`,
+      currentStepId: dagStep.id,
+    });
+  }
+  const execution = await withTaskTimeout(
+    () => gitTool.executeStageFiles!({
+      approvalId: plan.approvalId,
+      paths,
+      taskId,
+    }),
+    {
+      label: `tool ${GIT_STAGE_TOOL_NAME} execute`,
+      timeoutMs: toolTimeoutMs,
+      signal,
+    },
+  );
+  const stagedList = execution.stagedPaths.join(", ");
+  const summary = `Staged ${execution.fileCount} file(s)${stagedList ? `: ${stagedList}` : ""}.`;
+  if (agentTracker.getState(agentId)) {
+    agentTracker.setState(agentId, {
+      status: "completed",
+      task: `Completed: ${dagStep.title}`,
+    });
+  }
+  emitSnapshot({
+    ...getSnapshot(),
+    status: "running",
+    commanderMessage: summary,
+    plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
+    agents: agentTracker.getSnapshots(),
+    verificationSummary: `verified: ${summary}`,
+    logs: appendLog(getSnapshot(), emitEvent({
+      kind: "tool.completed",
+      taskId,
+      toolName: GIT_STAGE_TOOL_NAME,
+      detail: `Step ${dagStep.id}: ${summary}`,
+    })),
+  });
+  return execution;
+}
+
+async function executeGitCommitDagStep(options: {
+  dagStep: CommanderDagStep;
+  agentId: string;
+  taskId: string;
+  context: SharedTaskContext;
+  gitTool?: GitTool;
+  getSnapshot: () => TaskSnapshot;
+  emitSnapshot: (snapshot: TaskSnapshot) => void;
+  emitEvent: (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number];
+  agentTracker: ReturnType<typeof createAgentStateTracker>;
+  setPendingPermissionHandler?: (
+    requestId: string,
+    handler: ((decision: string) => void | Promise<void>) | undefined,
+  ) => void;
+  signal?: AbortSignal;
+  toolTimeoutMs: number;
+  userWaitTimeoutMs: number;
+}): Promise<unknown> {
+  const {
+    dagStep,
+    agentId,
+    taskId,
+    context,
+    gitTool,
+    getSnapshot,
+    emitSnapshot,
+    emitEvent,
+    agentTracker,
+    setPendingPermissionHandler,
+    signal,
+    toolTimeoutMs,
+    userWaitTimeoutMs,
+  } = options;
+
+  if (!gitTool?.planCommit || !gitTool.executeCommit) {
+    throw new Error("git.createCommit tool is not available.");
+  }
+  if (!setPendingPermissionHandler) {
+    throw new Error("git.createCommit requires a permission handler for confirmed-write commits.");
+  }
+
+  const input = mergeStepInput(dagStep, context);
+  const { message, paths } = extractGitCommitInput(input);
+  const scopeSummary = paths?.length ? `${paths.length} selected file(s)` : "current workspace changes";
+
+  if (agentTracker.getState(agentId)) {
+    agentTracker.setState(agentId, {
+      status: "running",
+      task: dagStep.title,
+      currentStepId: dagStep.id,
+    });
+  }
+  emitSnapshot({
+    ...getSnapshot(),
+    plan: markStep(getSnapshot().plan, dagStep.id, "running"),
+    agents: agentTracker.getSnapshots(),
+    logs: appendLog(getSnapshot(), emitEvent({
+      kind: "tool.planned",
+      taskId,
+      toolName: GIT_COMMIT_TOOL_NAME,
+      detail: `Step ${dagStep.id}: preparing Git commit preview for ${scopeSummary}.`,
+    })),
+  });
+
+  const plan = await withTaskTimeout(
+    () => gitTool.planCommit!({ message, paths, taskId }),
+    {
+      label: `tool ${GIT_COMMIT_TOOL_NAME} plan`,
+      timeoutMs: toolTimeoutMs,
+      signal,
+    },
+  );
+
+  const permissionRequest = createPendingPermissionRequest({
+    id: plan.approvalId,
+    level: "confirmed_write",
+    writeRiskLevel: "risky",
+    title: "Approve Git commit",
+    reason: paths?.length
+      ? "Committing stages selected workspace files and writes a local Git commit."
+      : "Committing stages current workspace changes and writes a local Git commit.",
+    dryRun: plan.preview.dryRun,
+    allowAlways: false,
+  });
+
+  const approved = await withTaskTimeout(
+    new Promise<boolean>((resolve, reject) => {
+      if (agentTracker.getState(agentId)) {
+        agentTracker.setState(agentId, {
+          status: "waiting_permission",
+          task: `Waiting for Git commit approval for ${scopeSummary}`,
+          currentStepId: dagStep.id,
+        });
+      }
+      emitSnapshot({
+        ...getSnapshot(),
+        status: "waiting_permission",
+        commanderMessage: `Git commit needs approval for ${scopeSummary}.`,
+        permissionRequest,
+        agents: agentTracker.getSnapshots(),
+        logs: [
+          ...getSnapshot().logs,
+          emitEvent({
+            kind: "permission.requested",
+            taskId,
+            request: permissionRequest,
+          }),
+          emitEvent({
+            kind: "task.waiting",
+            taskId,
+            phase: "waiting_user",
+            label: `Git commit approval ${permissionRequest.id}`,
+            detail: `Waiting for permission decision for Git commit "${message}".`,
+            stepId: dagStep.id,
+            agentKind: dagStep.assignedAgentKind as AgentKind,
+            toolName: GIT_COMMIT_TOOL_NAME,
+          }),
+        ],
+      });
+
+      setPendingPermissionHandler(permissionRequest.id, async (decision) => {
+        try {
+          resolvePermissionRequest(permissionRequest, decision as PermissionDecision);
+          setPendingPermissionHandler(permissionRequest.id, undefined);
+          emitSnapshot({
+            ...getSnapshot(),
+            permissionRequest: undefined,
+            logs: appendLog(getSnapshot(), emitEvent({
+              kind: "permission.resolved",
+              taskId,
+              requestId: permissionRequest.id,
+              decision: decision === "denied" ? "denied" : "approved",
+            })),
+          });
+          resolve(decision !== "denied");
+        } catch (error) {
+          setPendingPermissionHandler(permissionRequest.id, undefined);
+          reject(error);
+        }
+      });
+    }),
+    {
+      label: `Git commit approval ${permissionRequest.id}`,
+      timeoutMs: userWaitTimeoutMs,
+      signal,
+      onTimeout: () => {
+        setPendingPermissionHandler(permissionRequest.id, undefined);
+        emitSnapshot({
+          ...getSnapshot(),
+          permissionRequest: undefined,
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "task.timeout",
+            taskId,
+            phase: "waiting_user",
+            label: `Git commit approval ${permissionRequest.id}`,
+            timeoutMs: userWaitTimeoutMs,
+            detail: "Git commit approval timed out.",
+            stepId: dagStep.id,
+            agentKind: dagStep.assignedAgentKind as AgentKind,
+            toolName: GIT_COMMIT_TOOL_NAME,
+          })),
+        });
+      },
+      onAbort: () => {
+        setPendingPermissionHandler(permissionRequest.id, undefined);
+        emitSnapshot({
+          ...getSnapshot(),
+          permissionRequest: undefined,
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "task.cancelled",
+            taskId,
+            label: `Git commit approval ${permissionRequest.id}`,
+            detail: "Git commit approval cancelled.",
+            stepId: dagStep.id,
+            agentKind: dagStep.assignedAgentKind as AgentKind,
+          })),
+        });
+      },
+    },
+  );
+
+  if (!approved) {
+    const output = {
+      approvalId: plan.approvalId,
+      committed: false,
+      fileCount: 0,
+      denied: true,
+    };
+    if (agentTracker.getState(agentId)) {
+      agentTracker.setState(agentId, {
+        status: "completed",
+        task: `Skipped: ${dagStep.title}`,
+      });
+    }
+    emitSnapshot({
+      ...getSnapshot(),
+      status: "running",
+      commanderMessage: "Git commit was denied; no commit was created.",
+      plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
+      agents: agentTracker.getSnapshots(),
+      verificationSummary: "verified: Git commit denied by user; no commit was created.",
+      logs: appendLog(getSnapshot(), emitEvent({
+        kind: "tool.completed",
+        taskId,
+        toolName: GIT_COMMIT_TOOL_NAME,
+        detail: `Step ${dagStep.id}: Git commit denied by user; no commit created.`,
+      })),
+    });
+    return output;
+  }
+
+  if (agentTracker.getState(agentId)) {
+    agentTracker.setState(agentId, {
+      status: "running",
+      task: `Creating Git commit for ${scopeSummary}`,
+      currentStepId: dagStep.id,
+    });
+  }
+  const execution = await withTaskTimeout(
+    () => gitTool.executeCommit!({
+      approvalId: plan.approvalId,
+      message,
+      paths,
+      taskId,
+    }),
+    {
+      label: `tool ${GIT_COMMIT_TOOL_NAME} execute`,
+      timeoutMs: toolTimeoutMs,
+      signal,
+    },
+  );
+  const shortHash = execution.commitHash.slice(0, 12);
+  const summary = `Created commit ${shortHash} for ${execution.fileCount} file(s): ${execution.subject}.`;
+  if (agentTracker.getState(agentId)) {
+    agentTracker.setState(agentId, {
+      status: "completed",
+      task: `Completed: ${dagStep.title}`,
+    });
+  }
+  emitSnapshot({
+    ...getSnapshot(),
+    status: "running",
+    commanderMessage: summary,
+    plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
+    agents: agentTracker.getSnapshots(),
+    verificationSummary: `verified: ${summary}`,
+    logs: appendLog(getSnapshot(), emitEvent({
+      kind: "tool.completed",
+      taskId,
+      toolName: GIT_COMMIT_TOOL_NAME,
+      detail: `Step ${dagStep.id}: ${summary}`,
+    })),
+  });
+  return execution;
+}
+
+async function executeGitCreatePullRequestDagStep(options: {
+  dagStep: CommanderDagStep;
+  agentId: string;
+  taskId: string;
+  context: SharedTaskContext;
+  gitTool?: GitTool;
+  getSnapshot: () => TaskSnapshot;
+  emitSnapshot: (snapshot: TaskSnapshot) => void;
+  emitEvent: (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number];
+  agentTracker: ReturnType<typeof createAgentStateTracker>;
+  setPendingPermissionHandler?: (
+    requestId: string,
+    handler: ((decision: string) => void | Promise<void>) | undefined,
+  ) => void;
+  signal?: AbortSignal;
+  toolTimeoutMs: number;
+  userWaitTimeoutMs: number;
+}): Promise<unknown> {
+  const {
+    dagStep,
+    agentId,
+    taskId,
+    context,
+    gitTool,
+    getSnapshot,
+    emitSnapshot,
+    emitEvent,
+    agentTracker,
+    setPendingPermissionHandler,
+    signal,
+    toolTimeoutMs,
+    userWaitTimeoutMs,
+  } = options;
+
+  if (!gitTool?.planCreatePullRequest || !gitTool.executeCreatePullRequest) {
+    throw new Error("git.createPullRequest tool is not available.");
+  }
+  if (!setPendingPermissionHandler) {
+    throw new Error("git.createPullRequest requires a permission handler for confirmed-write pull request creation.");
+  }
+
+  const input = mergeStepInput(dagStep, context);
+  const { title, body, baseBranch, draft } = extractGitCreatePullRequestInput(input);
+
+  if (agentTracker.getState(agentId)) {
+    agentTracker.setState(agentId, {
+      status: "running",
+      task: dagStep.title,
+      currentStepId: dagStep.id,
+    });
+  }
+  emitSnapshot({
+    ...getSnapshot(),
+    plan: markStep(getSnapshot().plan, dagStep.id, "running"),
+    agents: agentTracker.getSnapshots(),
+    logs: appendLog(getSnapshot(), emitEvent({
+      kind: "tool.planned",
+      taskId,
+      toolName: GIT_CREATE_PR_TOOL_NAME,
+      detail: `Step ${dagStep.id}: preparing Git pull request preview for base branch ${baseBranch}.`,
+    })),
+  });
+
+  const plan = await withTaskTimeout(
+    () => gitTool.planCreatePullRequest!({ title, body, baseBranch, draft, taskId }),
+    {
+      label: `tool ${GIT_CREATE_PR_TOOL_NAME} plan`,
+      timeoutMs: toolTimeoutMs,
+      signal,
+    },
+  );
+
+  const permissionRequest = createPendingPermissionRequest({
+    id: plan.approvalId,
+    level: "confirmed_write",
+    writeRiskLevel: "risky",
+    title: "Approve Git pull request",
+    reason: "Creating a pull request publishes the current branch to the configured GitHub remote.",
+    dryRun: plan.preview.dryRun,
+    allowAlways: false,
+  });
+
+  const approved = await withTaskTimeout(
+    new Promise<boolean>((resolve, reject) => {
+      if (agentTracker.getState(agentId)) {
+        agentTracker.setState(agentId, {
+          status: "waiting_permission",
+          task: `Waiting for Git pull request approval for ${plan.preview.headBranch}`,
+          currentStepId: dagStep.id,
+        });
+      }
+      emitSnapshot({
+        ...getSnapshot(),
+        status: "waiting_permission",
+        commanderMessage: `Git pull request creation needs approval for ${plan.preview.headBranch} -> ${plan.preview.baseBranch}.`,
+        permissionRequest,
+        agents: agentTracker.getSnapshots(),
+        logs: [
+          ...getSnapshot().logs,
+          emitEvent({
+            kind: "permission.requested",
+            taskId,
+            request: permissionRequest,
+          }),
+          emitEvent({
+            kind: "task.waiting",
+            taskId,
+            phase: "waiting_user",
+            label: `Git pull request approval ${permissionRequest.id}`,
+            detail: `Waiting for permission decision for Git pull request "${title}".`,
+            stepId: dagStep.id,
+            agentKind: dagStep.assignedAgentKind as AgentKind,
+            toolName: GIT_CREATE_PR_TOOL_NAME,
+          }),
+        ],
+      });
+
+      setPendingPermissionHandler(permissionRequest.id, async (decision) => {
+        try {
+          resolvePermissionRequest(permissionRequest, decision as PermissionDecision);
+          setPendingPermissionHandler(permissionRequest.id, undefined);
+          emitSnapshot({
+            ...getSnapshot(),
+            permissionRequest: undefined,
+            logs: appendLog(getSnapshot(), emitEvent({
+              kind: "permission.resolved",
+              taskId,
+              requestId: permissionRequest.id,
+              decision: decision === "denied" ? "denied" : "approved",
+            })),
+          });
+          resolve(decision !== "denied");
+        } catch (error) {
+          setPendingPermissionHandler(permissionRequest.id, undefined);
+          reject(error);
+        }
+      });
+    }),
+    {
+      label: `Git pull request approval ${permissionRequest.id}`,
+      timeoutMs: userWaitTimeoutMs,
+      signal,
+      onTimeout: () => {
+        setPendingPermissionHandler(permissionRequest.id, undefined);
+        emitSnapshot({
+          ...getSnapshot(),
+          permissionRequest: undefined,
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "task.timeout",
+            taskId,
+            phase: "waiting_user",
+            label: `Git pull request approval ${permissionRequest.id}`,
+            timeoutMs: userWaitTimeoutMs,
+            detail: "Git pull request approval timed out.",
+            stepId: dagStep.id,
+            agentKind: dagStep.assignedAgentKind as AgentKind,
+            toolName: GIT_CREATE_PR_TOOL_NAME,
+          })),
+        });
+      },
+      onAbort: () => {
+        setPendingPermissionHandler(permissionRequest.id, undefined);
+        emitSnapshot({
+          ...getSnapshot(),
+          permissionRequest: undefined,
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "task.cancelled",
+            taskId,
+            label: `Git pull request approval ${permissionRequest.id}`,
+            detail: "Git pull request approval cancelled.",
+            stepId: dagStep.id,
+            agentKind: dagStep.assignedAgentKind as AgentKind,
+          })),
+        });
+      },
+    },
+  );
+
+  if (!approved) {
+    const output = {
+      approvalId: plan.approvalId,
+      created: false,
+      denied: true,
+    };
+    if (agentTracker.getState(agentId)) {
+      agentTracker.setState(agentId, {
+        status: "completed",
+        task: `Skipped: ${dagStep.title}`,
+      });
+    }
+    emitSnapshot({
+      ...getSnapshot(),
+      status: "running",
+      commanderMessage: "Git pull request creation was denied; no pull request was created.",
+      plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
+      agents: agentTracker.getSnapshots(),
+      verificationSummary: "verified: Git pull request creation denied by user; no pull request was created.",
+      logs: appendLog(getSnapshot(), emitEvent({
+        kind: "tool.completed",
+        taskId,
+        toolName: GIT_CREATE_PR_TOOL_NAME,
+        detail: `Step ${dagStep.id}: Git pull request creation denied by user; no pull request created.`,
+      })),
+    });
+    return output;
+  }
+
+  if (agentTracker.getState(agentId)) {
+    agentTracker.setState(agentId, {
+      status: "running",
+      task: `Creating Git pull request for ${plan.preview.headBranch}`,
+      currentStepId: dagStep.id,
+    });
+  }
+  const execution = await withTaskTimeout(
+    () => gitTool.executeCreatePullRequest!({
+      approvalId: plan.approvalId,
+      title,
+      body,
+      baseBranch,
+      draft,
+      taskId,
+    }),
+    {
+      label: `tool ${GIT_CREATE_PR_TOOL_NAME} execute`,
+      timeoutMs: toolTimeoutMs,
+      signal,
+    },
+  );
+  const draftLabel = execution.draft ? "draft " : "";
+  const summary = `Created ${draftLabel}pull request ${execution.url} from ${execution.headBranch} to ${execution.baseBranch}.`;
+  if (agentTracker.getState(agentId)) {
+    agentTracker.setState(agentId, {
+      status: "completed",
+      task: `Completed: ${dagStep.title}`,
+    });
+  }
+  emitSnapshot({
+    ...getSnapshot(),
+    status: "running",
+    commanderMessage: summary,
+    plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
+    agents: agentTracker.getSnapshots(),
+    verificationSummary: `verified: ${summary}`,
+    logs: appendLog(getSnapshot(), emitEvent({
+      kind: "tool.completed",
+      taskId,
+      toolName: GIT_CREATE_PR_TOOL_NAME,
+      detail: `Step ${dagStep.id}: ${summary}`,
+    })),
+  });
+  return execution;
+}
+
+async function executeGitCommentPullRequestDagStep(options: {
+  dagStep: CommanderDagStep;
+  agentId: string;
+  taskId: string;
+  context: SharedTaskContext;
+  gitTool?: GitTool;
+  getSnapshot: () => TaskSnapshot;
+  emitSnapshot: (snapshot: TaskSnapshot) => void;
+  emitEvent: (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number];
+  agentTracker: ReturnType<typeof createAgentStateTracker>;
+  setPendingPermissionHandler?: (
+    requestId: string,
+    handler: ((decision: string) => void | Promise<void>) | undefined,
+  ) => void;
+  signal?: AbortSignal;
+  toolTimeoutMs: number;
+  userWaitTimeoutMs: number;
+}): Promise<unknown> {
+  const {
+    dagStep,
+    agentId,
+    taskId,
+    context,
+    gitTool,
+    getSnapshot,
+    emitSnapshot,
+    emitEvent,
+    agentTracker,
+    setPendingPermissionHandler,
+    signal,
+    toolTimeoutMs,
+    userWaitTimeoutMs,
+  } = options;
+
+  if (!gitTool?.planCommentPullRequest || !gitTool.executeCommentPullRequest) {
+    throw new Error("git.commentPullRequest tool is not available.");
+  }
+  if (!setPendingPermissionHandler) {
+    throw new Error("git.commentPullRequest requires a permission handler for confirmed-write pull request comments.");
+  }
+
+  const input = mergeStepInput(dagStep, context);
+  const { pullRequest, body } = extractGitCommentPullRequestInput(input);
+
+  if (agentTracker.getState(agentId)) {
+    agentTracker.setState(agentId, {
+      status: "running",
+      task: dagStep.title,
+      currentStepId: dagStep.id,
+    });
+  }
+  emitSnapshot({
+    ...getSnapshot(),
+    plan: markStep(getSnapshot().plan, dagStep.id, "running"),
+    agents: agentTracker.getSnapshots(),
+    logs: appendLog(getSnapshot(), emitEvent({
+      kind: "tool.planned",
+      taskId,
+      toolName: GIT_COMMENT_PR_TOOL_NAME,
+      detail: `Step ${dagStep.id}: preparing Git pull request comment preview for ${pullRequest}.`,
+    })),
+  });
+
+  const plan = await withTaskTimeout(
+    () => gitTool.planCommentPullRequest!({ pullRequest, body, taskId }),
+    {
+      label: `tool ${GIT_COMMENT_PR_TOOL_NAME} plan`,
+      timeoutMs: toolTimeoutMs,
+      signal,
+    },
+  );
+
+  const permissionRequest = createPendingPermissionRequest({
+    id: plan.approvalId,
+    level: "confirmed_write",
+    writeRiskLevel: "risky",
+    title: "Approve Git pull request comment",
+    reason: "Commenting on a pull request publishes text to the configured GitHub remote.",
+    dryRun: plan.preview.dryRun,
+    allowAlways: false,
+  });
+
+  const approved = await withTaskTimeout(
+    new Promise<boolean>((resolve, reject) => {
+      if (agentTracker.getState(agentId)) {
+        agentTracker.setState(agentId, {
+          status: "waiting_permission",
+          task: `Waiting for Git pull request comment approval for ${plan.preview.pullRequest}`,
+          currentStepId: dagStep.id,
+        });
+      }
+      emitSnapshot({
+        ...getSnapshot(),
+        status: "waiting_permission",
+        commanderMessage: `Git pull request comment needs approval for ${plan.preview.pullRequest}.`,
+        permissionRequest,
+        agents: agentTracker.getSnapshots(),
+        logs: [
+          ...getSnapshot().logs,
+          emitEvent({
+            kind: "permission.requested",
+            taskId,
+            request: permissionRequest,
+          }),
+          emitEvent({
+            kind: "task.waiting",
+            taskId,
+            phase: "waiting_user",
+            label: `Git pull request comment approval ${permissionRequest.id}`,
+            detail: `Waiting for permission decision for Git pull request comment on ${pullRequest}.`,
+            stepId: dagStep.id,
+            agentKind: dagStep.assignedAgentKind as AgentKind,
+            toolName: GIT_COMMENT_PR_TOOL_NAME,
+          }),
+        ],
+      });
+
+      setPendingPermissionHandler(permissionRequest.id, async (decision) => {
+        try {
+          resolvePermissionRequest(permissionRequest, decision as PermissionDecision);
+          setPendingPermissionHandler(permissionRequest.id, undefined);
+          emitSnapshot({
+            ...getSnapshot(),
+            permissionRequest: undefined,
+            logs: appendLog(getSnapshot(), emitEvent({
+              kind: "permission.resolved",
+              taskId,
+              requestId: permissionRequest.id,
+              decision: decision === "denied" ? "denied" : "approved",
+            })),
+          });
+          resolve(decision !== "denied");
+        } catch (error) {
+          setPendingPermissionHandler(permissionRequest.id, undefined);
+          reject(error);
+        }
+      });
+    }),
+    {
+      label: `Git pull request comment approval ${permissionRequest.id}`,
+      timeoutMs: userWaitTimeoutMs,
+      signal,
+      onTimeout: () => {
+        setPendingPermissionHandler(permissionRequest.id, undefined);
+        emitSnapshot({
+          ...getSnapshot(),
+          permissionRequest: undefined,
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "task.timeout",
+            taskId,
+            phase: "waiting_user",
+            label: `Git pull request comment approval ${permissionRequest.id}`,
+            timeoutMs: userWaitTimeoutMs,
+            detail: "Git pull request comment approval timed out.",
+            stepId: dagStep.id,
+            agentKind: dagStep.assignedAgentKind as AgentKind,
+            toolName: GIT_COMMENT_PR_TOOL_NAME,
+          })),
+        });
+      },
+      onAbort: () => {
+        setPendingPermissionHandler(permissionRequest.id, undefined);
+        emitSnapshot({
+          ...getSnapshot(),
+          permissionRequest: undefined,
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "task.cancelled",
+            taskId,
+            label: `Git pull request comment approval ${permissionRequest.id}`,
+            detail: "Git pull request comment approval cancelled.",
+            stepId: dagStep.id,
+            agentKind: dagStep.assignedAgentKind as AgentKind,
+          })),
+        });
+      },
+    },
+  );
+
+  if (!approved) {
+    const output = {
+      approvalId: plan.approvalId,
+      commented: false,
+      denied: true,
+    };
+    if (agentTracker.getState(agentId)) {
+      agentTracker.setState(agentId, {
+        status: "completed",
+        task: `Skipped: ${dagStep.title}`,
+      });
+    }
+    emitSnapshot({
+      ...getSnapshot(),
+      status: "running",
+      commanderMessage: "Git pull request comment was denied; no comment was posted.",
+      plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
+      agents: agentTracker.getSnapshots(),
+      verificationSummary: "verified: Git pull request comment denied by user; no comment was posted.",
+      logs: appendLog(getSnapshot(), emitEvent({
+        kind: "tool.completed",
+        taskId,
+        toolName: GIT_COMMENT_PR_TOOL_NAME,
+        detail: `Step ${dagStep.id}: Git pull request comment denied by user; no comment posted.`,
+      })),
+    });
+    return output;
+  }
+
+  if (agentTracker.getState(agentId)) {
+    agentTracker.setState(agentId, {
+      status: "running",
+      task: `Posting Git pull request comment for ${plan.preview.pullRequest}`,
+      currentStepId: dagStep.id,
+    });
+  }
+  const execution = await withTaskTimeout(
+    () => gitTool.executeCommentPullRequest!({
+      approvalId: plan.approvalId,
+      pullRequest,
+      body,
+      taskId,
+    }),
+    {
+      label: `tool ${GIT_COMMENT_PR_TOOL_NAME} execute`,
+      timeoutMs: toolTimeoutMs,
+      signal,
+    },
+  );
+  const summary = `Posted pull request comment on ${execution.pullRequest}.`;
+  if (agentTracker.getState(agentId)) {
+    agentTracker.setState(agentId, {
+      status: "completed",
+      task: `Completed: ${dagStep.title}`,
+    });
+  }
+  emitSnapshot({
+    ...getSnapshot(),
+    status: "running",
+    commanderMessage: summary,
+    plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
+    agents: agentTracker.getSnapshots(),
+    verificationSummary: `verified: ${summary}`,
+    logs: appendLog(getSnapshot(), emitEvent({
+      kind: "tool.completed",
+      taskId,
+      toolName: GIT_COMMENT_PR_TOOL_NAME,
+      detail: `Step ${dagStep.id}: ${summary}`,
+    })),
+  });
+  return execution;
 }
 
 const COMPUTER_USE_CAPABILITIES = new Set([
@@ -2015,70 +3720,352 @@ function getComputerUseStepIndex(step: unknown): number {
 function summarizeComputerUseAction(action: { tool: string; params: object }): string {
   const params = action.params as Record<string, unknown>;
   switch (action.tool) {
-    case "computer.screenshot":
-      return typeof params.windowHandle === "string"
-        ? `截取窗口 ${params.windowHandle} 的画面`
+    case "computer.screenshot": {
+      const regionSummary = formatScreenshotRegion(params.region);
+      if (typeof params.windowHandle === "number" || typeof params.windowHandle === "string") {
+        const windowHandle = redactImageDataUrlsForSummary(String(params.windowHandle));
+        return regionSummary
+          ? `截取窗口 ${windowHandle} 的局部画面 ${regionSummary}`
+          : `截取窗口 ${windowHandle} 的画面`;
+      }
+      return regionSummary
+        ? `截取当前桌面的局部画面 ${regionSummary}`
         : "截取当前桌面画面";
+    }
     case "computer.inspectUi":
-      return typeof params.windowHandle === "string"
-        ? `读取窗口 ${params.windowHandle} 的控件结构`
+      return typeof params.windowHandle === "number" || typeof params.windowHandle === "string"
+        ? `读取窗口 ${redactImageDataUrlsForSummary(String(params.windowHandle))} 的控件结构`
         : "读取当前窗口的控件结构";
     case "computer.wait":
       return `等待 ${typeof params.ms === "number" ? params.ms : 0} 毫秒`;
     case "computer.focusWindow":
-      return `聚焦窗口 ${String(params.handle ?? params.windowHandle ?? "目标窗口")}`;
+      return `聚焦窗口 ${redactImageDataUrlsForSummary(String(params.handle ?? params.windowHandle ?? "目标窗口"))}`;
     case "computer.moveMouse":
-      return `移动鼠标到 (${String(params.x ?? "?")}, ${String(params.y ?? "?")})`;
+      return `移动鼠标到 (${formatSummaryValue(params.x)}, ${formatSummaryValue(params.y)})`;
     case "computer.click":
-      return `点击屏幕坐标 (${String(params.x ?? "?")}, ${String(params.y ?? "?")})`;
+      return `点击屏幕坐标 (${formatSummaryValue(params.x)}, ${formatSummaryValue(params.y)})`;
     case "computer.type": {
       const text = typeof params.text === "string" ? params.text : "";
-      return `输入 ${text.length} 个字符`;
+      return `输入 ${redactedTextLength(text) ?? text.length} 个字符`;
     }
     case "computer.keyCombo": {
-      const keys = Array.isArray(params.keys) ? params.keys.map(String).join(" + ") : String(params.keys ?? "快捷键");
+      const keys = Array.isArray(params.keys)
+        ? params.keys.map((key) => redactImageDataUrlsForSummary(String(key))).join(" + ")
+        : redactImageDataUrlsForSummary(String(params.keys ?? "快捷键"));
       return `按下组合键 ${keys}`;
     }
     case "computer.scroll":
-      return `在 (${String(params.x ?? "?")}, ${String(params.y ?? "?")}) 滚动 ${String(params.delta ?? params.deltaY ?? "?")}`;
+      return `在 (${formatSummaryValue(params.x)}, ${formatSummaryValue(params.y)}) 滚动 ${formatSummaryValue(params.delta ?? params.deltaY)}`;
     case "computer.invokeUi":
       return `调用控件${formatComputerUseSelector(params.selector)}`;
     case "computer.setUiValue":
       return `设置控件${formatComputerUseSelector(params.selector)}的文本`;
     default:
-      return `执行桌面操作 ${action.tool}`;
+      return `执行桌面操作 ${formatSummaryValue(action.tool)}`;
   }
+}
+
+function parseMcpToolName(
+  toolName: string,
+  descriptor?: ToolDescriptor,
+): { serverName: string; source?: string; action: "listTools" | "callTool"; toolName?: string } | null {
+  const rest = toolName.slice("mcp.".length);
+  const toolSeparator = ".tool.";
+  const toolSeparatorIndex = rest.indexOf(toolSeparator);
+  if (toolSeparatorIndex > 0) {
+    const encodedServerName = rest.slice(0, toolSeparatorIndex);
+    const encodedToolName = rest.slice(toolSeparatorIndex + toolSeparator.length);
+    if (!encodedToolName) return null;
+    const parsedServer = parseMcpServerDescriptorName(encodedServerName, descriptor);
+    return parsedServer
+      ? { ...parsedServer, action: "callTool", toolName: decodeMcpToolServerName(encodedToolName) }
+      : null;
+  }
+  const suffixes: Array<[string, "listTools" | "callTool"]> = [
+    [".listTools", "listTools"],
+    [".callTool", "callTool"],
+  ];
+  for (const [suffix, action] of suffixes) {
+    if (rest.endsWith(suffix)) {
+      const encodedServerName = rest.slice(0, -suffix.length);
+      const parsedServer = parseMcpServerDescriptorName(encodedServerName, descriptor);
+      return parsedServer ? { ...parsedServer, action } : null;
+    }
+  }
+  const parsedServer = parseMcpServerDescriptorName(rest, descriptor);
+  return parsedServer ? { ...parsedServer, action: "callTool" } : null;
+}
+
+function getAllowlistedMcpToolName(descriptor?: ToolDescriptor): string | undefined {
+  const value = typeof descriptor?.metadata?.mcpToolName === "string"
+    ? descriptor.metadata.mcpToolName.trim()
+    : "";
+  return value || undefined;
+}
+
+function extractMcpToolArguments(input: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (isPlainRecord(input.arguments)) {
+    return input.arguments;
+  }
+  if (isPlainRecord(input.args)) {
+    return input.args;
+  }
+  if (isPlainRecord(input.input)) {
+    return input.input;
+  }
+  if (isPlainRecord(input.parameters)) {
+    return input.parameters;
+  }
+  const {
+    toolName: _toolName,
+    arguments: _arguments,
+    args: _args,
+    input: _input,
+    parameters: _parameters,
+    ...rest
+  } = input;
+  return Object.keys(rest).length > 0 ? rest : undefined;
+}
+
+function parseMcpServerDescriptorName(
+  encodedName: string,
+  descriptor?: ToolDescriptor,
+): { serverName: string; source?: string } | null {
+  const metadataName = typeof descriptor?.metadata?.mcpServerName === "string"
+    ? descriptor.metadata.mcpServerName
+    : undefined;
+  const metadataSource = typeof descriptor?.metadata?.mcpSource === "string"
+    ? descriptor.metadata.mcpSource
+    : undefined;
+  if (metadataName) {
+    return { serverName: metadataName, source: metadataSource };
+  }
+  const decoded = decodeMcpToolServerName(encodedName);
+  const sourceSeparator = decoded.indexOf(":");
+  if (sourceSeparator > 0) {
+    const source = decoded.slice(0, sourceSeparator);
+    const serverName = decoded.slice(sourceSeparator + 1);
+    return serverName ? { serverName, source } : null;
+  }
+  return decoded ? { serverName: decoded } : null;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function formatSummaryValue(value: unknown): string {
+  return redactImageDataUrlsForSummary(String(value ?? "?"));
+}
+
+function redactedTextLength(value: string): number | undefined {
+  const match = value.match(/^\[redacted:(\d+) chars\]$/);
+  return match ? Number(match[1]) : undefined;
+}
+
+function redactImageDataUrlsForSummary(value: string): string {
+  return value.replace(
+    /data:image(?:\/|\\\/)[a-z0-9.+-]+;base64,[a-z0-9+/=_-]+/gi,
+    (match) => `[redacted:image data URL:${match.length} chars]`,
+  );
+}
+
+function sanitizeComputerUseStepForContext(step: ComputerUseStep): ComputerUseStep {
+  return {
+    ...step,
+    screenshotDataUrl: "",
+    observation: redactImageDataUrlsForSummary(step.observation),
+    target: redactImageDataUrlsForSummary(step.target),
+    action: sanitizeComputerUseActionForContext(step.action),
+    result: sanitizeComputerUseContextValue(step.result),
+    trace: sanitizeComputerUseContextValue(step.trace) as ComputerUseStepTrace | undefined,
+    error: step.error ? redactImageDataUrlsForSummary(step.error) : undefined,
+  };
+}
+
+function sanitizeComputerUseActionForContext(
+  action: ComputerUseStep["action"],
+): ComputerUseStep["action"] {
+  const params = sanitizeComputerUseContextValue(action.params) as Record<string, unknown>;
+  if (action.tool === "computer.type" && typeof action.params.text === "string") {
+    params.text = `[redacted:${action.params.text.length} chars]`;
+  }
+  if (action.tool === "computer.setUiValue" && typeof action.params.value === "string") {
+    params.value = `[redacted:${action.params.value.length} chars]`;
+  }
+  return { ...action, params } as ComputerUseStep["action"];
+}
+
+function sanitizeComputerUseContextValue(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (typeof value === "string") {
+    return redactImageDataUrlsForSummary(value);
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  if (seen.has(value)) {
+    return "[redacted:circular]";
+  }
+  seen.add(value);
+  if (Array.isArray(value)) {
+    return value.map((entry) => sanitizeComputerUseContextValue(entry, seen));
+  }
+  const output: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    const lowerKey = key.toLowerCase();
+    output[key] = lowerKey.endsWith("dataurl")
+      ? ""
+      : sanitizeComputerUseContextValue(entry, seen);
+  }
+  return output;
 }
 
 function formatComputerUseSelector(selector: unknown): string {
   if (!selector || typeof selector !== "object") return "";
   const record = selector as Record<string, unknown>;
   const label = record.name ?? record.automationId ?? record.text ?? record.controlType;
-  return label ? `“${String(label)}”` : "";
+  return label ? `“${redactImageDataUrlsForSummary(String(label))}”` : "";
+}
+
+function formatScreenshotRegion(region: unknown): string {
+  if (!region || typeof region !== "object" || Array.isArray(region)) return "";
+  const record = region as Record<string, unknown>;
+  const { x, y, width, height } = record;
+  if (
+    typeof x !== "number" ||
+    typeof y !== "number" ||
+    typeof width !== "number" ||
+    typeof height !== "number"
+  ) {
+    return "";
+  }
+  return `(${x}, ${y}, ${width}x${height})`;
 }
 
 function summarizeComputerUseStep(step: ComputerUseStep): string {
   const index = getComputerUseStepIndex(step) + 1;
   const actionSummary = summarizeComputerUseAction(step.action);
-  const target = step.target?.trim() ? `目标：${step.target.trim()}。` : "";
-  const observation = step.observation?.trim() ? `观察：${step.observation.trim()}。` : "";
-  const error = step.error?.trim() ? `结果：${step.error.trim()}` : "结果：已执行。";
-  return `第 ${index} 步：${actionSummary}。${target}${observation}${error}`;
+  const localVisionSummary = summarizeComputerUseLocalVision(step);
+  const targetText = step.target?.trim() ? redactImageDataUrlsForSummary(step.target.trim()) : "";
+  const observationText = step.observation?.trim()
+    ? redactImageDataUrlsForSummary(step.observation.trim())
+    : "";
+  const errorText = step.error?.trim() ? redactImageDataUrlsForSummary(step.error.trim()) : "";
+  const target = targetText ? `目标：${targetText}。` : "";
+  const observation = observationText ? `观察：${observationText}。` : "";
+  const error = errorText ? `结果：${errorText}` : "结果：已执行。";
+  return `第 ${index} 步：${actionSummary}。${target}${observation}${localVisionSummary}${error}`;
+}
+
+function summarizeComputerUseLocalVision(step: ComputerUseStep): string {
+  const localVision = step.trace?.localVision;
+  if (!localVision) return "";
+  const parts = [
+    `本地视觉：${localVision.mode}`,
+    `检测 ${formatOptionalCount(localVision.detectionCount)}`,
+    `候选 ${formatOptionalCount(localVision.promptCandidateCount)}`,
+  ];
+  if (typeof localVision.latencyMs === "number" && Number.isFinite(localVision.latencyMs)) {
+    parts.push(`耗时 ${Math.round(localVision.latencyMs)}ms`);
+  }
+  if (typeof localVision.consecutiveTimeouts === "number" && localVision.consecutiveTimeouts > 0) {
+    parts.push(`连续超时 ${localVision.consecutiveTimeouts}`);
+  }
+  if (typeof localVision.consecutiveErrors === "number" && localVision.consecutiveErrors > 0) {
+    parts.push(`连续错误 ${localVision.consecutiveErrors}`);
+  }
+  if (typeof localVision.consecutiveActionFailures === "number" && localVision.consecutiveActionFailures > 0) {
+    parts.push(`连续动作失败 ${localVision.consecutiveActionFailures}`);
+  }
+  if (localVision.disabledReason) {
+    parts.push(`已禁用：${localVision.disabledReason}`);
+  }
+  return `${parts.join("，")}。`;
+}
+
+function formatOptionalCount(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value) ? String(value) : "0";
+}
+
+function appendComputerUseStepTrace(
+  trace: TaskSnapshot["executionTrace"],
+  dagStepId: string,
+  step: ComputerUseStep,
+): TaskSnapshot["executionTrace"] {
+  if (!trace) return trace;
+  const startedAt = step.trace?.startedAt ?? new Date().toISOString();
+  const completedAt = step.trace?.completedAt ?? new Date().toISOString();
+  const localVision = summarizeStepTraceLocalVision(step.trace?.localVision);
+  return {
+    ...trace,
+    steps: [
+      ...trace.steps,
+      {
+        stepId: `${dagStepId}:computer-${getComputerUseStepIndex(step) + 1}`,
+        agentKind: "computer",
+        toolName: step.action.tool,
+        startedAt,
+        completedAt,
+        wallTimeMs: step.trace?.durationMs ?? 0,
+        status: step.error ? "failed" : "completed",
+        ...(localVision ? { localVision } : {}),
+      },
+    ],
+  };
+}
+
+function summarizeStepTraceLocalVision(
+  localVision: ComputerUseStepTrace["localVision"] | undefined,
+): StepTrace["localVision"] | undefined {
+  if (!localVision) return undefined;
+  return {
+    mode: localVision.mode,
+    detectionCount: localVision.detectionCount,
+    promptCandidateCount: localVision.promptCandidateCount,
+    latencyMs: localVision.latencyMs,
+    fullScreenshotVlmCalled: localVision.fullScreenshotVlmCalled,
+    cropVlmCalled: localVision.cropVlmCalled,
+    fullScreenshotVlmSkipped: localVision.fullScreenshotVlmSkipped,
+    consecutiveTimeouts: localVision.consecutiveTimeouts,
+    consecutiveErrors: localVision.consecutiveErrors,
+    consecutiveActionFailures: localVision.consecutiveActionFailures,
+    consecutiveSlowDetections: localVision.consecutiveSlowDetections,
+    effectiveImgSize: localVision.effectiveImgSize,
+    disabledReason: localVision.disabledReason,
+    selectedCandidateSource: localVision.selectedCandidateSource,
+    actionType: localVision.actionType,
+    actionRisk: localVision.actionRisk,
+    actionSucceeded: localVision.actionSucceeded,
+    fallbackReason: localVision.fallbackReason,
+  };
 }
 
 function requiresFreshComputerUseApproval(action: { tool: string; params: Record<string, unknown> }): boolean {
   return action.tool === "computer.type" ||
     action.tool === "computer.keyCombo" ||
-    action.tool === "computer.setUiValue" ||
+    action.tool === "computer.setUiValue" && (
+      selectorLooksSensitive(action.params.selector) ||
+      typeof action.params.value === "string" && textLooksSensitive(action.params.value)
+    ) ||
     action.tool === "computer.invokeUi" && selectorLooksSensitive(action.params.selector);
 }
+
+const SENSITIVE_COMPUTER_SELECTOR_TEXT_PATTERN =
+  /delete|remove|pay|purchase|submit|send|publish|overwrite|install|grant|permission|password|passcode|token|secret|credential|api[_\s-]?key|private[_\s-]?key|删除|移除|付款|支付|购买|转账|提交|发送|发布|覆盖|安装|授权|权限|密码|口令|令牌|密钥|私钥|凭据|凭证/i;
+
+const SENSITIVE_COMPUTER_VALUE_TEXT_PATTERN =
+  /password|passcode|pin|otp|2fa|mfa|token|secret|credential|api[_\s-]?key|private[_\s-]?key|\bsk-[a-z0-9_-]+|ghp_[a-z0-9_]+|xox[abprs]-[a-z0-9-]+|akia[0-9a-z]{12,}|eyj[a-z0-9_-]+|credit\s*card|card\s*number|cvv|ssn|passport|密码|口令|验证码|动态码|令牌|密钥|私钥|凭据|凭证|信用卡|银行卡|身份证|护照/i;
 
 function selectorLooksSensitive(selector: unknown): boolean {
   if (!selector || typeof selector !== "object") return false;
   const record = selector as Record<string, unknown>;
-  return [record.name, record.automationId]
-    .filter((value): value is string => typeof value === "string")
-    .some((value) => /password|token|secret|credential|密码|令牌|密钥/i.test(value));
+  const textValues = [record.name, record.automationId]
+    .filter((value): value is string => typeof value === "string");
+  return textValues.some((value) => SENSITIVE_COMPUTER_SELECTOR_TEXT_PATTERN.test(value));
+}
+
+function textLooksSensitive(value: string): boolean {
+  return SENSITIVE_COMPUTER_VALUE_TEXT_PATTERN.test(value);
 }
 
 function createFallbackComputerUseDagPlan(
@@ -2111,12 +4098,32 @@ function normalizeCommanderDagPlan(plan: CommanderPlanResult): CommanderDagPlan 
       capability: (step as CommanderDagStep).capability,
       requiredCapabilities: step.requiredCapabilities ?? [],
       dependsOn: step.dependsOn ?? [],
+      toolInput: isPlainRecord((step as CommanderDagStep).toolInput)
+        ? (step as CommanderDagStep).toolInput
+        : undefined,
     })),
   };
 }
 
+function normalizeComputerTrustTitle(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const normalized = redactImageDataUrlsForSummary(value)
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+  return normalized || undefined;
+}
+
+function computerUseWriteRiskLevel(toolName: string): ToolDescriptor["writeRiskLevel"] {
+  return initialToolDescriptors.find((descriptor) => descriptor.name === toolName)?.writeRiskLevel;
+}
+
 async function requestComputerUseApproval(options: {
   action: { tool: string; params: Record<string, unknown> };
+  requiresFreshApproval?: boolean;
   stepId: string;
   taskId: string;
   computerTool: ComputerTool;
@@ -2126,6 +4133,8 @@ async function requestComputerUseApproval(options: {
   agentTracker: ReturnType<typeof createAgentStateTracker>;
   signal?: AbortSignal;
   timeoutMs?: number;
+  screenshotDataUrl?: string;
+  trustedWindowTitle?: string;
   setPendingPermissionHandler: (
     requestId: string,
     handler: ((decision: string) => void | Promise<void>) | undefined,
@@ -2136,6 +4145,7 @@ async function requestComputerUseApproval(options: {
     stepId,
     taskId,
     computerTool,
+    requiresFreshApproval = false,
     getSnapshot,
     emitSnapshot,
     emitEvent,
@@ -2150,26 +4160,33 @@ async function requestComputerUseApproval(options: {
   }
 
   const actionSummary = summarizeComputerUseAction(action);
-  const canUseTaskApproval = !requiresFreshComputerUseApproval(action);
+  const trustedWindowTitle = normalizeComputerTrustTitle(options.trustedWindowTitle);
+  const canUseTaskApproval = !requiresFreshApproval && !requiresFreshComputerUseApproval(action);
+  const writeRiskLevel = computerUseWriteRiskLevel(action.tool);
   const permissionRequest = createPendingPermissionRequest({
     id: `${taskId}-${stepId}-${action.tool.replace(/[^a-z0-9]+/gi, "-")}-approval-${Date.now()}`,
     level: "confirmed_write",
+    ...(writeRiskLevel ? { writeRiskLevel } : {}),
     title: "需要确认桌面操作",
     reason: canUseTaskApproval
-      ? `Javis 准备${actionSummary}。你也可以允许本次任务在短时间内继续执行低风险桌面动作；输入文字、快捷键和敏感控件仍会再次确认。`
+      ? `Javis 准备${actionSummary}。你也可以允许本次任务在短时间内继续执行低风险桌面动作；自由输入、快捷键、敏感控件和值仍会再次确认。`
       : `Javis 准备${actionSummary}。该动作需要单独确认。`,
+    screenshotDataUrl: options.screenshotDataUrl,
     dryRun: {
       operation: action.tool,
       affectedPaths: [{
-        source: "本机桌面",
+        source: trustedWindowTitle
+          ? `local desktop window: ${trustedWindowTitle}`
+          : "本机桌面",
         target: actionSummary,
         action: "modify",
       }],
       riskSummary: canUseTaskApproval
-        ? "任务级授权仅限当前任务、短时间和有限次数；敏感输入会再次请求确认。"
+        ? "任务级授权仅限当前任务、短时间、有限次数和同一窗口；敏感输入和值会再次请求确认。"
         : "该操作会影响当前桌面或目标应用，请确认后再执行。",
       reversible: false,
     },
+    allowAlways: canUseTaskApproval,
   });
 
   const approvalPromise = new Promise<{ approvalId: string; taskId?: string; sessionWide?: boolean }>((resolve, reject) => {
@@ -2220,7 +4237,7 @@ async function requestComputerUseApproval(options: {
           return;
         }
 
-        const sessionWide = decision === "approved_always";
+        const sessionWide = canUseTaskApproval && decision === "approved_always";
         const approval = await computerTool.approveAction!(
           action,
           permissionRequest.id,
@@ -2478,17 +4495,27 @@ interface CommanderDagTaskOptions {
   commanderTool: CommanderTool;
   codeTool?: CodeTool;
   computerTool?: ComputerTool;
-  fileTool: FileTool;
+  fileTool?: FileTool;
+  gitTool?: GitTool;
   shellTool?: ShellTool;
   schedulerTool?: SchedulerTool;
   workspaceTool?: WorkspaceTool;
   webTool?: WebTool;
+  trendTool?: TrendTool;
+  memoryTool?: MemoryTool;
+  mcpTool?: McpTool;
   browserTool?: BrowserTool;
   verifierTool?: VerifierTool;
   visionTool?: import("@javis/tools").VisionTool;
   taskId: string;
   userGoal: string;
+  priorMessages?: ChatMessage[];
+  omittedPriorMessageCount?: number;
+  fullPriorMessages?: ChatMessage[];
+  contextSummaryTool?: ContextSummaryTool;
+  runtimeConfig?: RuntimeExecutionConfig;
   initialLogs?: TaskSnapshot["logs"];
+  availableToolDescriptors?: ToolDescriptor[];
   signal?: AbortSignal;
   /** LLM-based ReAct decision maker. Called each iteration of the ReAct loop. */
   reactDecideNext?: (
@@ -2504,7 +4531,16 @@ interface CommanderDagTaskOptions {
   computerUseLoopRunner?: (options: {
     userGoal: string;
     computerTool: ComputerTool;
-    approveAction: (action: { tool: string; params: Record<string, unknown> }) => Promise<{ approvalId: string; taskId?: string; sessionWide?: boolean }>;
+    allowedToolNames?: string[];
+    approveAction: (
+      action: { tool: string; params: Record<string, unknown> },
+      options?: {
+        requiresFreshApproval?: boolean;
+        screenshotDataUrl?: string;
+        trustedWindowTitle?: string;
+        timeoutMs?: number;
+      },
+    ) => Promise<{ approvalId: string; taskId?: string; sessionWide?: boolean }>;
     onStep?: (step: unknown) => void;
     onProgress?: (step: unknown) => void;
     signal?: AbortSignal;
@@ -2524,24 +4560,45 @@ export async function runCommanderDagTask({
   codeTool,
   computerTool,
   fileTool,
+  gitTool,
   shellTool,
   schedulerTool,
   workspaceTool,
   webTool,
+  trendTool,
+  memoryTool,
+  mcpTool,
   browserTool,
   verifierTool,
   visionTool,
   taskId,
   userGoal,
+  priorMessages = [],
+  omittedPriorMessageCount = 0,
+  fullPriorMessages,
+  contextSummaryTool,
+  runtimeConfig,
   initialLogs = [],
+  availableToolDescriptors,
   signal,
   reactDecideNext,
   replanDag,
   computerUseLoopRunner,
 }: CommanderDagTaskOptions) {
   const { emit, getSnapshot, wait } = controller;
+  const runtimeTimeouts = resolveCommanderTimeouts(runtimeConfig);
+  const availableTools = filterAvailableToolDescriptorsForRuntime(
+    normalizeAvailableToolDescriptors(availableToolDescriptors),
+    { codeTool, trendTool },
+  );
   throwIfTaskAborted(signal, `Commander DAG task ${taskId}`);
   const context = createSharedTaskContext({ userGoal, taskId });
+  if (priorMessages.length > 0) {
+    context.set("priorMessages", priorMessages);
+  }
+  if (omittedPriorMessageCount > 0) {
+    context.set("omittedPriorMessageCount", omittedPriorMessageCount);
+  }
   if (isVisionGoal(userGoal)) {
     const imagePath = inferImagePath(userGoal);
     if (imagePath) context.set("imagePath", imagePath);
@@ -2590,9 +4647,12 @@ export async function runCommanderDagTask({
   await wait();
   throwIfTaskAborted(signal, `Commander DAG task ${taskId}`);
 
+  const recoveryAttempts: RecoveryAttemptRecord[] = [];
+
   try {
     // Phase 1: Commander generates DAG plan
-    const availableAgents = getAvailableAgentsForPlanning();
+    const availableAgents = getAvailableAgentsForPlanning(availableTools);
+    const plannerAvailableTools = toolDescriptorsForPlanner(availableTools);
     let dagPlan: CommanderDagPlan;
     try {
       emitWaitingLog({
@@ -2606,20 +4666,27 @@ export async function runCommanderDagTask({
         emitEvent,
       });
       dagPlan = normalizeCommanderDagPlan(await withTaskTimeout(
-        () => commanderTool.plan({
+        () => planCommanderDagWithContextRecovery({
+          commanderTool,
+          contextSummaryTool,
           userGoal,
+          priorMessages,
+          fullPriorMessages: fullPriorMessages ?? priorMessages,
+          omittedPriorMessageCount,
           availableAgents,
+          availableTools: plannerAvailableTools,
           workflowId: COMMANDER_DAG_WORKFLOW_ID,
+          context,
         }),
         {
           label: "commander.plan",
-          timeoutMs: COMMANDER_MODEL_TIMEOUT_MS,
+          timeoutMs: runtimeTimeouts.modelTimeoutMs,
           signal,
           onTimeout: () => emitTimeoutLog({
             taskId,
             phase: "waiting_model",
             label: "commander.plan",
-            timeoutMs: COMMANDER_MODEL_TIMEOUT_MS,
+            timeoutMs: runtimeTimeouts.modelTimeoutMs,
             detail: "Commander plan timed out.",
             agentKind: "commander",
             getSnapshot,
@@ -2687,6 +4754,8 @@ export async function runCommanderDagTask({
       assignedAgentKind: step.assignedAgentKind as TaskStep["assignedAgentKind"],
       agentId: `agent-${step.assignedAgentKind}`,
       requiredCapabilities: step.requiredCapabilities,
+      inputContextKeys: step.inputContextKeys,
+      outputContextKey: step.outputContextKey,
       status: "pending" as const,
       successCriteria: step.successCriteria,
     }));
@@ -2708,12 +4777,44 @@ export async function runCommanderDagTask({
       })),
     });
 
-    // Pre-set agents to queued
+    // Pre-set agents to queued and emit an explicit dispatch snapshot before tools start.
+    const queuedSubAgentSteps = new Map<AgentKind, string[]>();
     for (const step of dagPlan.steps) {
       const agentId = `agent-${step.assignedAgentKind}`;
       if (agentTracker.getState(agentId)) {
         agentTracker.setState(agentId, { status: "queued", task: step.title });
+        const agentKind = step.assignedAgentKind as AgentKind;
+        if (agentKind !== "commander") {
+          queuedSubAgentSteps.set(agentKind, [
+            ...(queuedSubAgentSteps.get(agentKind) ?? []),
+            step.title,
+          ]);
+        }
       }
+    }
+    if (queuedSubAgentSteps.size > 0) {
+      const dispatchSummary = [...queuedSubAgentSteps.keys()]
+        .map((agentKind) => formatAgentDisplayName(agentKind))
+        .join(", ");
+      let dispatchLogs = getSnapshot().logs;
+      for (const [agentKind, titles] of queuedSubAgentSteps) {
+        dispatchLogs = appendLog(
+          { ...getSnapshot(), logs: dispatchLogs },
+          emitEvent({
+            kind: "agent.status",
+            taskId,
+            agentKind,
+            status: "queued",
+            message: `Queued by Commander: ${titles.join("; ")}`,
+          }),
+        );
+      }
+      emitSnapshot({
+        ...getSnapshot(),
+        commanderMessage: `${dagPlan.reasoning}\n\nCommander dispatched: ${dispatchSummary}.`,
+        agents: agentTracker.getSnapshots(),
+        logs: dispatchLogs,
+      });
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -2743,6 +4844,7 @@ export async function runCommanderDagTask({
         agentTracker,
         setPendingAskUserHandler: controller.setPendingAskUserHandler,
         signal,
+        timeoutMs: runtimeTimeouts.userWaitTimeoutMs,
       });
 
       // If askUser was the only step, recurse with the clarification
@@ -2759,11 +4861,16 @@ export async function runCommanderDagTask({
           schedulerTool,
           workspaceTool,
           webTool,
+          trendTool,
+          memoryTool,
+          mcpTool,
           browserTool,
           verifierTool,
           visionTool,
           taskId,
           userGoal: `${userGoal}\n\nUser clarification: ${askResult}`,
+          runtimeConfig,
+          availableToolDescriptors: availableTools,
           signal,
           reactDecideNext,
           replanDag,
@@ -2781,8 +4888,8 @@ export async function runCommanderDagTask({
     // Independent steps (no shared dependsOn) are executed concurrently with
     // per-step timeout/cancellation so one hung step cannot block the batch.
     const tools: AllCapabilityTools = {
-      browserTool, codeTool, computerTool, fileTool,
-      shellTool, schedulerTool, workspaceTool, webTool,
+      browserTool, codeTool, computerTool, fileTool, gitTool,
+      shellTool, schedulerTool, workspaceTool, webTool, trendTool, memoryTool, mcpTool,
       commanderTool, verifierTool, visionTool,
     };
     const completedSteps = new Set<string>();
@@ -2794,7 +4901,7 @@ export async function runCommanderDagTask({
       agentKind: step.assignedAgentKind as WorkbenchWorkflowStep["agentKind"],
       input: step.title,
       output: step.successCriteria,
-      permissionLevel: getDagStepPermissionLevel(step as CommanderDagStep),
+      permissionLevel: getDagStepPermissionLevel(step as CommanderDagStep, availableTools),
       dependsOn: (step as CommanderDagStep).dependsOn ?? [],
       canRunInParallel: true,
       requiredCapabilities: step.requiredCapabilities as AgentCapabilityTag[] | undefined,
@@ -2863,6 +4970,7 @@ export async function runCommanderDagTask({
             agentTracker,
             setPendingAskUserHandler: controller.setPendingAskUserHandler,
             signal,
+            timeoutMs: runtimeTimeouts.userWaitTimeoutMs,
           });
           completedSteps.add(dagStep.id);
           context.set((dagStep as CommanderDagStep).outputContextKey ?? "clarification", answer);
@@ -2893,7 +5001,231 @@ export async function runCommanderDagTask({
         ?? (dagStep.requiredCapabilities?.length ? dagStep.requiredCapabilities[0] : undefined);
       const agentId = `agent-${dagStep.assignedAgentKind}`;
 
+      if (isGitStageDagStep(dagStep as CommanderDagStep, capability)) {
+        const descriptor = findToolDescriptorByNameIn(availableTools, GIT_STAGE_TOOL_NAME);
+        if (!descriptor) {
+          throw new Error("git.stageFiles tool is not available.");
+        }
+        if (!descriptor.ownerAgentKinds.includes(dagStep.assignedAgentKind)) {
+          throw new Error(`Tool git.stageFiles is not owned by agent ${dagStep.assignedAgentKind}.`);
+        }
+        try {
+          const output = await executeGitStageDagStep({
+            dagStep: dagStep as CommanderDagStep,
+            agentId,
+            taskId,
+            context,
+            gitTool,
+            getSnapshot,
+            emitSnapshot,
+            emitEvent,
+            agentTracker,
+            setPendingPermissionHandler: controller.setPendingPermissionHandler,
+            signal,
+            toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
+            userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
+          });
+          completedSteps.add(dagStep.id);
+          writeStepOutput(
+            (dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`,
+            output,
+            context,
+          );
+          return { output };
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          const redactedErrorMsg = redactImageDataUrlsForSummary(errorMsg);
+          if (agentTracker.getState(agentId)) {
+            agentTracker.setState(agentId, {
+              status: "failed",
+              task: `Failed: ${redactedErrorMsg}`,
+            });
+          }
+          emitSnapshot({
+            ...getSnapshot(),
+            permissionRequest: undefined,
+            plan: markStep(getSnapshot().plan, dagStep.id, "failed"),
+            agents: agentTracker.getSnapshots(),
+            logs: appendLog(getSnapshot(), emitEvent({
+              kind: "task.failed",
+              taskId,
+              error: redactedErrorMsg,
+            })),
+          });
+          throw error;
+        }
+      }
+
+      if (isGitCommitDagStep(dagStep as CommanderDagStep, capability)) {
+        const descriptor = findToolDescriptorByNameIn(availableTools, GIT_COMMIT_TOOL_NAME);
+        if (!descriptor) {
+          throw new Error("git.createCommit tool is not available.");
+        }
+        if (!descriptor.ownerAgentKinds.includes(dagStep.assignedAgentKind)) {
+          throw new Error(`Tool git.createCommit is not owned by agent ${dagStep.assignedAgentKind}.`);
+        }
+        try {
+          const output = await executeGitCommitDagStep({
+            dagStep: dagStep as CommanderDagStep,
+            agentId,
+            taskId,
+            context,
+            gitTool,
+            getSnapshot,
+            emitSnapshot,
+            emitEvent,
+            agentTracker,
+            setPendingPermissionHandler: controller.setPendingPermissionHandler,
+            signal,
+            toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
+            userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
+          });
+          completedSteps.add(dagStep.id);
+          writeStepOutput(
+            (dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`,
+            output,
+            context,
+          );
+          return { output };
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          const redactedErrorMsg = redactImageDataUrlsForSummary(errorMsg);
+          if (agentTracker.getState(agentId)) {
+            agentTracker.setState(agentId, {
+              status: "failed",
+              task: `Failed: ${redactedErrorMsg}`,
+            });
+          }
+          emitSnapshot({
+            ...getSnapshot(),
+            permissionRequest: undefined,
+            plan: markStep(getSnapshot().plan, dagStep.id, "failed"),
+            agents: agentTracker.getSnapshots(),
+            logs: appendLog(getSnapshot(), emitEvent({
+              kind: "task.failed",
+              taskId,
+              error: redactedErrorMsg,
+            })),
+          });
+          throw error;
+        }
+      }
+
+      if (isGitCreatePullRequestDagStep(dagStep as CommanderDagStep, capability)) {
+        const descriptor = findToolDescriptorByNameIn(availableTools, GIT_CREATE_PR_TOOL_NAME);
+        if (!descriptor) {
+          throw new Error("git.createPullRequest tool is not available.");
+        }
+        if (!descriptor.ownerAgentKinds.includes(dagStep.assignedAgentKind)) {
+          throw new Error(`Tool git.createPullRequest is not owned by agent ${dagStep.assignedAgentKind}.`);
+        }
+        try {
+          const output = await executeGitCreatePullRequestDagStep({
+            dagStep: dagStep as CommanderDagStep,
+            agentId,
+            taskId,
+            context,
+            gitTool,
+            getSnapshot,
+            emitSnapshot,
+            emitEvent,
+            agentTracker,
+            setPendingPermissionHandler: controller.setPendingPermissionHandler,
+            signal,
+            toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
+            userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
+          });
+          completedSteps.add(dagStep.id);
+          writeStepOutput(
+            (dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`,
+            output,
+            context,
+          );
+          return { output };
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          const redactedErrorMsg = redactImageDataUrlsForSummary(errorMsg);
+          if (agentTracker.getState(agentId)) {
+            agentTracker.setState(agentId, {
+              status: "failed",
+              task: `Failed: ${redactedErrorMsg}`,
+            });
+          }
+          emitSnapshot({
+            ...getSnapshot(),
+            permissionRequest: undefined,
+            plan: markStep(getSnapshot().plan, dagStep.id, "failed"),
+            agents: agentTracker.getSnapshots(),
+            logs: appendLog(getSnapshot(), emitEvent({
+              kind: "task.failed",
+              taskId,
+              error: redactedErrorMsg,
+            })),
+          });
+          throw error;
+        }
+      }
+
+      if (isGitCommentPullRequestDagStep(dagStep as CommanderDagStep, capability)) {
+        const descriptor = findToolDescriptorByNameIn(availableTools, GIT_COMMENT_PR_TOOL_NAME);
+        if (!descriptor) {
+          throw new Error("git.commentPullRequest tool is not available.");
+        }
+        if (!descriptor.ownerAgentKinds.includes(dagStep.assignedAgentKind)) {
+          throw new Error(`Tool git.commentPullRequest is not owned by agent ${dagStep.assignedAgentKind}.`);
+        }
+        try {
+          const output = await executeGitCommentPullRequestDagStep({
+            dagStep: dagStep as CommanderDagStep,
+            agentId,
+            taskId,
+            context,
+            gitTool,
+            getSnapshot,
+            emitSnapshot,
+            emitEvent,
+            agentTracker,
+            setPendingPermissionHandler: controller.setPendingPermissionHandler,
+            signal,
+            toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
+            userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
+          });
+          completedSteps.add(dagStep.id);
+          writeStepOutput(
+            (dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`,
+            output,
+            context,
+          );
+          return { output };
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          const redactedErrorMsg = redactImageDataUrlsForSummary(errorMsg);
+          if (agentTracker.getState(agentId)) {
+            agentTracker.setState(agentId, {
+              status: "failed",
+              task: `Failed: ${redactedErrorMsg}`,
+            });
+          }
+          emitSnapshot({
+            ...getSnapshot(),
+            permissionRequest: undefined,
+            plan: markStep(getSnapshot().plan, dagStep.id, "failed"),
+            agents: agentTracker.getSnapshots(),
+            logs: appendLog(getSnapshot(), emitEvent({
+              kind: "task.failed",
+              taskId,
+              error: redactedErrorMsg,
+            })),
+          });
+          throw error;
+        }
+      }
+
       if (isComputerUseDagStep(dagStep) || isComputerUseCapability(capability)) {
+        const descriptor = findToolDescriptorForDagStep(dagStep as CommanderDagStep, availableTools);
+        if (!descriptor) {
+          throw new Error(`No available Computer Use tool is registered for step ${dagStep.id}.`);
+        }
         if (!computerUseLoopRunner) {
           throw new Error("Computer Use loop runner is not available.");
         }
@@ -2927,9 +5259,15 @@ export async function runCommanderDagTask({
         const steps = await computerUseLoopRunner({
           userGoal,
           computerTool,
-          approveAction: (action) =>
+          allowedToolNames: availableTools
+            .filter((descriptor) => descriptor.ownerAgentKinds.includes("computer"))
+            .map((descriptor) => descriptor.name),
+          approveAction: (action, approvalOptions) =>
             requestComputerUseApproval({
               action,
+              requiresFreshApproval: approvalOptions?.requiresFreshApproval,
+              screenshotDataUrl: approvalOptions?.screenshotDataUrl,
+              trustedWindowTitle: approvalOptions?.trustedWindowTitle,
               stepId: dagStep.id,
               taskId,
               computerTool,
@@ -2939,39 +5277,52 @@ export async function runCommanderDagTask({
               agentTracker,
               signal,
               setPendingPermissionHandler: controller.setPendingPermissionHandler!,
+              timeoutMs: approvalOptions?.timeoutMs ?? runtimeTimeouts.userWaitTimeoutMs,
             }),
           onStep: (step) => {
             const computerStep = step as ComputerUseStep;
-            context.set((dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`, computerStep);
+            context.set(
+              (dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`,
+              sanitizeComputerUseStepForContext(computerStep),
+            );
             const stepSummary = summarizeComputerUseStep(computerStep);
+            const currentSnapshot = getSnapshot();
             emitSnapshot({
-              ...getSnapshot(),
+              ...currentSnapshot,
               status: "running",
               commanderMessage: stepSummary,
-              plan: markStep(getSnapshot().plan, dagStep.id, "running"),
+              plan: markStep(currentSnapshot.plan, dagStep.id, "running"),
               agents: agentTracker.getSnapshots(),
-              logs: appendLog(getSnapshot(), emitEvent({
+              logs: appendLog(currentSnapshot, emitEvent({
                 kind: "tool.completed",
                 taskId,
                 toolName: computerStep.action.tool,
                 detail: stepSummary,
               })),
+              executionTrace: appendComputerUseStepTrace(
+                currentSnapshot.executionTrace,
+                dagStep.id,
+                computerStep,
+              ),
             });
           },
           onProgress: (step) => {
             const progressStep = step as ComputerUseStep;
             const phase = progressStep.phase ?? "executing";
+            const progressObservation = progressStep.observation
+              ? redactImageDataUrlsForSummary(progressStep.observation)
+              : "";
             if (agentTracker.getState(agentId)) {
               agentTracker.setState(agentId, {
                 status: phase === "waiting_permission" ? "waiting_permission" : "running",
-                task: progressStep.observation || `Computer Use: ${phase}`,
+                task: progressObservation || `Computer Use: ${phase}`,
                 currentStepId: dagStep.id,
               });
             }
             emitSnapshot({
               ...getSnapshot(),
               status: phase === "waiting_permission" ? "waiting_permission" : "running",
-              commanderMessage: progressStep.observation || `Computer Use: ${phase}`,
+              commanderMessage: progressObservation || `Computer Use: ${phase}`,
               plan: markStep(getSnapshot().plan, dagStep.id, "running"),
               agents: agentTracker.getSnapshots(),
             });
@@ -2989,11 +5340,14 @@ export async function runCommanderDagTask({
           if (/denied by user|permission denied|用户已拒绝/i.test(error)) {
             throw new Error("用户已拒绝桌面操作。");
           }
-          throw new Error(`Computer Use failed: ${error}`);
+          throw new Error(`Computer Use failed: ${redactImageDataUrlsForSummary(error)}`);
         }
 
         completedSteps.add(dagStep.id);
-        context.set((dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`, steps);
+        context.set(
+          (dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`,
+          steps.map((step) => sanitizeComputerUseStepForContext(step as ComputerUseStep)),
+        );
         if (agentTracker.getState(agentId)) {
           agentTracker.setState(agentId, {
             status: "completed",
@@ -3038,27 +5392,24 @@ export async function runCommanderDagTask({
       await wait();
 
       const executionMode = resolveStepExecutionMode(dagStep as CommanderDagStep);
-      const agentDef = demoAgents.find((a) => a.kind === dagStep.assignedAgentKind);
-      const allowedToolNames = agentDef?.allowedToolNames ?? [];
+      const allowedToolNames = getAllowedToolNamesForAgent(dagStep.assignedAgentKind, availableTools);
       const stepToolDescriptors = filterToolDescriptorsForStep(
         dagStep as CommanderDagStep,
         allowedToolNames,
+        availableTools,
       );
 
       // Build ReAct tools from available tool descriptors filtered by agent, capability, and toolName.
       const reactTools: AgentReActTool[] = stepToolDescriptors
         .map((td) => ({
           name: td.name,
-          execute: async () => {
-            const stepInput = resolveStepInput(
-              (dagStep as CommanderDagStep).inputContextKeys,
-              context,
-            );
+          execute: async ({ input: reactInput }) => {
+            const stepInput = mergeStepInput(dagStep as CommanderDagStep, context, reactInput);
             const output = await withTaskTimeout(
-              () => dispatchToolByName(td.name, stepInput, tools),
+              () => dispatchToolByName(td.name, stepInput, tools, availableTools),
               {
                 label: `ReAct tool ${td.name}`,
-                timeoutMs: COMMANDER_TOOL_TIMEOUT_MS,
+                timeoutMs: runtimeTimeouts.toolTimeoutMs,
                 signal,
               },
             );
@@ -3078,10 +5429,10 @@ export async function runCommanderDagTask({
           step: wfStep,
           context,
           tools: reactTools,
-          maxIterations: 4,
+          maxIterations: runtimeTimeouts.agentMaxIterations,
           signal,
-          decisionTimeoutMs: COMMANDER_MODEL_TIMEOUT_MS,
-          toolTimeoutMs: COMMANDER_TOOL_TIMEOUT_MS,
+          decisionTimeoutMs: runtimeTimeouts.modelTimeoutMs,
+          toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
           decideNext: (req) =>
             reactDecideNext({
               agentKind: req.agent.kind,
@@ -3119,7 +5470,7 @@ export async function runCommanderDagTask({
               taskId,
               phase,
               label: `${dagStep.id} iteration ${iteration}`,
-              timeoutMs: phase === "waiting_model" ? COMMANDER_MODEL_TIMEOUT_MS : COMMANDER_TOOL_TIMEOUT_MS,
+              timeoutMs: phase === "waiting_model" ? runtimeTimeouts.modelTimeoutMs : runtimeTimeouts.toolTimeoutMs,
               detail: `Step ${dagStep.id} ${phase} iteration ${iteration}: ${detail}`,
               stepId: dagStep.id,
               agentKind: dagStep.assignedAgentKind as AgentKind,
@@ -3180,13 +5531,13 @@ export async function runCommanderDagTask({
           ),
           {
             label: `commander.synthesize ${dagStep.id}`,
-            timeoutMs: COMMANDER_MODEL_TIMEOUT_MS,
+            timeoutMs: runtimeTimeouts.modelTimeoutMs,
             signal,
             onTimeout: () => emitTimeoutLog({
               taskId,
               phase: "waiting_model",
               label: `commander.synthesize ${dagStep.id}`,
-              timeoutMs: COMMANDER_MODEL_TIMEOUT_MS,
+              timeoutMs: runtimeTimeouts.modelTimeoutMs,
               detail: `Commander synthesis for ${dagStep.id} timed out.`,
               stepId: dagStep.id,
               agentKind: "commander",
@@ -3220,7 +5571,6 @@ export async function runCommanderDagTask({
             task: `Completed: ${dagStep.title}`,
           });
         }
-
         emitSnapshot({
           ...getSnapshot(),
           plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
@@ -3255,17 +5605,21 @@ export async function runCommanderDagTask({
             dagStep as CommanderDagStep,
             context,
             tools,
-            { signal, timeoutMs: COMMANDER_TOOL_TIMEOUT_MS },
+            {
+              signal,
+              timeoutMs: runtimeTimeouts.toolTimeoutMs,
+              availableToolDescriptors: availableTools,
+            },
           ),
           {
             label: `tool dispatch ${dagStep.id}`,
-            timeoutMs: COMMANDER_TOOL_TIMEOUT_MS,
+            timeoutMs: runtimeTimeouts.toolTimeoutMs,
             signal,
             onTimeout: () => emitTimeoutLog({
               taskId,
               phase: "waiting_tool",
               label: `tool dispatch ${dagStep.id}`,
-              timeoutMs: COMMANDER_TOOL_TIMEOUT_MS,
+              timeoutMs: runtimeTimeouts.toolTimeoutMs,
               detail: `Step ${dagStep.id} tool dispatch timed out.`,
               stepId: dagStep.id,
               agentKind: dagStep.assignedAgentKind as AgentKind,
@@ -3295,8 +5649,19 @@ export async function runCommanderDagTask({
           });
         }
 
+        const repoSearchReport = result.toolName === "code.searchRepository" &&
+          isCodeRepositorySearchResult(result.output)
+          ? result.output
+          : undefined;
+        const repoTraceReport = result.toolName === "code.traceCallChain" &&
+          isCodeRepositoryTraceResult(result.output)
+          ? result.output
+          : undefined;
+
         emitSnapshot({
           ...getSnapshot(),
+          ...(repoSearchReport ? { repoSearchReport } : {}),
+          ...(repoTraceReport ? { repoTraceReport } : {}),
           plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
           agents: agentTracker.getSnapshots(),
           logs: appendLog(getSnapshot(), emitEvent({
@@ -3310,11 +5675,12 @@ export async function runCommanderDagTask({
         return { output: result.output };
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
+        const redactedErrorMsg = redactImageDataUrlsForSummary(errorMsg);
 
         if (agentTracker.getState(agentId)) {
           agentTracker.setState(agentId, {
             status: "failed",
-            task: `Failed: ${errorMsg}`,
+            task: `Failed: ${redactedErrorMsg}`,
           });
         }
 
@@ -3325,7 +5691,7 @@ export async function runCommanderDagTask({
           logs: appendLog(getSnapshot(), emitEvent({
             kind: "task.failed",
             taskId,
-            error: errorMsg,
+            error: redactedErrorMsg,
           })),
         });
 
@@ -3343,10 +5709,32 @@ export async function runCommanderDagTask({
       context: SharedTaskContext;
       completedStepIds: string[];
     }) {
-      if (!replanDag) return undefined;
+      if (runtimeConfig?.failureRecoveryEnabled === false || !replanDag) {
+        recoveryAttempts.push(createRecoveryAttempt({
+          step: request.step,
+          error: request.error,
+          completedStepIds: request.completedStepIds,
+          replanAttempted: false,
+          replanStatus: "not_attempted",
+          detail: runtimeConfig?.failureRecoveryEnabled === false
+            ? "Failure recovery is disabled by runtime configuration."
+            : "No Commander replan implementation is available.",
+        }));
+        return undefined;
+      }
 
       const dagStep = dagPlan.steps.find((s) => s.id === request.step.id);
-      if (!dagStep) return undefined;
+      if (!dagStep) {
+        recoveryAttempts.push(createRecoveryAttempt({
+          step: request.step,
+          error: request.error,
+          completedStepIds: request.completedStepIds,
+          replanAttempted: true,
+          replanStatus: "failed",
+          detail: "Failed step was not found in the Commander DAG.",
+        }));
+        return undefined;
+      }
 
       try {
         emitSnapshot({
@@ -3380,13 +5768,13 @@ export async function runCommanderDagTask({
           ),
           {
             label: `commander.replan ${request.step.id}`,
-            timeoutMs: COMMANDER_REPLAN_TIMEOUT_MS,
+            timeoutMs: runtimeTimeouts.replanTimeoutMs,
             signal,
             onTimeout: () => emitTimeoutLog({
               taskId,
               phase: "waiting_model",
               label: `commander.replan ${request.step.id}`,
-              timeoutMs: COMMANDER_REPLAN_TIMEOUT_MS,
+              timeoutMs: runtimeTimeouts.replanTimeoutMs,
               detail: `commander.replan timed out after ${request.step.id}.`,
               stepId: request.step.id,
               agentKind: "commander",
@@ -3409,6 +5797,14 @@ export async function runCommanderDagTask({
         );
 
         if (!recoveryPlan.steps || recoveryPlan.steps.length === 0) {
+          recoveryAttempts.push(createRecoveryAttempt({
+            step: request.step,
+            error: request.error,
+            completedStepIds: request.completedStepIds,
+            replanAttempted: true,
+            replanStatus: "failed",
+            detail: "Commander replan returned no recovery steps.",
+          }));
           return undefined;
         }
 
@@ -3422,7 +5818,7 @@ export async function runCommanderDagTask({
           agentKind: s.assignedAgentKind as WorkbenchWorkflowStep["agentKind"],
           input: s.title,
           output: s.successCriteria,
-          permissionLevel: getDagStepPermissionLevel(s as CommanderDagStep),
+          permissionLevel: getDagStepPermissionLevel(s as CommanderDagStep, availableTools),
           dependsOn: (s.dependsOn ?? []).filter((depId) => depId !== failedId),
           canRunInParallel: true,
           requiredCapabilities: s.requiredCapabilities as AgentCapabilityTag[] | undefined,
@@ -3432,6 +5828,16 @@ export async function runCommanderDagTask({
         for (const rs of recoveryPlan.steps) {
           dagPlan.steps.push(rs as CommanderDagStep);
         }
+        recoveryAttempts.push(createRecoveryAttempt({
+          step: request.step,
+          error: request.error,
+          completedStepIds: request.completedStepIds,
+          replanAttempted: true,
+          replanStatus: "planned",
+          abandonedFailedStep: true,
+          recoveryStepIds: recoverySteps.map((step) => step.id),
+          detail: `Commander produced ${recoverySteps.length} recovery step(s).`,
+        }));
 
         emitSnapshot({
           ...getSnapshot(),
@@ -3447,6 +5853,14 @@ export async function runCommanderDagTask({
         return { abandonFailedStep: true, steps: recoverySteps };
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
+        recoveryAttempts.push(createRecoveryAttempt({
+          step: request.step,
+          error: request.error,
+          completedStepIds: request.completedStepIds,
+          replanAttempted: true,
+          replanStatus: "failed",
+          detail: errorMsg,
+        }));
         emitSnapshot({
           ...getSnapshot(),
           logs: appendLog(getSnapshot(), emitEvent({
@@ -3464,7 +5878,7 @@ export async function runCommanderDagTask({
       workflow: syntheticWorkflow,
       context,
       signal,
-      stepTimeoutMs: COMMANDER_TOOL_TIMEOUT_MS,
+      stepTimeoutMs: runtimeTimeouts.toolTimeoutMs,
       executeStep: executeStepWithReAct,
       onStepStarted: (step) => {
         emitSnapshot({
@@ -3479,6 +5893,10 @@ export async function runCommanderDagTask({
         });
       },
       onStepCompleted: (_step, _output, _ctx) => {
+        const dagStep = dagPlan.steps.find((s) => s.id === _step.id);
+        if (dagStep?.toolName === "verifier.check") {
+          context.set("verifierCheck", _output);
+        }
         emitSnapshot({
           ...getSnapshot(),
           plan: markStep(getSnapshot().plan, _step.id, "completed"),
@@ -3578,13 +5996,13 @@ export async function runCommanderDagTask({
       ),
       {
         label: "commander.synthesize final",
-        timeoutMs: COMMANDER_MODEL_TIMEOUT_MS,
+        timeoutMs: runtimeTimeouts.modelTimeoutMs,
         signal,
         onTimeout: () => emitTimeoutLog({
           taskId,
           phase: "waiting_model",
           label: "commander.synthesize final",
-          timeoutMs: COMMANDER_MODEL_TIMEOUT_MS,
+          timeoutMs: runtimeTimeouts.modelTimeoutMs,
           detail: "Commander final synthesis timed out.",
           agentKind: "commander",
           getSnapshot,
@@ -3602,35 +6020,59 @@ export async function runCommanderDagTask({
         }),
       },
     );
-    const conclusion = synthesis?.message
-      ?? `Task completed: ${completedSteps.size}/${dagPlan.steps.length} step(s) executed.`;
     const allCompleted = execution.status === "completed";
+    const verifierCheck = context.snapshot().verifierCheck as VerifierCheckResult | undefined;
+    const verificationPassed = verifierCheck?.status !== "fail";
+    const finalCompleted = allCompleted && verificationPassed;
+    const conclusion = synthesis?.message
+      ?? (verificationPassed
+        ? `Task completed: ${completedSteps.size}/${dagPlan.steps.length} step(s) executed.`
+        : `Task failed verification: ${verifierCheck?.summary ?? "Verifier reported failed evidence."}`);
 
     agentTracker.setState("agent-commander", {
-      status: allCompleted ? "completed" : "failed",
-      task: allCompleted ? "Task conclusion written" : "Some steps failed",
+      status: finalCompleted ? "completed" : "failed",
+      task: finalCompleted ? "Task conclusion written" : "Some steps failed",
     });
 
     const now = Date.now();
+    const priorVerificationSummary = getSnapshot().verificationSummary;
     const trace = getSnapshot().executionTrace;
+    const handoffReport = buildHandoffReport(dagPlan.steps, context, {
+      generatedAt: new Date(now).toISOString(),
+    });
+    const recoveryReport = recoveryAttempts.length > 0
+      ? buildRecoveryReport(recoveryAttempts, {
+          generatedAt: new Date(now).toISOString(),
+          abandonedStepIds: execution.abandonedStepIds,
+          replannedStepIds: execution.replannedStepIds,
+        })
+      : undefined;
     emitSnapshot({
       ...getSnapshot(),
       title: dagPlan.title || "Task completed",
-      status: allCompleted ? "completed" : "failed",
+      status: finalCompleted ? "completed" : "failed",
       commanderMessage: conclusion,
       plan: snapshot.plan.map((s) => ({
         ...s,
         status: s.status === "pending" ? ("skipped" as const) : s.status,
       })),
       agents: agentTracker.getSnapshots(),
-      verificationSummary: allCompleted
-        ? `verified: ${execution.completedStepIds.length}/${execution.completedStepIds.length + (execution.abandonedStepIds?.length ?? 0)} steps completed via Commander DAG.`
-        : `warn: ${execution.completedStepIds.length}/${execution.completedStepIds.length + (execution.abandonedStepIds?.length ?? 0)} steps completed.`,
+      verificationSummary: verifierCheck
+        ? `${verifierCheck.status}: ${verifierCheck.summary}`
+        : finalCompleted && priorVerificationSummary
+          ? priorVerificationSummary
+        : finalCompleted
+          ? `verified: ${execution.completedStepIds.length}/${execution.completedStepIds.length + (execution.abandonedStepIds?.length ?? 0)} steps completed via Commander DAG.`
+          : `warn: ${execution.completedStepIds.length}/${execution.completedStepIds.length + (execution.abandonedStepIds?.length ?? 0)} steps completed.`,
+      handoffReport,
+      ...(recoveryReport ? { recoveryReport } : {}),
       executionTrace: trace ? {
         ...trace,
         completedAt: new Date(now).toISOString(),
         totalWallTimeMs: now - taskStartedAt,
-        steps: dagPlan.steps.map((s) => ({
+        steps: [
+          ...trace.steps,
+          ...dagPlan.steps.map((s) => ({
           stepId: s.id,
           agentKind: s.assignedAgentKind,
           toolName: s.toolName,
@@ -3638,12 +6080,14 @@ export async function runCommanderDagTask({
           completedAt: new Date(now).toISOString(),
           wallTimeMs: 0,
           status: (allCompleted ? "completed" : "failed") as "completed" | "failed" | "skipped",
-        })),
+          })),
+        ],
       } : undefined,
     });
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    const userError = toUserFacingError(errorMsg);
+    const redactedErrorMsg = redactImageDataUrlsForSummary(errorMsg);
+    const userError = toUserFacingError(redactedErrorMsg);
     const cancelled = isTaskCancelledError(error);
     agentTracker.setState("agent-commander", {
       status: cancelled ? "cancelled" : "failed",
@@ -3652,7 +6096,12 @@ export async function runCommanderDagTask({
 
     const completionEvent: TaskRuntimeEvent = cancelled
       ? { kind: "task.completed", taskId, detail: "Task cancelled." }
-      : { kind: "task.failed", taskId, error: errorMsg };
+      : { kind: "task.failed", taskId, error: redactedErrorMsg };
+    const recoveryReport = recoveryAttempts.length > 0 && !cancelled
+      ? buildRecoveryReport(recoveryAttempts, {
+          generatedAt: new Date().toISOString(),
+        })
+      : undefined;
 
     emitSnapshot({
       ...getSnapshot(),
@@ -3669,6 +6118,7 @@ export async function runCommanderDagTask({
           : s.status,
       })),
       agents: agentTracker.getSnapshots(),
+      ...(recoveryReport ? { recoveryReport } : {}),
       logs: appendLog(snapshot, emitEvent(completionEvent)),
     });
   }
@@ -3755,13 +6205,16 @@ function concreteOutput(
 function unsupportedOutput(
   workflow: WorkbenchWorkflow,
   step: WorkbenchWorkflowStep,
+  reason?: string,
 ): GenericStepOutput {
   return {
     workflowId: workflow.id,
     stepId: step.id,
     status: "unsupported",
     summary:
-      isApprovalGatedPermissionLevel(step.permissionLevel)
+      reason
+        ? reason
+        : isApprovalGatedPermissionLevel(step.permissionLevel)
         ? "Approval-gated workflow steps are not dispatched by the generic executor."
         : "No concrete read tool is wired for this workflow step yet.",
     expectedOutput: step.output,
@@ -3778,6 +6231,132 @@ function getSourcesFromContext(contextSnapshot: Record<string, unknown>): WebSou
       ? value.data.sources
       : [])
     .filter(isWebSource);
+}
+
+function getTrendHotListFromContext(contextSnapshot: Record<string, unknown>): TrendHotListResult | undefined {
+  return Object.values(contextSnapshot)
+    .map((value) => isGenericStepOutput(value) ? value.data?.trendHotList : undefined)
+    .find(isTrendHotListResult);
+}
+
+type TrendProvider = TrendHotListResult["provider"];
+
+const TREND_PROVIDER_MATCHERS: Array<{
+  provider: TrendProvider;
+  label: string;
+  patterns: RegExp[];
+}> = [
+  {
+    provider: "weibo",
+    label: "Weibo",
+    patterns: [/weibo/i, /\u5fae\u535a/u, /\u70ed\u641c/u, /\u70ed\u699c/u, /hot\s*search/i],
+  },
+];
+
+function inferTrendHotListRequest(userGoal: string): { provider: TrendProvider; limit: number } | undefined {
+  const provider = inferTrendProvider(userGoal);
+  if (!provider) return undefined;
+  return {
+    provider,
+    limit: inferTrendLimit(userGoal),
+  };
+}
+
+function inferTrendProvider(userGoal: string): TrendProvider | undefined {
+  return TREND_PROVIDER_MATCHERS.find((candidate) =>
+    candidate.patterns.some((pattern) => pattern.test(userGoal))
+  )?.provider;
+}
+
+function parseTrendProvider(value: unknown): TrendProvider {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  throw new Error(`Unsupported trend provider: ${String(value)}`);
+}
+
+function isTrendProvider(value: unknown): value is TrendProvider {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function formatTrendProviderLabel(provider: TrendProvider): string {
+  return TREND_PROVIDER_MATCHERS.find((candidate) => candidate.provider === provider)?.label ?? provider;
+}
+
+function inferTrendLimit(userGoal: string): number {
+  const match = /(?:\u524d|top\s*)(\d{1,2})/i.exec(userGoal);
+  const parsed = match ? Number.parseInt(match[1] ?? "", 10) : 20;
+  return Number.isFinite(parsed) ? Math.max(1, Math.min(50, parsed)) : 20;
+}
+
+function trendHotListToSources(hotList: TrendHotListResult): WebSource[] {
+  return hotList.items.map((item) => ({
+    url: item.url ?? hotList.sourceUrl,
+    title: `${item.rank}. ${item.title}`,
+    excerpt: [
+      `rank=${item.rank}`,
+      typeof item.hotScore === "number" ? `hotScore=${item.hotScore}` : undefined,
+      item.label ? `label=${item.label}` : undefined,
+    ].filter(Boolean).join("; "),
+    fetchedAt: hotList.fetchedAt,
+    provider: hotList.provider,
+  }));
+}
+
+function createTrendHotListResearchReport(hotList: TrendHotListResult): ResearchReport {
+  const providerLabel = formatTrendProviderLabel(hotList.provider);
+  const diagnosticSummary = summarizeTrendDiagnostics(hotList);
+  return {
+    title: `${providerLabel} trend top ${hotList.expectedCount}`,
+    summary: `${hotList.complete
+      ? `Fetched ${hotList.items.length} ${providerLabel} trend item(s) at ${hotList.fetchedAt}.`
+      : `Fetched ${hotList.items.length}/${hotList.expectedCount} ${providerLabel} trend item(s) at ${hotList.fetchedAt}.`} ${diagnosticSummary}`,
+    rows: hotList.items.map((item) => ({
+      claim: `${item.rank}. ${item.title}`,
+      status: "verified" as const,
+      sourceUrl: item.url ?? hotList.sourceUrl,
+      excerpt: typeof item.hotScore === "number"
+        ? `hotScore=${item.hotScore}`
+        : `rank=${item.rank}`,
+      evidence: [
+        `provider=${hotList.provider}`,
+        `fetchedAt=${hotList.fetchedAt}`,
+        item.label ? `label=${item.label}` : undefined,
+      ].filter(Boolean).join("; "),
+      verificationStatus: "verified" as const,
+      sourceProvider: hotList.provider,
+    })),
+    unknowns: [
+      ...hotList.warnings,
+      ...hotList.diagnostics
+        .filter((diagnostic) => diagnostic.status === "failed")
+        .map(formatTrendDiagnosticUnknown),
+    ],
+  };
+}
+
+function summarizeTrendDiagnostics(hotList: TrendHotListResult): string {
+  const completed = hotList.diagnostics.filter((diagnostic) => diagnostic.status === "completed").length;
+  const failed = hotList.diagnostics.filter((diagnostic) => diagnostic.status === "failed").length;
+  if (hotList.diagnostics.length === 0) return "No fetch diagnostics were reported.";
+  return `Diagnostics: ${completed} completed, ${failed} failed.`;
+}
+
+function formatTrendDiagnosticUnknown(diagnostic: TrendHotListResult["diagnostics"][number]): string {
+  const provider = diagnostic.provider || "unknown provider";
+  const reason = diagnostic.error ?? diagnostic.errorKind ?? "unknown error";
+  const httpStatus = typeof diagnostic.httpStatus === "number" ? ` HTTP ${diagnostic.httpStatus};` : "";
+  return `Trend provider ${provider} failed:${httpStatus} ${reason}`;
+}
+
+function isTrendHotListResult(value: unknown): value is TrendHotListResult {
+  if (!isPlainRecord(value)) return false;
+  return isTrendProvider(value.provider) &&
+    typeof value.fetchedAt === "string" &&
+    typeof value.sourceUrl === "string" &&
+    Array.isArray(value.items) &&
+    typeof value.expectedCount === "number" &&
+    typeof value.complete === "boolean" &&
+    Array.isArray(value.warnings) &&
+    Array.isArray(value.diagnostics);
 }
 
 function getCandidatesFromContext(contextSnapshot: Record<string, unknown>): ComputerFileCandidate[] {
@@ -3941,6 +6520,7 @@ function isScheduledTaskResult(value: unknown): value is Awaited<ReturnType<Sche
 }
 
 async function runScanFilesStep({
+  availableToolNames,
   agentTracker,
   controller,
   emit,
@@ -3948,6 +6528,7 @@ async function runScanFilesStep({
   fileTool,
   taskId,
 }: {
+  availableToolNames?: ReadonlySet<string>;
   agentTracker: ReadCurrentProjectAgentTracker;
   controller: FlowController;
   emit: SnapshotEmitter;
@@ -3955,6 +6536,9 @@ async function runScanFilesStep({
   fileTool: FileTool;
   taskId: ID;
 }): Promise<MarkdownDocumentSummary[]> {
+  if (availableToolNames && !availableToolNames.has("file.scanMarkdownDocuments")) {
+    throw new Error("Tool file.scanMarkdownDocuments is not available.");
+  }
   agentTracker.setState("agent-commander", {
     status: "completed",
     task: "Workflow submitted",
@@ -4005,6 +6589,7 @@ async function runScanFilesStep({
 }
 
 async function runInspectProjectStep({
+  availableToolNames,
   agentTracker,
   controller,
   emit,
@@ -4013,6 +6598,7 @@ async function runInspectProjectStep({
   shellTool,
   taskId,
 }: {
+  availableToolNames?: ReadonlySet<string>;
   agentTracker: ReadCurrentProjectAgentTracker;
   controller: FlowController;
   emit: SnapshotEmitter;
@@ -4021,6 +6607,9 @@ async function runInspectProjectStep({
   shellTool: ShellTool;
   taskId: ID;
 }): Promise<ProjectInspectionStepOutput> {
+  if (availableToolNames && !availableToolNames.has("shell.runReadOnlyCommand")) {
+    throw new Error("Tool shell.runReadOnlyCommand is not available.");
+  }
   agentTracker.setState("agent-shell", {
     status: "running",
     task: "Inspecting project scripts and environment",
@@ -4076,6 +6665,7 @@ async function runInspectProjectStep({
 }
 
 async function runAnalyzeCodeStep({
+  availableToolNames,
   agentTracker,
   controller,
   emit,
@@ -4083,6 +6673,7 @@ async function runAnalyzeCodeStep({
   codeTool,
   taskId,
 }: {
+  availableToolNames?: ReadonlySet<string>;
   agentTracker: ReadCurrentProjectAgentTracker;
   controller: FlowController;
   emit: SnapshotEmitter;
@@ -4090,6 +6681,7 @@ async function runAnalyzeCodeStep({
   codeTool?: CodeTool;
   taskId: ID;
 }): Promise<AnalyzeCodeStepOutput> {
+  const canInspectRepository = !availableToolNames || availableToolNames.has("code.inspectRepository");
   agentTracker.setState("agent-code", {
     status: "running",
     task: "Analyzing project structure",
@@ -4110,10 +6702,12 @@ async function runAnalyzeCodeStep({
     })),
   });
 
-  const codeReviewPreview = codeTool ? await safeInspectRepository(codeTool) : undefined;
+  const codeReviewPreview = codeTool && canInspectRepository ? await safeInspectRepository(codeTool) : undefined;
   const analysisSummary = codeReviewPreview
     ? `Code Agent produced a repository inspection with ${codeReviewPreview.changedFiles?.length ?? 0} changed file(s).`
-    : "Code Agent produced a rule-based architecture summary (no code tool available).";
+    : canInspectRepository
+      ? "Code Agent produced a rule-based architecture summary (no code tool available)."
+      : "Code Agent skipped repository inspection because code.inspectRepository is disabled.";
 
   agentTracker.setState("agent-code", {
     status: "completed",
@@ -4458,6 +7052,10 @@ function runProjectReadOnlyCommands(shellTool: ShellTool): Promise<ShellCommandO
     shellTool.runReadOnlyCommand({ program: "pnpm", args: ["--version"], workspacePath: null }),
     shellTool.runReadOnlyCommand({ program: "git", args: ["status", "--short"], workspacePath: null }),
   ]);
+}
+
+function formatAgentDisplayName(agentKind: AgentKind): string {
+  return demoAgents.find((agent) => agent.kind === agentKind)?.displayName ?? `${agentKind} Agent`;
 }
 
 async function safeInspectRepository(codeTool: CodeTool) {

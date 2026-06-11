@@ -12,6 +12,30 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/qa/check-product-wor
 Use `-AllowKnownBlockers` only for development inventory across all dated
 folders.
 
+For source-level helper checks and development inventory, run:
+
+```powershell
+corepack pnpm qa:product-workflows:source
+```
+
+This command verifies the product evidence checker, release QA helper scripts,
+and known-blocker inventory without claiming live/package workflows are
+complete.
+
+Recent source-level audits:
+
+- `docs/qa/2026-06-11/product-live-package-evidence-gate-source-qa.md`
+  records stricter packaged/live evidence gates, including structured JSON
+  status fields and artifact-reference checks.
+- `docs/qa/2026-06-11/local-storage-consumer-migration-audit-source-qa.md`
+  records the localStorage consumer migration audit and intentional remaining
+  localStorage settings/cache/fallback consumers.
+- `docs/qa/2026-06-11/git-remote-pr-denial-json-gate-source-qa.md`
+  records the Git remote/PR denial fail-closed JSON gate.
+- `docs/qa/2026-06-11/capability-concrete-evidence-signal-gate-source-qa.md`
+  records the capability scoring gate for concrete evidence references and
+  numeric recent-failure-rate signals.
+
 Recommended layout:
 
 ```text
@@ -36,6 +60,7 @@ docs/qa/YYYY-MM-DD/
   model-secret-redaction-qa-output.txt
   pdf-durable-approval-qa-output.txt
   code-patch-durable-approval-qa-output.txt
+  release-build-summary.json
   release-rollback-notes.md
 ```
 

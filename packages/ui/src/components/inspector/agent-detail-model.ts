@@ -5,7 +5,7 @@ export interface AgentArtifactSummary {
   id: string;
   title: string;
   detail: string;
-  kind: "command" | "code" | "document" | "file" | "research" | "source" | "trace";
+  kind: "browser" | "command" | "code" | "document" | "file" | "repository" | "research" | "source" | "trace";
 }
 
 export interface AgentDetailViewModel {
@@ -100,6 +100,27 @@ function buildArtifactsForAgent(task: WorkbenchTask, agent: WorkbenchAgent, kind
     });
   }
 
+  if (normalizedKind === "browser" || agentText.includes("browser") || agentText.includes("web")) {
+    task.logs
+      .filter((log) => isLogRelatedToAgent(log, agent, kind, new Set()) && isBrowserToolLog(log))
+      .forEach((log) => {
+        artifacts.push({
+          id: `browser-log-${log.id}`,
+          title: log.title,
+          detail: log.userMessage || log.detail,
+          kind: "browser",
+        });
+      });
+    task.sources?.forEach((source, index) => {
+      artifacts.push({
+        id: `browser-source-${index}`,
+        title: source.title ?? source.url,
+        detail: source.excerpt || source.url,
+        kind: "source",
+      });
+    });
+  }
+
   if (normalizedKind === "code" || agentText.includes("code")) {
     if (task.codeReviewPreview) {
       artifacts.push({
@@ -123,6 +144,22 @@ function buildArtifactsForAgent(task: WorkbenchTask, agent: WorkbenchAgent, kind
         title: "Code apply result",
         detail: task.codeApplyResult.message,
         kind: "code",
+      });
+    }
+    if (task.repoSearchReport) {
+      artifacts.push({
+        id: "repo-search-report",
+        title: "Repository search report",
+        detail: `${task.repoSearchReport.keyFiles.length} key file(s), ${task.repoSearchReport.actualFound.length} match(es)`,
+        kind: "repository",
+      });
+    }
+    if (task.repoTraceReport) {
+      artifacts.push({
+        id: "repo-trace-report",
+        title: "Repository trace report",
+        detail: `${task.repoTraceReport.keyFiles.length} key file(s), ${task.repoTraceReport.edges.length} edge(s)`,
+        kind: "trace",
       });
     }
   }
@@ -161,12 +198,74 @@ function buildArtifactsForAgent(task: WorkbenchTask, agent: WorkbenchAgent, kind
     artifacts.push({
       id: "execution-trace",
       title: "Execution trace",
-      detail: `${task.executionTrace.steps.length} step(s), ${(task.executionTrace.totalWallTimeMs / 1000).toFixed(1)}s`,
+      detail: formatExecutionTraceDetail(task),
       kind: "trace",
     });
   }
 
   return artifacts;
+}
+
+function formatExecutionTraceDetail(task: WorkbenchTask): string {
+  const trace = task.executionTrace;
+  if (!trace) return "";
+  const base = `${trace.steps.length} step(s), ${(trace.totalWallTimeMs / 1000).toFixed(1)}s`;
+  const localVisionSteps = trace.steps.filter((step) => step.localVision);
+  const latestLocalVision = localVisionSteps[localVisionSteps.length - 1]?.localVision;
+  if (!latestLocalVision) return base;
+  const parts = [
+    `local vision ${latestLocalVision.mode}`,
+    `${latestLocalVision.detectionCount ?? 0} detections`,
+    `${latestLocalVision.promptCandidateCount ?? 0} candidates`,
+  ];
+  if (latestLocalVision.cropVlmCalled) {
+    parts.push("crop VLM");
+  }
+  if (latestLocalVision.fullScreenshotVlmCalled) {
+    parts.push("full screenshot VLM");
+  }
+  if (latestLocalVision.fullScreenshotVlmSkipped) {
+    parts.push("full screenshot skipped");
+  }
+  if (latestLocalVision.disabledReason) {
+    parts.push(`disabled: ${latestLocalVision.disabledReason}`);
+  }
+  if (typeof latestLocalVision.consecutiveTimeouts === "number" && latestLocalVision.consecutiveTimeouts > 0) {
+    parts.push(`${latestLocalVision.consecutiveTimeouts} timeouts`);
+  }
+  if (typeof latestLocalVision.consecutiveErrors === "number" && latestLocalVision.consecutiveErrors > 0) {
+    parts.push(`${latestLocalVision.consecutiveErrors} errors`);
+  }
+  if (
+    typeof latestLocalVision.consecutiveActionFailures === "number" &&
+      latestLocalVision.consecutiveActionFailures > 0
+  ) {
+    parts.push(`${latestLocalVision.consecutiveActionFailures} action failures`);
+  }
+  if (latestLocalVision.actionRisk) {
+    parts.push(`risk: ${latestLocalVision.actionRisk}`);
+  }
+  if (typeof latestLocalVision.actionSucceeded === "boolean") {
+    parts.push(latestLocalVision.actionSucceeded ? "action succeeded" : "action failed");
+  }
+  if (latestLocalVision.selectedCandidateSource?.length) {
+    parts.push(`source: ${latestLocalVision.selectedCandidateSource.join("+")}`);
+  }
+  if (latestLocalVision.fallbackReason) {
+    parts.push(`fallback: ${latestLocalVision.fallbackReason}`);
+  }
+  return `${base}; ${parts.join(", ")}`;
+}
+
+function isBrowserToolLog(log: WorkbenchLogEntry): boolean {
+  const haystack = normalize([
+    log.kind,
+    log.title,
+    log.detail,
+    log.userMessage,
+    log.devDetail,
+  ].filter(Boolean).join(" "));
+  return haystack.includes("browser") || haystack.includes("web page") || haystack.includes("url");
 }
 
 function matchesAgentText(haystack: string, agent: WorkbenchAgent, kind: string): boolean {

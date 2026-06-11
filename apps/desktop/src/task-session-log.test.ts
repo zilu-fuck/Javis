@@ -79,6 +79,87 @@ describe("task session JSONL", () => {
     expect(line?.snapshot.conversationMessages?.[0]?.attachments).toBeUndefined();
   });
 
+  it("preserves handoff reports in session snapshot JSONL", () => {
+    const line = createTaskSessionSnapshotJsonLine({
+      ...createSnapshot("task-handoff", "running"),
+      handoffReport: {
+        generatedAt: "2026-06-11T00:00:00.000Z",
+        status: "complete",
+        missingInputContextKeys: [],
+        unconsumedOutputContextKeys: [],
+        steps: [{
+          stepId: "collect-evidence",
+          assignedAgentKind: "code",
+          dependsOn: [],
+          inputContextKeys: [],
+          outputContextKey: "repoEvidence",
+          missingInputContextKeys: [],
+        }],
+        handoffs: [{
+          contextKey: "repoEvidence",
+          producedByStepId: "collect-evidence",
+          consumedByStepIds: ["review-evidence"],
+          status: "available",
+          valueSummary: { type: "object", present: true, keyCount: 2 },
+        }],
+      },
+    });
+
+    const parsed = parseTaskSessionJsonLines(`${JSON.stringify(line)}\n`);
+
+    expect(parsed[0]?.snapshot.handoffReport?.handoffs[0]).toMatchObject({
+      contextKey: "repoEvidence",
+      producedByStepId: "collect-evidence",
+      consumedByStepIds: ["review-evidence"],
+      status: "available",
+    });
+  });
+
+  it("preserves recovery reports in session snapshot JSONL", () => {
+    const line = createTaskSessionSnapshotJsonLine({
+      ...createSnapshot("task-recovery", "running"),
+      recoveryReport: {
+        generatedAt: "2026-06-11T00:00:00.000Z",
+        status: "recovered",
+        failureCount: 1,
+        recoveredCount: 1,
+        unrecoveredCount: 0,
+        abandonedStepIds: ["collect-primary"],
+        replannedStepIds: ["collect-fallback"],
+        attempts: [{
+          failedStepId: "collect-primary",
+          failedStepTitle: "Collect primary evidence",
+          agentKind: "research",
+          errorSummary: "HTTP 503 from primary provider",
+          failureKind: "network",
+          completedBefore: ["parse-request"],
+          replanAttempted: true,
+          replanStatus: "planned",
+          abandonedFailedStep: true,
+          recoveryStepIds: ["collect-fallback"],
+          suggestedAlternatives: [
+            "retry with a fallback provider",
+            "use cached or user-provided sources when available",
+          ],
+        }],
+      },
+    });
+
+    const parsed = parseTaskSessionJsonLines(`${JSON.stringify(line)}\n`);
+
+    expect(parsed[0]?.snapshot.recoveryReport).toMatchObject({
+      status: "recovered",
+      abandonedStepIds: ["collect-primary"],
+      replannedStepIds: ["collect-fallback"],
+    });
+    expect(parsed[0]?.snapshot.recoveryReport?.attempts[0]).toMatchObject({
+      failedStepId: "collect-primary",
+      failureKind: "network",
+      replanStatus: "planned",
+      recoveryStepIds: ["collect-fallback"],
+    });
+  });
+
   it("prefers file writes and falls back to localStorage", async () => {
     const storage = createMemoryStorage();
     const appendToFile = vi

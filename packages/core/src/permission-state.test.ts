@@ -34,6 +34,28 @@ describe("permission-state", () => {
     expect(request.resolvedAt).toBeUndefined();
   });
 
+  it("preserves explicit single-action approval requests", () => {
+    const request = createPendingPermissionRequest(
+      {
+        id: "permission-1",
+        level: "confirmed_write",
+        title: "Approve write",
+        reason: "Writing needs approval.",
+        allowAlways: false,
+        dryRun: {
+          operation: "computer.click",
+          affectedPaths: [],
+          riskSummary: "Fresh approval only.",
+          reversible: false,
+        },
+      },
+      () => "2026-05-24T00:00:00.000Z",
+    );
+
+    expect(request.allowAlways).toBe(false);
+    expect(request.bindingHash).toBe(createDryRunBindingHash(request.dryRun));
+  });
+
   it("creates stable dry-run binding hashes", () => {
     const dryRun = {
       operation: "Move file",

@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "corepack pnpm build:bundle",
     "frontendDist": "../dist"
   },
   "app": {
@@ -42,7 +42,17 @@
     },
     "resources": {
       "../../../node_modules/.pnpm/opencode-windows-x64@1.15.10/node_modules/opencode-windows-x64/bin/opencode.exe": "bin/opencode-windows-x64/opencode.exe",
-      "../../../node_modules/.pnpm/opencode-windows-x64-baseline@1.15.10/node_modules/opencode-windows-x64-baseline/bin/opencode.exe": "bin/opencode-windows-x64-baseline/opencode.exe"
+      "../../../node_modules/.pnpm/opencode-windows-x64-baseline@1.15.10/node_modules/opencode-windows-x64-baseline/bin/opencode.exe": "bin/opencode-windows-x64-baseline/opencode.exe",
+      "sidecar/browser/dist/index.js": "sidecar/browser/dist/index.js",
+      "../../../node_modules/.pnpm/playwright@1.60.0/node_modules/playwright/": "sidecar/browser/node_modules/playwright/",
+      "../../../node_modules/.pnpm/playwright-core@1.60.0/node_modules/playwright-core/": "sidecar/browser/node_modules/playwright-core/",
+      "../../../scripts/local-vision-worker.cmd": "scripts/local-vision-worker.cmd",
+      "../../../scripts/local-vision-worker.mjs": "scripts/local-vision-worker.mjs",
+      "../../../scripts/local-vision-onnx-adapter.mjs": "scripts/local-vision-onnx-adapter.mjs",
+      "../../../artifacts/local-vision/yolo26n-ui.onnx": "models/local-vision/yolo26n-ui.onnx",
+      "../../../artifacts/local-vision/node_modules/onnxruntime-common/": "scripts/node_modules/onnxruntime-common/",
+      "../../../artifacts/local-vision/node_modules/onnxruntime-node/": "scripts/node_modules/onnxruntime-node/",
+      "../../../artifacts/local-vision/node-runtime/": "bin/node/"
     },
     "icon": [
       "icons/32x32.png",

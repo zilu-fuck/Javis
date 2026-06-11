@@ -1,9 +1,14 @@
+param(
+  [switch]$RequireLiveProvider
+)
+
 $ErrorActionPreference = "Stop"
 
 $qaDir = $PSScriptRoot
 $repoRoot = (Resolve-Path (Join-Path $qaDir "..\..\..")).Path
 $exe = Join-Path $repoRoot "apps\desktop\src-tauri\target\release\javis-desktop.exe"
 $fixturePath = Join-Path $qaDir "code-agent-opencode-proposal-fixture.json"
+$outputPath = Join-Path $qaDir "code-agent-opencode-qa-output.txt"
 $workspacePath = Join-Path $qaDir "code-agent-opencode-workspace"
 $workspaceName = Split-Path $workspacePath -Leaf
 $storageWorkspaceKey = "javis.recentWorkspaces.v1"
@@ -40,6 +45,30 @@ public struct CodeAgentOpenCodeQaRect { public int Left; public int Top; public 
 
 function Write-Utf8NoBom($path, $value) {
   [System.IO.File]::WriteAllText($path, $value, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Get-AppVersion {
+  $tauriConfigPath = Join-Path $repoRoot "apps\desktop\src-tauri\tauri.conf.json"
+  if (Test-Path -LiteralPath $tauriConfigPath) {
+    return [string]((Get-Content -LiteralPath $tauriConfigPath -Raw | ConvertFrom-Json).version)
+  }
+  return "unknown"
+}
+
+function Get-ResultScreenshots {
+  param([object[]]$Results)
+  $screenshots = New-Object System.Collections.Generic.List[string]
+  foreach ($result in $Results) {
+    if ($null -eq $result) {
+      continue
+    }
+    foreach ($screenshot in @($result.Screenshots)) {
+      if ($screenshot) {
+        $screenshots.Add([string]$screenshot)
+      }
+    }
+  }
+  return @($screenshots | Select-Object -Unique)
 }
 
 function Capture-Window($handle, $path) {
@@ -271,12 +300,12 @@ function Stop-Javis($session) {
   Start-Sleep -Seconds 2
 }
 
-function Configure-AppStorage($session, [ref]$id, $provider, $model, $baseUrl) {
+function Configure-AppStorage($session, [ref]$id, $provider, $model, $baseUrl, $apiKeyReference = "default") {
   $workspaceJson = $workspacePath | ConvertTo-Json -Compress
   $modelSettingsJson = @{
     provider = $provider
     model = $model
-    apiKeyReference = "default"
+    apiKeyReference = $apiKeyReference
     baseUrl = $baseUrl
   } | ConvertTo-Json -Compress
   $storageWorkspaceKeyJson = $storageWorkspaceKey | ConvertTo-Json -Compress
@@ -294,14 +323,24 @@ function Configure-AppStorage($session, [ref]$id, $provider, $model, $baseUrl) {
   Start-Sleep -Seconds 2
 }
 
-function Save-ModelApiKeySecret($session, [ref]$id, $apiKey) {
+function Save-ModelApiKeySecret($session, [ref]$id, $keyReference, $apiKey) {
+  $keyReferenceJson = $keyReference | ConvertTo-Json -Compress
   $apiKeyJson = $apiKey | ConvertTo-Json -Compress
   Eval-Js $session.Socket $id @"
 window.__TAURI__.core.invoke("save_model_api_key_secret", {
   request: {
-    keyReference: "default",
+    keyReference: $keyReferenceJson,
     apiKey: $apiKeyJson
   }
+})
+"@ | Out-Null
+}
+
+function Delete-ModelApiKeySecret($session, [ref]$id, $keyReference) {
+  $keyReferenceJson = $keyReference | ConvertTo-Json -Compress
+  Eval-Js $session.Socket $id @"
+window.__TAURI__.core.invoke("delete_model_api_key_secret", {
+  keyReference: $keyReferenceJson
 })
 "@ | Out-Null
 }
@@ -340,7 +379,7 @@ function Run-CodeAgentScenario(
     $completion = Wait-ForAnyText $session.Socket ([ref]$id) @(
       $expectedTitle,
       "Code Agent patch application failed",
-      "Code Agent patch application 失败"
+        "Code Agent patch application failed"
     ) 30
     if ($completion -ne $expectedTitle) {
       Expand-ActivityLog $session.Socket ([ref]$id)
@@ -374,14 +413,15 @@ function Run-CodeAgentScenario(
 function Run-LiveCodeAgentScenario($provider, $model, $apiKey, $baseUrl) {
   Reset-QaWorkspace
   $session = $null
+  $liveKeyReference = "model.code_agent_live_qa"
   try {
     $session = Start-JavisWithCdp 9227 $false
     $id = $session.Id
-    Configure-AppStorage $session ([ref]$id) $provider $model $baseUrl
-    Save-ModelApiKeySecret $session ([ref]$id) $apiKey
+    Configure-AppStorage $session ([ref]$id) $provider $model $baseUrl $liveKeyReference
+    Save-ModelApiKeySecret $session ([ref]$id) $liveKeyReference $apiKey
     Wait-ForText $session.Socket ([ref]$id) $workspaceName 20 | Out-Null
 
-    Submit-Goal $session.Socket ([ref]$id) "Review code changes"
+    Submit-Goal $session.Socket ([ref]$id) "Review code changes and propose the smallest safe patch for src/message.txt."
     Wait-ForText $session.Socket ([ref]$id) "Approve code review continuation" 30 | Out-Null
     Click-PendingPermissionButton $session.Socket ([ref]$id) "Approve"
 
@@ -393,13 +433,38 @@ function Run-LiveCodeAgentScenario($provider, $model, $apiKey, $baseUrl) {
     if ($liveOutcome -eq "Code Agent patch approval needed") {
       Wait-ForText $session.Socket ([ref]$id) "Code Agent patch proposal" 10 | Out-Null
       Capture-Window $session.Process.MainWindowHandle (Join-Path $qaDir "20-code-agent-live-proposal-before-approve.png")
+      Click-PendingPermissionButton $session.Socket ([ref]$id) "Approve"
+      $completion = Wait-ForAnyText $session.Socket ([ref]$id) @(
+        "Code Agent patch applied",
+        "Code Agent patch application failed"
+      ) 45
+      if ($completion -ne "Code Agent patch applied") {
+        Expand-ActivityLog $session.Socket ([ref]$id)
+        Start-Sleep -Milliseconds 500
+        Capture-Window $session.Process.MainWindowHandle (Join-Path $qaDir "20-code-agent-live-apply-failed.png")
+        $pageText = Get-PageText $session.Socket ([ref]$id)
+        return [pscustomobject]@{
+          Scenario = "live-approved"
+          Provider = $provider
+          Model = $model
+          Status = "apply-failed"
+          Summary = "Live provider produced a proposal, but approved apply did not complete."
+          PageTextExcerpt = $pageText.Substring(0, [Math]::Min(1200, $pageText.Length))
+          Screenshots = @("20-code-agent-live-proposal-before-approve.png", "20-code-agent-live-apply-failed.png")
+        }
+      }
+      Capture-Window $session.Process.MainWindowHandle (Join-Path $qaDir "20-code-agent-live-approved.png")
+      $gitDiffCheck = Run-Git $workspacePath @("diff", "--check")
+      $gitStatus = Run-Git $workspacePath @("status", "--short")
       return [pscustomobject]@{
-        Scenario = "live-proposal"
+        Scenario = "live-approved"
         Provider = $provider
         Model = $model
         Status = "pass"
-        Summary = "Live provider produced a parseable patch proposal and Javis stopped for confirmed-write approval."
-        Screenshots = @("20-code-agent-live-proposal-before-approve.png")
+        Summary = "Live provider produced a parseable patch proposal, Javis stopped for confirmed-write approval, and approved apply completed."
+        GitDiffCheck = $gitDiffCheck
+        GitStatus = $gitStatus
+        Screenshots = @("20-code-agent-live-proposal-before-approve.png", "20-code-agent-live-approved.png")
       }
     } else {
       if (!$liveOutcome) {
@@ -424,6 +489,14 @@ function Run-LiveCodeAgentScenario($provider, $model, $apiKey, $baseUrl) {
     }
   }
   finally {
+    if ($session) {
+      try {
+        $cleanupId = $session.Id
+        Delete-ModelApiKeySecret $session ([ref]$cleanupId) $liveKeyReference
+      } catch {
+        Write-Warning "Could not delete live Code Agent QA API key secret: $($_.Exception.Message)"
+      }
+    }
     Stop-Javis $session
   }
 }
@@ -442,7 +515,11 @@ try {
     $liveResult = Run-LiveCodeAgentScenario $liveProvider $liveModel $liveApiKey $liveBaseUrl
   }
 
-  [pscustomobject]@{
+  $resultJson = [pscustomobject]@{
+    PackagedApp = $true
+    AppVersion = Get-AppVersion
+    QaDate = Get-Date -Format "yyyy-MM-dd"
+    Artifacts = Get-ResultScreenshots @($denyResult, $approveResult, $liveResult)
     WorkspacePath = $workspacePath
     FixturePath = $fixturePath
     GitDiffCheck = $gitCheck
@@ -451,6 +528,11 @@ try {
     Results = @($denyResult, $approveResult)
     LiveResult = $liveResult
   } | ConvertTo-Json -Depth 6
+  Write-Utf8NoBom $outputPath $resultJson
+  Write-Output $resultJson
+  if ($RequireLiveProvider -and (!$liveResult -or $liveResult.Status -ne "pass" -or $liveResult.Scenario -ne "live-approved")) {
+    throw "Live Code Agent provider QA did not pass. See $outputPath."
+  }
 }
 finally {
   if ($null -eq $previousWebviewArgs) {

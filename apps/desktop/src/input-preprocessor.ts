@@ -25,6 +25,8 @@ export async function preprocessChineseInput(
         maxTokens: 700,
         temperature: 0,
         locale: "zh-CN",
+        skipAgentMemory: true,
+        skipSkillContext: true,
       }),
       timeoutMs,
     );

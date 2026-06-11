@@ -1,16 +1,76 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { fireEvent, render, waitFor, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   JavisWorkbench,
+  createWorkbenchHandoffReportArtifacts,
   filterWorkbenchHistoryEntries,
   zhCNWorkbenchLocale,
 } from "./index";
+import { AgentDetailSections } from "./components/AgentDetailSections";
 import { HELP_ME_DECIDE_ANSWER } from "./components/TaskSections";
+import { defaultWorkbenchLocale } from "./locale";
 import { normalizeWorkspacePath } from "./utils";
 import type { WorkbenchTask } from "./index";
 
+afterEach(() => {
+  cleanup();
+});
+
 describe("JavisWorkbench permission cards", () => {
+  it("renders the current Goal panel with lifecycle actions", () => {
+    const html = renderWorkbench(createIdleTask(), undefined, {
+      currentGoal: {
+        id: "goal-1",
+        objective: "Implement Goal MVP",
+        acceptanceCriteria: ["Persist current goal", "Continue until verified"],
+        status: "active",
+        workspacePath: "E:/Javis",
+        taskIds: ["task-1"],
+        completedChecks: ["Core state added"],
+        blockedStreak: 0,
+        runCount: 1,
+        maxRunCount: 8,
+        createdAt: "2026-06-09T00:00:00.000Z",
+        updatedAt: "2026-06-09T00:01:00.000Z",
+      },
+      currentGoalEvaluations: [{
+        id: "eval-1",
+        goalId: "goal-1",
+        taskId: "task-1",
+        decision: "continue",
+        confidence: "medium",
+        satisfiedCriteria: ["Core state added"],
+        unsatisfiedCriteria: ["Timeline UI"],
+        evidence: ["Verifier requested another run"],
+        completedChecks: ["Core state added"],
+        reason: "UI is incomplete.",
+        createdAt: "2026-06-09T00:02:00.000Z",
+      }],
+      currentGoalEvents: [{
+        id: "event-1",
+        goalId: "goal-1",
+        taskId: "task-1",
+        type: "evaluated",
+        message: "Verifier requested another run.",
+        createdAt: "2026-06-09T00:03:00.000Z",
+      }],
+      onPauseGoal: vi.fn(),
+      onCompleteGoal: vi.fn(),
+      onClearGoal: vi.fn(),
+    });
+
+    expect(html).toContain("javis-goal-panel");
+    expect(html).toContain("Implement Goal MVP");
+    expect(html).toContain("Core state added");
+    expect(html).toContain("Timeline UI");
+    expect(html).toContain("Verifier requested another run");
+    expect(html).toContain("1/8");
+    expect(html).toContain("Pause");
+    expect(html).toContain("Complete");
+    expect(html).toContain("Clear");
+  });
+
   it("renders multiple workspace tool tabs for multi-open tools", () => {
     const html = renderWorkbench(
       {
@@ -105,6 +165,126 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).toContain("Expand activity log");
     expect(html).toContain("Expand inspector");
     expect(html).not.toContain("Task planning and orchestration");
+  });
+
+  it("renders a Computer Use guard and routes Escape to emergency stop", () => {
+    const onEmergencyStopTask = vi.fn();
+    const onStopTask = vi.fn();
+    const view = render(
+      <JavisWorkbench
+        draftGoal=""
+        isTaskActive
+        onDraftGoalChange={vi.fn()}
+        onEmergencyStopTask={onEmergencyStopTask}
+        onStopTask={onStopTask}
+        onSubmitGoal={vi.fn()}
+        task={{
+          id: "task-computer-use",
+          title: "Computer Use task",
+          userGoal: "Open calculator",
+          status: "running",
+          commanderMessage: "Computer Use: observing",
+          plan: [{
+            id: "computer-use-loop",
+            title: "Computer Use action loop",
+            status: "running",
+            agentKind: "computer",
+          }],
+          agents: [{
+            id: "agent-computer",
+            name: "Computer Agent",
+            role: "Desktop automation",
+            status: "running",
+            task: "Computer Use: observing",
+          }],
+          logs: [],
+        }}
+      />,
+    );
+
+    expect(view.container.querySelector(".javis-computer-use-guard")?.textContent).toContain("Computer Use");
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onEmergencyStopTask).toHaveBeenCalledTimes(1);
+    expect(onStopTask).not.toHaveBeenCalled();
+  });
+
+  it("does not render the Computer Use guard for read-only Computer Agent work", () => {
+    const view = render(
+      <JavisWorkbench
+        draftGoal=""
+        isTaskActive
+        onDraftGoalChange={vi.fn()}
+        onEmergencyStopTask={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={{
+          id: "task-local-search",
+          title: "Find a local document",
+          userGoal: "Find report.pdf",
+          status: "running",
+          commanderMessage: "Searching local documents",
+          plan: [{
+            id: "search-computer",
+            title: "Computer Agent searches indexed local locations",
+            status: "running",
+            agentKind: "computer",
+          }],
+          agents: [{
+            id: "agent-computer",
+            name: "Computer Agent",
+            role: "Local file search",
+            status: "running",
+            task: "Searching local documents",
+          }],
+          logs: [],
+        }}
+      />,
+    );
+
+    expect(view.container.querySelector(".javis-computer-use-guard")).toBeNull();
+  });
+
+  it("does not render the Computer Use guard for generic desktop or screenshot text", () => {
+    const view = render(
+      <JavisWorkbench
+        draftGoal=""
+        isTaskActive
+        onDraftGoalChange={vi.fn()}
+        onEmergencyStopTask={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={{
+          id: "task-image-review",
+          title: "Review desktop screenshot",
+          userGoal: "Summarize a screenshot",
+          status: "running",
+          commanderMessage: "Analyzing a desktop screenshot for documentation.",
+          plan: [{
+            id: "screenshot-analysis",
+            title: "Inspect screenshot content",
+            status: "running",
+          }],
+          agents: [],
+          logs: [{
+            id: "log-screenshot",
+            kind: "info",
+            title: "desktop screenshot",
+            detail: "Mouse and keyboard labels are visible in the image.",
+          }],
+          executionTrace: {
+            taskId: "task-image-review",
+            startedAt: "2026-06-09T00:00:00.000Z",
+            totalWallTimeMs: 1200,
+            steps: [{
+              stepId: "screenshot-analysis",
+              agentKind: "computer",
+              wallTimeMs: 1200,
+              status: "completed",
+            }],
+          },
+        }}
+      />,
+    );
+
+    expect(view.container.querySelector(".javis-computer-use-guard")).toBeNull();
   });
 
   it("renders profile-backed new chat recommendations when provided", () => {
@@ -221,6 +401,243 @@ describe("JavisWorkbench permission cards", () => {
 
     expect(classifiedHtml).toContain("javis-nav-subitem");
     expect(classifiedHtml).toContain("Contracts(1)");
+  });
+
+  it("renders user skills and MCP servers with enable and delete controls", () => {
+    const onToggleSkillEnabled = vi.fn();
+    const onDeleteSkill = vi.fn();
+    const view = render(
+      <JavisWorkbench
+        activeView="skills"
+        draftGoal="Inspect project"
+        onDeleteSkill={onDeleteSkill}
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        onToggleSkillEnabled={onToggleSkillEnabled}
+        skillEntries={[
+          {
+            id: "skill-codex:godot",
+            name: "godot",
+            description: "Godot development reference",
+            category: "skill",
+            agentOwners: ["codex skill"],
+            enabled: true,
+            source: "user",
+            path: "C:/Users/example/.codex/skills/godot",
+            toggleable: true,
+            removable: true,
+          },
+          {
+            id: "mcp-filesystem",
+            name: "filesystem",
+            description: "stdio · npx",
+            category: "mcp",
+            agentOwners: [],
+            enabled: false,
+            source: "mcp",
+            toggleable: true,
+            removable: true,
+          },
+          {
+            id: "codex-mcp-manual",
+            name: "manual",
+            description: "stdio · npx",
+            category: "mcp",
+            agentOwners: ["codex MCP"],
+            enabled: true,
+            source: "mcp",
+            toggleable: true,
+            removable: false,
+          },
+          {
+            id: "codex-mcp-installed",
+            name: "installed",
+            description: "stdio · npx",
+            category: "mcp",
+            agentOwners: ["codex MCP"],
+            enabled: true,
+            source: "mcp",
+            toggleable: true,
+            removable: true,
+          },
+        ]}
+        task={createIdleTask()}
+      />,
+    );
+
+    expect(view.getByText("Codex Skills")).toBeTruthy();
+    expect(view.getByText("godot")).toBeTruthy();
+    expect(view.getByText("filesystem")).toBeTruthy();
+    const toggles = view.container.querySelectorAll<HTMLInputElement>(".javis-skill-toggle input");
+    expect(toggles).toHaveLength(4);
+    const deleteButtons = view.getAllByText("删除");
+    expect(deleteButtons).toHaveLength(3);
+
+    fireEvent.click(toggles[0]!);
+    fireEvent.click(toggles[1]!);
+    fireEvent.click(toggles[2]!);
+    fireEvent.click(deleteButtons[0]!);
+    fireEvent.click(deleteButtons[2]!);
+
+    expect(onToggleSkillEnabled).toHaveBeenNthCalledWith(1, "skill-codex:godot", false);
+    expect(onToggleSkillEnabled).toHaveBeenNthCalledWith(2, "mcp-filesystem", true);
+    expect(onToggleSkillEnabled).toHaveBeenNthCalledWith(3, "codex-mcp-manual", false);
+    expect(onDeleteSkill).toHaveBeenCalledWith("skill-codex:godot");
+    expect(onDeleteSkill).toHaveBeenCalledWith("codex-mcp-installed");
+  });
+
+  it("runs bulk disable and delete actions from my skills", () => {
+    const onDisableAllSkills = vi.fn();
+    const onDeleteAllSkills = vi.fn();
+    const view = render(
+      <JavisWorkbench
+        activeView="skills"
+        draftGoal="Inspect project"
+        onDeleteAllSkills={onDeleteAllSkills}
+        onDisableAllSkills={onDisableAllSkills}
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        skillEntries={[
+          {
+            id: "skill-codex:godot",
+            name: "godot",
+            description: "Godot development reference",
+            category: "skill",
+            agentOwners: ["codex skill"],
+            enabled: true,
+            source: "user",
+            toggleable: true,
+            removable: true,
+          },
+          {
+            id: "mcp-filesystem",
+            name: "filesystem",
+            description: "stdio via npx",
+            category: "mcp",
+            agentOwners: [],
+            enabled: true,
+            source: "mcp",
+            toggleable: true,
+            removable: true,
+          },
+        ]}
+        task={createIdleTask()}
+      />,
+    );
+
+    const bulkButtons = view.container.querySelectorAll<HTMLButtonElement>(".javis-skill-bulk-button");
+    expect(bulkButtons).toHaveLength(2);
+    expect(bulkButtons[0]!.disabled).toBe(false);
+    expect(bulkButtons[1]!.disabled).toBe(false);
+
+    fireEvent.click(bulkButtons[0]!);
+    fireEvent.click(bulkButtons[1]!);
+
+    expect(onDisableAllSkills).toHaveBeenCalledOnce();
+    expect(onDeleteAllSkills).toHaveBeenCalledOnce();
+  });
+
+  it("opens skill market result source links from the detail panel", () => {
+    const onOpenUrl = vi.fn();
+    const view = render(
+      <JavisWorkbench
+        activeView="skills"
+        draftGoal="Inspect project"
+        initialIsInspectorOpen
+        onDraftGoalChange={vi.fn()}
+        onOpenUrl={onOpenUrl}
+        onSubmitGoal={vi.fn()}
+        skillSearchResults={[{
+          id: "result-1",
+          title: "godot-mcp",
+          description: "Godot MCP server for editor automation.",
+          url: "https://github.com/example/godot-mcp",
+          source: "github",
+          kind: "mcp",
+        }]}
+        task={createIdleTask()}
+      />,
+    );
+
+    const skillSubitems = view.container.querySelectorAll<HTMLButtonElement>(".javis-nav-subitem");
+    fireEvent.click(skillSubitems[1]!);
+    fireEvent.click(view.getByText("godot-mcp"));
+
+    const link = view.getByRole("link", { name: "https://github.com/example/godot-mcp" });
+    expect(link).toBeTruthy();
+    fireEvent.click(link);
+
+    expect(onOpenUrl).toHaveBeenCalledWith("https://github.com/example/godot-mcp");
+  });
+
+  it("installs skill market results from the market card", () => {
+    const onInstallSkillMarketResult = vi.fn();
+    const result = {
+      id: "result-1",
+      title: "example/godot-skill",
+      description: "Godot skill.",
+      url: "https://github.com/example/godot-skill",
+      source: "github",
+      kind: "skill" as const,
+    };
+    const view = render(
+      <JavisWorkbench
+        activeView="skills"
+        draftGoal="Inspect project"
+        onDraftGoalChange={vi.fn()}
+        onInstallSkillMarketResult={onInstallSkillMarketResult}
+        onSubmitGoal={vi.fn()}
+        skillSearchResults={[result]}
+        task={createIdleTask()}
+      />,
+    );
+
+    const skillSubitems = view.container.querySelectorAll<HTMLButtonElement>(".javis-nav-subitem");
+    fireEvent.click(skillSubitems[1]!);
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>(".javis-skill-action-button")!);
+
+    expect(onInstallSkillMarketResult).toHaveBeenCalledWith(result);
+  });
+
+  it("refreshes and opens personalized skill market suggestions", () => {
+    const onRefreshSkillMarketSuggestions = vi.fn();
+    const onSearchSkillMarket = vi.fn();
+    const onOpenDetail = vi.fn();
+    const view = render(
+      <JavisWorkbench
+        activeView="skills"
+        draftGoal="Inspect project"
+        onDraftGoalChange={vi.fn()}
+        onOpenDetail={onOpenDetail}
+        onRefreshSkillMarketSuggestions={onRefreshSkillMarketSuggestions}
+        onSearchSkillMarket={onSearchSkillMarket}
+        onSubmitGoal={vi.fn()}
+        skillMarketSuggestions={[{
+          title: "example/memory-fit-agent",
+          description: "GitHub 热门项目 · 贴合：RAG",
+          url: "https://github.com/example/memory-fit-agent",
+          source: "github-cli",
+        }]}
+        task={createIdleTask()}
+      />,
+    );
+
+    const skillSubitems = view.container.querySelectorAll<HTMLButtonElement>(".javis-nav-subitem");
+    fireEvent.click(skillSubitems[1]!);
+
+    expect(view.container.textContent).not.toContain("RAG 知识库");
+    expect(view.container.querySelectorAll(".javis-hot-skill-card")).toHaveLength(1);
+    const refreshButton = within(view.container).getByRole("button", { name: "基于 GitHub 热榜和记忆侧写刷新推荐" });
+    fireEvent.click(refreshButton);
+    expect(onRefreshSkillMarketSuggestions).toHaveBeenCalledWith("github", "skill");
+
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>(".javis-hot-skill-card")!);
+
+    expect(onOpenDetail).toHaveBeenCalledWith(expect.objectContaining({
+      title: "example/memory-fit-agent",
+      url: "https://github.com/example/memory-fit-agent",
+    }));
+    expect(onSearchSkillMarket).toHaveBeenCalledWith("example/memory-fit-agent", "github", "skill");
   });
 
   it("normalizes Windows namespace prefixes in computer breadcrumbs", () => {
@@ -469,6 +886,457 @@ describe("JavisWorkbench permission cards", () => {
     expect(view.container.querySelector(".javis-agent.active")?.textContent).toContain("Shell Agent");
   });
 
+  it("shows capability score signals in selected agent details", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const task = createOrchestrationTask();
+    task.agents = task.agents.map((agent) => agent.id === "agent-shell"
+      ? {
+          ...agent,
+          capabilityScore: {
+            score: 65,
+            status: "usable",
+            implemented: true,
+            permissionReady: true,
+            qaPassed: false,
+            liveVerified: false,
+            recentFailureRate: 0.25,
+            highestPermissionLevel: "read",
+            capabilityTags: ["shell_readonly"],
+            evidenceRefs: [
+              "docs/qa/shell.json",
+              "docs/qa/live-shell.json",
+              "docs/qa/recent-failure.json",
+              "docs/qa/extra.json",
+            ],
+            gaps: [
+              "product QA evidence is not marked as passed",
+              "live workflow verification is not marked as passed",
+            ],
+          },
+        }
+      : agent);
+    const view = render(
+      <JavisWorkbench
+        draftGoal="Inspect project"
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={task}
+      />,
+    );
+
+    fireEvent.click(view.container.querySelector(".javis-agent-run-card.status-running")!);
+
+    await waitFor(() => {
+      expect(view.container.querySelector(".javis-selected-agent-detail")?.textContent)
+        .toContain("Shell Agent");
+    });
+
+    const detailsText = view.container.querySelector(".javis-task-overview")?.textContent ?? "";
+    expect(detailsText).toContain("Capability score");
+    expect(detailsText).toContain("65/100 usable");
+    expect(detailsText).toContain("Implementedpass");
+    expect(detailsText).toContain("Permissionpassread");
+    expect(detailsText).toContain("QApending");
+    expect(detailsText).toContain("Livepending");
+    expect(detailsText).toContain("Evidence4");
+    expect(detailsText).toContain("docs/qa/shell.json");
+    expect(detailsText).toContain("docs/qa/live-shell.json");
+    expect(detailsText).toContain("docs/qa/recent-failure.json");
+    expect(detailsText).toContain("+1 more");
+    expect(detailsText).toContain("Repair priorityhigh");
+    expect(detailsText).toContain("live evidence, QA evidence, recent failures");
+    expect(detailsText).toContain("product QA evidence is not marked as passed");
+  });
+
+  it("replaces selected agent details when a workspace resource is clicked", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const baseProps = {
+      draftGoal: "Inspect project",
+      onDraftGoalChange: vi.fn(),
+      onSubmitGoal: vi.fn(),
+      task: createOrchestrationTask(),
+      userDocuments: [
+        { name: "Notes.md", path: "E:/Javis/Notes.md", isDir: false, extension: "md" },
+      ],
+    };
+    const view = render(
+      <JavisWorkbench {...baseProps} />,
+    );
+
+    fireEvent.click(view.container.querySelector(".javis-agent-run-card.status-running")!);
+    await waitFor(() => {
+      expect(view.container.querySelector(".javis-selected-agent-detail")?.textContent)
+        .toContain("Shell Agent");
+    });
+
+    view.rerender(<JavisWorkbench {...baseProps} activeView="documents" />);
+    const docButton = within(view.container).getByText("Notes.md").closest("button");
+    expect(docButton).toBeTruthy();
+    fireEvent.click(docButton!);
+
+    await waitFor(() => {
+      expect(view.container.querySelector(".javis-selected-agent-detail")).toBeNull();
+      expect(view.container.querySelector(".javis-review-card")?.textContent).toContain("E:/Javis/Notes.md");
+    });
+  });
+
+  it("replaces an open resource detail when a workspace tool is launched", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const view = render(
+      <JavisWorkbench
+        activeView="documents"
+        draftGoal="Inspect project"
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={createOrchestrationTask()}
+        userDocuments={[
+          { name: "Notes.md", path: "E:/Javis/Notes.md", isDir: false, extension: "md" },
+        ]}
+      />,
+    );
+
+    const docButton = within(view.container).getByText("Notes.md").closest("button");
+    expect(docButton).toBeTruthy();
+    fireEvent.click(docButton!);
+    await waitFor(() => {
+      expect(view.container.querySelector(".javis-review-card")?.textContent).toContain("E:/Javis/Notes.md");
+    });
+
+    const browserTool = view.container.querySelector<HTMLButtonElement>(".javis-inspector-quick-card.action-browser");
+    expect(browserTool).toBeTruthy();
+    fireEvent.click(browserTool!);
+
+    await waitFor(() => {
+      expect(view.container.textContent).not.toContain("E:/Javis/Notes.md");
+      expect(view.container.querySelector(".javis-tool-panel.browser-panel")).not.toBeNull();
+      expect(view.container.querySelector(".javis-tool-tab.active")?.textContent).toContain("Browser");
+    });
+  });
+
+  it("shows local vision status in computer agent execution trace details", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const task: WorkbenchTask = {
+      ...createOrchestrationTask(),
+      plan: [
+        { id: "scan", title: "Scan files", status: "completed", durationMs: 1240, agentId: "agent-file" },
+        {
+          id: "use-computer",
+          title: "Use desktop",
+          status: "completed",
+          agentId: "agent-computer",
+          agentKind: "computer",
+        },
+      ],
+      agents: [
+        { id: "agent-file", name: "File Agent", role: "Reads files", status: "completed", task: "Scanned files" },
+        {
+          id: "agent-computer",
+          name: "Computer Agent",
+          role: "Controls desktop",
+          status: "completed",
+          task: "Clicked target",
+        },
+      ],
+      executionTrace: {
+        taskId: "task-progress-rich",
+        startedAt: "2026-06-08T00:00:00.000Z",
+        completedAt: "2026-06-08T00:00:04.250Z",
+        totalWallTimeMs: 4250,
+        steps: [{
+          stepId: "use-computer:computer-1",
+          agentKind: "computer",
+          toolName: "computer.click",
+          wallTimeMs: 80,
+          status: "completed",
+          localVision: {
+            mode: "disabled",
+            detectionCount: 0,
+            promptCandidateCount: 0,
+            cropVlmCalled: true,
+            fullScreenshotVlmSkipped: true,
+            consecutiveTimeouts: 2,
+            disabledReason: "timeout",
+            selectedCandidateSource: ["uia", "yolo"],
+            actionRisk: "medium",
+            actionSucceeded: false,
+            fallbackReason: "coordinate_mismatch",
+          },
+        }],
+      },
+    };
+    const view = render(
+      <JavisWorkbench
+        draftGoal="Inspect project"
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={task}
+      />,
+    );
+
+    const computerCard = Array.from(
+      view.container.querySelectorAll<HTMLButtonElement>(".javis-agent-run-card"),
+    ).find((card) => card.textContent?.includes("Computer Agent"));
+    expect(computerCard).toBeTruthy();
+    fireEvent.click(computerCard!);
+
+    await waitFor(() => {
+      expect(view.container.querySelector(".javis-selected-agent-detail")?.textContent)
+        .toContain("Computer Agent");
+    });
+
+    const detailsText = view.container.querySelector(".javis-task-overview")?.textContent ?? "";
+    expect(detailsText).toContain("Execution trace");
+    expect(detailsText).toContain("local vision disabled");
+    expect(detailsText).toContain("0 detections");
+    expect(detailsText).toContain("0 candidates");
+    expect(detailsText).toContain("crop VLM");
+    expect(detailsText).toContain("full screenshot skipped");
+    expect(detailsText).toContain("disabled: timeout");
+    expect(detailsText).toContain("2 timeouts");
+    expect(detailsText).toContain("risk: medium");
+    expect(detailsText).toContain("action failed");
+    expect(detailsText).toContain("source: uia+yolo");
+    expect(detailsText).toContain("fallback: coordinate_mismatch");
+  });
+
+  it("shows repository evidence in Code Agent details", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const task: WorkbenchTask = {
+      ...createOrchestrationTask(),
+      plan: [
+        {
+          id: "search-repo",
+          title: "Search repository",
+          status: "completed",
+          agentId: "agent-code",
+          agentKind: "code",
+          successCriteria: "Repository evidence is collected.",
+        },
+      ],
+      agents: [
+        {
+          id: "agent-code",
+          name: "Code Agent",
+          role: "Inspects implementation",
+          status: "completed",
+          task: "Repository search completed",
+        },
+      ],
+      repoSearchReport: {
+        actualFound: [{
+          path: "packages/core/src/memory.ts",
+          line: 8,
+          excerpt: "export interface AgentMemory {}",
+          matchedTerms: ["memory"],
+        }],
+        inferred: ["Memory code lives under packages/core."],
+        needsConfirmation: ["No test file was found in the first search pass."],
+        keyFiles: ["packages/core/src/memory.ts"],
+        relatedTestFiles: [],
+        testFileCandidates: ["packages/core/src/memory.test.ts"],
+        clusters: [{
+          id: "packages/core",
+          label: "packages/core",
+          paths: ["packages/core/src/memory.ts"],
+          resultCount: 1,
+          score: 2,
+          topTerms: ["memory"],
+        }],
+        semanticDiagnostics: [{
+          provider: "local-test-embedding",
+          status: "completed",
+          candidateCount: 1,
+          rerankedCount: 1,
+          durationMs: 7,
+        }],
+        attempts: [{
+          id: "term-memory",
+          query: "memory",
+          reason: "Search known term.",
+          resultCount: 1,
+          provider: "rg",
+        }, {
+          id: "fallback-agent-memory",
+          query: "agent memory",
+          reason: "fallback term for a no-result search",
+          resultCount: 0,
+          status: "failed",
+          durationMs: 12,
+          error: "search backend unavailable",
+          errorKind: "unavailable",
+          provider: "ignore",
+          retryCount: 1,
+        }],
+      },
+    };
+    const view = render(
+      <JavisWorkbench
+        draftGoal="Search repository"
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={task}
+      />,
+    );
+
+    const codeCard = Array.from(
+      view.container.querySelectorAll<HTMLButtonElement>(".javis-agent-run-card"),
+    ).find((card) => card.textContent?.includes("Code Agent"));
+    expect(codeCard).toBeTruthy();
+    fireEvent.click(codeCard!);
+
+    await waitFor(() => {
+      expect(view.container.querySelector(".javis-selected-agent-detail")?.textContent)
+        .toContain("Code Agent");
+    });
+
+    const detailsText = view.container.querySelector(".javis-task-overview")?.textContent ?? "";
+    expect(detailsText).toContain("Repository evidence");
+    expect(detailsText).toContain("packages/core/src/memory.ts");
+    expect(detailsText).toContain("packages/core/src/memory.ts:8");
+    expect(detailsText).toContain("packages/core/src/memory.test.ts");
+    expect(detailsText).toContain("export interface AgentMemory");
+    expect(detailsText).toContain("packages/core");
+    expect(detailsText).toContain("Memory code lives under packages/core.");
+    expect(detailsText).toContain("No test file was found in the first search pass.");
+    expect(detailsText).toContain("local-test-embedding");
+    expect(detailsText).toContain("completed - 1/1 candidate(s) - 7ms");
+    expect(detailsText).toContain("memory");
+    expect(detailsText).toContain("rg - 1 result(s) - Search known term.");
+    expect(detailsText).toContain("agent memory");
+    expect(detailsText).toContain("failed - ignore - 0 result(s) - 12ms - 1 retry - fallback term for a no-result search - kind: unavailable - error: search backend unavailable");
+    expect(detailsText).toContain("Repository search report");
+  });
+
+  it("shows repository trace evidence in Code Agent details", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const task: WorkbenchTask = {
+      ...createOrchestrationTask(),
+      plan: [
+        {
+          id: "trace-repo",
+          title: "Trace repository",
+          status: "completed",
+          agentId: "agent-code",
+          agentKind: "code",
+          successCriteria: "Repository trace evidence is collected.",
+        },
+      ],
+      agents: [
+        {
+          id: "agent-code",
+          name: "Code Agent",
+          role: "Inspects implementation",
+          status: "completed",
+          task: "Repository trace completed",
+        },
+      ],
+      repoTraceReport: {
+        target: "runTask",
+        direction: "forward",
+        actualFound: [{
+          path: "packages/ui/src/TaskPanel.tsx",
+          line: 42,
+          excerpt: "onClick={() => runTask(goal)}",
+          matchedTerms: ["runTask"],
+        }],
+        nodes: [
+          {
+            id: "target:runtask",
+            label: "runTask",
+            kind: "target",
+            symbol: "runTask",
+            score: 100,
+          },
+          {
+            id: "candidate:taskpanel",
+            label: "TaskPanel (packages/ui/src/TaskPanel.tsx)",
+            kind: "candidate",
+            path: "packages/ui/src/TaskPanel.tsx",
+            symbol: "TaskPanel",
+            score: 12,
+          },
+        ],
+        edges: [{
+          from: "target:runtask",
+          to: "candidate:taskpanel",
+          relation: "may_call",
+          evidencePath: "packages/ui/src/TaskPanel.tsx",
+          line: 42,
+          excerpt: "onClick={() => runTask(goal)}",
+          confidence: 0.85,
+          moduleSpecifier: "@javis/core",
+          moduleKind: "workspace",
+        }],
+        moduleLinks: [{
+          specifier: "@javis/core",
+          kind: "workspace",
+          evidencePaths: ["packages/ui/src/TaskPanel.tsx"],
+          importCount: 1,
+          exportCount: 0,
+          dynamicImportCount: 0,
+          confidence: 0.85,
+          resolutionStatus: "resolved",
+          resolvedPaths: ["packages/core/src/workflow-executor.ts"],
+          resolverProvider: "fixture-resolver",
+          packageHints: [{
+            manifestPath: "packages/core/package.json",
+            name: "@javis/core",
+            main: "./dist/index.cjs",
+            types: "./dist/index.d.ts",
+            exports: ["./workflow: ./dist/workflow.js"],
+          }],
+        }],
+        inferred: ["runTask may_call TaskPanel via packages/ui/src/TaskPanel.tsx"],
+        needsConfirmation: ["Some edges are text-search candidates and need AST, runtime trace, or manual confirmation."],
+        keyFiles: ["packages/ui/src/TaskPanel.tsx"],
+        attempts: [{
+          id: "trace-target",
+          query: "runTask",
+          reason: "exact target from trace request",
+          resultCount: 1,
+          provider: "rg",
+        }],
+      },
+    };
+    const view = render(
+      <JavisWorkbench
+        draftGoal="Trace repository"
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={task}
+      />,
+    );
+
+    const codeCard = Array.from(
+      view.container.querySelectorAll<HTMLButtonElement>(".javis-agent-run-card"),
+    ).find((card) => card.textContent?.includes("Code Agent"));
+    expect(codeCard).toBeTruthy();
+    fireEvent.click(codeCard!);
+
+    await waitFor(() => {
+      expect(view.container.querySelector(".javis-selected-agent-detail")?.textContent)
+        .toContain("Code Agent");
+    });
+
+    const detailsText = view.container.querySelector(".javis-task-overview")?.textContent ?? "";
+    expect(detailsText).toContain("Repository trace");
+    expect(detailsText).toContain("runTask");
+    expect(detailsText).toContain("forward");
+    expect(detailsText).toContain("TaskPanel (packages/ui/src/TaskPanel.tsx)");
+    expect(detailsText).toContain("packages/ui/src/TaskPanel.tsx:42");
+    expect(detailsText).toContain("confidence 0.85");
+    expect(detailsText).toContain("module @javis/core (workspace)");
+    expect(detailsText).toContain("workspace - imports 1, exports 0, dynamic 0");
+    expect(detailsText).toContain("resolved by fixture-resolver - packages/core/src/workflow-executor.ts");
+    expect(detailsText).toContain("package @javis/core main=./dist/index.cjs types=./dist/index.d.ts exports=./workflow: ./dist/workflow.js");
+    expect(detailsText).toContain("onClick={() => runTask(goal)}");
+    expect(detailsText).toContain("runTask may_call TaskPanel");
+    expect(detailsText).toContain("Some edges are text-search candidates");
+    expect(detailsText).toContain("rg - 1 result(s) - exact target from trace request");
+    expect(detailsText).toContain("Repository trace report");
+    expect(detailsText).toContain("1 key file(s), 1 edge(s)");
+  });
+
   it("shows full related event messages in the selected agent details", async () => {
     Element.prototype.scrollIntoView = vi.fn();
     const longMessage = "正在检查项目脚本、依赖和启动命令，并保留完整事件说明供用户回看。";
@@ -519,6 +1387,75 @@ describe("JavisWorkbench permission cards", () => {
     expect(eventList?.textContent).toContain(longMessage);
     expect(eventList?.textContent).toContain("使用 Shell Agent 检查 package scripts。");
     expect(eventList?.textContent).not.toContain("\"plan\"");
+  });
+
+  it("links Browser Agent steps and browser tool logs into selected agent details", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const task: WorkbenchTask = {
+      id: "task-browser-detail",
+      title: "Browse docs",
+      userGoal: "Check docs in browser",
+      status: "running",
+      commanderMessage: "Browser Agent checked the docs.",
+      plan: [
+        {
+          id: "open-docs",
+          title: "Open docs page",
+          status: "completed",
+          agentKind: "browser",
+        },
+      ],
+      agents: [
+        {
+          id: "agent-browser",
+          name: "Browser Agent",
+          role: "Navigates web pages",
+          status: "completed",
+          task: "Opened the docs page",
+        },
+      ],
+      logs: [
+        {
+          id: "browser-log-1",
+          kind: "tool",
+          title: "browser.navigate",
+          detail: "Navigated to https://example.com/docs.",
+        },
+        {
+          id: "research-url-log",
+          kind: "tool",
+          title: "web.fetch",
+          detail: "Fetched unrelated URL evidence.",
+          agentId: "agent-research",
+        },
+      ],
+    };
+    const view = render(
+      <JavisWorkbench
+        draftGoal="Inspect browser activity"
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={task}
+      />,
+    );
+
+    const browserCard = Array.from(
+      view.container.querySelectorAll<HTMLButtonElement>(".javis-agent-run-card"),
+    ).find((card) => card.textContent?.includes("Browser Agent"));
+    expect(browserCard).toBeTruthy();
+    fireEvent.click(browserCard!);
+
+    await waitFor(() => {
+      expect(view.container.querySelector(".javis-selected-agent-detail")?.textContent)
+        .toContain("Browser Agent");
+    });
+
+    const detailsText = view.container.querySelector(".javis-task-overview")?.textContent ?? "";
+    expect(detailsText).toContain("Open docs page");
+    expect(detailsText).toContain("browser.navigate");
+    expect(detailsText).toContain("Navigated to https://example.com/docs.");
+    expect(detailsText).not.toContain("Fetched unrelated URL evidence.");
+    expect(detailsText).toContain("Browser");
   });
 
   it("closes the selected agent detail tab back to inspector quick actions", async () => {
@@ -752,6 +1689,227 @@ describe("JavisWorkbench permission cards", () => {
     expect(details?.textContent).not.toContain("Shell Agent mention from File");
   });
 
+  it("shows Commander handoff context keys in inspector plan details", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const task: WorkbenchTask = {
+      ...createOrchestrationTask(),
+      plan: [
+        {
+          id: "collect-evidence",
+          title: "Collect repository evidence",
+          status: "completed",
+          agentId: "agent-file",
+          agentKind: "file",
+          outputContextKey: "repoEvidence",
+          successCriteria: "Repository evidence is saved for the next agent.",
+        },
+        {
+          id: "review-evidence",
+          title: "Review evidence",
+          status: "running",
+          agentId: "agent-shell",
+          agentKind: "command",
+          inputContextKeys: ["repoEvidence"],
+          outputContextKey: "reviewFindings",
+          successCriteria: "Review findings name the handoff artifact.",
+        },
+      ],
+    };
+    const view = render(
+      <JavisWorkbench
+        draftGoal="Inspect project"
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={task}
+      />,
+    );
+
+    fireEvent.click(view.container.querySelector(".javis-agent-run-card.status-running")!);
+
+    await waitFor(() => {
+      expect(view.container.querySelector(".javis-selected-agent-detail")?.textContent).toContain("Shell Agent");
+    });
+
+    const details = view.container.querySelector(".javis-inspector-details");
+    expect(details?.textContent).toContain("Review evidence");
+    expect(details?.textContent).toContain("in: repoEvidence -> out: reviewFindings");
+    expect(details?.textContent).not.toContain("out: repoEvidence");
+  });
+
+  it("shows the serializable handoff report in task details", () => {
+    const task: WorkbenchTask = {
+      ...createOrchestrationTask(),
+      handoffReport: {
+        generatedAt: "2026-06-11T00:00:00.000Z",
+        status: "needs_attention",
+        missingInputContextKeys: ["sourceEvidence"],
+        unconsumedOutputContextKeys: ["draftText"],
+        steps: [],
+        handoffs: [{
+          contextKey: "repoEvidence",
+          producedByStepId: "collect-evidence",
+          consumedByStepIds: ["review-evidence"],
+          status: "available",
+          valueSummary: { type: "object", present: true, keyCount: 2 },
+        }, {
+          contextKey: "draftText",
+          producedByStepId: "draft",
+          consumedByStepIds: [],
+          status: "unconsumed",
+          valueSummary: { type: "string", present: true, preview: "short draft" },
+        }],
+      },
+    };
+    const html = renderToStaticMarkup(
+      <AgentDetailSections
+        labels={defaultWorkbenchLocale.labels}
+        locale={defaultWorkbenchLocale}
+        task={task}
+      />,
+    );
+
+    expect(html).toContain("Agent handoff report");
+    expect(html).toContain("needs attention");
+    expect(html).toContain("2 handoff(s)");
+    expect(html).toContain("Missing input: sourceEvidence");
+    expect(html).toContain("Unconsumed output: draftText");
+    expect(html).toContain("collect-evidence -&gt; review-evidence");
+    expect(html).toContain("draft -&gt; none");
+    expect(html).toContain("object: 2 key(s)");
+    expect(html).toContain("string: short draft");
+    expect(html).toContain("JSON");
+    expect(html).toContain("Markdown");
+  });
+
+  it("creates stable handoff report artifacts for UI export", () => {
+    const artifacts = createWorkbenchHandoffReportArtifacts({
+      generatedAt: "2026-06-11T00:00:00.000Z",
+      status: "complete",
+      missingInputContextKeys: [],
+      unconsumedOutputContextKeys: [],
+      steps: [{
+        stepId: "collect",
+        title: "Collect evidence",
+        assignedAgentKind: "research",
+        dependsOn: [],
+        inputContextKeys: [],
+        outputContextKey: "evidence",
+        missingInputContextKeys: [],
+        successCriteria: "Evidence is ready.",
+      }],
+      handoffs: [{
+        contextKey: "evidence",
+        producedByStepId: "collect",
+        consumedByStepIds: ["review"],
+        status: "available",
+        valueSummary: { type: "array", present: true, itemCount: 2 },
+      }],
+    }, { baseName: "../Task Handoff.md" });
+
+    expect(artifacts.map((artifact) => artifact.filename)).toEqual([
+      "Task-Handoff.json",
+      "Task-Handoff.md",
+    ]);
+    expect(artifacts[0].content).toContain('"contextKey": "evidence"');
+    expect(artifacts[1].content).toContain("# Agent Handoff Report");
+    expect(artifacts[1].content).toContain("| evidence | collect | review | available | array: 2 item(s) |");
+  });
+
+  it("downloads handoff report artifacts from task details", () => {
+    const createObjectURL = vi.fn(() => "blob:javis-handoff");
+    const revokeObjectURL = vi.fn();
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+    const originalCreateObjectURL = URL.createObjectURL;
+    const originalRevokeObjectURL = URL.revokeObjectURL;
+    URL.createObjectURL = createObjectURL;
+    URL.revokeObjectURL = revokeObjectURL;
+
+    try {
+      const task: WorkbenchTask = {
+        ...createOrchestrationTask(),
+        id: "task/export",
+        handoffReport: {
+          generatedAt: "2026-06-11T00:00:00.000Z",
+          status: "complete",
+          missingInputContextKeys: [],
+          unconsumedOutputContextKeys: [],
+          steps: [],
+          handoffs: [{
+            contextKey: "repoEvidence",
+            producedByStepId: "collect-evidence",
+            consumedByStepIds: ["review-evidence"],
+            status: "available",
+            valueSummary: { type: "object", present: true, keyCount: 2 },
+          }],
+        },
+      };
+      const view = render(
+        <AgentDetailSections
+          labels={defaultWorkbenchLocale.labels}
+          locale={defaultWorkbenchLocale}
+          task={task}
+        />,
+      );
+
+      fireEvent.click(view.getByRole("button", { name: "JSON" }));
+
+      expect(createObjectURL).toHaveBeenCalledTimes(1);
+      expect(click).toHaveBeenCalledTimes(1);
+      expect(revokeObjectURL).toHaveBeenCalledWith("blob:javis-handoff");
+      expect(view.container.querySelector("a[download='task-export-handoff-report.json']")).toBeNull();
+    } finally {
+      URL.createObjectURL = originalCreateObjectURL;
+      URL.revokeObjectURL = originalRevokeObjectURL;
+      click.mockRestore();
+    }
+  });
+
+  it("shows recovery reports in task details", () => {
+    const task: WorkbenchTask = {
+      ...createOrchestrationTask(),
+      recoveryReport: {
+        generatedAt: "2026-06-11T00:00:00.000Z",
+        status: "recovered",
+        failureCount: 1,
+        recoveredCount: 1,
+        unrecoveredCount: 0,
+        abandonedStepIds: ["collect-evidence"],
+        replannedStepIds: ["recover-with-partial-evidence"],
+        attempts: [{
+          failedStepId: "collect-evidence",
+          failedStepTitle: "Collect evidence",
+          agentKind: "code",
+          errorSummary: "HTTP 503 from repository search provider",
+          failureKind: "network",
+          completedBefore: ["parse-request"],
+          replanAttempted: true,
+          replanStatus: "planned",
+          abandonedFailedStep: true,
+          recoveryStepIds: ["recover-with-partial-evidence"],
+          suggestedAlternatives: ["retry with a fallback provider"],
+          detail: "Commander produced 1 recovery step.",
+        }],
+      },
+    };
+    const html = renderToStaticMarkup(
+      <AgentDetailSections
+        labels={defaultWorkbenchLocale.labels}
+        locale={defaultWorkbenchLocale}
+        task={task}
+      />,
+    );
+
+    expect(html).toContain("Recovery report");
+    expect(html).toContain("1/1 recovered");
+    expect(html).toContain("Abandoned: collect-evidence");
+    expect(html).toContain("Recovery steps: recover-with-partial-evidence");
+    expect(html).toContain("Collect evidence");
+    expect(html).toContain("network");
+    expect(html).toContain("HTTP 503 from repository search provider");
+    expect(html).toContain("Replan: planned -&gt; recover-with-partial-evidence");
+    expect(html).toContain("retry with a fallback provider");
+  });
+
   it("renders Commander plan JSON as a compact user-facing step list", () => {
     const html = renderWorkbench({
       id: "task-plan-json",
@@ -806,7 +1964,7 @@ describe("JavisWorkbench permission cards", () => {
       commanderMessage: "Running",
       plan: [],
       agents: [],
-      logs: Array.from({ length: 20 }, (_, index) => ({
+      logs: Array.from({ length: 120 }, (_, index) => ({
         id: `log-${index}`,
         kind: "event",
         title: `step.${index}`,
@@ -854,6 +2012,138 @@ describe("JavisWorkbench permission cards", () => {
     expect(container.textContent).toContain("Hidden developer detail");
   });
 
+  it("restores activity log rows after switching tasks", () => {
+    const firstTask: WorkbenchTask = {
+      ...createIdleTask(),
+      id: "task-clear-one",
+      logs: [{ id: "log-one", kind: "event", title: "step.one", detail: "First task log" }],
+    };
+    const secondTask: WorkbenchTask = {
+      ...createIdleTask(),
+      id: "task-clear-two",
+      logs: [{ id: "log-two", kind: "event", title: "step.two", detail: "Second task log" }],
+    };
+    const view = render(
+      <JavisWorkbench
+        draftGoal="Inspect project"
+        initialIsActivityOpen={true}
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={firstTask}
+      />,
+    );
+
+    expect(view.container.textContent).toContain("First task log");
+    fireEvent.click(view.container.querySelector(".javis-activity-tools button[title=\"Clear logs\"]")!);
+    expect(view.container.textContent).not.toContain("First task log");
+
+    view.rerender(
+      <JavisWorkbench
+        draftGoal="Inspect project"
+        initialIsActivityOpen={true}
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={secondTask}
+      />,
+    );
+
+    expect(view.container.textContent).toContain("Second task log");
+  });
+
+  it("renders computer root entries from mount roots", () => {
+    const view = render(
+      <JavisWorkbench
+        activeView="computer"
+        computerPath=""
+        draftGoal="Inspect files"
+        mountRoots={[{ name: "Data (D:)", path: "D:\\" }]}
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={createIdleTask()}
+      />,
+    );
+    const computerGrid = view.container.querySelector(".javis-computer-grid");
+
+    expect(computerGrid?.textContent).toContain("Data (D:)");
+    expect(computerGrid?.textContent).not.toContain("C:");
+  });
+
+  it("selects computer files into the inspector and opens them only on double click", () => {
+    const onNavigateDirectory = vi.fn();
+    const onOpenDetail = vi.fn();
+    const onOpenFile = vi.fn();
+    const view = render(
+      <JavisWorkbench
+        activeView="computer"
+        computerEntries={[
+          { name: "Project", path: "E:/Docs/Project", isDir: true },
+          { name: "Notes.md", path: "E:/Docs/Notes.md", isDir: false, extension: "md", sizeBytes: 2048 },
+        ]}
+        computerPath="E:/Docs"
+        draftGoal="Inspect files"
+        onDraftGoalChange={vi.fn()}
+        onNavigateDirectory={onNavigateDirectory}
+        onOpenDetail={onOpenDetail}
+        onOpenFile={onOpenFile}
+        onSubmitGoal={vi.fn()}
+        task={createIdleTask()}
+      />,
+    );
+
+    const fileButton = within(view.container).getByText("Notes.md").closest("button");
+    expect(fileButton).toBeTruthy();
+    fireEvent.click(fileButton!);
+    expect(onOpenDetail).toHaveBeenCalledWith(expect.objectContaining({
+      title: "Notes.md",
+      kind: "File",
+    }));
+    expect(view.container.querySelector(".javis-shell")?.className).toContain("inspector-open");
+    expect(view.container.querySelector(".javis-review-card")?.textContent).toContain("E:/Docs/Notes.md");
+    expect(onOpenFile).not.toHaveBeenCalled();
+
+    fireEvent.doubleClick(fileButton!);
+    expect(onOpenFile).toHaveBeenCalledWith("E:/Docs/Notes.md");
+
+    const folderButton = within(view.container).getByText("Project").closest("button");
+    expect(folderButton).toBeTruthy();
+    fireEvent.click(folderButton!);
+    expect(onNavigateDirectory).toHaveBeenCalledWith("E:\\Docs\\Project");
+  });
+
+  it("creates scheduled tasks from the automated view form", () => {
+    const onCreateScheduledTask = vi.fn();
+    const view = render(
+      <JavisWorkbench
+        activeView="automated"
+        currentWorkspacePath="E:/Javis"
+        draftGoal="Inspect files"
+        onCreateScheduledTask={onCreateScheduledTask}
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={createIdleTask()}
+      />,
+    );
+
+    fireEvent.change(view.getByLabelText("Task name"), {
+      target: { value: "Morning review" },
+    });
+    fireEvent.change(view.getByLabelText("Task goal"), {
+      target: { value: "Summarize the project status" },
+    });
+    fireEvent.change(view.getByLabelText("Schedule value"), {
+      target: { value: "08:30" },
+    });
+    fireEvent.click(view.getByText("Create task"));
+
+    expect(onCreateScheduledTask).toHaveBeenCalledWith({
+      name: "Morning review",
+      goal: "Summarize the project status",
+      workspacePath: "E:/Javis",
+      scheduleType: "daily",
+      scheduleValue: "08:30",
+    });
+  });
+
   it("keeps confirmation actions enabled only while permission is pending", () => {
     const pendingHtml = renderWorkbench(createTaskWithPermission("pending"));
     const approvedHtml = renderWorkbench(createTaskWithPermission("approved"));
@@ -875,6 +2165,20 @@ describe("JavisWorkbench permission cards", () => {
     expect(deniedHtml).toContain("No write operation executed");
   });
 
+  it("does not show Always Allow when a generic permission request disallows it", () => {
+    const html = renderWorkbench({
+      ...createTaskWithPermission("pending"),
+      permissionRequest: {
+        ...createTaskWithPermission("pending").permissionRequest!,
+        allowAlways: false,
+      },
+    });
+
+    expect(html).toContain("<button type=\"button\">Approve</button>");
+    expect(html).not.toContain("Always Allow");
+    expect(html).toContain("<button type=\"button\">Deny</button>");
+  });
+
   it("renders Computer Use action approvals as desktop actions", () => {
     const html = renderWorkbench({
       ...createTaskWithPermission("pending"),
@@ -882,7 +2186,9 @@ describe("JavisWorkbench permission cards", () => {
       commanderMessage: "需要你确认：点击屏幕坐标 (640, 420)。",
       permissionRequest: {
         id: "computer-permission-1",
+        screenshotDataUrl: "data:image/png;base64,PREVIEW==",
         level: "confirmed_write",
+        writeRiskLevel: "dangerous",
         title: "需要确认桌面操作",
         reason: "Javis 准备点击屏幕坐标 (640, 420)。",
         status: "pending",
@@ -905,6 +2211,10 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).toContain("Javis 准备点击屏幕坐标 (640, 420)。");
     expect(html).toContain("点击屏幕坐标 (640, 420)");
     expect(html).toContain("<button type=\"button\">Approve</button>");
+    expect(html).toContain("class=\"javis-status javis-risk-status risk-dangerous\"");
+    expect(html).toContain("dangerous");
+    expect(html).toContain("class=\"javis-permission-screenshot\"");
+    expect(html).toContain("src=\"data:image/png;base64,PREVIEW==\"");
     expect(html).toContain("<button type=\"button\">Allow this task</button>");
     expect(html).toContain("<button type=\"button\">Deny</button>");
   });
@@ -924,6 +2234,37 @@ describe("JavisWorkbench permission cards", () => {
             {
               source: "local desktop",
               target: "Type 5 characters",
+              action: "modify",
+            },
+          ],
+          riskSummary: "This action requires separate confirmation.",
+          reversible: false,
+        },
+      },
+    });
+
+    expect(html).toContain("<button type=\"button\">Approve</button>");
+    expect(html).not.toContain("Allow this task");
+    expect(html).not.toContain("Always Allow");
+    expect(html).toContain("<button type=\"button\">Deny</button>");
+  });
+
+  it("does not show task-level approval when a Computer Use request disallows always-allow", () => {
+    const html = renderWorkbench({
+      ...createTaskWithPermission("pending"),
+      permissionRequest: {
+        id: "computer-fresh-permission-1",
+        level: "confirmed_write",
+        title: "Confirm desktop action",
+        reason: "Javis is about to click a high-risk candidate.",
+        status: "pending",
+        allowAlways: false,
+        dryRun: {
+          operation: "computer.click",
+          affectedPaths: [
+            {
+              source: "local desktop",
+              target: "Click high-risk candidate",
               action: "modify",
             },
           ],
@@ -997,6 +2338,42 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).toContain("Show process");
     // Detailed steps are only in the right sidebar, not inline
     expect(html).toContain("1/1");
+  });
+
+  it("shows repair priority badges on agent summary cards", () => {
+    const html = renderWorkbench({
+      id: "task-agent-summary-capability",
+      title: "Project inspected",
+      userGoal: "Inspect project",
+      status: "completed",
+      commanderMessage: "Final conclusion.",
+      plan: [],
+      agents: [{
+        id: "agent-shell",
+        name: "Shell Agent",
+        role: "Checks commands",
+        status: "completed",
+        task: "Checked scripts",
+        capabilityScore: {
+          score: 65,
+          status: "usable",
+          implemented: true,
+          permissionReady: true,
+          qaPassed: false,
+          liveVerified: false,
+          recentFailureRate: 0.25,
+          highestPermissionLevel: "read",
+          capabilityTags: ["shell_readonly"],
+          evidenceRefs: ["docs/qa/shell.json"],
+          gaps: ["product QA evidence is not marked as passed"],
+        },
+      }],
+      logs: [],
+    });
+
+    expect(html).toContain("Shell Agent");
+    expect(html).toContain("repair high");
+    expect(html).toContain("javis-agent-summary-card-capability priority-high");
   });
 
   it("renders code review diff preview in inspector panel", () => {
@@ -1343,6 +2720,43 @@ describe("JavisWorkbench permission cards", () => {
     expect(onOpenWorkspaceTool).toHaveBeenCalledWith("terminal");
   });
 
+  it("shows workspace file tool entries in the inspector on click", () => {
+    const onOpenDetail = vi.fn();
+    const onOpenFile = vi.fn();
+    const view = render(
+      <JavisWorkbench
+        computerEntries={[
+          { name: "src", path: "E:/Javis/src", isDir: true },
+          { name: "package.json", path: "E:/Javis/package.json", isDir: false, extension: "json", sizeBytes: 512 },
+        ]}
+        currentWorkspacePath="E:/Javis"
+        draftGoal="Use files"
+        initialIsInspectorOpen={true}
+        onDraftGoalChange={vi.fn()}
+        onOpenDetail={onOpenDetail}
+        onOpenFile={onOpenFile}
+        onSubmitGoal={vi.fn()}
+        task={createIdleTask()}
+        workspaceToolTabs={[{ id: "files-1", tool: "files" }]}
+      />,
+    );
+
+    const fileButton = Array.from(
+      view.container.querySelectorAll<HTMLButtonElement>(".javis-tool-file-entry.file"),
+    ).find((button) => button.textContent?.includes("package.json"));
+    expect(fileButton).toBeTruthy();
+    fireEvent.click(fileButton!);
+    expect(onOpenDetail).toHaveBeenCalledWith(expect.objectContaining({
+      title: "package.json",
+      kind: "Workspace file",
+    }));
+    expect(view.container.querySelector(".javis-review-card")?.textContent).toContain("E:/Javis/package.json");
+    expect(onOpenFile).not.toHaveBeenCalled();
+
+    fireEvent.doubleClick(fileButton!);
+    expect(onOpenFile).toHaveBeenCalledWith("E:/Javis/package.json");
+  });
+
   it("passes the active agent session into right-rail tool actions", async () => {
     Element.prototype.scrollIntoView = vi.fn();
     const task: WorkbenchTask = {
@@ -1434,6 +2848,31 @@ describe("JavisWorkbench permission cards", () => {
     }), { action: "navigate", url: "http://localhost:5173" }));
     view.unmount();
 
+    const onRequestedBrowser = vi.fn().mockResolvedValue({
+      url: "http://localhost:5173",
+      title: "Local app",
+      loadState: "snapshot",
+    });
+    view = render(
+      <JavisWorkbench
+        {...baseProps}
+        initialIsInspectorOpen={false}
+        onQuickActionBrowser={onRequestedBrowser}
+        workspaceToolRequest={{
+          id: "runtime-browser-request-1",
+          tool: "browser",
+          source: "browser.navigate",
+        }}
+      />,
+    );
+    await waitFor(() => expect(onRequestedBrowser).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "thread-1:task-session",
+      workspaceRoot: "E:/Javis",
+      activeTool: "browser",
+    }), { action: "status" }));
+    expect(view.container.querySelector(".javis-tool-browser-nav")).toBeTruthy();
+    view.unmount();
+
     const onBrowserRefresh = vi.fn(async (_session: unknown, request: string | { action?: string }) => ({
       url: "http://localhost:5173",
       title: "Local app",
@@ -1451,7 +2890,10 @@ describe("JavisWorkbench permission cards", () => {
     );
     await waitFor(() => expect(view.container.textContent).toContain("Local app"));
     expect(view.container.querySelector(".javis-tool-browser-frame")).toBeNull();
-    fireEvent.click(view.getByLabelText("Refresh"));
+    const refreshButton = [...view.container.querySelectorAll<HTMLButtonElement>(".browser-panel .icon-refresh")]
+      .find((button) => !button.disabled);
+    expect(refreshButton).toBeDefined();
+    fireEvent.click(refreshButton!);
     await waitFor(() => expect(onBrowserRefresh).toHaveBeenCalledWith(expect.anything(), {
       action: "refresh",
       url: "http://localhost:5173",
@@ -1460,6 +2902,38 @@ describe("JavisWorkbench permission cards", () => {
     details.open = true;
     fireEvent(details, new Event("toggle"));
     expect(view.container.querySelector(".javis-tool-browser-frame")).not.toBeNull();
+    view.unmount();
+
+    const onApproveBrowserWrite = vi.fn().mockResolvedValue(undefined);
+    const onDenyBrowserWrite = vi.fn().mockResolvedValue(undefined);
+    view = render(
+      <JavisWorkbench
+        {...baseProps}
+        workspaceToolTabs={[{ id: "browser-1", tool: "browser" }]}
+        pendingBrowserWriteApproval={{
+          approvalId: "browser-approval-1",
+          sessionId: "browser-session-1",
+          toolName: "browser.type",
+          action: "type",
+          previewHash: "hash-browser",
+          selector: "input.secret",
+          byteCount: 19,
+        }}
+        onApproveBrowserWrite={onApproveBrowserWrite}
+        onDenyBrowserWrite={onDenyBrowserWrite}
+      />,
+    );
+    expect(view.container.textContent).toContain("Approve browser write");
+    expect(view.container.textContent).toContain("Type 19 byte(s)");
+    expect(view.container.textContent).toContain("hash hash-browser");
+    expect(view.container.textContent).not.toContain("SECRET_BROWSER_TEXT");
+    fireEvent.click(view.getByText("Approve and execute"));
+    await waitFor(() => expect(onApproveBrowserWrite).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "thread-1:task-session",
+      activeTool: "browser",
+    }), "browser-approval-1"));
+    fireEvent.click(view.getByText("Deny"));
+    await waitFor(() => expect(onDenyBrowserWrite).toHaveBeenCalledWith(expect.anything(), "browser-approval-1"));
     view.unmount();
 
     const onSideChat = vi.fn().mockResolvedValue("Done");
@@ -1479,6 +2953,651 @@ describe("JavisWorkbench permission cards", () => {
       workspaceRoot: "E:/Javis",
       activeTool: "sideChat",
     }), "Summarize this workspace"));
+  });
+
+  it("shows a visible approval gate before starting an interactive terminal", async () => {
+    const terminalService = {
+      planCreate: vi.fn(async () => ({
+        approvalId: "terminal-approval-1",
+        toolName: "terminal.create",
+        action: "create" as const,
+        previewHash: "terminal-preview-hash",
+        preview: {
+          terminalId: "term-1",
+          workspaceRoot: "E:/Javis",
+        },
+      })),
+      executeCreate: vi.fn(),
+      create: vi.fn(),
+      input: vi.fn(),
+      resize: vi.fn(),
+      kill: vi.fn(),
+      subscribe: vi.fn(() => vi.fn()),
+    };
+
+    const view = render(
+      <JavisWorkbench
+        activeHistoryEntryId="thread-1"
+        currentWorkspacePath="E:/Javis"
+        draftGoal="Use terminal"
+        initialIsInspectorOpen={true}
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={createIdleTask()}
+        terminalService={terminalService}
+        workspaceToolTabs={[{ id: "terminal-1", tool: "terminal" }]}
+      />,
+    );
+
+    expect(view.container.textContent).toContain("Start interactive terminal");
+    expect(view.container.textContent).toContain("Approve and start");
+    await waitFor(() => expect(view.container.textContent).toContain("terminal-approval-1"));
+    expect(view.container.textContent).toContain("terminal-preview-hash");
+    expect(terminalService.planCreate).toHaveBeenCalled();
+    expect(terminalService.create).not.toHaveBeenCalled();
+  });
+
+  it("prepares and executes a Git push approval from the review tool", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const task: WorkbenchTask = {
+      id: "task-git-push",
+      title: "Git push",
+      userGoal: "Push branch",
+      status: "completed",
+      commanderMessage: "Review is ready.",
+      plan: [],
+      agents: [],
+      logs: [],
+    };
+    const pushPreview = {
+      branch: "feature/git-push",
+      upstream: "origin/feature/git-push",
+      remoteName: "origin",
+      remoteBranch: "feature/git-push",
+      remoteUrl: "file:///tmp/remote.git",
+      ahead: 1,
+      behind: 0,
+      commits: [{ hash: "abc123", subject: "Local change" }],
+      dryRun: {
+        operation: "Preview Git push",
+        riskSummary: "Preview only. No Git write was executed.",
+        reversible: false,
+        affectedPaths: [{
+          source: "feature/git-push",
+          target: "origin/feature/git-push",
+          action: "push",
+        }],
+      },
+    };
+    const onReview = vi.fn().mockResolvedValue({
+      changedFiles: ["README.md"],
+      diffStat: " README.md | 1 +",
+      diff: "diff --git a/README.md b/README.md",
+      workspacePath: "E:/Javis",
+      branch: "feature/git-push",
+      upstream: "origin/feature/git-push",
+      upstreamRemote: "origin",
+      ahead: 1,
+      behind: 0,
+      remotes: [{ name: "origin", pushUrl: "file:///tmp/remote.git" }],
+      pullRequests: {
+        provider: "github-cli",
+        pullRequests: [{
+          number: 42,
+          title: "Add PR list",
+          state: "OPEN",
+          url: "https://github.com/acme/repo/pull/42",
+          author: "octocat",
+          headRefName: "feature/git-push",
+          baseRefName: "main",
+          updatedAt: "2026-06-09T10:00:00Z",
+        }],
+      },
+      pushPreview,
+    });
+    const onPlan = vi.fn().mockResolvedValue({
+      approvalId: "approval-1",
+      preview: pushPreview,
+    });
+    const onExecute = vi.fn().mockResolvedValue({
+      workspacePath: "E:/Javis",
+      branch: "feature/git-push",
+      upstream: "origin/feature/git-push",
+      remoteName: "origin",
+      remoteBranch: "feature/git-push",
+      commitCount: 1,
+      pushed: true,
+      output: "Done",
+    });
+
+    const view = render(
+      <JavisWorkbench
+        activeHistoryEntryId="thread-1"
+        currentWorkspacePath="E:/Javis"
+        draftGoal="Push branch"
+        initialIsInspectorOpen
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={task}
+        workspaceToolTabs={[{ id: "review-1", tool: "review" }]}
+        onQuickActionReview={onReview}
+        onQuickActionGitPushPlan={onPlan}
+        onQuickActionGitPushExecute={onExecute}
+      />,
+    );
+
+    fireEvent.click(getEnabledButton(view.container, ".javis-tool-action-btn"));
+    await waitFor(() => expect(view.container.textContent).toContain("Push preview 1 commit(s)"));
+    expect(view.container.textContent).toContain("#42 Add PR list");
+
+    fireEvent.click(view.getByText("Prepare push"));
+    await waitFor(() => expect(onPlan).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "thread-1:task-git-push",
+      workspaceRoot: "E:/Javis",
+      activeTool: "review",
+    })));
+    expect(view.container.textContent).toContain("Pending Push Approval");
+
+    fireEvent.click(view.getByText("Approve and push"));
+    await waitFor(() => expect(onExecute).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "thread-1:task-git-push",
+      workspaceRoot: "E:/Javis",
+      activeTool: "review",
+    }), "approval-1"));
+    await waitFor(() => expect(view.container.textContent).toContain("Pushed 1 commit(s)"));
+  });
+
+  it("prepares and executes a Git commit approval from the review tool", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const task: WorkbenchTask = {
+      id: "task-git-commit",
+      title: "Git commit",
+      userGoal: "Commit changes",
+      status: "completed",
+      commanderMessage: "Review is ready.",
+      plan: [],
+      agents: [],
+      logs: [],
+    };
+    const commitPreview = {
+      workspaceRoot: "E:/Javis",
+      branch: "feature/git-commit",
+      message: "Commit changes",
+      files: [
+        {
+          path: "README.md",
+          indexStatus: "",
+          worktreeStatus: "M",
+          action: "modify" as const,
+          contentHash: "hash-readme",
+        },
+      ],
+      diffStat: " README.md | 1 +",
+      diff: "diff --git a/README.md b/README.md",
+      dryRun: {
+        operation: "Preview Git commit",
+        riskSummary: "Preview only. No Git write was executed.",
+        reversible: false,
+        affectedPaths: [{
+          source: "README.md",
+          target: "README.md",
+          action: "modify" as const,
+        }],
+      },
+    };
+    const onReview = vi.fn().mockResolvedValue({
+      changedFiles: ["README.md"],
+      diffStat: " README.md | 1 +",
+      diff: "diff --git a/README.md b/README.md",
+      workspacePath: "E:/Javis",
+      branch: "feature/git-commit",
+      remotes: [],
+    });
+    const onPlan = vi.fn().mockResolvedValue({
+      approvalId: "approval-commit-1",
+      preview: commitPreview,
+    });
+    const onExecute = vi.fn().mockResolvedValue({
+      workspacePath: "E:/Javis",
+      branch: "feature/git-commit",
+      commitHash: "abc123def4567890",
+      subject: "Commit changes",
+      fileCount: 1,
+      committed: true,
+      output: "[feature/git-commit abc123d] Commit changes",
+    });
+
+    const view = render(
+      <JavisWorkbench
+        activeHistoryEntryId="thread-1"
+        currentWorkspacePath="E:/Javis"
+        draftGoal="Commit changes"
+        initialIsInspectorOpen
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={task}
+        workspaceToolTabs={[{ id: "review-1", tool: "review" }]}
+        onQuickActionReview={onReview}
+        onQuickActionGitCommitPlan={onPlan}
+        onQuickActionGitCommitExecute={onExecute}
+      />,
+    );
+
+    fireEvent.click(getEnabledButton(view.container, ".javis-tool-action-btn"));
+    await waitFor(() => expect(view.container.textContent).toContain("Edited 1 files"));
+    const commitInput = view.container.querySelector<HTMLInputElement>('input[placeholder="Commit message"]');
+    expect(commitInput).not.toBeNull();
+    fireEvent.change(commitInput!, {
+      target: { value: "Commit changes" },
+    });
+
+    const prepareCommitButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Prepare commit" && !button.disabled);
+    expect(prepareCommitButton).toBeDefined();
+    fireEvent.click(prepareCommitButton!);
+    await waitFor(() => expect(onPlan).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "thread-1:task-git-commit",
+      workspaceRoot: "E:/Javis",
+      activeTool: "review",
+    }), "Commit changes"));
+    expect(view.container.textContent).toContain("Pending Commit Approval");
+
+    const approveCommitButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Approve and commit" && !button.disabled);
+    expect(approveCommitButton).toBeDefined();
+    fireEvent.click(approveCommitButton!);
+    await waitFor(() => expect(onExecute).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "thread-1:task-git-commit",
+      workspaceRoot: "E:/Javis",
+      activeTool: "review",
+    }), "approval-commit-1", "Commit changes"));
+    await waitFor(() => expect(view.container.textContent).toContain("Committed 1 file(s): Commit changes"));
+  });
+
+  it("prepares and executes a selected Git stage approval from the review tool", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const task: WorkbenchTask = {
+      id: "task-git-stage",
+      title: "Git stage",
+      userGoal: "Stage selected changes",
+      status: "completed",
+      commanderMessage: "Review is ready.",
+      plan: [],
+      agents: [],
+      logs: [],
+    };
+    const stagePreview = {
+      workspaceRoot: "E:/Javis",
+      files: [
+        {
+          path: "README.md",
+          indexStatus: "",
+          worktreeStatus: "M",
+          action: "stage" as const,
+          contentHash: "hash-readme",
+        },
+      ],
+      diffStat: " README.md | 1 +",
+      diff: "diff --git a/README.md b/README.md",
+      dryRun: {
+        operation: "Preview Git stage selected files",
+        riskSummary: "Preview only. No Git write was executed.",
+        reversible: true,
+        affectedPaths: [{
+          source: "README.md",
+          target: "README.md",
+          action: "stage" as const,
+        }],
+      },
+    };
+    const onReview = vi.fn().mockResolvedValue({
+      changedFiles: ["README.md", "notes.md"],
+      diffStat: " README.md | 1 +\n notes.md | 1 +",
+      diff: "diff --git a/README.md b/README.md",
+      workspacePath: "E:/Javis",
+      branch: "feature/git-stage",
+      remotes: [],
+    });
+    const onPlan = vi.fn().mockResolvedValue({
+      approvalId: "approval-stage-1",
+      preview: stagePreview,
+    });
+    const onExecute = vi.fn().mockResolvedValue({
+      workspacePath: "E:/Javis",
+      stagedPaths: ["README.md"],
+      fileCount: 1,
+      staged: true,
+      output: "",
+    });
+
+    const view = render(
+      <JavisWorkbench
+        activeHistoryEntryId="thread-1"
+        currentWorkspacePath="E:/Javis"
+        draftGoal="Stage selected changes"
+        initialIsInspectorOpen
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={task}
+        workspaceToolTabs={[{ id: "review-1", tool: "review" }]}
+        onQuickActionReview={onReview}
+        onQuickActionGitStagePlan={onPlan}
+        onQuickActionGitStageExecute={onExecute}
+      />,
+    );
+
+    fireEvent.click(getEnabledButton(view.container, ".javis-tool-action-btn"));
+    await waitFor(() => expect(view.container.textContent).toContain("Edited 2 files"));
+    const checkboxes = [...view.container.querySelectorAll<HTMLInputElement>(".javis-tool-review-files input[type=\"checkbox\"]")];
+    expect(checkboxes).toHaveLength(2);
+    fireEvent.click(checkboxes[1]);
+    await waitFor(() => expect(checkboxes[1].checked).toBe(false));
+
+    const prepareStageButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Prepare stage" && !button.disabled);
+    expect(prepareStageButton).toBeDefined();
+    fireEvent.click(prepareStageButton!);
+    await waitFor(() => expect(onPlan).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "thread-1:task-git-stage",
+      workspaceRoot: "E:/Javis",
+      activeTool: "review",
+    }), ["README.md"]));
+    expect(view.container.textContent).toContain("Pending Stage Approval");
+
+    const approveStageButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Approve and stage" && !button.disabled);
+    expect(approveStageButton).toBeDefined();
+    fireEvent.click(approveStageButton!);
+    await waitFor(() => expect(onExecute).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "thread-1:task-git-stage",
+      workspaceRoot: "E:/Javis",
+      activeTool: "review",
+    }), "approval-stage-1", ["README.md"]));
+    await waitFor(() => expect(view.container.textContent).toContain("Staged 1 file(s)"));
+  });
+
+  it("prepares and executes a draft Git pull request approval from the review tool", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const task: WorkbenchTask = {
+      id: "task-git-pr",
+      title: "Git PR",
+      userGoal: "Create a draft pull request",
+      status: "completed",
+      commanderMessage: "Review is ready.",
+      plan: [],
+      agents: [],
+      logs: [],
+    };
+    const pullRequestPreview = {
+      workspaceRoot: "E:/Javis",
+      provider: "github-cli",
+      title: "Add README update",
+      body: "Summarizes the README update.",
+      baseBranch: "main",
+      headBranch: "feature/readme",
+      headCommit: "1234567890abcdef",
+      remoteName: "origin",
+      remoteUrl: "https://github.com/acme/repo.git",
+      draft: true,
+      dryRun: {
+        operation: "git.createPullRequest",
+        riskSummary: "Creates a draft GitHub pull request.",
+        reversible: false,
+        affectedPaths: [{
+          source: "feature/readme",
+          target: "main",
+          action: "create_pr" as const,
+        }],
+      },
+    };
+    const onReview = vi.fn().mockResolvedValue({
+      changedFiles: ["README.md"],
+      diffStat: " README.md | 1 +",
+      diff: "diff --git a/README.md b/README.md",
+      workspacePath: "E:/Javis",
+      branch: "feature/readme",
+      remotes: [],
+    });
+    const onPlan = vi.fn().mockResolvedValue({
+      approvalId: "approval-pr-1",
+      preview: pullRequestPreview,
+    });
+    const onExecute = vi.fn().mockResolvedValue({
+      workspacePath: "E:/Javis",
+      provider: "github-cli",
+      url: "https://github.com/acme/repo/pull/12",
+      title: "Add README update",
+      baseBranch: "main",
+      headBranch: "feature/readme",
+      draft: true,
+      created: true,
+      output: "https://github.com/acme/repo/pull/12",
+    });
+
+    const view = render(
+      <JavisWorkbench
+        activeHistoryEntryId="thread-1"
+        currentWorkspacePath="E:/Javis"
+        draftGoal="Create a draft pull request"
+        initialIsInspectorOpen
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={task}
+        workspaceToolTabs={[{ id: "review-1", tool: "review" }]}
+        onQuickActionReview={onReview}
+        onQuickActionGitCreatePullRequestPlan={onPlan}
+        onQuickActionGitCreatePullRequestExecute={onExecute}
+      />,
+    );
+
+    fireEvent.click(getEnabledButton(view.container, ".javis-tool-action-btn"));
+    await waitFor(() => expect(view.container.textContent).toContain("Edited 1 files"));
+    fireEvent.change(view.getByPlaceholderText("PR title"), {
+      target: { value: "Add README update" },
+    });
+    fireEvent.change(view.getByPlaceholderText("PR body (optional)"), {
+      target: { value: "Summarizes the README update." },
+    });
+
+    const preparePullRequestButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Prepare PR" && !button.disabled);
+    expect(preparePullRequestButton).toBeDefined();
+    fireEvent.click(preparePullRequestButton!);
+    await waitFor(() => expect(onPlan).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "thread-1:task-git-pr",
+      workspaceRoot: "E:/Javis",
+      activeTool: "review",
+    }), {
+      title: "Add README update",
+      body: "Summarizes the README update.",
+      baseBranch: "main",
+      draft: true,
+    }));
+    expect(view.container.textContent).toContain("Pending PR Approval");
+
+    const approvePullRequestButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Approve and create PR" && !button.disabled);
+    expect(approvePullRequestButton).toBeDefined();
+    fireEvent.click(approvePullRequestButton!);
+    await waitFor(() => expect(onExecute).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "thread-1:task-git-pr",
+      workspaceRoot: "E:/Javis",
+      activeTool: "review",
+    }), "approval-pr-1", {
+      title: "Add README update",
+      body: "Summarizes the README update.",
+      baseBranch: "main",
+      draft: true,
+    }));
+    await waitFor(() => expect(view.container.textContent).toContain("Created PR: Add README update"));
+  });
+
+  it("prepares and executes a Git pull request comment approval from the review tool", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const task: WorkbenchTask = {
+      id: "task-git-pr-comment",
+      title: "Git PR comment",
+      userGoal: "Comment on a pull request",
+      status: "completed",
+      commanderMessage: "Review is ready.",
+      plan: [],
+      agents: [],
+      logs: [],
+    };
+    const commentPreview = {
+      workspaceRoot: "E:/Javis",
+      provider: "github-cli",
+      pullRequest: "12",
+      body: "Looks good after the latest changes.",
+      remoteUrl: "https://github.com/acme/repo.git",
+      dryRun: {
+        operation: "git.commentPullRequest",
+        riskSummary: "Posts a GitHub pull request comment.",
+        reversible: false,
+        affectedPaths: [{
+          source: "12",
+          target: "https://github.com/acme/repo.git",
+          action: "comment_pr" as const,
+        }],
+      },
+    };
+    const onReview = vi.fn().mockResolvedValue({
+      changedFiles: ["README.md"],
+      diffStat: " README.md | 1 +",
+      diff: "diff --git a/README.md b/README.md",
+      workspacePath: "E:/Javis",
+      branch: "feature/readme",
+      remotes: [],
+      pullRequests: {
+        provider: "github-cli",
+        pullRequests: [{
+          number: 12,
+          title: "Add README update",
+          state: "OPEN",
+          url: "https://github.com/acme/repo/pull/12",
+        }],
+      },
+    });
+    const onPlan = vi.fn().mockResolvedValue({
+      approvalId: "approval-pr-comment-1",
+      preview: commentPreview,
+    });
+    const onExecute = vi.fn().mockResolvedValue({
+      workspacePath: "E:/Javis",
+      provider: "github-cli",
+      pullRequest: "12",
+      commented: true,
+      output: "https://github.com/acme/repo/pull/12#issuecomment-1",
+    });
+
+    const view = render(
+      <JavisWorkbench
+        activeHistoryEntryId="thread-1"
+        currentWorkspacePath="E:/Javis"
+        draftGoal="Comment on a pull request"
+        initialIsInspectorOpen
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={task}
+        workspaceToolTabs={[{ id: "review-1", tool: "review" }]}
+        onQuickActionReview={onReview}
+        onQuickActionGitCommentPullRequestPlan={onPlan}
+        onQuickActionGitCommentPullRequestExecute={onExecute}
+      />,
+    );
+
+    fireEvent.click(getEnabledButton(view.container, ".javis-tool-action-btn"));
+    await waitFor(() => expect(view.container.textContent).toContain("PRs 1"));
+    fireEvent.change(view.getByPlaceholderText("PR number, URL, or branch"), {
+      target: { value: "12" },
+    });
+    fireEvent.change(view.getByPlaceholderText("PR comment"), {
+      target: { value: "Looks good after the latest changes." },
+    });
+
+    let prepareCommentButton: HTMLButtonElement | undefined;
+    await waitFor(() => {
+      prepareCommentButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent?.trim() === "Prepare PR comment" && !button.disabled);
+      expect(prepareCommentButton).toBeDefined();
+    });
+    fireEvent.click(prepareCommentButton!);
+    await waitFor(() => expect(onPlan).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "thread-1:task-git-pr-comment",
+      workspaceRoot: "E:/Javis",
+      activeTool: "review",
+    }), {
+      pullRequest: "12",
+      body: "Looks good after the latest changes.",
+    }));
+    expect(view.container.textContent).toContain("Pending PR Comment Approval");
+
+    const approveCommentButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Approve and post comment" && !button.disabled);
+    expect(approveCommentButton).toBeDefined();
+    fireEvent.click(approveCommentButton!);
+    await waitFor(() => expect(onExecute).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "thread-1:task-git-pr-comment",
+      workspaceRoot: "E:/Javis",
+      activeTool: "review",
+    }), "approval-pr-comment-1", {
+      pullRequest: "12",
+      body: "Looks good after the latest changes.",
+    }));
+    await waitFor(() => expect(view.container.textContent).toContain("Posted PR comment on 12"));
+  });
+
+  it("syncs externally controlled workspace tool tabs without clearing internal tabs", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const task: WorkbenchTask = {
+      id: "task-tabs",
+      title: "Tool tabs",
+      userGoal: "Use right rail tools",
+      status: "completed",
+      commanderMessage: "Tools are ready.",
+      plan: [],
+      agents: [],
+      logs: [],
+      codeProposedEdit: {
+        proposalId: "proposal-tabs",
+        workspacePath: "E:/Javis",
+        summary: "Open review tab.",
+        changedFiles: ["packages/ui/src/JavisWorkbench.tsx"],
+        patch: "diff --git",
+        patchHash: "hash-tabs",
+      },
+    };
+    const baseProps = {
+      currentWorkspacePath: "E:/Javis",
+      draftGoal: "Use tools",
+      initialIsInspectorOpen: true,
+      onDraftGoalChange: vi.fn(),
+      onSubmitGoal: vi.fn(),
+      task,
+    };
+
+    const uncontrolled = render(<JavisWorkbench {...baseProps} />);
+    fireEvent.click(uncontrolled.container.querySelector(".javis-artifact-card")!);
+    await waitFor(() => expect(uncontrolled.container.textContent).toContain("Review"));
+    uncontrolled.rerender(<JavisWorkbench {...baseProps} draftGoal="Use tools again" />);
+    expect(uncontrolled.container.textContent).toContain("Review");
+    uncontrolled.unmount();
+
+    const controlled = render(
+      <JavisWorkbench
+        {...baseProps}
+        workspaceToolTabs={[{ id: "review-1", tool: "review" }]}
+      />,
+    );
+    expect(controlled.container.textContent).toContain("Review");
+    controlled.rerender(
+      <JavisWorkbench
+        {...baseProps}
+        workspaceToolTabs={[{ id: "terminal-1", tool: "terminal" }]}
+      />,
+    );
+    await waitFor(() => expect(controlled.container.textContent).toContain("Terminal"));
+    expect(controlled.container.textContent).not.toContain("Review");
   });
 
   it("renders Code Agent patch approval dry-run details", () => {
@@ -2022,8 +4141,9 @@ describe("JavisWorkbench permission cards", () => {
     ]);
   });
 
-  it("filters classified apps and opens them on click", () => {
+  it("filters classified apps, shows details on click, and opens them only on double click", () => {
     const onOpenFile = vi.fn();
+    const onOpenDetail = vi.fn();
     const view = render(
       <JavisWorkbench
         activeView="apps"
@@ -2034,6 +4154,7 @@ describe("JavisWorkbench permission cards", () => {
           { name: "Game Box", path: "C:/Apps/game.exe", category: "Games", tags: ["play"] },
         ]}
         onDraftGoalChange={vi.fn()}
+        onOpenDetail={onOpenDetail}
         onOpenFile={onOpenFile}
         onSubmitGoal={vi.fn()}
         task={createIdleTask()}
@@ -2047,6 +4168,14 @@ describe("JavisWorkbench permission cards", () => {
     const appButton = within(view.container).getByText("Calendar").closest("button");
     expect(appButton).toBeTruthy();
     fireEvent.click(appButton!);
+    expect(onOpenDetail).toHaveBeenCalledWith(expect.objectContaining({
+      title: "Calendar",
+      kind: "Application",
+    }));
+    expect(view.container.querySelector(".javis-shell")?.className).toContain("inspector-open");
+    expect(view.container.querySelector(".javis-review-card")?.textContent).toContain("C:/Apps/calendar.exe");
+    expect(onOpenFile).not.toHaveBeenCalled();
+    fireEvent.doubleClick(appButton!);
     expect(onOpenFile).toHaveBeenCalledWith("C:/Apps/calendar.exe");
   });
 
@@ -2123,13 +4252,109 @@ describe("JavisWorkbench permission cards", () => {
     expect(within(view.container).getByText("Travel(1)")).toBeTruthy();
   });
 
-  it("filters classified documents and opens them only on double click", async () => {
-    const onOpenFile = vi.fn();
+  it("keeps document and gallery category tabs scoped to their own resources", () => {
     const view = render(
       <JavisWorkbench
         activeView="documents"
         draftGoal=""
         onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={createIdleTask()}
+        categoryStats={[{ category: "图片", count: 9 }]}
+        userDocuments={[
+          { name: "Contract.pdf", path: "E:/Docs/Contract.pdf", isDir: false, category: "Contracts" },
+        ]}
+        userImages={[
+          { name: "Trip.png", path: "E:/Photos/Trip.png", isDir: false, category: "Travel" },
+        ]}
+      />,
+    );
+
+    const main = view.container.querySelector<HTMLElement>(".javis-main");
+    expect(main).toBeInstanceOf(HTMLElement);
+    const mainElement = main as HTMLElement;
+    expect(within(mainElement).getByText("Contracts(1)")).toBeTruthy();
+    expect(within(mainElement).queryByText("Travel(1)")).toBeNull();
+    expect(within(mainElement).queryByText("图片(9)")).toBeNull();
+
+    view.rerender(
+      <JavisWorkbench
+        activeView="gallery"
+        draftGoal=""
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={createIdleTask()}
+        categoryStats={[{ category: "图片", count: 9 }]}
+        userDocuments={[
+          { name: "Contract.pdf", path: "E:/Docs/Contract.pdf", isDir: false, category: "Contracts" },
+        ]}
+        userImages={[
+          { name: "Trip.png", path: "E:/Photos/Trip.png", isDir: false, category: "Travel" },
+        ]}
+      />,
+    );
+
+    expect(within(mainElement).getByText("Travel(1)")).toBeTruthy();
+    expect(within(mainElement).queryByText("Contracts(1)")).toBeNull();
+    expect(within(mainElement).queryByText("图片(9)")).toBeNull();
+  });
+
+  it("opens the directory panel from the resource plus button", () => {
+    const view = render(
+      <JavisWorkbench
+        activeView="documents"
+        draftGoal=""
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={createIdleTask()}
+        userDocuments={[
+          { name: "Contract.pdf", path: "E:/Docs/Contract.pdf", isDir: false },
+        ]}
+      />,
+    );
+
+    const main = view.container.querySelector<HTMLElement>(".javis-main");
+    expect(main).toBeInstanceOf(HTMLElement);
+    const mainElement = main as HTMLElement;
+    expect(within(mainElement).queryByText("扫描目录管理")).toBeNull();
+    fireEvent.click(within(mainElement).getByLabelText("添加目录"));
+    expect(within(mainElement).getByText("扫描目录管理")).toBeTruthy();
+  });
+
+  it("refreshes resource roots from the scan directory action", () => {
+    const onRefreshResourceRoots = vi.fn();
+    const onRefreshScan = vi.fn();
+    const view = render(
+      <JavisWorkbench
+        activeView="gallery"
+        draftGoal=""
+        onDraftGoalChange={vi.fn()}
+        onRefreshResourceRoots={onRefreshResourceRoots}
+        onRefreshScan={onRefreshScan}
+        onSubmitGoal={vi.fn()}
+        task={createIdleTask()}
+        userImages={[
+          { name: "Trip.png", path: "E:/Photos/Trip.png", isDir: false },
+        ]}
+      />,
+    );
+
+    const main = view.container.querySelector<HTMLElement>(".javis-main");
+    expect(main).toBeInstanceOf(HTMLElement);
+    fireEvent.click(within(main as HTMLElement).getByLabelText("扫描目录"));
+    expect(onRefreshResourceRoots).toHaveBeenCalledWith("images");
+    expect(onRefreshScan).not.toHaveBeenCalled();
+  });
+
+  it("filters classified documents and opens them only on double click", async () => {
+    const onOpenFile = vi.fn();
+    const onOpenDetail = vi.fn();
+    const view = render(
+      <JavisWorkbench
+        activeView="documents"
+        draftGoal=""
+        onDraftGoalChange={vi.fn()}
+        onOpenDetail={onOpenDetail}
         onOpenFile={onOpenFile}
         onSubmitGoal={vi.fn()}
         task={createIdleTask()}
@@ -2149,18 +4374,53 @@ describe("JavisWorkbench permission cards", () => {
     const docButton = within(view.container).getByText("Contract.pdf").closest("button");
     expect(docButton).toBeTruthy();
     fireEvent.click(docButton!);
+    expect(onOpenDetail).toHaveBeenCalledWith(expect.objectContaining({
+      title: "Contract.pdf",
+      kind: "Document",
+    }));
+    expect(view.container.querySelector(".javis-shell")?.className).toContain("inspector-open");
+    expect(view.container.querySelector(".javis-review-card")?.textContent).toContain("E:/Docs/Contract.pdf");
     expect(onOpenFile).not.toHaveBeenCalled();
     fireEvent.doubleClick(docButton!);
     expect(onOpenFile).toHaveBeenCalledWith("E:/Docs/Contract.pdf");
   });
 
+  it("lets users set a custom document category from the context menu", () => {
+    const onUpdateFileCategory = vi.fn();
+    const view = render(
+      <JavisWorkbench
+        activeView="documents"
+        draftGoal=""
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        onUpdateFileCategory={onUpdateFileCategory}
+        task={createIdleTask()}
+        userDocuments={[
+          { name: "Contract.pdf", path: "E:/Docs/Contract.pdf", isDir: false, category: "Contracts" },
+        ]}
+      />,
+    );
+
+    const docButton = within(view.container).getByText("Contract.pdf").closest("button");
+    expect(docButton).toBeTruthy();
+    fireEvent.contextMenu(docButton!);
+    fireEvent.change(view.getByLabelText("自定义分类"), {
+      target: { value: "项目资料" },
+    });
+    fireEvent.click(view.getByText("保存"));
+
+    expect(onUpdateFileCategory).toHaveBeenCalledWith("E:/Docs/Contract.pdf", "项目资料");
+  });
+
   it("filters classified gallery images and opens them only on double click", () => {
     const onOpenFile = vi.fn();
+    const onOpenDetail = vi.fn();
     const view = render(
       <JavisWorkbench
         activeView="gallery"
         draftGoal=""
         onDraftGoalChange={vi.fn()}
+        onOpenDetail={onOpenDetail}
         onOpenFile={onOpenFile}
         onSubmitGoal={vi.fn()}
         task={createIdleTask()}
@@ -2179,9 +4439,42 @@ describe("JavisWorkbench permission cards", () => {
     const imageButton = within(view.container).getByText("Trip.png").closest("button");
     expect(imageButton).toBeTruthy();
     fireEvent.click(imageButton!);
+    expect(onOpenDetail).toHaveBeenCalledWith(expect.objectContaining({
+      title: "Trip.png",
+      kind: "Image",
+    }));
+    expect(view.container.querySelector(".javis-shell")?.className).toContain("inspector-open");
+    expect(view.container.querySelector(".javis-review-card")?.textContent).toContain("E:/Photos/Trip.png");
     expect(onOpenFile).not.toHaveBeenCalled();
     fireEvent.doubleClick(imageButton!);
     expect(onOpenFile).toHaveBeenCalledWith("E:/Photos/Trip.png");
+  });
+
+  it("lets users set a custom gallery category from the context menu", () => {
+    const onUpdateFileCategory = vi.fn();
+    const view = render(
+      <JavisWorkbench
+        activeView="gallery"
+        draftGoal=""
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        onUpdateFileCategory={onUpdateFileCategory}
+        task={createIdleTask()}
+        userImages={[
+          { name: "Trip.png", path: "E:/Photos/Trip.png", isDir: false, category: "Travel" },
+        ]}
+      />,
+    );
+
+    const imageButton = within(view.container).getByText("Trip.png").closest("button");
+    expect(imageButton).toBeTruthy();
+    fireEvent.contextMenu(imageButton!);
+    fireEvent.change(view.getByLabelText("自定义分类"), {
+      target: { value: "旅行照片" },
+    });
+    fireEvent.click(view.getByText("保存"));
+
+    expect(onUpdateFileCategory).toHaveBeenCalledWith("E:/Photos/Trip.png", "旅行照片");
   });
 });
 

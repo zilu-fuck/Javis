@@ -23,6 +23,7 @@ import type {
   ActiveView,
   JavisWorkbenchProps,
   WorkbenchDetailItem,
+  WorkbenchTask,
   WorkbenchAgentSessionContext,
   WorkbenchSkillPage,
   WorkbenchWorkspaceToolTab,
@@ -51,8 +52,15 @@ export function JavisWorkbench({
   agentCatalog = [],
   modelSettings,
   modelConfiguration,
+  computerUseSettings,
+  computerUseLocalVisionSettings,
+  runtimePreferences,
+  currentGoal,
+  currentGoalEvents,
+  currentGoalEvaluations,
   newChatRecommendations,
   userProfileMemorySummary,
+  agentMemorySummary,
   recentWorkspacePaths = [],
   activeView: activeViewProp,
   activeHistoryEntryId,
@@ -62,6 +70,8 @@ export function JavisWorkbench({
   skillTranslationError = null,
   skillSearchResults = [],
   skillSearchStatus = "idle",
+  skillMarketSuggestions = [],
+  skillMarketSuggestionStatus = "idle",
   mcpConfigError = null,
   installedApps = [],
   userDocuments = [],
@@ -86,12 +96,15 @@ export function JavisWorkbench({
   imagesProgress,
   classifying = false,
   classifyProgress,
+  classifyError,
   appsClassifying = false,
   appsClassifyProgress,
+  appsClassifyError,
   categoryStats = [],
   appCategoryStats = [],
   resourceScanRoots = [],
   onRefreshScan,
+  onRefreshResourceRoots,
   onClassifyDocuments,
   onClassifyApps,
   onCancelClassify,
@@ -101,14 +114,25 @@ export function JavisWorkbench({
   onAddScanRoot,
   onRefreshScanRoot,
   onDraftGoalChange,
+  onPauseGoal,
+  onResumeGoal,
+  onCompleteGoal,
+  onClearGoal,
   onDeleteHistoryEntry,
   onDeleteRecentWorkspacePath,
   onBrowseWorkspacePath,
   onModelSettingsChange,
   onTestModelConnection,
   onModelConfigurationChange,
+  onComputerUseSettingsChange,
+  onComputerUseLocalVisionSettingsChange,
+  onRuntimePreferencesChange,
   onRebuildUserProfileMemory,
   onClearUserProfileMemory,
+  onAgentMemoryEnabledChange,
+  onClearAgentMemory,
+  onClearWorkspaceAgentMemory,
+  onDeleteAgentMemoryFact,
   onReadAgentStyle,
   onSaveAgentStyle,
   onResetAgentStyle,
@@ -125,19 +149,29 @@ export function JavisWorkbench({
   onAskUserAnswer,
   onRetryTask,
   onStopTask,
+  onEmergencyStopTask,
   onConversationMessagesChange,
   onSubmitGoal,
   onTranslateSkillsToChinese,
   onSearchSkillMarket,
+  onRefreshSkillMarketSuggestions,
+  onToggleSkillEnabled,
+  onDeleteSkill,
+  onDisableAllSkills,
+  onDeleteAllSkills,
+  onInstallSkillMarketResult,
   onOpenDetail,
+  onOpenUrl,
   onOpenWorkspaceTool,
   onChangeActiveView,
   onSelectComposeMode,
   activeComposeMode,
   onToggleScheduledTask,
+  onCreateScheduledTask,
   onDeleteScheduledTask,
   onRefreshApps,
   onUpdateAppCategory,
+  onUpdateFileCategory,
   onRefreshDocuments,
   onRefreshImages,
   onNavigateDirectory,
@@ -158,9 +192,28 @@ export function JavisWorkbench({
   systemResources,
   openTabs: openTabsProp,
   workspaceToolTabs: workspaceToolTabsProp,
+  workspaceToolRequest,
   onActiveToolChange,
   onQuickActionBrowser,
+  pendingBrowserWriteApproval,
+  onApproveBrowserWrite,
+  onDenyBrowserWrite,
   onQuickActionReview,
+  onQuickActionGitPushPlan,
+  onQuickActionGitPushExecute,
+  onQuickActionGitPushCancel,
+  onQuickActionGitStagePlan,
+  onQuickActionGitStageExecute,
+  onQuickActionGitStageCancel,
+  onQuickActionGitCommitPlan,
+  onQuickActionGitCommitExecute,
+  onQuickActionGitCommitCancel,
+  onQuickActionGitCreatePullRequestPlan,
+  onQuickActionGitCreatePullRequestExecute,
+  onQuickActionGitCreatePullRequestCancel,
+  onQuickActionGitCommentPullRequestPlan,
+  onQuickActionGitCommentPullRequestExecute,
+  onQuickActionGitCommentPullRequestCancel,
   onQuickActionTerminal,
   onQuickActionSideChat,
   sidebarNavItems,
@@ -190,7 +243,7 @@ export function JavisWorkbench({
   const [detailItem, setDetailItem] = useState<WorkbenchDetailItem | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | undefined>(undefined);
   const [openTabs, setOpenTabs] = useState<WorkbenchWorkspaceToolTab[]>(
-    workspaceToolTabsProp ?? (openTabsProp ?? []).map((tool) => createWorkspaceToolTab(tool, 0)),
+    workspaceToolTabsProp ?? controlledWorkspaceToolTabs(openTabsProp),
   );
   const activeView = activeViewProp ?? internalActiveView;
   const [activeToolTabId, setActiveToolTabId] = useState<string | null>(openTabs[openTabs.length - 1]?.id ?? null);
@@ -206,13 +259,14 @@ export function JavisWorkbench({
   };
   const activityCount = task.logs.length + (task.permissionRequest ? 1 : 0) + (task.askUserQuestion ? 1 : 0);
   const isChatView = activeView === "chat";
+  const hasVisibleGoal = Boolean(currentGoal && currentGoal.status !== "cleared");
   const effectiveAppCategoryStats = useMemo(
     () => appCategoryStats.length > 0 ? appCategoryStats : buildResourceCategoryStats(installedApps),
     [appCategoryStats, installedApps],
   );
   const documentCategoryStats = useMemo(
-    () => buildResourceCategoryStats(userDocuments),
-    [userDocuments],
+    () => categoryStats.length > 0 ? categoryStats : buildResourceCategoryStats(userDocuments),
+    [categoryStats, userDocuments],
   );
   const galleryCategoryStats = useMemo(
     () => buildResourceCategoryStats(userImages),
@@ -277,6 +331,27 @@ export function JavisWorkbench({
     };
   }, [activeView, isInspectorOpen, sidebarWidth]);
 
+  useEffect(() => {
+    if (workspaceToolTabsProp === undefined && openTabsProp === undefined) {
+      return;
+    }
+    const nextTabs = workspaceToolTabsProp ?? controlledWorkspaceToolTabs(openTabsProp);
+    setOpenTabs(nextTabs);
+    setActiveToolTabId((current) => {
+      if (current && nextTabs.some((tab) => tab.id === current)) {
+        return current;
+      }
+      return nextTabs[nextTabs.length - 1]?.id ?? null;
+    });
+  }, [openTabsProp, workspaceToolTabsProp]);
+
+  useEffect(() => {
+    if (!workspaceToolRequest) {
+      return;
+    }
+    handleWorkspaceToolAction(workspaceToolRequest.tool);
+  }, [workspaceToolRequest?.id]);
+
   function handleChangeActiveView(view: ActiveView) {
     if (view === "apps" || view === "documents" || view === "gallery") {
       setSelectedResourceCategories((current) => ({ ...current, [view]: null }));
@@ -293,12 +368,14 @@ export function JavisWorkbench({
 
   function handleOpenDetail(detail: WorkbenchDetailItem) {
     setDetailItem(detail);
+    setSelectedAgentId(undefined);
     onOpenDetail?.(detail);
     setIsInspectorOpen(true);
     onInspectorOpenChange?.(true);
   }
 
   function handleSelectAgent(agentId: string) {
+    setDetailItem(null);
     setSelectedAgentId(agentId);
     setInspectorOpenState(true);
   }
@@ -309,6 +386,8 @@ export function JavisWorkbench({
       action === "files" || action === "sideChat" ||
       action === "browser" || action === "review" || action === "terminal"
     ) {
+      setDetailItem(null);
+      setSelectedAgentId(undefined);
       setOpenTabs((prev) => {
         const shouldReuse = action === "files" || action === "review";
         const existing = shouldReuse ? prev.find((tab) => tab.tool === action) : undefined;
@@ -340,12 +419,14 @@ export function JavisWorkbench({
 
   function handleSelectToolTab(tabId: string) {
     const tab = openTabs.find((item) => item.id === tabId);
+    setDetailItem(null);
     setActiveToolTabId(tabId);
     onActiveToolChange?.(tab?.tool ?? null);
   }
 
   function handleNewToolTab(tool: WorkbenchWorkspaceToolAction) {
     const nextTab = createWorkspaceToolTab(tool, openTabs.filter((tab) => tab.tool === tool).length);
+    setDetailItem(null);
     setOpenTabs((prev) => [...prev, nextTab]);
     setActiveToolTabId(nextTab.id);
     onActiveToolChange?.(tool);
@@ -549,11 +630,18 @@ export function JavisWorkbench({
     () => (
       <ChatView
         currentWorkspacePath={currentWorkspacePath}
+        currentGoal={currentGoal}
+        currentGoalEvents={currentGoalEvents}
+        currentGoalEvaluations={currentGoalEvaluations}
         draftGoal={draftGoal}
         locale={effectiveLocale}
         onBrowseWorkspacePath={onBrowseWorkspacePath}
         onDeleteRecentWorkspacePath={onDeleteRecentWorkspacePath}
         onDraftGoalChange={onDraftGoalChange}
+        onPauseGoal={onPauseGoal}
+        onResumeGoal={onResumeGoal}
+        onCompleteGoal={onCompleteGoal}
+        onClearGoal={onClearGoal}
         onPermissionDecision={onPermissionDecision}
         onAskUserAnswer={onAskUserAnswer}
         modelConfiguration={modelConfiguration}
@@ -579,24 +667,31 @@ export function JavisWorkbench({
     [
       activeComposeMode, currentWorkspacePath, draftGoal, effectiveLocale,
       onAskUserAnswer, onBrowseWorkspacePath, onDeleteRecentWorkspacePath, onDraftGoalChange,
+      onPauseGoal, onResumeGoal, onCompleteGoal, onClearGoal,
       onPermissionDecision, modelConfiguration, onRetryTask, onStopTask,
       onConversationMessagesChange,
       handleOpenDetail, handleWorkspaceToolAction, onOpenFile,
       onSelectComposeMode, onSubmitGoal, onUseWorkspacePath, onWorkspacePathChange,
       recentWorkspacePaths, task, userDocuments, selectedAgentId, newChatRecommendations,
+      currentGoal, currentGoalEvents, currentGoalEvaluations,
     ],
   );
   const renderAutomatedView = useCallback(
     () => (
       <ScheduledTasksView
+        currentWorkspacePath={currentWorkspacePath}
         isTaskActive={isTaskActive}
         locale={effectiveLocale}
+        onCreate={onCreateScheduledTask}
         onDelete={onDeleteScheduledTask}
         onToggle={onToggleScheduledTask}
         tasks={scheduledTasks}
       />
     ),
-    [isTaskActive, effectiveLocale, onDeleteScheduledTask, onToggleScheduledTask, scheduledTasks],
+    [
+      currentWorkspacePath, isTaskActive, effectiveLocale, onCreateScheduledTask,
+      onDeleteScheduledTask, onToggleScheduledTask, scheduledTasks,
+    ],
   );
   const renderSkillsView = useCallback(
     () => (
@@ -605,10 +700,18 @@ export function JavisWorkbench({
         locale={effectiveLocale}
         mcpError={mcpConfigError}
         onSearchSkillMarket={onSearchSkillMarket}
+        onRefreshSuggestions={onRefreshSkillMarketSuggestions}
         onOpenDetail={handleOpenDetail}
         onTranslateToChinese={onTranslateSkillsToChinese}
+        onToggleSkillEnabled={onToggleSkillEnabled}
+        onDeleteSkill={onDeleteSkill}
+        onDisableAllSkills={onDisableAllSkills}
+        onDeleteAllSkills={onDeleteAllSkills}
+        onInstallSkillMarketResult={onInstallSkillMarketResult}
         searchResults={skillSearchResults}
         searchStatus={skillSearchStatus}
+        suggestions={skillMarketSuggestions}
+        suggestionStatus={skillMarketSuggestionStatus}
         skills={skillEntries}
         translationStatus={skillTranslationStatus}
         translationError={skillTranslationError}
@@ -620,10 +723,18 @@ export function JavisWorkbench({
       mcpConfigError,
       handleOpenDetail,
       onSearchSkillMarket,
+      onRefreshSkillMarketSuggestions,
       onTranslateSkillsToChinese,
+      onToggleSkillEnabled,
+      onDeleteSkill,
+      onDisableAllSkills,
+      onDeleteAllSkills,
+      onInstallSkillMarketResult,
       skillEntries,
       skillSearchResults,
       skillSearchStatus,
+      skillMarketSuggestions,
+      skillMarketSuggestionStatus,
       skillTranslationStatus,
       skillTranslationError,
     ],
@@ -637,11 +748,13 @@ export function JavisWorkbench({
         locale={effectiveLocale}
         categoryStats={effectiveAppCategoryStats}
         classifying={appsClassifying}
+        classifyError={appsClassifyError}
         classifyProgress={appsClassifyProgress}
         selectedCategory={selectedResourceCategories.apps}
         onCancelClassifyApps={onCancelClassifyApps}
         onClassifyApps={onClassifyApps}
         onOpen={onOpenFile}
+        onOpenDetail={handleOpenDetail}
         onRefresh={onRefreshApps}
         onUpdateAppCategory={onUpdateAppCategory}
         progress={appsProgress}
@@ -649,15 +762,16 @@ export function JavisWorkbench({
     ),
     [
       installedApps, appsError, appsLoading, effectiveLocale, effectiveAppCategoryStats,
-      appsClassifying, appsClassifyProgress, selectedResourceCategories.apps, onCancelClassifyApps,
-      onClassifyApps, onOpenFile, onRefreshApps, onUpdateAppCategory, appsProgress,
+      appsClassifying, appsClassifyError, appsClassifyProgress, selectedResourceCategories.apps, onCancelClassifyApps,
+      onClassifyApps, onOpenFile, handleOpenDetail, onRefreshApps, onUpdateAppCategory, appsProgress,
     ],
   );
   const renderDocumentsView = useCallback(
     () => (
       <DocumentsView
-        categoryStats={galleryCategoryStats}
+        categoryStats={documentCategoryStats}
         classifying={classifying}
+        classifyError={classifyError}
         classifyProgress={classifyProgress}
         documents={userDocuments}
         error={docsError}
@@ -669,28 +783,32 @@ export function JavisWorkbench({
         onCancelClassify={onCancelClassify}
         onClassifyDocuments={onClassifyDocuments}
         onOpen={onOpenFile}
+        onOpenDetail={handleOpenDetail}
         onRefresh={onRefreshDocuments}
+        onRefreshResourceRoots={() => onRefreshResourceRoots?.("documents")}
         onRefreshScan={onRefreshScan}
         onRefreshScanRoot={onRefreshScanRoot}
         onRemoveScanRoot={onRemoveScanRoot}
         onToggleScanRoot={onToggleScanRoot}
+        onUpdateCategory={onUpdateFileCategory}
         loadProgress={docsProgress}
         scanProgress={scanProgress}
         scanning={scanning}
       />
     ),
     [
-      documentCategoryStats, classifying, classifyProgress, userDocuments, docsError, docsProgress,
+      documentCategoryStats, classifying, classifyError, classifyProgress, userDocuments, docsError, docsProgress,
       docsLoading, effectiveLocale, resourceScanRoots, onAddScanRoot, onCancelClassify,
-      selectedResourceCategories.documents, onClassifyDocuments, onOpenFile, onRefreshDocuments, onRefreshScan,
-      onRefreshScanRoot, onRemoveScanRoot, onToggleScanRoot, scanProgress, scanning,
+      selectedResourceCategories.documents, onClassifyDocuments, onOpenFile, handleOpenDetail, onRefreshDocuments, onRefreshResourceRoots, onRefreshScan,
+      onRefreshScanRoot, onRemoveScanRoot, onToggleScanRoot, onUpdateFileCategory, scanProgress, scanning,
     ],
   );
   const renderGalleryView = useCallback(
     () => (
       <GalleryView
-        categoryStats={categoryStats}
+        categoryStats={galleryCategoryStats}
         classifying={classifying}
+        classifyError={classifyError}
         classifyProgress={classifyProgress}
         error={imagesError}
         images={userImages}
@@ -702,21 +820,24 @@ export function JavisWorkbench({
         onCancelClassify={onCancelClassify}
         onClassifyDocuments={onClassifyDocuments}
         onOpen={onOpenFile}
+        onOpenDetail={handleOpenDetail}
         onRefresh={onRefreshImages}
+        onRefreshResourceRoots={() => onRefreshResourceRoots?.("images")}
         onRefreshScan={onRefreshScan}
         onRefreshScanRoot={onRefreshScanRoot}
         onRemoveScanRoot={onRemoveScanRoot}
         onToggleScanRoot={onToggleScanRoot}
+        onUpdateCategory={onUpdateFileCategory}
         loadProgress={imagesProgress}
         scanProgress={scanProgress}
         scanning={scanning}
       />
     ),
     [
-      galleryCategoryStats, classifying, classifyProgress, imagesError, userImages, imagesProgress,
+      galleryCategoryStats, classifying, classifyError, classifyProgress, imagesError, userImages, imagesProgress,
       imagesLoading, effectiveLocale, resourceScanRoots, onAddScanRoot, onCancelClassify,
-      selectedResourceCategories.gallery, onClassifyDocuments, onOpenFile, onRefreshImages, onRefreshScan,
-      onRefreshScanRoot, onRemoveScanRoot, onToggleScanRoot, scanProgress, scanning,
+      selectedResourceCategories.gallery, onClassifyDocuments, onOpenFile, handleOpenDetail, onRefreshImages, onRefreshResourceRoots, onRefreshScan,
+      onRefreshScanRoot, onRemoveScanRoot, onToggleScanRoot, onUpdateFileCategory, scanProgress, scanning,
     ],
   );
   const renderComputerView = useCallback(
@@ -730,13 +851,15 @@ export function JavisWorkbench({
         onListDirectory={onListDirectory}
         onNavigate={onNavigateDirectory}
         onOpen={onOpenFile}
+        onOpenDetail={handleOpenDetail}
         onRemoveTrustedApp={onRemoveTrustedComputerApp}
         trustedApps={trustedComputerApps}
+        mountRoots={mountRoots}
       />
     ),
     [
       computerPath, computerEntries, computerError, computerLoading,
-      effectiveLocale, onListDirectory, onNavigateDirectory, onOpenFile,
+      effectiveLocale, mountRoots, onListDirectory, onNavigateDirectory, onOpenFile, handleOpenDetail,
       onRemoveTrustedComputerApp, trustedComputerApps,
     ],
   );
@@ -777,6 +900,24 @@ export function JavisWorkbench({
   const sidebarResizeValue =
     sidebarWidth ?? (isChatView ? CHAT_DEFAULT_SIDEBAR_WIDTH : RESOURCE_DEFAULT_SIDEBAR_WIDTH);
   const activityResizeValue = activityHeight ?? ACTIVITY_DEFAULT_HEIGHT;
+  const isComputerUseActive = isActiveComputerUseTask(task, isTaskActive);
+  const stopComputerUse = onEmergencyStopTask ?? onStopTask;
+
+  useEffect(() => {
+    if (!isComputerUseActive || !stopComputerUse) {
+      return;
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape" || event.defaultPrevented || isEditableEventTarget(event.target)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      stopComputerUse?.();
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isComputerUseActive, stopComputerUse]);
 
   return (
     <div
@@ -790,6 +931,20 @@ export function JavisWorkbench({
       ].join(" ")}
       style={shellStyle}
     >
+      {isComputerUseActive && stopComputerUse ? (
+        <div className="javis-computer-use-guard" role="status" aria-live="polite">
+          <span className="javis-computer-use-guard-dot" aria-hidden="true" />
+          <strong>Computer Use</strong>
+          <span>{labels.running}</span>
+          <button
+            aria-label={`${labels.stopTask} Computer Use`}
+            onClick={stopComputerUse}
+            type="button"
+          >
+            {labels.stopTask}
+          </button>
+        </div>
+      ) : null}
       <div className="javis-workspace-controls" aria-label={labels.workspaceControls}>
         <details className="javis-workspace-preset-menu">
           <summary
@@ -858,8 +1013,13 @@ export function JavisWorkbench({
         locale={effectiveLocale}
         modelSettings={effectiveModelSettings}
         modelConfiguration={modelConfiguration}
+        computerUseSettings={computerUseSettings}
+        computerUseLocalVisionSettings={computerUseLocalVisionSettings}
+        trustedComputerApps={trustedComputerApps}
+        runtimePreferences={runtimePreferences}
         agentCatalog={agentCatalog}
         userProfileMemorySummary={userProfileMemorySummary}
+        agentMemorySummary={agentMemorySummary}
         mountRoots={mountRoots}
         recentWorkspacePaths={recentWorkspacePaths}
         onChangeActiveView={handleChangeActiveView}
@@ -868,8 +1028,16 @@ export function JavisWorkbench({
         onModelSettingsChange={onModelSettingsChange}
         onTestModelConnection={onTestModelConnection}
         onModelConfigurationChange={onModelConfigurationChange}
+        onComputerUseSettingsChange={onComputerUseSettingsChange}
+        onComputerUseLocalVisionSettingsChange={onComputerUseLocalVisionSettingsChange}
+        onRemoveTrustedComputerApp={onRemoveTrustedComputerApp}
+        onRuntimePreferencesChange={onRuntimePreferencesChange}
         onRebuildUserProfileMemory={onRebuildUserProfileMemory}
         onClearUserProfileMemory={onClearUserProfileMemory}
+        onAgentMemoryEnabledChange={onAgentMemoryEnabledChange}
+        onClearAgentMemory={onClearAgentMemory}
+        onClearWorkspaceAgentMemory={onClearWorkspaceAgentMemory}
+        onDeleteAgentMemoryFact={onDeleteAgentMemoryFact}
         onReadAgentStyle={onReadAgentStyle}
         onSaveAgentStyle={onSaveAgentStyle}
         onResetAgentStyle={onResetAgentStyle}
@@ -895,7 +1063,7 @@ export function JavisWorkbench({
         activeSkillPage={activeSkillPage}
       />
 
-      <main className={`javis-main ${isChatView && task.id === "task-idle" ? "new-chat" : ""}`}>
+      <main className={`javis-main ${isChatView && task.id === "task-idle" ? "new-chat" : ""} ${isChatView && hasVisibleGoal ? "has-goal" : ""}`}>
         {renderMainContent()}
       </main>
 
@@ -904,6 +1072,8 @@ export function JavisWorkbench({
         isInspectorOpen={isInspectorOpen}
         labels={labels}
         locale={effectiveLocale}
+        onOpenUrl={onOpenUrl}
+        onOpenDetail={handleOpenDetail}
         selectedAgentId={selectedAgentId}
         systemResources={systemResources}
         openTabs={openTabs}
@@ -926,7 +1096,25 @@ export function JavisWorkbench({
         onOpenFile={onOpenFile}
         onSideChatSend={onQuickActionSideChat}
         onQuickActionBrowser={onQuickActionBrowser}
+        pendingBrowserWriteApproval={pendingBrowserWriteApproval}
+        onApproveBrowserWrite={onApproveBrowserWrite}
+        onDenyBrowserWrite={onDenyBrowserWrite}
         onQuickActionReview={onQuickActionReview}
+        onQuickActionGitPushPlan={onQuickActionGitPushPlan}
+        onQuickActionGitPushExecute={onQuickActionGitPushExecute}
+        onQuickActionGitPushCancel={onQuickActionGitPushCancel}
+        onQuickActionGitStagePlan={onQuickActionGitStagePlan}
+        onQuickActionGitStageExecute={onQuickActionGitStageExecute}
+        onQuickActionGitStageCancel={onQuickActionGitStageCancel}
+        onQuickActionGitCommitPlan={onQuickActionGitCommitPlan}
+        onQuickActionGitCommitExecute={onQuickActionGitCommitExecute}
+        onQuickActionGitCommitCancel={onQuickActionGitCommitCancel}
+        onQuickActionGitCreatePullRequestPlan={onQuickActionGitCreatePullRequestPlan}
+        onQuickActionGitCreatePullRequestExecute={onQuickActionGitCreatePullRequestExecute}
+        onQuickActionGitCreatePullRequestCancel={onQuickActionGitCreatePullRequestCancel}
+        onQuickActionGitCommentPullRequestPlan={onQuickActionGitCommentPullRequestPlan}
+        onQuickActionGitCommentPullRequestExecute={onQuickActionGitCommentPullRequestExecute}
+        onQuickActionGitCommentPullRequestCancel={onQuickActionGitCommentPullRequestCancel}
         onQuickActionTerminal={onQuickActionTerminal}
         task={task}
       />
@@ -954,6 +1142,72 @@ export function JavisWorkbench({
   );
 }
 
+const ACTIVE_COMPUTER_USE_STATUSES = new Set([
+  "planning",
+  "running",
+  "generating",
+  "waiting_permission",
+  "waiting_info",
+  "retrying",
+  "verifying",
+]);
+
+const COMPUTER_USE_TEXT_MARKERS = [
+  "computer use",
+  "computer-use",
+  "computer-use.loop",
+];
+
+function isActiveComputerUseTask(task: WorkbenchTask, isTaskActive: boolean): boolean {
+  if (!isTaskActive || !ACTIVE_COMPUTER_USE_STATUSES.has(task.status)) {
+    return false;
+  }
+  if (task.permissionRequest?.dryRun.operation.startsWith("computer.")) {
+    return true;
+  }
+  if (task.streamingAgentKind === "computer" && hasComputerUseText(task.commanderMessage)) {
+    return true;
+  }
+  if (task.plan.some((step) =>
+    ACTIVE_COMPUTER_USE_STATUSES.has(step.status) &&
+    (hasComputerUseText(step.id) || hasComputerUseText(step.title) || hasComputerUseText(step.successCriteria))
+  )) {
+    return true;
+  }
+  if (task.agents.some((agent) =>
+    agent.id === "agent-computer" &&
+    ACTIVE_COMPUTER_USE_STATUSES.has(agent.status) &&
+    hasComputerUseText(agent.task)
+  )) {
+    return true;
+  }
+  if (task.logs.some((log) => hasComputerUseText(log.title) || hasComputerUseText(log.detail))) {
+    return true;
+  }
+  return Boolean(task.executionTrace?.steps.some((step) =>
+    hasComputerUseText(step.stepId) ||
+    hasComputerUseText(step.toolName)
+  ));
+}
+
+function hasComputerUseText(value: string | undefined): boolean {
+  const normalized = value?.toLowerCase() ?? "";
+  return COMPUTER_USE_TEXT_MARKERS.some((marker) => normalized.includes(marker));
+}
+
+function isEditableEventTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  const tagName = target.tagName.toLowerCase();
+  return (
+    tagName === "input" ||
+    tagName === "textarea" ||
+    tagName === "select" ||
+    target.isContentEditable
+  );
+}
+
 function clampSidebarWidth(width: number, maxWidth: number): number {
   return Math.round(Math.min(Math.max(width, SIDEBAR_MIN_WIDTH), maxWidth));
 }
@@ -964,6 +1218,16 @@ function createWorkspaceToolTab(tool: WorkbenchWorkspaceToolAction, index: numbe
     tool,
     title: index > 0 ? `${tool} ${index + 1}` : undefined,
   };
+}
+
+function controlledWorkspaceToolTabs(
+  tools: WorkbenchWorkspaceToolAction[] | undefined,
+): WorkbenchWorkspaceToolTab[] {
+  return (tools ?? []).map((tool, index) => ({
+    id: `controlled-${tool}-${index}`,
+    tool,
+    title: index > 0 ? `${tool} ${index + 1}` : undefined,
+  }));
 }
 
 function buildResourceCategoryStats(entries: Array<{ category?: string }>): { category: string; count: number }[] {

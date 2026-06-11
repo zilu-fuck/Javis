@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import type {
   WorkbenchLocale,
   WorkbenchDetailItem,
@@ -7,6 +7,7 @@ import type {
   WorkbenchSkillSearchKind,
   WorkbenchSkillSearchResult,
   WorkbenchSkillSearchSource,
+  WorkbenchSkillSuggestion,
 } from "../types";
 
 interface SkillMarketViewProps {
@@ -17,6 +18,8 @@ interface SkillMarketViewProps {
   translationError?: string | null;
   searchStatus?: "idle" | "searching" | "error";
   searchResults?: WorkbenchSkillSearchResult[];
+  suggestions?: WorkbenchSkillSuggestion[];
+  suggestionStatus?: "idle" | "refreshing" | "error";
   mcpError?: string | null;
   onTranslateToChinese?: () => void;
   onSearchSkillMarket?: (
@@ -24,6 +27,15 @@ interface SkillMarketViewProps {
     source: WorkbenchSkillSearchSource,
     kind: WorkbenchSkillSearchKind,
   ) => void;
+  onRefreshSuggestions?: (
+    source: WorkbenchSkillSearchSource,
+    kind: WorkbenchSkillSearchKind,
+  ) => void;
+  onToggleSkillEnabled?: (id: string, enabled: boolean) => void;
+  onDeleteSkill?: (id: string) => void;
+  onDisableAllSkills?: () => void;
+  onDeleteAllSkills?: () => void;
+  onInstallSkillMarketResult?: (result: WorkbenchSkillSearchResult) => void;
   onOpenDetail?: (detail: WorkbenchDetailItem) => void;
 }
 
@@ -71,7 +83,7 @@ const SKILL_ICON_RULES: Array<[string, string]> = [
   ["mcp", "server"],
 ];
 
-const HOT_SKILLS = [
+const SEARCH_SUGGESTIONS: WorkbenchSkillSuggestion[] = [
   { title: "RAG 知识库", description: "文档索引、问答和引用追踪" },
   { title: "GitHub Issue 助手", description: "同步 issue、总结状态和生成回复" },
   { title: "PDF 整理", description: "批量识别、分类和移动 PDF 文件" },
@@ -90,33 +102,34 @@ export function SkillMarketView({
   translationError = null,
   searchStatus = "idle",
   searchResults = [],
+  suggestions,
+  suggestionStatus = "idle",
   mcpError = null,
   onTranslateToChinese,
   onSearchSkillMarket,
+  onRefreshSuggestions,
+  onToggleSkillEnabled,
+  onDeleteSkill,
+  onDisableAllSkills,
+  onDeleteAllSkills,
+  onInstallSkillMarketResult,
   onOpenDetail,
 }: SkillMarketViewProps) {
   const labels = locale.labels;
   const [source, setSource] = useState<WorkbenchSkillSearchSource>("github");
   const [kind, setKind] = useState<WorkbenchSkillSearchKind>("skill");
   const [query, setQuery] = useState("");
-  const [hotOffset, setHotOffset] = useState(0);
 
   const tools = skills.filter((s) => s.category === "tool");
   const agents = skills.filter((s) => s.category === "agent");
+  const userSkills = skills.filter((s) => s.category === "skill");
   const mcpServers = skills.filter((s) => s.category === "mcp");
-  const visibleHotSkills = useMemo(
-    () => HOT_SKILLS.map((_, index) => HOT_SKILLS[(index + hotOffset) % HOT_SKILLS.length]),
-    [hotOffset],
-  );
+  const activeSuggestions = suggestions?.length ? suggestions : SEARCH_SUGGESTIONS;
 
   function runSearch(nextQuery = query) {
     const trimmed = nextQuery.trim();
     if (!trimmed) return;
     onSearchSkillMarket?.(trimmed, source, kind);
-  }
-
-  function refreshHotSkills() {
-    setHotOffset((current) => (current + 1) % HOT_SKILLS.length);
   }
 
   function openSkillDetail(detail: WorkbenchDetailItem) {
@@ -135,6 +148,26 @@ export function SkillMarketView({
           </div>
         </div>
         <div className="javis-skill-header-actions">
+          {activePage === "mine" ? (
+            <div className="javis-skill-bulk-actions">
+              <button
+                className="javis-skill-bulk-button"
+                disabled={!skills.some((skill) => skill.toggleable && skill.enabled)}
+                onClick={onDisableAllSkills}
+                type="button"
+              >
+                一键关闭
+              </button>
+              <button
+                className="javis-skill-bulk-button danger"
+                disabled={!skills.some((skill) => skill.removable)}
+                onClick={onDeleteAllSkills}
+                type="button"
+              >
+                一键删除
+              </button>
+            </div>
+          ) : null}
           {activePage === "mine" && onTranslateToChinese ? (
             <div className="javis-skill-translate-wrapper">
               <button
@@ -214,31 +247,47 @@ export function SkillMarketView({
               <h3>搜索结果</h3>
               <div className="javis-skill-grid">
                 {searchResults.map((result) => (
-                  <button
-                    className="javis-skill-card javis-skill-result-card"
+                  <div
+                    className={`javis-skill-card javis-skill-result-card ${result.installed ? "installed" : ""}`}
                     key={result.id}
-                    onClick={() => openSkillDetail({
-                      title: result.title,
-                      description: result.description,
-                      kind: result.kind,
-                      source: result.source,
-                      url: result.url,
-                      metadata: [
-                        { label: "来源", value: String(result.source) },
-                        { label: "类型", value: result.kind },
-                      ],
-                    })}
-                    type="button"
                   >
-                    <div className="javis-skill-card-top">
+                    <button
+                      className="javis-skill-result-main"
+                      onClick={() => openSkillDetail({
+                        title: result.title,
+                        description: result.description,
+                        kind: result.kind,
+                        source: result.source,
+                        url: result.url,
+                        metadata: [
+                          { label: "来源", value: String(result.source) },
+                          { label: "类型", value: result.kind },
+                        ],
+                      })}
+                      type="button"
+                    >
                       <span className="javis-skill-card-icon icon-skills" aria-hidden="true" />
                       <div className="javis-skill-card-header">
                         <span className="javis-skill-name">{result.title}</span>
                         <span className="javis-skill-owner-chip">{result.source}</span>
                       </div>
-                    </div>
+                    </button>
                     <p className="javis-skill-desc">{result.description}</p>
-                  </button>
+                    <p className="javis-skill-result-safety">
+                      GitHub 搜索结果，安装前仅做基础结构校验；启用后仍受 Javis 权限和 MCP 只读白名单限制。
+                    </p>
+                    {result.installError ? (
+                      <p className="javis-skill-install-error">{result.installError}</p>
+                    ) : null}
+                    <button
+                      className="javis-skill-action-button"
+                      disabled={result.installed || result.installing}
+                      onClick={() => onInstallSkillMarketResult?.(result)}
+                      type="button"
+                    >
+                      {result.installed ? "已安装" : result.installing ? "安装中..." : "安装"}
+                    </button>
+                  </div>
                 ))}
               </div>
             </section>
@@ -246,30 +295,36 @@ export function SkillMarketView({
 
           <section className="javis-skill-section">
             <div className="javis-skill-section-header">
-              <h3>今日热搜技能</h3>
+              <h3>搜索建议</h3>
               <button
-                className="javis-skill-icon-button refresh"
-                onClick={refreshHotSkills}
-                title="刷新热搜"
+                aria-label="基于 GitHub 热榜和记忆侧写刷新推荐"
+                className={`javis-skill-icon-button refresh ${suggestionStatus === "refreshing" ? "loading" : ""}`}
+                disabled={suggestionStatus === "refreshing" || !onRefreshSuggestions}
+                onClick={() => onRefreshSuggestions?.(source, kind)}
+                title={suggestionStatus === "refreshing" ? "正在刷新推荐" : "基于 GitHub 热榜和记忆侧写刷新推荐"}
                 type="button"
               >
                 <span aria-hidden="true" />
               </button>
             </div>
+            {suggestionStatus === "error" ? (
+              <p className="javis-skill-search-status">推荐刷新失败，已保留当前建议。</p>
+            ) : null}
             <div className="javis-hot-skill-grid">
-              {visibleHotSkills.map((skill) => (
+              {activeSuggestions.map((skill) => (
                 <button
                   className="javis-skill-card javis-hot-skill-card"
-                  key={skill.title}
+                  key={`${skill.source ?? "local"}-${skill.url ?? skill.title}`}
                   onClick={() => {
                     setQuery(skill.title);
                     openSkillDetail({
                       title: skill.title,
                       description: skill.description,
                       kind,
-                      source,
+                      source: skill.source ?? source,
+                      url: skill.url,
                       metadata: [
-                        { label: "来源", value: source },
+                        { label: "来源", value: skill.source ?? source },
                         { label: "类型", value: kind },
                       ],
                     });
@@ -291,7 +346,29 @@ export function SkillMarketView({
               <h3>{labels.skillCategoryTool}</h3>
               <div className="javis-skill-grid">
                 {tools.map((skill) => (
-                  <SkillCard key={skill.id} labels={labels} skill={skill} />
+                  <SkillCard
+                    key={skill.id}
+                    labels={labels}
+                    onToggleEnabled={onToggleSkillEnabled}
+                    skill={skill}
+                  />
+                ))}
+              </div>
+            </section>
+          )}
+
+          {userSkills.length > 0 && (
+            <section className="javis-skill-section">
+              <h3>Codex Skills</h3>
+              <div className="javis-skill-grid">
+                {userSkills.map((skill) => (
+                  <SkillCard
+                    key={skill.id}
+                    labels={labels}
+                    onDelete={onDeleteSkill}
+                    onToggleEnabled={onToggleSkillEnabled}
+                    skill={skill}
+                  />
                 ))}
               </div>
             </section>
@@ -313,7 +390,13 @@ export function SkillMarketView({
               <h3>{labels.skillCategoryMcp}</h3>
               <div className="javis-skill-grid">
                 {mcpServers.map((skill) => (
-                  <SkillCard key={skill.id} labels={labels} skill={skill} />
+                  <SkillCard
+                    key={skill.id}
+                    labels={labels}
+                    onDelete={onDeleteSkill}
+                    onToggleEnabled={onToggleSkillEnabled}
+                    skill={skill}
+                  />
                 ))}
               </div>
             </section>
@@ -356,9 +439,13 @@ function formatTranslationError(error: string): string {
 function SkillCard({
   skill,
   labels,
+  onToggleEnabled,
+  onDelete,
 }: {
   skill: WorkbenchSkillEntry;
   labels: WorkbenchLocale["labels"];
+  onToggleEnabled?: (id: string, enabled: boolean) => void;
+  onDelete?: (id: string) => void;
 }) {
   const permColor = skill.permissionLevel
     ? PERMISSION_COLORS[skill.permissionLevel] ?? "#6f7d75"
@@ -366,7 +453,7 @@ function SkillCard({
   const icon = getSkillIconName(skill);
 
   return (
-    <div className="javis-skill-card">
+    <div className={`javis-skill-card ${skill.enabled ? "" : "disabled"}`}>
       <div className="javis-skill-card-top">
         <span className={`javis-skill-card-icon icon-${icon}`} aria-hidden="true" />
         <div className="javis-skill-card-header">
@@ -378,7 +465,29 @@ function SkillCard({
           )}
         </div>
       </div>
+      {skill.toggleable ? (
+        <label className="javis-skill-toggle">
+          <input
+            checked={skill.enabled}
+            onChange={(event) => onToggleEnabled?.(skill.id, event.currentTarget.checked)}
+            type="checkbox"
+          />
+          <span>{skill.enabled ? "Enabled" : "Disabled"}</span>
+        </label>
+      ) : null}
+      {skill.removable ? (
+        <button
+          className="javis-skill-delete-button"
+          onClick={() => onDelete?.(skill.id)}
+          type="button"
+        >
+          删除
+        </button>
+      ) : null}
       <p className="javis-skill-desc">{skill.description}</p>
+      {skill.installError ? (
+        <p className="javis-skill-install-error">{skill.installError}</p>
+      ) : null}
       {skill.category === "tool" && skill.agentOwners.length > 0 ? (
         <div className="javis-skill-owners">
           {skill.agentOwners.map((owner) => (
@@ -392,6 +501,18 @@ function SkillCard({
           <span className="javis-skill-owner-chip muted">
             {labels.skillUiFeatureLabel}
           </span>
+        </div>
+      ) : skill.agentOwners.length > 0 ? (
+        <div className="javis-skill-owners">
+          {skill.agentOwners.map((owner) => (
+            <span className="javis-skill-owner-chip" key={owner}>
+              {owner}
+            </span>
+          ))}
+        </div>
+      ) : skill.path ? (
+        <div className="javis-skill-owners">
+          <span className="javis-skill-owner-chip muted">{skill.path}</span>
         </div>
       ) : null}
     </div>

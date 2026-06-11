@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { DatabaseValue } from "./desktop-database";
 import {
+  PREF_KEYS,
   USER_PREFERENCES_MIGRATIONS,
   USER_PREFERENCES_STORAGE_KEY,
   USER_PREFERENCES_TABLE_SQL,
@@ -175,6 +176,29 @@ describe("user preferences persistence", () => {
         sidebarWidth: "220",
       });
       expect(storage.getItem(USER_PREFERENCES_STORAGE_KEY)).toBeNull();
+    });
+
+    it("maps legacy theme preference to the current appearance theme key", async () => {
+      const database = createMemoryUserPreferencesDatabase();
+      const storage = createMemoryStorage();
+      storage.setItem(
+        USER_PREFERENCES_STORAGE_KEY,
+        JSON.stringify({ locale: "zh-CN", theme: "dark" }),
+      );
+
+      const now = "2026-05-28T10:00:00.000Z";
+      const imported = await importUserPreferencesFromLocalStorage(
+        database,
+        storage,
+        now,
+      );
+
+      expect(imported).toMatchObject({
+        locale: "zh-CN",
+        theme: "dark",
+        [PREF_KEYS.APPEARANCE_THEME]: "dark",
+      });
+      expect(await loadPreferenceFromDatabase(database, PREF_KEYS.APPEARANCE_THEME)).toBe("dark");
     });
 
     it("removes legacy key even when localStorage has an empty object", async () => {

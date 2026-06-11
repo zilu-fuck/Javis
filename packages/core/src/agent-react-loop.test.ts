@@ -61,6 +61,32 @@ describe("runAgentReActLoop", () => {
     expect(forbiddenTool).not.toHaveBeenCalled();
   });
 
+  it("passes decision input to the selected tool", async () => {
+    const tool = vi.fn(async ({ input }) => input);
+
+    const result = await runAgentReActLoop({
+      agent: mustAgent("file"),
+      step: step("file"),
+      context: createSharedTaskContext(),
+      tools: [{ name: "file.scanMarkdownDocuments", execute: tool }],
+      decideNext: ({ observations }) =>
+        observations.length === 0
+          ? {
+              status: "continue",
+              toolName: "file.scanMarkdownDocuments",
+              input: { query: "demo" },
+              reason: "scan with input",
+            }
+          : { status: "completed", reason: "done" },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(tool).toHaveBeenCalledWith(expect.objectContaining({
+      input: { query: "demo" },
+    }));
+    expect(result.observations[0]?.output).toEqual({ query: "demo" });
+  });
+
   it("fails when the agent keeps acting past the iteration limit", async () => {
     const result = await runAgentReActLoop({
       agent: mustAgent("file"),

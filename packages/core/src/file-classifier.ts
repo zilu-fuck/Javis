@@ -37,6 +37,7 @@ export function createClassificationPrompt(files: ClassifiableFile[]): string {
     "You are a document classifier. Given a list of files, classify each one.",
     "",
     `Predefined categories: ${PREDEFINED_CATEGORIES.join(", ")}`,
+    "Use only filename, path, extension, and size hints; if unclear, choose 其他 with low confidence instead of inventing content.",
     "",
     "For each file return:",
     "- path: echo the exact input path for the file",

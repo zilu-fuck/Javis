@@ -597,6 +597,13 @@ dirty: 34 files
 - 用户手动操作和 Agent 自动操作共享同一 service state。
 - 每次工具调用进入 audit log。
 
+当前 source-level 状态：
+
+- runtime 已在 Browser、Git/Code Review、Files、Shell read-only 工具调用时发出 workspace tool activity。
+- App 会把 activity 转成一次性 `workspaceToolRequest`，由 `JavisWorkbench` 打开对应右侧工具 tab。
+- 每次自动联动都会写入轻量 `workspace.*.sync` tool-call audit 记录，用于证明 Agent 工具与右侧工作台发生同步。
+- 这只关闭源码契约缺口；packaged/live 截图和结构化 QA 输出仍需单独补齐。
+
 验收：
 
 - Agent 跑命令时 TerminalPanel 有输出。

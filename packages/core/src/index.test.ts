@@ -8,9 +8,12 @@ import {
   getWorkbenchWorkflow,
   listWorkbenchWorkflows,
 } from "./index";
+import { initialToolDescriptors } from "@javis/tools";
 import type {
   FileOrganizationExecution,
   FileOrganizationPlan,
+  CommanderTool,
+  CodeTool,
   MarkdownDocument,
   PlannedPathOperation,
   ProjectInspection,
@@ -66,6 +69,35 @@ describe("createFileScanTaskRuntime", () => {
       "agent-browser",
     ]);
     expect(snapshot.agents.every((agent) => agent.status === "queued")).toBe(true);
+    const researchScore = snapshot.agents.find((agent) => agent.id === "agent-research")?.capabilityScore;
+    const codeScore = snapshot.agents.find((agent) => agent.id === "agent-code")?.capabilityScore;
+    expect(researchScore).toMatchObject({
+      status: "ready",
+      qaPassed: true,
+      liveVerified: true,
+    });
+    expect(codeScore).toMatchObject({
+      status: "usable",
+      qaPassed: true,
+      liveVerified: false,
+    });
+  });
+
+  it("accepts injected capability verification for idle snapshots", () => {
+    const snapshot = createInitialTaskSnapshot({
+      capabilityVerification: {
+        qaPassedAgentKinds: [],
+        liveVerifiedAgentKinds: [],
+        recentFailureRateByAgentKind: { research: 1 },
+      },
+    });
+
+    const researchScore = snapshot.agents.find((agent) => agent.id === "agent-research")?.capabilityScore;
+
+    expect(researchScore?.qaPassed).toBe(false);
+    expect(researchScore?.liveVerified).toBe(false);
+    expect(researchScore?.recentFailureRate).toBe(1);
+    expect(researchScore?.gaps).toContain("recent tool failure rate is 100%");
   });
 
   it("provides bilingual system prompts for built-in agents", () => {
@@ -381,6 +413,56 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
+  it("uses runtime-configured Agent max rounds for ReAct steps", async () => {
+    const commanderPlan = vi.fn(async () => ({
+      title: "Long ReAct step",
+      reasoning: "The agent needs more than four rounds.",
+      steps: [{
+        id: "long-react",
+        title: "Run several observations",
+        assignedAgentKind: "file",
+        capability: "file_scan" as const,
+        requiredCapabilities: ["file_scan"],
+        dependsOn: [] as string[],
+        executionMode: "react" as const,
+        successCriteria: "The fifth decision can complete.",
+      }],
+    }));
+    const scanMarkdownDocuments = vi.fn(async () => []);
+    let decisions = 0;
+    const reactDecideNext = vi.fn(async () => {
+      decisions += 1;
+      return decisions < 5
+        ? {
+            status: "continue" as const,
+            toolName: "file.scanMarkdownDocuments",
+            reason: "need another observation",
+          }
+        : {
+            status: "completed" as const,
+            reason: "enough observations",
+          };
+    });
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      runtimeConfig: { agentMaxIterations: 8 },
+      fileTool: { scanMarkdownDocuments },
+      commanderTool: { plan: commanderPlan },
+      reactDecideNext,
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("inspect this project with more rounds", { mode: "project" });
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(finalSnapshot.status).toBe("completed");
+    expect(reactDecideNext).toHaveBeenCalledTimes(5);
+    expect(scanMarkdownDocuments).toHaveBeenCalledTimes(4);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
   it("completes direct_response Commander DAG steps without capability dispatch or ReAct", async () => {
     const commanderPlan = vi.fn(async () => ({
       title: "Direct response",
@@ -443,6 +525,17 @@ describe("createFileScanTaskRuntime", () => {
     expect(getWorkbenchWorkflow("find-local-document")?.participatingAgentKinds).toContain("computer");
     expect(getWorkbenchWorkflow("daily-reminder")?.steps).toContainEqual(expect.objectContaining({
       agentKind: "scheduler",
+      permissionLevel: "confirmed_write",
+    }));
+    expect(getWorkbenchWorkflow("browser-research")?.safetyNotes).toContain(
+      "Click/type/evaluate/upload/runTest operations are disabled until browser approvals are implemented.",
+    );
+    expect(getWorkbenchWorkflow("browser-test")?.safetyNotes).toContain(
+      "Browser test execution is disabled until browser approvals are implemented.",
+    );
+    expect(getWorkbenchWorkflow("computer-use")?.currentSupport).toBe("partial");
+    expect(getWorkbenchWorkflow("computer-use")?.steps).toContainEqual(expect.objectContaining({
+      id: "execute-actions",
       permissionLevel: "confirmed_write",
     }));
   });
@@ -892,6 +985,175 @@ describe("createFileScanTaskRuntime", () => {
     expect(finalSnapshot.sources).toHaveLength(1);
     expect(finalSnapshot.researchReport?.rows[0]?.sourceUrl).toBe("https://example.com/trend");
     expect(finalSnapshot.plan.every((step) => step.status === "completed")).toBe(true);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("does not route search-backed research through disabled web.search", async () => {
+    const searchWeb = vi.fn(async () => [
+      {
+        url: "https://example.com/trend",
+        title: "Trend",
+        excerpt: "Search excerpt",
+        fetchedAt: "2026-05-25T00:00:00.000Z",
+        provider: "fixture",
+      },
+    ]);
+    const fetchWebSource = vi.fn(async () => ({
+      url: "https://example.com/trend",
+      title: "Trend details",
+      excerpt: "Fetched detail excerpt",
+      fetchedAt: "2026-05-25T00:01:00.000Z",
+      provider: "fixture",
+    }));
+    const commanderPlan = vi.fn(async (request) => {
+      expect(request.availableTools?.some((tool: { name: string }) => tool.name === "web.search")).toBe(false);
+      return {
+        title: "Answer without search",
+        reasoning: "Search is disabled.",
+        steps: [{
+          id: "answer",
+          title: "Answer without search",
+          assignedAgentKind: "commander",
+          executionMode: "direct_response" as const,
+          requiredCapabilities: [],
+          dependsOn: [] as string[],
+          successCriteria: "User gets a bounded answer.",
+        }],
+      };
+    });
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => []),
+      },
+      webTool: {
+        searchWeb,
+        fetchWebSource,
+      },
+      commanderTool: {
+        plan: commanderPlan,
+      },
+      availableToolDescriptors: initialToolDescriptors.filter((descriptor) => descriptor.name !== "web.search"),
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("latest trending topics");
+
+    await waitForStatus(snapshots, "completed");
+
+    expect(searchWeb).not.toHaveBeenCalled();
+    expect(fetchWebSource).not.toHaveBeenCalled();
+    expect(commanderPlan).toHaveBeenCalled();
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("does not expose code.searchRepository unless the runtime code tool implements it", async () => {
+    const commanderPlan = vi.fn(async (request) => {
+      expect(request.availableTools?.some((tool: { name: string }) => tool.name === "code.searchRepository")).toBe(false);
+      const codeAgent = request.availableAgents.find((agent: { kind: string }) => agent.kind === "code");
+      expect(codeAgent?.allowedToolNames).not.toContain("code.searchRepository");
+      return {
+        title: "Answer without repository search",
+        reasoning: "Repository search is unavailable.",
+        steps: [{
+          id: "answer",
+          title: "Answer without repository search",
+          assignedAgentKind: "commander",
+          executionMode: "direct_response" as const,
+          requiredCapabilities: [],
+          dependsOn: [] as string[],
+          successCriteria: "User gets a bounded answer.",
+        }],
+      };
+    });
+    const codeTool: CodeTool = {
+      inspectRepository: vi.fn(async () => ({
+        workspacePath: "E:/Javis",
+        changedFiles: [],
+        diffStat: "0 files changed",
+        diff: "",
+      })),
+    };
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => []),
+      },
+      codeTool,
+      commanderTool: {
+        plan: commanderPlan,
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("search the current repository for agent memory code");
+
+    await waitForStatus(snapshots, "completed");
+
+    expect(commanderPlan).toHaveBeenCalled();
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("exposes code.searchRepository when the runtime code tool implements it", async () => {
+    const commanderPlan = vi.fn(async (request) => {
+      expect(request.availableTools?.some((tool: { name: string }) => tool.name === "code.searchRepository")).toBe(true);
+      const codeAgent = request.availableAgents.find((agent: { kind: string }) => agent.kind === "code");
+      expect(codeAgent?.allowedToolNames).toContain("code.searchRepository");
+      return {
+        title: "Repository search available",
+        reasoning: "Repository search can be delegated.",
+        steps: [{
+          id: "answer",
+          title: "Repository search available",
+          assignedAgentKind: "commander",
+          executionMode: "direct_response" as const,
+          requiredCapabilities: [],
+          dependsOn: [] as string[],
+          successCriteria: "User gets a bounded answer.",
+        }],
+      };
+    });
+    const codeTool: CodeTool = {
+      inspectRepository: vi.fn(async () => ({
+        workspacePath: "E:/Javis",
+        changedFiles: [],
+        diffStat: "0 files changed",
+        diff: "",
+      })),
+      searchRepository: vi.fn(async () => ({
+        actualFound: [],
+        inferred: [],
+        needsConfirmation: [],
+        keyFiles: [],
+        relatedTestFiles: [],
+        testFileCandidates: [],
+        clusters: [],
+        attempts: [],
+      })),
+    };
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => []),
+      },
+      codeTool,
+      commanderTool: {
+        plan: commanderPlan,
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("search the current repository for agent memory code");
+
+    await waitForStatus(snapshots, "completed");
+
+    expect(commanderPlan).toHaveBeenCalled();
 
     unsubscribe();
     runtime.dispose();
@@ -1960,6 +2222,7 @@ describe("createFileScanTaskRuntime", () => {
       temperature: 0.7,
       locale: "zh-CN",
     });
+    expect(complete).toHaveBeenCalledWith(expect.stringContaining("不要把推测写成事实"), expect.any(Object));
     expect(finalSnapshot.title).toBeTruthy();
     expect(finalSnapshot.commanderMessage).toBe("Hello, I am Javis.");
     expect(finalSnapshot.tokenUsage?.modelCalls).toBe(1);
@@ -2032,12 +2295,261 @@ describe("createFileScanTaskRuntime", () => {
       temperature: 0.7,
       locale: "en",
     });
+    expect(complete).toHaveBeenCalledWith(expect.stringContaining("do not present guesses as facts"), expect.any(Object));
     expect(finalSnapshot.conversationMessages).toEqual([
       { role: "user", content: "first question" },
       { role: "assistant", content: "First answer" },
       { role: "user", content: "second question" },
       { role: "assistant", content: "Second answer" },
     ]);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("windows long chat context for the model while preserving the full conversation timeline", async () => {
+    let prompt = "";
+    const priorMessages = Array.from({ length: 130 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" as const : "assistant" as const,
+      content: index === 0 ? "oldest-message-should-be-omitted" : `message-${index}`,
+    }));
+    const complete = vi.fn(async (nextPrompt: string) => {
+      prompt = nextPrompt;
+      return { text: "Answer after long context" };
+    });
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      chatTool: { complete },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("continue the thread", {
+      mode: "chat",
+      taskId: "task-long-chat",
+      priorMessages,
+    });
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(prompt).toContain("(10 earlier message(s) omitted)");
+    expect(prompt).not.toContain("oldest-message-should-be-omitted");
+    expect(prompt).toContain("message-129");
+    expect(finalSnapshot.conversationMessages).toHaveLength(132);
+    expect(finalSnapshot.conversationMessages?.[0]?.content).toBe("oldest-message-should-be-omitted");
+    expect(finalSnapshot.conversationMessages?.[130]).toEqual({
+      role: "user",
+      content: "continue the thread",
+    });
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("recovers general chat from context overflow with summary plus recent messages", async () => {
+    let recoveredPrompt = "";
+    const priorMessages = Array.from({ length: 14 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" as const : "assistant" as const,
+      content: index === 0 ? "old-raw-detail-should-be-summarized" : `context-message-${index}`,
+    }));
+    const complete = vi.fn(async (nextPrompt: string) => {
+      if (complete.mock.calls.length === 1) {
+        throw new Error("maximum context length exceeded");
+      }
+      if (nextPrompt.includes("Summarize this earlier Javis conversation")) {
+        return { text: "- Earlier discussion established a stable API constraint." };
+      }
+      recoveredPrompt = nextPrompt;
+      return { text: "Recovered answer" };
+    });
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      chatTool: { complete },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("continue after overflow", {
+      mode: "chat",
+      taskId: "task-chat-context-recovery",
+      priorMessages,
+    });
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(complete).toHaveBeenCalledTimes(3);
+    expect(recoveredPrompt).toContain("Earlier conversation summary:");
+    expect(recoveredPrompt).toContain("stable API constraint");
+    expect(recoveredPrompt).toContain("context-message-13");
+    expect(recoveredPrompt).not.toContain("old-raw-detail-should-be-summarized");
+    expect(recoveredPrompt).not.toContain("earlier message(s) omitted");
+    expect(finalSnapshot.commanderMessage).toBe("Recovered answer");
+    expect(finalSnapshot.conversationMessages).toHaveLength(16);
+    expect(finalSnapshot.conversationMessages?.[0]?.content).toBe("old-raw-detail-should-be-summarized");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("does not recover general chat for non-context model errors", async () => {
+    const complete = vi.fn(async () => {
+      throw new Error("provider offline");
+    });
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      chatTool: { complete },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("fail normally", {
+      mode: "chat",
+      taskId: "task-chat-non-context-error",
+      priorMessages: [{ role: "user", content: "previous" }],
+    });
+
+    const finalSnapshot = await waitForStatus(snapshots, "failed");
+
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(finalSnapshot.logs.some((log) => log.detail.includes("provider offline"))).toBe(true);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("uses the short context strategy for model prompts without truncating the timeline", async () => {
+    let prompt = "";
+    const priorMessages = Array.from({ length: 50 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" as const : "assistant" as const,
+      content: index === 0 ? "short-context-oldest-message" : `short-message-${index}`,
+    }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      runtimeConfig: { contextStrategy: "short" },
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      chatTool: {
+        complete: vi.fn(async (nextPrompt: string) => {
+          prompt = nextPrompt;
+          return { text: "Short context answer" };
+        }),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("continue briefly", {
+      mode: "chat",
+      taskId: "task-short-context",
+      priorMessages,
+    });
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(prompt).toContain("(10 earlier message(s) omitted)");
+    expect(prompt).not.toContain("short-context-oldest-message");
+    expect(prompt).toContain("short-message-49");
+    expect(finalSnapshot.conversationMessages).toHaveLength(52);
+    expect(finalSnapshot.conversationMessages?.[0]?.content).toBe("short-context-oldest-message");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("passes windowed follow-up context into Commander DAG planning", async () => {
+    const priorMessages = Array.from({ length: 130 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" as const : "assistant" as const,
+      content: index === 0 ? "oldest-project-message" : `project-message-${index}`,
+    }));
+    const commanderPlan = vi.fn<CommanderTool["plan"]>(async () => ({
+      title: "Follow-up plan",
+      reasoning: "Use context from the existing task.",
+      steps: [{
+        id: "answer-follow-up",
+        title: "Answer the follow-up",
+        assignedAgentKind: "commander",
+        executionMode: "direct_response" as const,
+        dependsOn: [] as string[],
+        successCriteria: "The follow-up is answered.",
+      }],
+    }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      commanderTool: { plan: commanderPlan },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("continue that project task", {
+      mode: "project",
+      taskId: "task-project-context",
+      priorMessages,
+    });
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+    const planRequest = commanderPlan.mock.calls[0]?.[0];
+
+    expect(planRequest?.priorMessages).toHaveLength(120);
+    expect(planRequest?.omittedPriorMessageCount).toBe(10);
+    expect(planRequest?.priorMessages?.[0]?.content).toBe("project-message-10");
+    expect(planRequest?.priorMessages?.[planRequest.priorMessages.length - 1]?.content).toBe("project-message-129");
+    expect(finalSnapshot.conversationMessages).toHaveLength(132);
+    expect(finalSnapshot.conversationMessages?.[0]?.content).toBe("oldest-project-message");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("recovers Commander DAG planning from context overflow with localized summary plus recent messages", async () => {
+    const priorMessages = Array.from({ length: 14 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" as const : "assistant" as const,
+      content: index === 0 ? "old-project-detail-should-be-summarized" : `project-context-${index}`,
+    }));
+    const summarize = vi.fn(async (prompt: string) => {
+      expect(prompt).toContain("请压缩总结下面这段较早的 Javis 对话");
+      return { text: "- Earlier project context requires preserving audit logs." };
+    });
+    const commanderPlan = vi.fn<CommanderTool["plan"]>(async () => {
+      if (commanderPlan.mock.calls.length === 1) {
+        throw new Error("prompt is too long for context length");
+      }
+      return {
+        title: "Recovered follow-up plan",
+        reasoning: "Use recovered context.",
+        steps: [{
+          id: "answer-follow-up",
+          title: "Answer the follow-up",
+          assignedAgentKind: "commander",
+          executionMode: "direct_response" as const,
+          dependsOn: [] as string[],
+          successCriteria: "The follow-up is answered.",
+        }],
+      };
+    });
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      chatTool: { complete: summarize },
+      commanderTool: { plan: commanderPlan },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("继续这个项目任务并保留上下文", {
+      mode: "project",
+      taskId: "task-project-context-recovery",
+      priorMessages,
+    });
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+    const recoveredRequest = commanderPlan.mock.calls[1]?.[0];
+
+    expect(commanderPlan).toHaveBeenCalledTimes(2);
+    expect(summarize).toHaveBeenCalledTimes(1);
+    expect(recoveredRequest?.omittedPriorMessageCount).toBe(0);
+    expect(recoveredRequest?.priorMessages?.[0]?.content).toContain("Earlier conversation summary:");
+    expect(recoveredRequest?.priorMessages?.[0]?.content).toContain("preserving audit logs");
+    expect(recoveredRequest?.priorMessages?.some((message) => message.content === "project-context-13")).toBe(true);
+    expect(recoveredRequest?.priorMessages?.some((message) => message.content === "old-project-detail-should-be-summarized")).toBe(false);
+    expect(finalSnapshot.conversationMessages).toHaveLength(16);
+    expect(finalSnapshot.conversationMessages?.[0]?.content).toBe("old-project-detail-should-be-summarized");
 
     unsubscribe();
     runtime.dispose();
@@ -2676,6 +3188,60 @@ describe("createFileScanTaskRuntime", () => {
 
   // P0-1/P0-4 Commander DAG: askUser and replan tests
 
+  it("surfaces Commander-to-sub-agent dispatch in project-mode conversation snapshots", async () => {
+    const commanderPlan = vi.fn(async () => ({
+      title: "Scan files",
+      reasoning: "Commander will delegate file scanning.",
+      steps: [{
+        id: "scan-files",
+        title: "Scan project documents",
+        assignedAgentKind: "file",
+        capability: "file_scan" as const,
+        requiredCapabilities: ["file_scan"] as string[],
+        dependsOn: [] as string[],
+        successCriteria: "Documents are scanned.",
+      }],
+    }));
+    const scanDocs = vi.fn(async () => [{
+      path: "E:/Javis/README.md",
+      modifiedAt: "2026-06-10T00:00:00.000Z",
+      sizeBytes: 100,
+      heading: "Javis",
+      excerpt: "Project readme.",
+    }]);
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      commanderTool: { plan: commanderPlan },
+      fileTool: { scanMarkdownDocuments: scanDocs },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("scan the project documents", {
+      mode: "project",
+      taskId: "task-project-dispatch-visible",
+    });
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+    const dispatchSnapshot = snapshots.find((snapshot) =>
+      snapshot.commanderMessage.includes("Commander dispatched: File Agent") &&
+      snapshot.logs.some((log) =>
+        log.agentId === "agent-file" &&
+        log.userMessage?.includes("Queued by Commander"),
+      ),
+    );
+
+    expect(finalSnapshot.status).toBe("completed");
+    expect(dispatchSnapshot).toBeDefined();
+    expect(dispatchSnapshot?.conversationMessages?.some((message) =>
+      message.role === "user" &&
+      message.content === "scan the project documents",
+    )).toBe(true);
+    expect(dispatchSnapshot?.agents.find((agent) => agent.id === "agent-file")?.status).toBe("queued");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
   it("handles askUser as the only step by recursing with clarification", async () => {
     // Phase 1: Commander returns an askUser-only plan.
     // Phase 1.5: askUser fires, answer triggers recursive call.
@@ -2886,6 +3452,100 @@ describe("createFileScanTaskRuntime", () => {
     unsubscribe();
     runtime.dispose();
   });
+
+  it("stops on step failure when runtime failure recovery is disabled", async () => {
+    const commanderPlan = vi.fn(async () => ({
+      title: "No recovery",
+      reasoning: "Stop on failure.",
+      steps: [{
+        id: "bad-step",
+        title: "This will fail",
+        assignedAgentKind: "file",
+        capability: "file_scan" as const,
+        requiredCapabilities: ["file_scan"] as string[],
+        dependsOn: [] as string[],
+        successCriteria: "Should fail.",
+      }],
+    }));
+    const scanDocs = vi.fn(async () => {
+      throw new Error("Scan failed: permission denied");
+    });
+    const replanDag = vi.fn(async () => ({
+      title: "Recovery plan",
+      reasoning: "Should not be used.",
+      steps: [{
+        id: "recovery-step",
+        title: "Scan with different approach",
+        assignedAgentKind: "file",
+        capability: "file_scan" as const,
+        requiredCapabilities: ["file_scan"] as string[],
+        dependsOn: [] as string[],
+        successCriteria: "Scan retried.",
+      }],
+    }));
+
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      runtimeConfig: { failureRecoveryEnabled: false },
+      commanderTool: { plan: commanderPlan },
+      fileTool: { scanMarkdownDocuments: scanDocs },
+      replanDag,
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("test no failure replan", { mode: "project" });
+    const finalSnapshot = await waitForStatus(snapshots, "failed");
+
+    expect(replanDag).not.toHaveBeenCalled();
+    expect(finalSnapshot.logs.some((log) => log.title === "replan_started")).toBe(false);
+    expect(finalSnapshot.logs.some((log) => log.detail?.includes("Recovery for bad-step"))).toBe(false);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("expires askUser waits using the runtime user-wait timeout", async () => {
+    vi.useFakeTimers();
+    const commanderPlan = vi.fn(async () => ({
+      title: "Clarification needed",
+      reasoning: "Goal is ambiguous.",
+      steps: [{
+        id: "ask",
+        title: "What file?",
+        assignedAgentKind: "commander",
+        toolName: "commander.askUser",
+        requiredCapabilities: [],
+        dependsOn: [] as string[],
+        successCriteria: "Clarified.",
+      }],
+    }));
+
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      runtimeConfig: { userWaitTimeoutMs: 60_000 },
+      commanderTool: { plan: commanderPlan },
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    try {
+      runtime.start("scan that file", { mode: "project" });
+
+      await waitForStatus(snapshots, "waiting_info");
+      await vi.advanceTimersByTimeAsync(60_000);
+      const finalSnapshot = await waitForStatus(snapshots, "failed");
+
+      expect(finalSnapshot.askUserQuestion).toBeUndefined();
+      expect(finalSnapshot.logs.some((log) =>
+        log.title === "timeout" &&
+        log.detail.includes("60000ms")
+      )).toBe(true);
+    } finally {
+      unsubscribe();
+      runtime.dispose();
+      vi.useRealTimers();
+    }
+  });
 });
 
 function createPdfPlan(): FileOrganizationPlan {
@@ -2999,6 +3659,79 @@ describe("completeGeneralChat streaming pipeline", () => {
     expect(streamPrompt).not.toContain("Available tools:");
     expect(streamPrompt).not.toContain("ReAct");
     expect(snapshots[snapshots.length - 1]?.commanderMessage).toBe("Hi");
+
+    runtime.dispose();
+  });
+
+  it("recovers streaming general chat context overflow with summary plus recent messages", async () => {
+    const priorMessages = Array.from({ length: 14 }, (_, index) => ({
+      role: index % 2 === 0 ? "user" as const : "assistant" as const,
+      content: index === 0 ? "old-stream-detail-should-be-summarized" : `stream-context-${index}`,
+    }));
+    const mockChatTool = {
+      complete: vi.fn(async (prompt: string, options?: { skipAgentMemory?: boolean; skipSkillContext?: boolean }) => {
+        if (prompt.includes("Summarize this earlier Javis conversation")) {
+          expect(options).toMatchObject({
+            skipAgentMemory: true,
+            skipSkillContext: true,
+          });
+          return { text: "- Earlier stream context requires preserving user constraints.", tokenUsage: undefined };
+        }
+        return { text: "Recovered stream answer", tokenUsage: undefined };
+      }),
+      stream: vi.fn(async function* (prompt: string) {
+        if (!prompt.includes("Earlier conversation summary:")) {
+          throw new Error("maximum context length exceeded");
+        }
+        yield { text: "Recovered stream answer" };
+      }),
+    };
+
+    const eventBus = createTaskEventBus();
+    const streamEvents: Array<{ kind: string; error?: string }> = [];
+    eventBus.on((event) => {
+      if (event.kind === "agent.chunk_start" || event.kind === "agent.chunk_end") {
+        streamEvents.push({
+          kind: event.kind,
+          error: event.kind === "agent.chunk_end" ? event.error : undefined,
+        });
+      }
+    });
+    const runtime = createFileScanTaskRuntime({
+      fileTool: undefined as any,
+      chatTool: mockChatTool,
+      eventBus,
+    });
+
+    const { snapshots } = subscribeToRuntime(runtime);
+    runtime.start("continue streamed thread", {
+      mode: "chat",
+      taskId: "task-stream-context-recovery",
+      priorMessages,
+    });
+
+    await vi.waitFor(() => {
+      expect(snapshots[snapshots.length - 1]?.status).toBe("completed");
+    }, { timeout: 3000 });
+
+    const finalSnapshot = snapshots[snapshots.length - 1];
+    const finalPrompt = mockChatTool.stream.mock.calls[1]?.[0] ?? "";
+    expect(mockChatTool.stream).toHaveBeenCalledTimes(2);
+    expect(mockChatTool.complete).toHaveBeenCalledTimes(1);
+    expect(finalPrompt).toContain("Earlier conversation summary:");
+    expect(finalPrompt).toContain("preserving user constraints");
+    expect(finalPrompt).toContain("stream-context-13");
+    expect(finalPrompt).not.toContain("old-stream-detail-should-be-summarized");
+    expect(finalSnapshot?.commanderMessage).toBe("Recovered stream answer");
+    expect(finalSnapshot?.conversationMessages?.[0]?.content).toBe("old-stream-detail-should-be-summarized");
+    expect(finalSnapshot?.isStreaming).toBe(false);
+    expect(finalSnapshot?.streamingText).toBeUndefined();
+    expect(streamEvents).toEqual([
+      { kind: "agent.chunk_start", error: undefined },
+      { kind: "agent.chunk_end", error: "context overflow" },
+      { kind: "agent.chunk_start", error: undefined },
+      { kind: "agent.chunk_end", error: undefined },
+    ]);
 
     runtime.dispose();
   });
@@ -3170,6 +3903,45 @@ describe("completeGeneralChat streaming pipeline", () => {
     }));
     const final = snapshots[snapshots.length - 1];
     expect(final?.commanderMessage).toBe("recovered after stream failure");
+
+    runtime.dispose();
+  });
+
+  it("does not let a replaced chat task cancel the new task", async () => {
+    let resolveFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => {
+      resolveFirstStarted = resolve;
+    });
+    let callCount = 0;
+    const complete = vi.fn(async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        resolveFirstStarted();
+        await new Promise(() => {});
+      }
+      return { text: "Second answer", tokenUsage: undefined };
+    });
+    const runtime = createFileScanTaskRuntime({
+      fileTool: undefined as any,
+      chatTool: { complete },
+    });
+    const { snapshots } = subscribeToRuntime(runtime);
+
+    runtime.start("first question", { mode: "chat", taskId: "task-first" });
+    await firstStarted;
+    runtime.start("second question", { mode: "chat", taskId: "task-second" });
+
+    await vi.waitFor(() => {
+      const last = snapshots[snapshots.length - 1];
+      expect(last?.id).toBe("task-second");
+      expect(last?.status).toBe("completed");
+    }, { timeout: 3000 });
+
+    const final = snapshots[snapshots.length - 1];
+    expect(final?.commanderMessage).toBe("Second answer");
+    expect(snapshots.some((snapshot) =>
+      snapshot.id === "task-second" && snapshot.status === "cancelled"
+    )).toBe(false);
 
     runtime.dispose();
   });

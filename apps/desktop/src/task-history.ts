@@ -41,7 +41,14 @@ const ARCHIVABLE_STATUSES = new Set<TaskSnapshot["status"]>([
   "cancelled",
 ]);
 const REDACTED_IMAGE_DATA_URL = "[redacted image data URL]";
-const IMAGE_DATA_URL_PATTERN = /data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=_-]+/gi;
+const IMAGE_DATA_URL_PATTERN = /data:image(?:\/|\\\/)[a-z0-9.+-]+;base64,[a-z0-9+/=_-]+/gi;
+const LOCAL_VISION_ABSOLUTE_PATH_PATTERN = /(?:file:\/\/\/|[A-Za-z]:[\\/]|\/(?:Users|home|tmp|var|mnt|Volumes|opt|workspace|private|run|data)\/)[^\r\n"'`<>()\[\]{}]*?\.(?:onnx|engine|xml|bin|mjs|js)\b/gi;
+const LOCAL_VISION_RELATIVE_PATH_PATTERN = /(?:^|(?<=[\s"'=:,]))(?:\.{1,2}[\\/])?[A-Za-z0-9_. -]+[\\/][^\r\n"'`<>()\[\]{}]*?\.(?:onnx|engine|xml|bin|mjs|js)\b/gi;
+const LOCAL_VISION_PATH_EXTENSIONS = [".onnx", ".engine", ".xml", ".bin", ".mjs", ".js"];
+const LOCAL_VISION_MODEL_EXTENSIONS = [".onnx", ".engine", ".xml", ".bin"];
+const PERSISTED_TEXT_MAX_LENGTH = 20_000;
+const PERSISTED_ARRAY_MAX_ITEMS = 200;
+const PERSISTED_OBJECT_MAX_ENTRIES = 120;
 
 export function isArchivableTask(task: TaskSnapshot): boolean {
   return task.id !== "task-idle" && ARCHIVABLE_STATUSES.has(task.status);
@@ -418,6 +425,12 @@ export function sanitizeTaskSnapshot(value: unknown): TaskSnapshot | null {
   if (isTokenUsageSummary(value.tokenUsage)) {
     snapshot.tokenUsage = value.tokenUsage;
   }
+  if (isHandoffReport(value.handoffReport)) {
+    snapshot.handoffReport = value.handoffReport;
+  }
+  if (isRecoveryReport(value.recoveryReport)) {
+    snapshot.recoveryReport = value.recoveryReport;
+  }
   if (isString(value.verificationSummary)) {
     snapshot.verificationSummary = value.verificationSummary;
   }
@@ -435,37 +448,113 @@ export function sanitizeTaskSnapshot(value: unknown): TaskSnapshot | null {
 }
 
 export function redactTaskSnapshotForPersistence(task: TaskSnapshot): TaskSnapshot {
-  return {
+  const withoutAttachments: TaskSnapshot = {
     ...task,
-    title: redactImageDataUrls(task.title),
-    userGoal: redactImageDataUrls(task.userGoal),
-    commanderMessage: redactImageDataUrls(task.commanderMessage),
-    logs: task.logs.map((log) => {
-      const redacted = {
-        ...log,
-        detail: redactImageDataUrls(log.detail),
-      };
-      if (log.userMessage !== undefined) {
-        redacted.userMessage = redactImageDataUrls(log.userMessage);
-      }
-      if (log.devDetail !== undefined) {
-        redacted.devDetail = redactImageDataUrls(log.devDetail);
-      }
-      return redacted;
-    }),
     conversationMessages: task.conversationMessages?.map((message) => {
-      const redacted = {
-        ...message,
-        content: redactImageDataUrls(message.content),
-      };
+      const redacted = { ...message };
       delete redacted.attachments;
       return redacted;
     }),
   };
+
+  return redactLargePersistenceValues(withoutAttachments) as TaskSnapshot;
 }
 
 function redactImageDataUrls(value: string): string {
   return value.replace(IMAGE_DATA_URL_PATTERN, REDACTED_IMAGE_DATA_URL);
+}
+
+function redactLocalVisionPaths(value: string): string {
+  return redactLocalVisionPathPattern(
+    redactLocalVisionPathPattern(value, LOCAL_VISION_ABSOLUTE_PATH_PATTERN),
+    LOCAL_VISION_RELATIVE_PATH_PATTERN,
+  );
+}
+
+function redactLocalVisionPathPattern(value: string, pattern: RegExp): string {
+  pattern.lastIndex = 0;
+  const redacted = value.replace(pattern, (match) => {
+    const { path, suffix, matchedExtension } = splitLocalVisionPathMatch(match);
+    if (!matchedExtension || !shouldRedactLocalVisionPath(path, matchedExtension)) {
+      return match;
+    }
+    const filename = localVisionPathFilename(path);
+    const replacement = filename ? `[redacted local path:${filename}]` : "[redacted local path]";
+    return `${replacement}${suffix}`;
+  });
+  pattern.lastIndex = 0;
+  return redacted;
+}
+
+function splitLocalVisionPathMatch(match: string): { path: string; suffix: string; matchedExtension?: string } {
+  const lower = match.toLowerCase();
+  let end = match.length;
+  let matchedExtension: string | undefined;
+  for (const extension of LOCAL_VISION_PATH_EXTENSIONS) {
+    const extensionEnd = lower.lastIndexOf(extension);
+    if (extensionEnd < 0) continue;
+    const candidateEnd = extensionEnd + extension.length;
+    if (!/[\\/]/.test(match.slice(candidateEnd)) && candidateEnd <= end) {
+      end = candidateEnd;
+      matchedExtension = extension;
+    }
+  }
+  while (end > 0 && /[)\]}.;:,]/.test(match[end - 1] ?? "")) {
+    end -= 1;
+  }
+  return {
+    path: match.slice(0, end),
+    suffix: match.slice(end),
+    matchedExtension,
+  };
+}
+
+function shouldRedactLocalVisionPath(path: string, extension: string): boolean {
+  if (LOCAL_VISION_MODEL_EXTENSIONS.includes(extension)) {
+    return true;
+  }
+  const filename = localVisionPathFilename(path)?.toLowerCase() ?? "";
+  return filename.includes("vision") || filename.includes("yolo") || filename.includes("adapter");
+}
+
+function localVisionPathFilename(value: string): string | undefined {
+  const normalized = value
+    .replace(/^file:\/\/\/?/i, "")
+    .replace(/\\/g, "/")
+    .replace(/[)\]}.;:,]+$/g, "");
+  return normalized.split("/").filter(Boolean).pop();
+}
+
+function truncatePersistedText(value: string, maxLength = PERSISTED_TEXT_MAX_LENGTH): string {
+  const redacted = redactLocalVisionPaths(redactImageDataUrls(value));
+  if (redacted.length <= maxLength) {
+    return redacted;
+  }
+  return `${redacted.slice(0, maxLength)}\n...[truncated:${redacted.length - maxLength} chars]`;
+}
+
+function redactLargePersistenceValues(value: unknown): unknown {
+  if (typeof value === "string") {
+    return truncatePersistedText(value);
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .slice(0, PERSISTED_ARRAY_MAX_ITEMS)
+      .map(redactLargePersistenceValues);
+  }
+  const record = value as Record<string, unknown>;
+  const redacted: Record<string, unknown> = {};
+  const entries = Object.entries(record);
+  for (const [key, entry] of entries.slice(0, PERSISTED_OBJECT_MAX_ENTRIES)) {
+    redacted[truncatePersistedText(key, 240)] = redactLargePersistenceValues(entry);
+  }
+  if (entries.length > PERSISTED_OBJECT_MAX_ENTRIES) {
+    redacted.__truncated = `${entries.length - PERSISTED_OBJECT_MAX_ENTRIES} object fields`;
+  }
+  return redacted;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -474,6 +563,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isString(value: unknown): value is string {
   return typeof value === "string";
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(isString);
 }
 
 function firstNonEmptyString(...values: Array<string | undefined>): string | undefined {
@@ -556,7 +649,11 @@ function isPlannedPathAction(
     value === "move" ||
     value === "copy" ||
     value === "delete" ||
-    value === "overwrite"
+    value === "overwrite" ||
+    value === "stage" ||
+    value === "push" ||
+    value === "create_pr" ||
+    value === "comment_pr"
   );
 }
 
@@ -564,6 +661,12 @@ function isPermissionLevel(
   value: unknown,
 ): value is NonNullable<TaskSnapshot["permissionRequest"]>["level"] {
   return value === "preview" || value === "confirmed_write" || value === "dangerous";
+}
+
+function isWriteRiskLevel(
+  value: unknown,
+): value is NonNullable<TaskSnapshot["permissionRequest"]>["writeRiskLevel"] {
+  return value === "safe" || value === "risky" || value === "dangerous";
 }
 
 function isResolvedPermissionStatus(
@@ -588,6 +691,8 @@ function isTaskStepArray(value: unknown): value is TaskSnapshot["plan"] {
         isAgentKind(step.assignedAgentKind) &&
         isTaskStepStatus(step.status) &&
         (!("agentId" in step) || isString(step.agentId)) &&
+        (!("inputContextKeys" in step) || isStringArray(step.inputContextKeys)) &&
+        (!("outputContextKey" in step) || isString(step.outputContextKey)) &&
         (!("successCriteria" in step) || isString(step.successCriteria)),
     )
   );
@@ -760,6 +865,7 @@ function sanitizeResolvedPermissionRequest(
     !isString(value.status) ||
     !isString(value.createdAt) ||
     !isRecord(value.dryRun) ||
+    ("writeRiskLevel" in value && !isWriteRiskLevel(value.writeRiskLevel)) ||
     ("bindingHash" in value && !isString(value.bindingHash)) ||
     ("resolvedAt" in value && !isString(value.resolvedAt))
   ) {
@@ -788,6 +894,7 @@ function sanitizeResolvedPermissionRequest(
   return {
     id: value.id,
     level: value.level,
+    ...(isWriteRiskLevel(value.writeRiskLevel) ? { writeRiskLevel: value.writeRiskLevel } : {}),
     title: value.title,
     reason: value.reason,
     dryRun: {
@@ -796,11 +903,11 @@ function sanitizeResolvedPermissionRequest(
       riskSummary: dryRun.riskSummary,
       reversible: dryRun.reversible,
     },
-    bindingHash: "bindingHash" in value && isString(value.bindingHash) ? value.bindingHash : undefined,
+    ...("bindingHash" in value && isString(value.bindingHash) ? { bindingHash: value.bindingHash } : {}),
+    ...(value.allowAlways === false ? { allowAlways: false } : {}),
     status: value.status,
     createdAt: value.createdAt,
-    resolvedAt:
-      "resolvedAt" in value && isString(value.resolvedAt) ? value.resolvedAt : undefined,
+    ...("resolvedAt" in value && isString(value.resolvedAt) ? { resolvedAt: value.resolvedAt } : {}),
   };
 }
 
@@ -959,4 +1066,152 @@ function isTokenUsageSummary(value: unknown): value is NonNullable<TaskSnapshot[
         isNumber(entry.modelCalls),
     )
   );
+}
+
+function isHandoffReport(value: unknown): value is NonNullable<TaskSnapshot["handoffReport"]> {
+  return (
+    isRecord(value) &&
+    isString(value.generatedAt) &&
+    (value.status === "complete" || value.status === "needs_attention") &&
+    isHandoffReportStepArray(value.steps) &&
+    isHandoffRecordArray(value.handoffs) &&
+    isStringArray(value.missingInputContextKeys) &&
+    isStringArray(value.unconsumedOutputContextKeys)
+  );
+}
+
+function isHandoffReportStepArray(
+  value: unknown,
+): value is NonNullable<TaskSnapshot["handoffReport"]>["steps"] {
+  return (
+    Array.isArray(value) &&
+    value.every((step) =>
+      isRecord(step) &&
+      isString(step.stepId) &&
+      isString(step.assignedAgentKind) &&
+      isStringArray(step.dependsOn) &&
+      isStringArray(step.inputContextKeys) &&
+      isStringArray(step.missingInputContextKeys) &&
+      (!("title" in step) || isString(step.title)) &&
+      (!("outputContextKey" in step) || isString(step.outputContextKey)) &&
+      (!("successCriteria" in step) || isString(step.successCriteria)),
+    )
+  );
+}
+
+function isHandoffRecordArray(
+  value: unknown,
+): value is NonNullable<TaskSnapshot["handoffReport"]>["handoffs"] {
+  return (
+    Array.isArray(value) &&
+    value.every((handoff) =>
+      isRecord(handoff) &&
+      isString(handoff.contextKey) &&
+      isHandoffStatus(handoff.status) &&
+      isStringArray(handoff.consumedByStepIds) &&
+      isHandoffValueSummary(handoff.valueSummary) &&
+      (!("producedByStepId" in handoff) || isString(handoff.producedByStepId)),
+    )
+  );
+}
+
+function isHandoffStatus(
+  value: unknown,
+): value is NonNullable<TaskSnapshot["handoffReport"]>["handoffs"][number]["status"] {
+  return (
+    value === "available" ||
+    value === "missing" ||
+    value === "unconsumed" ||
+    value === "input_missing"
+  );
+}
+
+function isHandoffValueSummary(
+  value: unknown,
+): value is NonNullable<TaskSnapshot["handoffReport"]>["handoffs"][number]["valueSummary"] {
+  return (
+    isRecord(value) &&
+    isHandoffValueType(value.type) &&
+    typeof value.present === "boolean" &&
+    (!("itemCount" in value) || isNumber(value.itemCount)) &&
+    (!("keyCount" in value) || isNumber(value.keyCount)) &&
+    (!("preview" in value) || isString(value.preview))
+  );
+}
+
+function isHandoffValueType(
+  value: unknown,
+): value is NonNullable<TaskSnapshot["handoffReport"]>["handoffs"][number]["valueSummary"]["type"] {
+  return (
+    value === "array" ||
+    value === "object" ||
+    value === "string" ||
+    value === "number" ||
+    value === "boolean" ||
+    value === "null" ||
+    value === "undefined" ||
+    value === "unknown"
+  );
+}
+
+function isRecoveryReport(value: unknown): value is NonNullable<TaskSnapshot["recoveryReport"]> {
+  return (
+    isRecord(value) &&
+    isString(value.generatedAt) &&
+    isRecoveryReportStatus(value.status) &&
+    isNumber(value.failureCount) &&
+    isNumber(value.recoveredCount) &&
+    isNumber(value.unrecoveredCount) &&
+    isStringArray(value.abandonedStepIds) &&
+    isStringArray(value.replannedStepIds) &&
+    isRecoveryAttemptArray(value.attempts)
+  );
+}
+
+function isRecoveryReportStatus(
+  value: unknown,
+): value is NonNullable<TaskSnapshot["recoveryReport"]>["status"] {
+  return value === "not_needed" || value === "recovered" || value === "needs_attention";
+}
+
+function isRecoveryAttemptArray(
+  value: unknown,
+): value is NonNullable<TaskSnapshot["recoveryReport"]>["attempts"] {
+  return (
+    Array.isArray(value) &&
+    value.every((attempt) =>
+      isRecord(attempt) &&
+      isString(attempt.failedStepId) &&
+      isString(attempt.errorSummary) &&
+      isRecoveryFailureKind(attempt.failureKind) &&
+      isStringArray(attempt.completedBefore) &&
+      typeof attempt.replanAttempted === "boolean" &&
+      isRecoveryReplanStatus(attempt.replanStatus) &&
+      typeof attempt.abandonedFailedStep === "boolean" &&
+      isStringArray(attempt.recoveryStepIds) &&
+      isStringArray(attempt.suggestedAlternatives) &&
+      (!("failedStepTitle" in attempt) || isString(attempt.failedStepTitle)) &&
+      (!("agentKind" in attempt) || isString(attempt.agentKind)) &&
+      (!("detail" in attempt) || isString(attempt.detail)),
+    )
+  );
+}
+
+function isRecoveryFailureKind(
+  value: unknown,
+): value is NonNullable<TaskSnapshot["recoveryReport"]>["attempts"][number]["failureKind"] {
+  return (
+    value === "timeout" ||
+    value === "permission_denied" ||
+    value === "unavailable" ||
+    value === "network" ||
+    value === "validation" ||
+    value === "unknown"
+  );
+}
+
+function isRecoveryReplanStatus(
+  value: unknown,
+): value is NonNullable<TaskSnapshot["recoveryReport"]>["attempts"][number]["replanStatus"] {
+  return value === "not_attempted" || value === "planned" || value === "failed";
 }

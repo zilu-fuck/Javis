@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import type { WorkbenchAppEntry, WorkbenchLocale, WorkbenchProgress } from "../types";
+import type { WorkbenchAppEntry, WorkbenchDetailItem, WorkbenchLocale, WorkbenchProgress } from "../types";
+import { createAppDetailItem } from "../detail-items";
 import { ProgressBar } from "./ProgressBar";
 import { createCountLabel, ResourceIconButton, ResourceShell } from "./ResourceShell";
 
@@ -13,6 +14,7 @@ interface AppsViewProps {
   error?: string;
   classifying?: boolean;
   classifyProgress?: WorkbenchProgress & { completed?: number };
+  classifyError?: string;
   categoryStats?: { category: string; count: number }[];
   selectedCategory?: string | null;
   onRefresh?: () => void;
@@ -20,6 +22,7 @@ interface AppsViewProps {
   onCancelClassifyApps?: () => void;
   onUpdateAppCategory?: (path: string, category: string) => void;
   onOpen?: (path: string) => void;
+  onOpenDetail?: (detail: WorkbenchDetailItem) => void;
 }
 
 export function AppsView({
@@ -30,6 +33,7 @@ export function AppsView({
   error,
   classifying,
   classifyProgress,
+  classifyError,
   categoryStats = [],
   selectedCategory,
   onRefresh,
@@ -37,6 +41,7 @@ export function AppsView({
   onCancelClassifyApps,
   onUpdateAppCategory,
   onOpen,
+  onOpenDetail,
 }: AppsViewProps) {
   const labels = locale.labels;
   const categoryLabels = locale.categoryLabels ?? {};
@@ -44,6 +49,7 @@ export function AppsView({
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
   const [menuAppPath, setMenuAppPath] = useState<string | null>(null);
   const [menuSide, setMenuSide] = useState<"left" | "right">("right");
+  const [selectedAppPath, setSelectedAppPath] = useState<string | null>(null);
   const [customCategory, setCustomCategory] = useState("");
 
   useEffect(() => {
@@ -96,11 +102,17 @@ export function AppsView({
     closeContextMenu();
   }
 
+  function selectApp(app: WorkbenchAppEntry) {
+    setSelectedAppPath(app.path);
+    onOpenDetail?.(createAppDetailItem(app, categoryLabels, locale));
+  }
+
   const actions = (
     <>
       <label className="javis-resource-search">
         <span className="javis-resource-action-icon icon-search" aria-hidden="true" />
         <input
+          aria-label={labels.searchPlaceholder}
           onChange={(e) => setQuery(e.currentTarget.value)}
           placeholder={labels.searchPlaceholder}
           value={query}
@@ -185,8 +197,11 @@ export function AppsView({
       tabs={categoryTabs.map((t) => `${t.label}(${t.count})`)}
       title={labels.apps}
     >
-      {(classifying || classifyProgress) && (
+      {(classifying || classifyProgress || classifyError) && (
         <div className="javis-classify-status">
+          {classifyError && (
+            <span className="javis-classify-error">{classifyError}</span>
+          )}
           {classifyProgress && (
             <ProgressBar
               current={classifyProgress.completed ?? classifyProgress.current}
@@ -211,8 +226,8 @@ export function AppsView({
           {filtered.map((app) => (
             <div className="javis-app-cell" key={app.path}>
               <button
-                className="javis-app-card"
-                onClick={() => onOpen?.(app.path)}
+                className={`javis-app-card${selectedAppPath === app.path ? " selected" : ""}`}
+                onClick={() => selectApp(app)}
                 onContextMenu={(event) => {
                   event.preventDefault();
                   const rect = event.currentTarget.getBoundingClientRect();
@@ -221,6 +236,7 @@ export function AppsView({
                   setMenuAppPath(app.path);
                   setCustomCategory(app.category ?? "");
                 }}
+                onDoubleClick={() => onOpen?.(app.path)}
                 type="button"
               >
                 <AppIcon app={app} />

@@ -1,11 +1,16 @@
 use crate::error::JavisError;
+use crate::{
+    approve_native_approval_binding, create_approval_id, create_fnv1a_hash,
+    create_native_approval_binding, require_native_approval_binding, NativeApprovalBinding,
+};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     env,
     io::{BufRead, BufReader, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{mpsc, Mutex},
     thread,
@@ -36,14 +41,24 @@ struct ManagedInner {
 
 pub(crate) struct BrowserState {
     inner: Mutex<Option<ManagedInner>>,
+    approvals: Mutex<HashMap<String, PendingBrowserApproval>>,
 }
 
 impl BrowserState {
     pub(crate) fn new() -> Self {
         Self {
             inner: Mutex::new(None),
+            approvals: Mutex::new(HashMap::new()),
         }
     }
+}
+
+#[derive(Debug)]
+struct PendingBrowserApproval {
+    action: String,
+    session_id: String,
+    preview_hash: String,
+    binding: NativeApprovalBinding,
 }
 
 impl Drop for BrowserState {
@@ -116,8 +131,11 @@ pub(crate) struct BrowserExtractLinksRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrowserClickRequest {
+    task_id: Option<String>,
     session_id: Option<String>,
+    #[allow(dead_code)]
     permission_mode: Option<String>,
+    approval_id: Option<String>,
     selector: String,
     button: Option<String>,
     click_count: Option<u32>,
@@ -127,8 +145,11 @@ pub(crate) struct BrowserClickRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrowserTypeRequest {
+    task_id: Option<String>,
     session_id: Option<String>,
+    #[allow(dead_code)]
     permission_mode: Option<String>,
+    approval_id: Option<String>,
     selector: String,
     text: String,
     delay: Option<u32>,
@@ -139,8 +160,11 @@ pub(crate) struct BrowserTypeRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrowserEvaluateRequest {
+    task_id: Option<String>,
     session_id: Option<String>,
+    #[allow(dead_code)]
     permission_mode: Option<String>,
+    approval_id: Option<String>,
     expression: String,
     timeout_ms: Option<u64>,
 }
@@ -148,9 +172,38 @@ pub(crate) struct BrowserEvaluateRequest {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrowserRunTestRequest {
+    task_id: Option<String>,
+    session_id: Option<String>,
+    approval_id: Option<String>,
     script: String,
     test_file: Option<String>,
     timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserPlanWriteRequest {
+    task_id: Option<String>,
+    session_id: String,
+    action: String,
+    selector: Option<String>,
+    expression: Option<String>,
+    test_file: Option<String>,
+    input_summary: Option<String>,
+    input_hash: Option<String>,
+    input_bytes: Option<usize>,
+    script_hash: Option<String>,
+    script_bytes: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserApproveWriteRequest {
+    approval_id: String,
+    task_id: Option<String>,
+    session_id: String,
+    action: String,
+    preview_hash: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -259,6 +312,30 @@ pub(crate) struct BrowserStatusResult {
     can_go_forward: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserPlanWriteResult {
+    approval_id: String,
+    tool_name: String,
+    session_id: String,
+    action: String,
+    preview_hash: String,
+    binding: NativeApprovalBindingView,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrowserApproveWriteResult {
+    approval_id: String,
+    approved: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NativeApprovalBindingView {
+    task_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Sidecar management — resolution helpers
 // ---------------------------------------------------------------------------
@@ -307,12 +384,7 @@ fn resolve_sidecar_script() -> Result<PathBuf, JavisError> {
 
     // 2. Relative to the executable (production / packaged mode).
     if let Ok(exe_path) = env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let candidate = exe_dir
-                .join("sidecar")
-                .join("browser")
-                .join("dist")
-                .join("index.js");
+        for candidate in sidecar_script_candidates_near_executable(&exe_path) {
             if candidate.exists() {
                 return Ok(candidate);
             }
@@ -341,6 +413,21 @@ fn resolve_sidecar_script() -> Result<PathBuf, JavisError> {
 // ---------------------------------------------------------------------------
 // Sidecar management — spawn & request
 // ---------------------------------------------------------------------------
+
+fn sidecar_script_candidates_near_executable(exe_path: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(exe_dir) = exe_path.parent() {
+        for base in [exe_dir, &exe_dir.join("resources")] {
+            candidates.push(
+                base.join("sidecar")
+                    .join("browser")
+                    .join("dist")
+                    .join("index.js"),
+            );
+        }
+    }
+    candidates
+}
 
 fn generate_request_id() -> String {
     let nanos = SystemTime::now()
@@ -650,6 +737,7 @@ fn is_localhost(host: &str) -> bool {
     )
 }
 
+#[cfg(test)]
 fn ensure_browser_write_permission(
     session_id: Option<&str>,
     permission_mode: Option<&str>,
@@ -672,6 +760,121 @@ fn ensure_browser_write_permission(
             "Browser write operation requires a native approval binding.".to_string(),
         )),
     }
+}
+
+fn browser_tool_name(action: &str) -> Result<&'static str, JavisError> {
+    match action {
+        "click" => Ok("browser.click"),
+        "type" => Ok("browser.type"),
+        "evaluate" => Ok("browser.evaluate"),
+        "runTest" => Ok("browser.runTest"),
+        other => Err(JavisError::Validation(format!(
+            "Unsupported browser write action: {other}"
+        ))),
+    }
+}
+
+fn create_browser_preview_hash(
+    session_id: &str,
+    action: &str,
+    payload: &serde_json::Value,
+) -> String {
+    create_fnv1a_hash(
+        serde_json::json!({
+            "sessionId": session_id,
+            "action": action,
+            "payload": payload,
+        })
+        .to_string()
+        .as_bytes(),
+    )
+}
+
+fn browser_write_payload(
+    selector: serde_json::Value,
+    expression: serde_json::Value,
+    test_file: serde_json::Value,
+    input_summary: serde_json::Value,
+    input_hash: serde_json::Value,
+    input_bytes: serde_json::Value,
+    script_hash: serde_json::Value,
+    script_bytes: serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "selector": selector,
+        "expression": expression,
+        "testFile": test_file,
+        "inputSummary": input_summary,
+        "inputHash": input_hash,
+        "inputBytes": input_bytes,
+        "scriptHash": script_hash,
+        "scriptBytes": script_bytes,
+    })
+}
+
+fn browser_text_hash(value: &str) -> String {
+    create_fnv1a_hash(value.as_bytes())
+}
+
+fn browser_text_bytes(value: &str) -> usize {
+    value.as_bytes().len()
+}
+
+fn validate_browser_session_id(session_id: &str) -> Result<String, JavisError> {
+    let trimmed = session_id.trim();
+    if trimmed.is_empty() {
+        return Err(JavisError::Validation(
+            "Browser write operation requires a session id.".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn require_browser_approval(
+    state: &BrowserState,
+    approval_id: Option<&str>,
+    task_id: Option<&str>,
+    session_id: Option<&str>,
+    action: &str,
+    payload: &serde_json::Value,
+) -> Result<(), JavisError> {
+    let session_id = validate_browser_session_id(session_id.unwrap_or_default())?;
+    let approval_id = approval_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            JavisError::Permission(
+                "Browser write operation requires a native approval id.".to_string(),
+            )
+        })?;
+    let preview_hash = create_browser_preview_hash(&session_id, action, payload);
+    let tool_name = browser_tool_name(action)?;
+    let mut approvals = state
+        .approvals
+        .lock()
+        .map_err(|_| JavisError::Internal("Browser approval state could not be locked.".into()))?;
+    let pending = approvals.remove(approval_id).ok_or_else(|| {
+        JavisError::Permission("Browser approval was not found or was already used.".into())
+    })?;
+    if pending.action != action || pending.session_id != session_id {
+        return Err(JavisError::Permission(
+            "Browser approval scope does not match this operation.".into(),
+        ));
+    }
+    if pending.preview_hash != preview_hash {
+        return Err(JavisError::Permission(
+            "Browser approval preview hash does not match this operation.".into(),
+        ));
+    }
+    require_native_approval_binding(
+        &pending.binding,
+        approval_id,
+        tool_name,
+        task_id,
+        &preview_hash,
+        "Browser approval id does not match the approved operation.",
+        "Browser write operation requires confirmed-write approval.",
+    )
 }
 
 fn validate_current_page_url(
@@ -985,8 +1188,8 @@ pub(crate) fn browser_go_forward(
     request: BrowserSessionRequest,
 ) -> Result<BrowserStatusResult, String> {
     require_localhost_session(&request).map_err(|e| e.to_string())?;
-    let result = send_request(&state, "goForward", session_params(&request))
-        .map_err(|e| e.to_string())?;
+    let result =
+        send_request(&state, "goForward", session_params(&request)).map_err(|e| e.to_string())?;
     validate_current_page_url(&result, request.allow_localhost.unwrap_or(false))
         .map_err(|e| e.to_string())?;
     Ok(status_from_value(result))
@@ -1108,21 +1311,119 @@ pub(crate) fn browser_extract_links(
 }
 
 #[tauri::command]
+pub(crate) fn browser_plan_write(
+    state: tauri::State<'_, BrowserState>,
+    request: BrowserPlanWriteRequest,
+) -> Result<BrowserPlanWriteResult, String> {
+    let session_id = validate_browser_session_id(&request.session_id).map_err(|e| e.to_string())?;
+    let tool_name = browser_tool_name(&request.action)
+        .map_err(|e| e.to_string())?
+        .to_string();
+    let payload = browser_write_payload(
+        serde_json::json!(request.selector),
+        serde_json::json!(request.expression),
+        serde_json::json!(request.test_file),
+        serde_json::json!(request.input_summary),
+        serde_json::json!(request.input_hash),
+        serde_json::json!(request.input_bytes),
+        serde_json::json!(request.script_hash),
+        serde_json::json!(request.script_bytes),
+    );
+    let preview_hash = create_browser_preview_hash(&session_id, &request.action, &payload);
+    let approval_id = create_approval_id();
+    let binding = create_native_approval_binding(
+        approval_id.clone(),
+        &tool_name,
+        request.task_id.unwrap_or_default(),
+        preview_hash.clone(),
+        false,
+    );
+    let binding_view = NativeApprovalBindingView {
+        task_id: binding.task_id().to_string(),
+    };
+    let mut approvals = state
+        .approvals
+        .lock()
+        .map_err(|_| "Browser approval state could not be locked.".to_string())?;
+    approvals.insert(
+        approval_id.clone(),
+        PendingBrowserApproval {
+            action: request.action.clone(),
+            session_id: session_id.clone(),
+            preview_hash: preview_hash.clone(),
+            binding,
+        },
+    );
+    Ok(BrowserPlanWriteResult {
+        approval_id,
+        tool_name,
+        session_id,
+        action: request.action,
+        preview_hash,
+        binding: binding_view,
+    })
+}
+
+#[tauri::command]
+pub(crate) fn browser_approve_write(
+    state: tauri::State<'_, BrowserState>,
+    request: BrowserApproveWriteRequest,
+) -> Result<BrowserApproveWriteResult, String> {
+    let session_id = validate_browser_session_id(&request.session_id).map_err(|e| e.to_string())?;
+    let tool_name = browser_tool_name(&request.action).map_err(|e| e.to_string())?;
+    let mut approvals = state
+        .approvals
+        .lock()
+        .map_err(|_| "Browser approval state could not be locked.".to_string())?;
+    let pending = approvals
+        .get_mut(&request.approval_id)
+        .ok_or_else(|| "Browser approval was not found.".to_string())?;
+    if pending.action != request.action || pending.session_id != session_id {
+        return Err("Browser approval scope does not match this operation.".to_string());
+    }
+    approve_native_approval_binding(
+        &mut pending.binding,
+        &request.approval_id,
+        tool_name,
+        request.task_id.as_deref(),
+        &request.preview_hash,
+        "Browser approval id does not match the pending operation.",
+    )?;
+    Ok(BrowserApproveWriteResult {
+        approval_id: request.approval_id,
+        approved: true,
+    })
+}
+
+#[tauri::command]
 pub(crate) fn browser_click(
     state: tauri::State<'_, BrowserState>,
     request: BrowserClickRequest,
 ) -> Result<BrowserClickResult, String> {
-    ensure_browser_write_permission(
-        request.session_id.as_deref(),
-        request.permission_mode.as_deref(),
-    )
-    .map_err(|e| e.to_string())?;
     let params = serde_json::json!({
-        "selector": request.selector,
+        "selector": request.selector.clone(),
         "button": request.button,
         "clickCount": request.click_count,
         "timeoutMs": request.timeout_ms,
     });
+    require_browser_approval(
+        &state,
+        request.approval_id.as_deref(),
+        request.task_id.as_deref(),
+        request.session_id.as_deref(),
+        "click",
+        &browser_write_payload(
+            params.get("selector").cloned().unwrap_or_default(),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        ),
+    )
+    .map_err(|e| e.to_string())?;
 
     let result = send_request(&state, "click", params).map_err(|e| e.to_string())?;
 
@@ -1149,18 +1450,31 @@ pub(crate) fn browser_type(
     state: tauri::State<'_, BrowserState>,
     request: BrowserTypeRequest,
 ) -> Result<BrowserTypeResult, String> {
-    ensure_browser_write_permission(
-        request.session_id.as_deref(),
-        request.permission_mode.as_deref(),
-    )
-    .map_err(|e| e.to_string())?;
     let params = serde_json::json!({
-        "selector": request.selector,
-        "text": request.text,
+        "selector": request.selector.clone(),
+        "text": request.text.clone(),
         "delay": request.delay,
         "clearBefore": request.clear_before,
         "pressEnter": request.press_enter,
     });
+    require_browser_approval(
+        &state,
+        request.approval_id.as_deref(),
+        request.task_id.as_deref(),
+        request.session_id.as_deref(),
+        "type",
+        &browser_write_payload(
+            params.get("selector").cloned().unwrap_or_default(),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::json!("text input"),
+            serde_json::json!(browser_text_hash(&request.text)),
+            serde_json::json!(browser_text_bytes(&request.text)),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        ),
+    )
+    .map_err(|e| e.to_string())?;
 
     let result = send_request(&state, "type", params).map_err(|e| e.to_string())?;
 
@@ -1187,15 +1501,28 @@ pub(crate) fn browser_evaluate(
     state: tauri::State<'_, BrowserState>,
     request: BrowserEvaluateRequest,
 ) -> Result<BrowserEvaluateResult, String> {
-    ensure_browser_write_permission(
-        request.session_id.as_deref(),
-        request.permission_mode.as_deref(),
-    )
-    .map_err(|e| e.to_string())?;
     let params = serde_json::json!({
         "expression": request.expression,
         "timeoutMs": request.timeout_ms,
     });
+    require_browser_approval(
+        &state,
+        request.approval_id.as_deref(),
+        request.task_id.as_deref(),
+        request.session_id.as_deref(),
+        "evaluate",
+        &browser_write_payload(
+            serde_json::Value::Null,
+            params.get("expression").cloned().unwrap_or_default(),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        ),
+    )
+    .map_err(|e| e.to_string())?;
 
     let result = send_request(&state, "evaluate", params).map_err(|e| e.to_string())?;
 
@@ -1219,12 +1546,65 @@ pub(crate) fn browser_run_test(
     request: BrowserRunTestRequest,
 ) -> Result<BrowserRunTestResult, String> {
     let BrowserRunTestRequest {
+        task_id,
+        session_id,
+        approval_id,
         script,
         test_file,
         timeout_ms,
     } = request;
-    let _ = (&state, script, test_file, timeout_ms);
-    Err("Browser test execution requires native approval and is disabled until browser approvals are implemented.".to_string())
+    let script_hash = browser_text_hash(&script);
+    let script_bytes = browser_text_bytes(&script);
+    let params = serde_json::json!({
+        "script": script.clone(),
+        "testFile": test_file,
+        "timeoutMs": timeout_ms,
+    });
+    require_browser_approval(
+        &state,
+        approval_id.as_deref(),
+        task_id.as_deref(),
+        session_id.as_deref(),
+        "runTest",
+        &browser_write_payload(
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            params.get("testFile").cloned().unwrap_or_default(),
+            serde_json::json!("browser test"),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::json!(script_hash),
+            serde_json::json!(script_bytes),
+        ),
+    )
+    .map_err(|e| e.to_string())?;
+    let result = send_request(&state, "runTest", params).map_err(|e| e.to_string())?;
+    Ok(BrowserRunTestResult {
+        passed: result
+            .get("passed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        exit_code: result
+            .get("exitCode")
+            .or_else(|| result.get("exit_code"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1) as i32,
+        stdout: result
+            .get("stdout")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        stderr: result
+            .get("stderr")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        duration_ms: result
+            .get("durationMs")
+            .or_else(|| result.get("duration_ms"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1404,6 +1784,24 @@ mod tests {
     }
 
     #[test]
+    fn sidecar_script_candidates_include_packaged_resources_dir() {
+        let exe_path = if cfg!(windows) {
+            Path::new("C:/Program Files/Javis/Javis.exe")
+        } else {
+            Path::new("/opt/javis/javis")
+        };
+        let candidates = sidecar_script_candidates_near_executable(exe_path);
+        let normalized: Vec<String> = candidates
+            .iter()
+            .map(|path| path.to_string_lossy().replace('\\', "/"))
+            .collect();
+
+        assert!(normalized
+            .iter()
+            .any(|path| path.ends_with("/resources/sidecar/browser/dist/index.js")));
+    }
+
+    #[test]
     fn generate_request_id_has_prefix() {
         let id = generate_request_id();
         assert!(id.starts_with("req-"));
@@ -1462,6 +1860,249 @@ mod tests {
         assert!(ensure_browser_write_permission(Some("session"), Some("full_access")).is_err());
         assert!(ensure_browser_write_permission(Some("session"), Some("read_only")).is_err());
         assert!(ensure_browser_write_permission(None, Some("full_access")).is_err());
+    }
+
+    #[test]
+    fn browser_native_approval_allows_matching_payload_once() {
+        let state = BrowserState::new();
+        let payload = browser_write_payload(
+            serde_json::json!("#submit"),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        );
+        let preview_hash = create_browser_preview_hash("session-1", "click", &payload);
+        let mut binding = create_native_approval_binding(
+            "approval-1".to_string(),
+            "browser.click",
+            "task-1".to_string(),
+            preview_hash.clone(),
+            false,
+        );
+        approve_native_approval_binding(
+            &mut binding,
+            "approval-1",
+            "browser.click",
+            Some("task-1"),
+            &preview_hash,
+            "mismatch",
+        )
+        .expect("approve browser click");
+        state.approvals.lock().unwrap().insert(
+            "approval-1".to_string(),
+            PendingBrowserApproval {
+                action: "click".to_string(),
+                session_id: "session-1".to_string(),
+                preview_hash,
+                binding,
+            },
+        );
+
+        require_browser_approval(
+            &state,
+            Some("approval-1"),
+            Some("task-1"),
+            Some("session-1"),
+            "click",
+            &payload,
+        )
+        .expect("matching approval should pass");
+        assert!(require_browser_approval(
+            &state,
+            Some("approval-1"),
+            Some("task-1"),
+            Some("session-1"),
+            "click",
+            &payload,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn browser_native_approval_rejects_changed_payload() {
+        let state = BrowserState::new();
+        let approved_payload = browser_write_payload(
+            serde_json::json!("#submit"),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        );
+        let changed_payload = browser_write_payload(
+            serde_json::json!("#delete"),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        );
+        let preview_hash = create_browser_preview_hash("session-1", "click", &approved_payload);
+        let mut binding = create_native_approval_binding(
+            "approval-1".to_string(),
+            "browser.click",
+            String::new(),
+            preview_hash.clone(),
+            false,
+        );
+        approve_native_approval_binding(
+            &mut binding,
+            "approval-1",
+            "browser.click",
+            None,
+            &preview_hash,
+            "mismatch",
+        )
+        .expect("approve browser click");
+        state.approvals.lock().unwrap().insert(
+            "approval-1".to_string(),
+            PendingBrowserApproval {
+                action: "click".to_string(),
+                session_id: "session-1".to_string(),
+                preview_hash,
+                binding,
+            },
+        );
+
+        assert!(require_browser_approval(
+            &state,
+            Some("approval-1"),
+            None,
+            Some("session-1"),
+            "click",
+            &changed_payload,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn browser_native_approval_rejects_changed_type_text() {
+        let state = BrowserState::new();
+        let approved_payload = browser_write_payload(
+            serde_json::json!("#message"),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::json!("text input"),
+            serde_json::json!(browser_text_hash("approved text")),
+            serde_json::json!(browser_text_bytes("approved text")),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        );
+        let changed_payload = browser_write_payload(
+            serde_json::json!("#message"),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::json!("text input"),
+            serde_json::json!(browser_text_hash("changed text")),
+            serde_json::json!(browser_text_bytes("changed text")),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+        );
+        let preview_hash = create_browser_preview_hash("session-1", "type", &approved_payload);
+        let mut binding = create_native_approval_binding(
+            "approval-1".to_string(),
+            "browser.type",
+            String::new(),
+            preview_hash.clone(),
+            false,
+        );
+        approve_native_approval_binding(
+            &mut binding,
+            "approval-1",
+            "browser.type",
+            None,
+            &preview_hash,
+            "mismatch",
+        )
+        .expect("approve browser type");
+        state.approvals.lock().unwrap().insert(
+            "approval-1".to_string(),
+            PendingBrowserApproval {
+                action: "type".to_string(),
+                session_id: "session-1".to_string(),
+                preview_hash,
+                binding,
+            },
+        );
+
+        assert!(require_browser_approval(
+            &state,
+            Some("approval-1"),
+            None,
+            Some("session-1"),
+            "type",
+            &changed_payload,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn browser_native_approval_rejects_changed_test_script() {
+        let state = BrowserState::new();
+        let approved_payload = browser_write_payload(
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::json!("browser.spec.ts"),
+            serde_json::json!("browser test"),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::json!(browser_text_hash("expect(page).toBeTruthy();")),
+            serde_json::json!(browser_text_bytes("expect(page).toBeTruthy();")),
+        );
+        let changed_payload = browser_write_payload(
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::json!("browser.spec.ts"),
+            serde_json::json!("browser test"),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::json!(browser_text_hash("await page.click('#delete');")),
+            serde_json::json!(browser_text_bytes("await page.click('#delete');")),
+        );
+        let preview_hash = create_browser_preview_hash("session-1", "runTest", &approved_payload);
+        let mut binding = create_native_approval_binding(
+            "approval-1".to_string(),
+            "browser.runTest",
+            String::new(),
+            preview_hash.clone(),
+            false,
+        );
+        approve_native_approval_binding(
+            &mut binding,
+            "approval-1",
+            "browser.runTest",
+            None,
+            &preview_hash,
+            "mismatch",
+        )
+        .expect("approve browser test");
+        state.approvals.lock().unwrap().insert(
+            "approval-1".to_string(),
+            PendingBrowserApproval {
+                action: "runTest".to_string(),
+                session_id: "session-1".to_string(),
+                preview_hash,
+                binding,
+            },
+        );
+
+        assert!(require_browser_approval(
+            &state,
+            Some("approval-1"),
+            None,
+            Some("session-1"),
+            "runTest",
+            &changed_payload,
+        )
+        .is_err());
     }
 
     #[test]

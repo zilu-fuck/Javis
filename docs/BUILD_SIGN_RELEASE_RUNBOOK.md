@@ -90,6 +90,7 @@ The script will:
 3. Build MSI and NSIS installers with Authenticode signing
 4. Verify signatures match the certificate thumbprint
 5. Output SHA-256 hashes for release notes
+6. Write `release-build-summary.json` under the QA folder
 
 Expected artifacts:
 
@@ -100,9 +101,9 @@ apps/desktop/src-tauri/target/release/bundle/nsis/Javis_X.Y.Z_x64-setup.exe
 
 ## Step 4: Verify Artifacts
 
-The build script already verifies signatures and prints hashes. This step is a
-manual double-check for extra confidence or when the script output needs to be
-captured separately for release notes.
+The build script already verifies signatures, prints hashes, and writes
+`release-build-summary.json`. This step is a manual double-check for extra
+confidence.
 
 ```powershell
 # Signature verification
@@ -158,6 +159,7 @@ Before declaring the build release-ready, write rollback notes. Required fields:
 - **Commit**: <full hash>
 - **Previous known-good version**: X.Y.Z (or "none — first release")
 - **Previous artifact location**: <path or URL>
+- **Previous artifact SHA-256**: 64-character hash (or `none` for first release)
 - **Storage schema changes**: yes/no
   - If yes: which stores (task history, approval records, workspaces, model settings)
   - Migration direction: forward-only / reversible / no change
@@ -171,6 +173,23 @@ Before declaring the build release-ready, write rollback notes. Required fields:
   5. Launch, verify version, run restart QA
 - **Non-downgradable data**: <list or "none">
 ```
+
+The notes can be generated from signed artifacts:
+
+```powershell
+.\scripts\release\write-release-rollback-notes.ps1 `
+  -Version X.Y.Z `
+  -QaRoot docs\qa\YYYY-MM-DD `
+  -PreviousKnownGoodBuild X.Y.Z `
+  -PreviousArtifactLocation <path-or-url> `
+  -PreviousArtifactSha256 <64-character-sha256>
+```
+
+The helper refuses unsigned artifacts, requires MSI and NSIS artifacts to be
+signed by the same certificate thumbprint, and writes the product-gate file
+`release-rollback-notes.md` with `Previous known-good build`, MSI/NSIS
+signature status, signer thumbprints, installer SHA-256 hashes, and the
+previous artifact SHA-256 used for rollback provenance.
 
 ## Step 7: Release Notes
 

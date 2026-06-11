@@ -60,6 +60,15 @@ export interface ToolCallAuditJsonLineWriter {
   appendLine(line: string): Promise<void>;
 }
 
+const REDACTED_IMAGE_DATA_URL = "[redacted image data URL]";
+const IMAGE_DATA_URL_PATTERN = /data:image(?:\/|\\\/)[a-z0-9.+-]+;base64,[a-z0-9+/=_-]+/gi;
+const LOCAL_VISION_ABSOLUTE_PATH_PATTERN = /(?:file:\/\/\/|[A-Za-z]:[\\/]|\/(?:Users|home|tmp|var|mnt|Volumes|opt|workspace|private|run|data)\/)[^\r\n"'`<>()\[\]{}]*?\.(?:onnx|engine|xml|bin|mjs|js)\b/gi;
+const LOCAL_VISION_RELATIVE_PATH_PATTERN = /(?:^|(?<=[\s"'=:,]))(?:\.{1,2}[\\/])?[A-Za-z0-9_. -]+[\\/][^\r\n"'`<>()\[\]{}]*?\.(?:onnx|engine|xml|bin|mjs|js)\b/gi;
+const LOCAL_VISION_PATH_EXTENSIONS = [".onnx", ".engine", ".xml", ".bin", ".mjs", ".js"];
+const LOCAL_VISION_MODEL_EXTENSIONS = [".onnx", ".engine", ".xml", ".bin"];
+const AUDIT_SUMMARY_MAX_LENGTH = 8_000;
+const AUDIT_JSON_MAX_LENGTH = 20_000;
+
 export const TOOL_CALL_AUDIT_MIGRATIONS: DesktopDatabaseMigration[] = [
   {
     id: "tool-call-audit-v1-table",
@@ -127,6 +136,12 @@ FROM tool_call_audit
 WHERE task_id = ?
 ORDER BY COALESCE(started_at, ended_at, id) ASC`.trim();
 
+const SELECT_RECENT_TOOL_CALL_AUDIT_SQL = `
+SELECT record_json
+FROM tool_call_audit
+ORDER BY COALESCE(ended_at, started_at, id) DESC
+LIMIT ?`.trim();
+
 export async function ensureToolCallAuditSchema(database: DesktopDatabase): Promise<void> {
   for (const migration of TOOL_CALL_AUDIT_MIGRATIONS) {
     await database.execute(migration.sql);
@@ -158,6 +173,21 @@ export async function listToolCallAuditRecordsForTask(
     .filter((record): record is ToolCallAuditRecord => Boolean(record));
 }
 
+export async function listRecentToolCallAuditRecords(
+  database: DesktopDatabase,
+  limit = 200,
+): Promise<ToolCallAuditRecord[]> {
+  const boundedLimit = Math.max(1, Math.min(1_000, Math.trunc(limit)));
+  const rows = await database.select<{ record_json: unknown }>(
+    SELECT_RECENT_TOOL_CALL_AUDIT_SQL,
+    [boundedLimit],
+  );
+  return rows
+    .map((row) => parseToolCallAuditRecord(row.record_json))
+    .filter((record): record is ToolCallAuditRecord => Boolean(record))
+    .reverse();
+}
+
 export function sanitizeToolCallAuditRecord(
   value: unknown,
 ): ToolCallAuditRecord | null {
@@ -183,21 +213,21 @@ export function sanitizeToolCallAuditRecord(
   }
 
   return {
-    id: value.id,
-    taskId: value.taskId,
-    toolName: value.toolName,
+    id: sanitizeAuditText(value.id, 240),
+    taskId: sanitizeAuditText(value.taskId, 240),
+    toolName: sanitizeAuditText(value.toolName, 240),
     permissionLevel: value.permissionLevel,
     status: value.status,
-    inputSummary: value.inputSummary,
-    ...(isString(value.agentRunId) ? { agentRunId: value.agentRunId } : {}),
-    ...(isString(value.outputSummary) ? { outputSummary: value.outputSummary } : {}),
-    ...(isString(value.dryRunJson) ? { dryRunJson: value.dryRunJson } : {}),
+    inputSummary: sanitizeAuditText(value.inputSummary, AUDIT_SUMMARY_MAX_LENGTH),
+    ...(isString(value.agentRunId) ? { agentRunId: sanitizeAuditText(value.agentRunId, 240) } : {}),
+    ...(isString(value.outputSummary) ? { outputSummary: sanitizeAuditText(value.outputSummary, AUDIT_SUMMARY_MAX_LENGTH) } : {}),
+    ...(isString(value.dryRunJson) ? { dryRunJson: sanitizeAuditText(value.dryRunJson, AUDIT_JSON_MAX_LENGTH) } : {}),
     ...(isString(value.permissionRequestId)
-      ? { permissionRequestId: value.permissionRequestId }
+      ? { permissionRequestId: sanitizeAuditText(value.permissionRequestId, 240) }
       : {}),
-    ...(isString(value.startedAt) ? { startedAt: value.startedAt } : {}),
-    ...(isString(value.endedAt) ? { endedAt: value.endedAt } : {}),
-    ...(isString(value.errorJson) ? { errorJson: value.errorJson } : {}),
+    ...(isString(value.startedAt) ? { startedAt: sanitizeAuditText(value.startedAt, 80) } : {}),
+    ...(isString(value.endedAt) ? { endedAt: sanitizeAuditText(value.endedAt, 80) } : {}),
+    ...(isString(value.errorJson) ? { errorJson: sanitizeAuditText(value.errorJson, AUDIT_JSON_MAX_LENGTH) } : {}),
   };
 }
 
@@ -227,6 +257,79 @@ export async function appendToolCallAuditJsonLine(
   }
   await writer.appendLine(line);
   return parseToolCallAuditJsonLines(line)[0] ?? null;
+}
+
+function redactImageDataUrls(value: string): string {
+  return value.replace(IMAGE_DATA_URL_PATTERN, REDACTED_IMAGE_DATA_URL);
+}
+
+function redactLocalVisionPaths(value: string): string {
+  return redactLocalVisionPathPattern(
+    redactLocalVisionPathPattern(value, LOCAL_VISION_ABSOLUTE_PATH_PATTERN),
+    LOCAL_VISION_RELATIVE_PATH_PATTERN,
+  );
+}
+
+function redactLocalVisionPathPattern(value: string, pattern: RegExp): string {
+  pattern.lastIndex = 0;
+  const redacted = value.replace(pattern, (match) => {
+    const { path, suffix, matchedExtension } = splitLocalVisionPathMatch(match);
+    if (!matchedExtension || !shouldRedactLocalVisionPath(path, matchedExtension)) {
+      return match;
+    }
+    const filename = localVisionPathFilename(path);
+    const replacement = filename ? `[redacted local path:${filename}]` : "[redacted local path]";
+    return `${replacement}${suffix}`;
+  });
+  pattern.lastIndex = 0;
+  return redacted;
+}
+
+function splitLocalVisionPathMatch(match: string): { path: string; suffix: string; matchedExtension?: string } {
+  const lower = match.toLowerCase();
+  let end = match.length;
+  let matchedExtension: string | undefined;
+  for (const extension of LOCAL_VISION_PATH_EXTENSIONS) {
+    const extensionEnd = lower.lastIndexOf(extension);
+    if (extensionEnd < 0) continue;
+    const candidateEnd = extensionEnd + extension.length;
+    if (!/[\\/]/.test(match.slice(candidateEnd)) && candidateEnd <= end) {
+      end = candidateEnd;
+      matchedExtension = extension;
+    }
+  }
+  while (end > 0 && /[)\]}.;:,]/.test(match[end - 1] ?? "")) {
+    end -= 1;
+  }
+  return {
+    path: match.slice(0, end),
+    suffix: match.slice(end),
+    matchedExtension,
+  };
+}
+
+function shouldRedactLocalVisionPath(path: string, extension: string): boolean {
+  if (LOCAL_VISION_MODEL_EXTENSIONS.includes(extension)) {
+    return true;
+  }
+  const filename = localVisionPathFilename(path)?.toLowerCase() ?? "";
+  return filename.includes("vision") || filename.includes("yolo") || filename.includes("adapter");
+}
+
+function localVisionPathFilename(value: string): string | undefined {
+  const normalized = value
+    .replace(/^file:\/\/\/?/i, "")
+    .replace(/\\/g, "/")
+    .replace(/[)\]}.;:,]+$/g, "");
+  return normalized.split("/").filter(Boolean).pop();
+}
+
+function sanitizeAuditText(value: string, maxLength: number): string {
+  const redacted = redactLocalVisionPaths(redactImageDataUrls(value));
+  if (redacted.length <= maxLength) {
+    return redacted;
+  }
+  return `${redacted.slice(0, maxLength)}\n...[truncated:${redacted.length - maxLength} chars]`;
 }
 
 export function createLocalStorageTaskAuditJsonLineWriter(
@@ -456,6 +559,12 @@ function inferToolNameFromLog(log: TaskSnapshot["logs"][number]): string | null 
     "code.analyzeProject",
     "web.search",
     "web.fetchSource",
+    "memory.search",
+    "computer.screenshot",
+    "computer.detectUiObjects",
+    "computer.click",
+    "computer.invokeUi",
+    "computer.setUiValue",
     "shell.runReadOnlyCommand",
   ].find((name) => text.includes(name));
   if (knownTool) {
@@ -487,7 +596,14 @@ function inferToolNameFromPermissionRequest(
 }
 
 function inferPermissionLevel(toolName: string): ToolCallAuditRecord["permissionLevel"] {
-  if (toolName === "code.applyProposedEdit" || toolName === "file.executePdfOrganization" || toolName === "file.writeText") {
+  if (
+    toolName === "code.applyProposedEdit" ||
+    toolName === "file.executePdfOrganization" ||
+    toolName === "file.writeText" ||
+    toolName === "computer.click" ||
+    toolName === "computer.invokeUi" ||
+    toolName === "computer.setUiValue"
+  ) {
     return "confirmed_write";
   }
   if (toolName === "code.inspectRepository" || toolName === "code.proposeEdit" || toolName === "file.planPdfOrganization" || toolName === "file.planWriteText") {

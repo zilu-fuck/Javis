@@ -2,6 +2,16 @@ import { useEffect, useState } from "react";
 import type {
   BrowserQuickResult,
   BrowserQuickRequest,
+  GitCommitExecutionQuickResult,
+  GitCommitPlanQuickResult,
+  GitCommentPullRequestExecutionQuickResult,
+  GitCommentPullRequestPlanQuickResult,
+  GitCreatePullRequestExecutionQuickResult,
+  GitCreatePullRequestPlanQuickResult,
+  GitPushExecutionQuickResult,
+  GitPushPlanQuickResult,
+  GitStageExecutionQuickResult,
+  GitStagePlanQuickResult,
   ReviewQuickResult,
   TerminalQuickResult,
   WorkbenchAgentSessionContext,
@@ -13,6 +23,7 @@ import type {
   WorkbenchSystemResources,
   WorkbenchTask,
   WorkbenchTerminalService,
+  WorkbenchBrowserWriteApprovalPreview,
   WorkbenchWorkspaceToolTab,
   WorkbenchWorkspaceToolAction,
 } from "../types";
@@ -40,7 +51,39 @@ interface InspectorPanelProps {
   onSelectToolTab?: (tabId: string) => void;
   onNewToolTab?: (tool: WorkbenchWorkspaceToolAction) => void;
   onQuickActionBrowser?: (session: WorkbenchAgentSessionContext, request: string | BrowserQuickRequest) => Promise<BrowserQuickResult>;
+  pendingBrowserWriteApproval?: WorkbenchBrowserWriteApprovalPreview | null;
+  onApproveBrowserWrite?: (session: WorkbenchAgentSessionContext, approvalId: string) => Promise<void>;
+  onDenyBrowserWrite?: (session: WorkbenchAgentSessionContext, approvalId: string) => Promise<void>;
   onQuickActionReview?: (session: WorkbenchAgentSessionContext) => Promise<ReviewQuickResult>;
+  onQuickActionGitPushPlan?: (session: WorkbenchAgentSessionContext) => Promise<GitPushPlanQuickResult>;
+  onQuickActionGitPushExecute?: (session: WorkbenchAgentSessionContext, approvalId: string) => Promise<GitPushExecutionQuickResult>;
+  onQuickActionGitPushCancel?: (session: WorkbenchAgentSessionContext, approvalId: string) => Promise<void>;
+  onQuickActionGitStagePlan?: (session: WorkbenchAgentSessionContext, paths: string[]) => Promise<GitStagePlanQuickResult>;
+  onQuickActionGitStageExecute?: (session: WorkbenchAgentSessionContext, approvalId: string, paths: string[]) => Promise<GitStageExecutionQuickResult>;
+  onQuickActionGitStageCancel?: (session: WorkbenchAgentSessionContext, approvalId: string) => Promise<void>;
+  onQuickActionGitCommitPlan?: (session: WorkbenchAgentSessionContext, message: string) => Promise<GitCommitPlanQuickResult>;
+  onQuickActionGitCommitExecute?: (session: WorkbenchAgentSessionContext, approvalId: string, message: string) => Promise<GitCommitExecutionQuickResult>;
+  onQuickActionGitCommitCancel?: (session: WorkbenchAgentSessionContext, approvalId: string) => Promise<void>;
+  onQuickActionGitCreatePullRequestPlan?: (
+    session: WorkbenchAgentSessionContext,
+    request: { title: string; body?: string; baseBranch: string; draft?: boolean },
+  ) => Promise<GitCreatePullRequestPlanQuickResult>;
+  onQuickActionGitCreatePullRequestExecute?: (
+    session: WorkbenchAgentSessionContext,
+    approvalId: string,
+    request: { title: string; body?: string; baseBranch: string; draft?: boolean },
+  ) => Promise<GitCreatePullRequestExecutionQuickResult>;
+  onQuickActionGitCreatePullRequestCancel?: (session: WorkbenchAgentSessionContext, approvalId: string) => Promise<void>;
+  onQuickActionGitCommentPullRequestPlan?: (
+    session: WorkbenchAgentSessionContext,
+    request: { pullRequest: string; body: string },
+  ) => Promise<GitCommentPullRequestPlanQuickResult>;
+  onQuickActionGitCommentPullRequestExecute?: (
+    session: WorkbenchAgentSessionContext,
+    approvalId: string,
+    request: { pullRequest: string; body: string },
+  ) => Promise<GitCommentPullRequestExecutionQuickResult>;
+  onQuickActionGitCommentPullRequestCancel?: (session: WorkbenchAgentSessionContext, approvalId: string) => Promise<void>;
   onQuickActionTerminal?: (session: WorkbenchAgentSessionContext, command: string) => Promise<TerminalQuickResult>;
   session: WorkbenchAgentSessionContext;
   terminalService?: WorkbenchTerminalService;
@@ -49,6 +92,8 @@ interface InspectorPanelProps {
   computerPath?: string;
   onNavigateDirectory?: (path: string) => void;
   onOpenFile?: (path: string) => void;
+  onOpenDetail?: (detail: WorkbenchDetailItem) => void;
+  onOpenUrl?: (url: string) => void;
   onSideChatSend?: (session: WorkbenchAgentSessionContext, message: string) => Promise<string>;
 }
 
@@ -80,7 +125,25 @@ export function InspectorPanel({
   onSelectToolTab,
   onNewToolTab,
   onQuickActionBrowser,
+  pendingBrowserWriteApproval,
+  onApproveBrowserWrite,
+  onDenyBrowserWrite,
   onQuickActionReview,
+  onQuickActionGitPushPlan,
+  onQuickActionGitPushExecute,
+  onQuickActionGitPushCancel,
+  onQuickActionGitStagePlan,
+  onQuickActionGitStageExecute,
+  onQuickActionGitStageCancel,
+  onQuickActionGitCommitPlan,
+  onQuickActionGitCommitExecute,
+  onQuickActionGitCommitCancel,
+  onQuickActionGitCreatePullRequestPlan,
+  onQuickActionGitCreatePullRequestExecute,
+  onQuickActionGitCreatePullRequestCancel,
+  onQuickActionGitCommentPullRequestPlan,
+  onQuickActionGitCommentPullRequestExecute,
+  onQuickActionGitCommentPullRequestCancel,
   onQuickActionTerminal,
   session,
   terminalService,
@@ -89,6 +152,8 @@ export function InspectorPanel({
   computerPath = "",
   onNavigateDirectory,
   onOpenFile,
+  onOpenDetail,
+  onOpenUrl,
   onSideChatSend,
 }: InspectorPanelProps) {
   const [activeSection, setActiveSection] = useState<InspectorSection>(
@@ -281,6 +346,17 @@ export function InspectorPanel({
                   ) : null}
                 </div>
               ) : null}
+              {detailItem ? (
+                <DetailInspector
+                  detailItem={detailItem}
+                  labels={labels}
+                  locale={locale}
+                  task={task}
+                  changedFiles={changedFiles}
+                  detailsLabel={detailsLabel}
+                  onOpenUrl={onOpenUrl}
+                />
+              ) : null}
               {/* Tool panel or default view */}
               {activeTool ? (
                 <WorkspaceToolPanels
@@ -290,7 +366,25 @@ export function InspectorPanel({
                   labels={labels}
                   onClose={() => activeTab ? onCloseToolTab?.(activeTab.id) : undefined}
                   onQuickActionBrowser={onQuickActionBrowser}
+                  pendingBrowserWriteApproval={pendingBrowserWriteApproval}
+                  onApproveBrowserWrite={onApproveBrowserWrite}
+                  onDenyBrowserWrite={onDenyBrowserWrite}
                   onQuickActionReview={onQuickActionReview}
+                  onQuickActionGitPushPlan={onQuickActionGitPushPlan}
+                  onQuickActionGitPushExecute={onQuickActionGitPushExecute}
+                  onQuickActionGitPushCancel={onQuickActionGitPushCancel}
+                  onQuickActionGitStagePlan={onQuickActionGitStagePlan}
+                  onQuickActionGitStageExecute={onQuickActionGitStageExecute}
+                  onQuickActionGitStageCancel={onQuickActionGitStageCancel}
+                  onQuickActionGitCommitPlan={onQuickActionGitCommitPlan}
+                  onQuickActionGitCommitExecute={onQuickActionGitCommitExecute}
+                  onQuickActionGitCommitCancel={onQuickActionGitCommitCancel}
+                  onQuickActionGitCreatePullRequestPlan={onQuickActionGitCreatePullRequestPlan}
+                  onQuickActionGitCreatePullRequestExecute={onQuickActionGitCreatePullRequestExecute}
+                  onQuickActionGitCreatePullRequestCancel={onQuickActionGitCreatePullRequestCancel}
+                  onQuickActionGitCommentPullRequestPlan={onQuickActionGitCommentPullRequestPlan}
+                  onQuickActionGitCommentPullRequestExecute={onQuickActionGitCommentPullRequestExecute}
+                  onQuickActionGitCommentPullRequestCancel={onQuickActionGitCommentPullRequestCancel}
                   onQuickActionTerminal={onQuickActionTerminal}
                   terminalService={terminalService}
                   fileService={fileService}
@@ -298,6 +392,7 @@ export function InspectorPanel({
                   computerPath={computerPath}
                   onNavigateDirectory={onNavigateDirectory}
                   onOpenFile={onOpenFile}
+                  onOpenDetail={onOpenDetail}
                   onSideChatSend={onSideChatSend}
                 />
               ) : selectedAgent ? (
@@ -312,14 +407,17 @@ export function InspectorPanel({
                   task={task}
                 />
               ) : null}
-              <DetailInspector
-                detailItem={detailItem}
-                labels={labels}
-                locale={locale}
-                task={task}
-                changedFiles={changedFiles}
-                detailsLabel={detailsLabel}
-              />
+              {!detailItem ? (
+                <DetailInspector
+                  detailItem={detailItem}
+                  labels={labels}
+                  locale={locale}
+                  task={task}
+                  changedFiles={changedFiles}
+                  detailsLabel={detailsLabel}
+                  onOpenUrl={onOpenUrl}
+                />
+              ) : null}
             </section>
           ) : activeSection === "resources" ? (
             <ResourceStatusPanel locale={locale} systemResources={systemResources} task={task} />
@@ -407,6 +505,7 @@ function DetailInspector({
   task,
   changedFiles,
   detailsLabel,
+  onOpenUrl,
 }: {
   detailItem?: WorkbenchDetailItem | null;
   labels: WorkbenchLocale["labels"];
@@ -414,6 +513,7 @@ function DetailInspector({
   task: WorkbenchTask;
   changedFiles: string[];
   detailsLabel: string;
+  onOpenUrl?: (url: string) => void;
 }) {
   const hasCodeReviewDetails = changedFiles.length > 0 || Boolean(task.codeReviewPreview || task.codeProposedEdit || task.codeApplyResult);
   const hasResearchDetails = Boolean(task.sources?.length || task.researchReport);
@@ -431,6 +531,22 @@ function DetailInspector({
             {detailItem.kind ? <span>{detailItem.kind}</span> : null}
           </div>
           {detailItem.description ? <p>{detailItem.description}</p> : null}
+          {detailItem.url ? (
+            <a
+              className="javis-detail-link"
+              href={detailItem.url}
+              onClick={(event) => {
+                if (!onOpenUrl) return;
+                event.preventDefault();
+                onOpenUrl(detailItem.url!);
+              }}
+              rel="noreferrer"
+              target="_blank"
+              title={detailItem.url}
+            >
+              {detailItem.url}
+            </a>
+          ) : null}
           {detailItem.metadata?.length ? (
             <dl className="javis-detail-metadata">
               {detailItem.metadata.map((item) => (

@@ -19,10 +19,10 @@ export function getBuiltinSidebarNavItems(
   const legacyCategoryStats = options?.categoryStats ?? [];
   const appCategoryStats = options?.appCategoryStats ?? [];
   const documentCategoryStats = options?.documentCategoryStats ?? legacyCategoryStats.filter(
-    (s) => s.category !== "鍥剧墖",
+    (s) => s.category !== "图片",
   );
   const galleryCategoryStats = options?.galleryCategoryStats ?? legacyCategoryStats.filter(
-    (s) => s.category === "鍥剧墖",
+    (s) => s.category === "图片",
   );
   const mountRoots = options?.mountRoots;
 

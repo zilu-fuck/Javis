@@ -7,6 +7,7 @@ import {
   createLocalStorageTaskAuditJsonLineWriter,
   createTaskSnapshotAuditJsonLines,
   ensureToolCallAuditSchema,
+  listRecentToolCallAuditRecords,
   listToolCallAuditRecordsForTask,
   parseTaskAuditJsonLines,
   parseToolCallAuditJsonLines,
@@ -80,6 +81,22 @@ describe("tool call audit persistence", () => {
     ]);
   });
 
+  it("loads bounded recent audit records in chronological order", async () => {
+    const newest = { ...createToolCallRecord(), id: "tool-newest" };
+    const older = { ...createToolCallRecord(), id: "tool-older" };
+    const database = createToolCallAuditDatabase([
+      { record_json: JSON.stringify(newest) },
+      { record_json: "{\"bad\":" },
+      { record_json: JSON.stringify(older) },
+    ]);
+
+    await expect(listRecentToolCallAuditRecords(database, 2)).resolves.toEqual([
+      older,
+      newest,
+    ]);
+    expect(database.selected[0]?.values).toEqual([2]);
+  });
+
   it("sanitizes optional fields", () => {
     expect(
       sanitizeToolCallAuditRecord({
@@ -102,6 +119,128 @@ describe("tool call audit persistence", () => {
       dryRunJson: "{}",
       permissionRequestId: "permission-1",
     });
+  });
+
+  it("redacts image data URLs from persisted audit record fields", async () => {
+    const database = createToolCallAuditDatabase();
+    const record: ToolCallAuditRecord = {
+      ...createToolCallRecord(),
+      id: "tool-image",
+      inputSummary: "Saw data:image/png;base64,INPUT==",
+      outputSummary: "Returned data:image/png;base64,OUTPUT==",
+      dryRunJson: "{\"data:image\\/png;base64,KEY==\":\"safe\",\"preview\":\"data:image\\/png;base64,DRYRUN==\"}",
+      errorJson: JSON.stringify({ message: "failed data:image/png;base64,ERROR==" }),
+    };
+
+    const sanitized = await upsertToolCallAuditRecord(database, record);
+    const recordJson = String(database.executed[0]?.values[13] ?? "");
+    const parsed = JSON.parse(recordJson) as ToolCallAuditRecord;
+    const line = serializeToolCallAuditJsonLine(record, "2026-05-25T00:00:00.000Z") ?? "";
+
+    expect(JSON.stringify(sanitized)).not.toContain("data:image");
+    expect(recordJson).not.toContain("data:image");
+    expect(line).not.toContain("data:image");
+    expect(parsed.inputSummary).toContain("[redacted image data URL]");
+    expect(parsed.outputSummary).toContain("[redacted image data URL]");
+    expect(parsed.dryRunJson).toContain("[redacted image data URL]");
+    expect(parsed.dryRunJson).not.toContain("data:image\\/");
+    expect(parsed.errorJson).toContain("[redacted image data URL]");
+  });
+
+  it("redacts local vision model and adapter paths from audit records", async () => {
+    const database = createToolCallAuditDatabase();
+    const record: ToolCallAuditRecord = {
+      ...createToolCallRecord(),
+      id: "tool-local-vision",
+      toolName: "computer.detectUiObjects",
+      inputSummary: String.raw`modelPath=C:\Users\alice\Models\yolo26n-ui.onnx runtimeAdapterPath=models\adapters\yolo26-ui.mjs`,
+      outputSummary: "adapter /home/alice/.cache/javis/runtime-adapter.mjs finished; source packages/core/src/index.js stayed visible",
+      dryRunJson: JSON.stringify({
+        modelPath: String.raw`C:\Users\alice\Models\yolo26n-ui.onnx`,
+        runtimeAdapterPath: "models/adapters/yolo26-ui.mjs",
+      }),
+      errorJson: JSON.stringify({
+        message: "failed at /home/alice/.cache/javis/runtime-adapter.mjs",
+      }),
+    };
+
+    const sanitized = await upsertToolCallAuditRecord(database, record);
+    const recordJson = String(database.executed[0]?.values[13] ?? "");
+    const line = serializeToolCallAuditJsonLine(record, "2026-05-25T00:00:00.000Z") ?? "";
+    const serialized = JSON.stringify(sanitized);
+
+    expect(serialized).toContain("[redacted local path:yolo26n-ui.onnx]");
+    expect(serialized).toContain("[redacted local path:yolo26-ui.mjs]");
+    expect(serialized).toContain("[redacted local path:runtime-adapter.mjs]");
+    expect(serialized).toContain("packages/core/src/index.js");
+    expect(recordJson).not.toContain("alice");
+    expect(recordJson).not.toContain("C:\\Users");
+    expect(recordJson).not.toContain("/home/alice");
+    expect(recordJson).not.toContain("models\\adapters");
+    expect(line).not.toContain("alice");
+    expect(line).not.toContain("models/adapters");
+  });
+
+  it("bounds oversized audit record fields before persistence", async () => {
+    const database = createToolCallAuditDatabase();
+    const hugeText = "x".repeat(60_000);
+    const record: ToolCallAuditRecord = {
+      ...createToolCallRecord(),
+      id: "tool-large",
+      inputSummary: hugeText,
+      outputSummary: hugeText,
+      dryRunJson: JSON.stringify({ preview: hugeText }),
+      errorJson: JSON.stringify({ message: hugeText }),
+    };
+
+    const sanitized = await upsertToolCallAuditRecord(database, record);
+    const values = database.executed[0]?.values ?? [];
+    const recordJson = String(values[13] ?? "");
+    const line = serializeToolCallAuditJsonLine(record, "2026-05-25T00:00:00.000Z") ?? "";
+
+    expect(sanitized?.inputSummary).toContain("[truncated:");
+    expect(String(values[6])).toContain("[truncated:");
+    expect(String(values[8])).toContain("[truncated:");
+    expect(String(values[12])).toContain("[truncated:");
+    expect(recordJson).toContain("[truncated:");
+    expect(recordJson.length).toBeLessThan(80_000);
+    expect(line).toContain("[truncated:");
+    expect(line.length).toBeLessThan(90_000);
+  });
+
+  it("redacts image data URLs from snapshot-derived audit lines", () => {
+    const snapshot = {
+      ...createTaskSnapshot(),
+      logs: [
+        {
+          id: "task-1-tool-computer-screenshot-completed",
+          kind: "tool" as const,
+          title: "tool_call.updated",
+          detail: "computer.screenshot returned data:image/png;base64,LOG==",
+        },
+        {
+          id: "task-1-permission-permission-1-requested",
+          kind: "permission" as const,
+          title: "permission.requested",
+          detail: "Approve preview data:image/png;base64,PERMISSION==",
+        },
+      ],
+      permissionRequest: {
+        ...createTaskSnapshot().permissionRequest!,
+        dryRun: {
+          operation: "Apply Code Agent patch",
+          affectedPaths: [],
+          riskSummary: "Preview data:image/png;base64,DRYRUN==",
+          reversible: true,
+        },
+      },
+    };
+
+    const lines = createTaskSnapshotAuditJsonLines(snapshot, "2026-05-25T00:00:00.000Z");
+    const serialized = JSON.stringify(lines);
+
+    expect(serialized).not.toContain("data:image");
+    expect(serialized).toContain("[redacted image data URL]");
   });
 
   it("serializes and parses JSONL audit event lines", () => {
@@ -162,6 +301,43 @@ describe("tool call audit persistence", () => {
         permissionRequestId: "permission-1",
       }),
     }));
+  });
+
+  it("audits memory.search without copying full query or fact text", () => {
+    const snapshot = {
+      ...createTaskSnapshot(),
+      logs: [
+        ...createTaskSnapshot().logs,
+        {
+          id: "task-1-tool-memory.search-completed",
+          kind: "tool" as const,
+          title: "tool_call.updated",
+          detail: "Step search-memory: memory.search completed.",
+          devDetail: JSON.stringify({
+            query: "FULL_MEMORY_QUERY",
+            results: [{ id: "mem-1", fact: "SECRET_MEMORY_FACT_BODY" }],
+          }),
+        },
+      ],
+    };
+
+    const lines = createTaskSnapshotAuditJsonLines(snapshot, "2026-05-25T00:00:00.000Z");
+    const memoryLine = lines.find((line) =>
+      line.kind === "tool_call_audit" && line.record.toolName === "memory.search",
+    );
+
+    expect(memoryLine).toEqual(expect.objectContaining({
+      kind: "tool_call_audit",
+      record: expect.objectContaining({
+        toolName: "memory.search",
+        permissionLevel: "read",
+        status: "succeeded",
+        inputSummary: "Step search-memory: memory.search completed.",
+        outputSummary: "tool_call.updated",
+      }),
+    }));
+    expect(JSON.stringify(memoryLine)).not.toContain("FULL_MEMORY_QUERY");
+    expect(JSON.stringify(memoryLine)).not.toContain("SECRET_MEMORY_FACT_BODY");
   });
 
   it("appends task snapshot audit lines to localStorage without duplicating seen records", async () => {
@@ -305,14 +481,18 @@ function createToolCallAuditDatabase(
   rows: Array<{ record_json: string }> = [],
 ) {
   const executed: Array<{ sql: string; values: DatabaseValue[] }> = [];
+  const selected: Array<{ sql: string; values: DatabaseValue[] }> = [];
   const database: DesktopDatabase & {
     executed: Array<{ sql: string; values: DatabaseValue[] }>;
+    selected: Array<{ sql: string; values: DatabaseValue[] }>;
   } = {
     executed,
+    selected,
     async execute(sql, values = []) {
       executed.push({ sql, values });
     },
-    async select<T extends Record<string, unknown>>() {
+    async select<T extends Record<string, unknown>>(sql: string, values: DatabaseValue[] = []) {
+      selected.push({ sql, values });
       return rows as unknown as T[];
     },
   };

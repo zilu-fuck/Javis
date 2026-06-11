@@ -1,3 +1,8 @@
+param(
+  [int]$DevtoolsPort = 9223,
+  [switch]$StopExistingJavis
+)
+
 $ErrorActionPreference = "Stop"
 
 $qaDir = "E:\Javis\docs\qa\2026-05-27"
@@ -5,6 +10,8 @@ $exe = "E:\Javis\apps\desktop\src-tauri\target\release\javis-desktop.exe"
 $workspacePath = "E:\Javis"
 $dbPath = "$env:APPDATA\app.javis.desktop\javis.db"
 $legacyKey = "javis.taskHistory.v1"
+$outputPath = Join-Path $qaDir "task-history-qa-output.txt"
+$previousWebviewArgs = [Environment]::GetEnvironmentVariable("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "Process")
 
 New-Item -ItemType Directory -Force -Path $qaDir | Out-Null
 
@@ -37,6 +44,10 @@ function Capture-Window($handle, $path) {
   $bmp.Dispose()
 }
 
+function Write-Utf8NoBom($path, $value) {
+  [System.IO.File]::WriteAllText($path, $value, [System.Text.UTF8Encoding]::new($false))
+}
+
 function Invoke-Cdp($socket, [ref]$msgId, $method, $params) {
   $msgId.Value += 1
   $payload = @{ id = $msgId.Value; method = $method; params = $params } | ConvertTo-Json -Depth 20 -Compress
@@ -57,6 +68,17 @@ function Eval-Js($socket, [ref]$msgId, $expr) {
   return Invoke-Cdp $socket ([ref]$msgId.Value) "Runtime.evaluate" @{ expression = $expr; awaitPromise = $true; returnByValue = $true }
 }
 
+function Get-EvalValue($response) {
+  if ($response.result.exceptionDetails) {
+    $details = $response.result.exceptionDetails | ConvertTo-Json -Depth 8 -Compress
+    throw "App JS failed: $details"
+  }
+  if ($response -and $response.result -and $response.result.result) {
+    return $response.result.result.value
+  }
+  return $null
+}
+
 function Wait-ForText($socket, [ref]$msgId, $text, $seconds) {
   $jsonText = $text | ConvertTo-Json -Compress
   $deadline = (Get-Date).AddSeconds($seconds)
@@ -69,13 +91,41 @@ function Wait-ForText($socket, [ref]$msgId, $text, $seconds) {
 }
 
 function Start-JavisWithCdp() {
-  $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9223"
+  $existing = @(Get-Process -Name "javis-desktop" -ErrorAction SilentlyContinue)
+  if ($existing.Count -gt 0) {
+    if (!$StopExistingJavis) {
+      throw "Existing javis-desktop process(es) detected: $($existing.Id -join ', '). Close them first or rerun with -StopExistingJavis."
+    }
+    $existing | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+  }
+  [Environment]::SetEnvironmentVariable("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--remote-debugging-port=$DevtoolsPort", "Process")
   $proc = Start-Process -FilePath $exe -WorkingDirectory $workspacePath -PassThru
-  Start-Sleep -Seconds 8
-  $target = (Invoke-RestMethod -Uri "http://127.0.0.1:9223/json")[0]
-  $ws = [System.Net.WebSockets.ClientWebSocket]::new()
-  $ws.ConnectAsync([Uri]$target.webSocketDebuggerUrl, [Threading.CancellationToken]::None).GetAwaiter().GetResult()
-  return @{ Process = $proc; Socket = $ws; Id = 0 }
+  try {
+    $deadline = (Get-Date).AddSeconds(90)
+    $target = $null
+    while ((Get-Date) -lt $deadline) {
+      try {
+        $targets = Invoke-RestMethod -Uri "http://127.0.0.1:$DevtoolsPort/json" -TimeoutSec 2
+        $target = @($targets | Where-Object { $_.webSocketDebuggerUrl } | Select-Object -First 1)[0]
+        if ($target) {
+          break
+        }
+      } catch {
+        Start-Sleep -Milliseconds 600
+      }
+    }
+    if (!$target) {
+      throw "Timed out waiting for WebView2 DevTools target on port $DevtoolsPort."
+    }
+    $ws = [System.Net.WebSockets.ClientWebSocket]::new()
+    $ws.ConnectAsync([Uri]$target.webSocketDebuggerUrl, [Threading.CancellationToken]::None).GetAwaiter().GetResult()
+    Start-Sleep -Seconds 3
+    return @{ Process = $proc; Socket = $ws; Id = 0 }
+  } catch {
+    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    throw
+  }
 }
 
 function Stop-Javis($sess) {
@@ -102,33 +152,82 @@ function Get-DbRows {
   return $val.Trim()
 }
 
+function Get-TaskHistoryExists {
+  param($taskId)
+  if (!(Test-Path $dbPath)) { return $false }
+  $escaped = $taskId.Replace("'", "''")
+  $val = cmd /c "echo SELECT COUNT(*) FROM task_history WHERE id = '$escaped'; | sqlite3 `"$dbPath`"" 2>&1
+  if ($LASTEXITCODE -ne 0 -or !$val) { return $false }
+  $num = 0
+  return [int]::TryParse($val.Trim(), [ref]$num) -and $num -gt 0
+}
+
 $session = $null
 $restartSession = $null
 
 try {
-  # Phase 1: Run a task
+  $qaTaskId = "qa-task-history-" + [Guid]::NewGuid().ToString("N")
+  $qaTitle = "QA Task History Restore Delete " + $qaTaskId.Substring($qaTaskId.Length - 8)
+  $qaGoal = "Verify packaged task history restore and delete"
+  $qaUpdatedAt = (Get-Date).ToUniversalTime().ToString("o")
+
+  # Phase 1: Insert a unique QA history entry through the packaged app DB bridge.
   Write-Host "Phase 1: Starting Javis with CDP..."
   $session = Start-JavisWithCdp
   $msgId = $session.Id
 
   Start-Sleep -Seconds 3
   $countBefore = Get-DbRowCount "task_history"
-  Write-Host "  task_history rows before task: $countBefore"
+  Write-Host "  task_history rows before QA insert: $countBefore"
 
-  # Submit task via CDP
-  $js = "(() => { var input = document.querySelector('textarea'); var setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set; setter.call(input, 'what is 2+2?'); input.dispatchEvent(new Event('input', { bubbles: true })); document.querySelector('button[type=submit]').click(); return 'submitted'; })()"
-  Eval-Js $session.Socket ([ref]$msgId) $js | Out-Null
-
-  # Wait for completion
-  if (!(Wait-ForText $session.Socket ([ref]$msgId) "Answered" 60)) {
-    Write-Warning "Task may not have completed in time"
+  $qaTaskIdJson = $qaTaskId | ConvertTo-Json -Compress
+  $qaTitleJson = $qaTitle | ConvertTo-Json -Compress
+  $qaGoalJson = $qaGoal | ConvertTo-Json -Compress
+  $qaUpdatedAtJson = $qaUpdatedAt | ConvertTo-Json -Compress
+  $insertJs = @"
+(async () => {
+  const invoke = window.__TAURI__?.core?.invoke?.bind(window.__TAURI__.core) ||
+    window.__TAURI__?.invoke?.bind(window.__TAURI__) ||
+    window.__TAURI_INTERNALS__?.invoke?.bind(window.__TAURI_INTERNALS__);
+  if (!invoke) {
+    throw new Error("Tauri invoke API is unavailable");
+  }
+  const snapshot = {
+    id: $qaTaskIdJson,
+    title: $qaTitleJson,
+    userGoal: $qaGoalJson,
+    status: "completed",
+    updatedAt: $qaUpdatedAtJson,
+    originMode: "chat",
+    commanderMessage: "QA inserted task history snapshot",
+    plan: [],
+    agents: [],
+    logs: [],
+    conversationMessages: [
+      { id: $qaTaskIdJson + "-user", role: "user", content: $qaGoalJson, createdAt: $qaUpdatedAtJson },
+      { id: $qaTaskIdJson + "-assistant", role: "assistant", content: "QA task history snapshot restored.", createdAt: $qaUpdatedAtJson }
+    ],
+    verificationSummary: "QA task history fixture"
+  };
+  await invoke("db_execute", {
+    sql: "INSERT INTO task_history (id, title, user_goal, status, updated_at, snapshot_json) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, user_goal = excluded.user_goal, status = excluded.status, updated_at = excluded.updated_at, snapshot_json = excluded.snapshot_json",
+    bindValues: [$qaTaskIdJson, $qaTitleJson, $qaGoalJson, "completed", $qaUpdatedAtJson, JSON.stringify(snapshot)]
+  });
+  location.reload();
+  return snapshot.title;
+})()
+"@
+  Eval-Js $session.Socket ([ref]$msgId) $insertJs | Out-Null
+  if (!(Wait-ForText $session.Socket ([ref]$msgId) $qaTitle 30)) {
+    throw "Inserted QA task history entry did not appear before restart."
   }
   Start-Sleep -Seconds 2
 
   Capture-Window $session.Process.MainWindowHandle (Join-Path $qaDir "task-history-before-restart.png")
   $countAfter = Get-DbRowCount "task_history"
+  $existsAfter = Get-TaskHistoryExists $qaTaskId
   $rowsAfter = Get-DbRows "task_history"
-  Write-Host "  task_history rows after task: $countAfter"
+  Write-Host "  task_history rows after QA insert: $countAfter"
   Write-Host $rowsAfter
 
   Stop-Javis $session
@@ -140,18 +239,71 @@ try {
   $restartSession = Start-JavisWithCdp
   $restartId = $restartSession.Id
   Start-Sleep -Seconds 5
+  if (!(Wait-ForText $restartSession.Socket ([ref]$restartId) $qaTitle 30)) {
+    throw "Inserted QA task history entry did not restore after restart."
+  }
 
   Capture-Window $restartSession.Process.MainWindowHandle (Join-Path $qaDir "task-history-restored-after-restart.png")
   $countRestart = Get-DbRowCount "task_history"
+  $existsRestart = Get-TaskHistoryExists $qaTaskId
   $rowsRestart = Get-DbRows "task_history"
   Write-Host "  task_history rows after restart: $countRestart"
   Write-Host $rowsRestart
 
   # Phase 3: Delete test
-  $jsDel = "(() => { var buttons = Array.from(document.querySelectorAll('button')); var btn = buttons.find(function(b) { return b.textContent.includes('Delete') || b.textContent.includes('Clear'); }); if (btn) { btn.click(); return 'clicked'; } return 'not found'; })()"
-  Eval-Js $restartSession.Socket ([ref]$restartId) $jsDel | Out-Null
+  $qaTitleJson = $qaTitle | ConvertTo-Json -Compress
+  $jsDel = @"
+(() => {
+  const title = $qaTitleJson;
+  const previousConfirm = window.confirm;
+  window.confirm = () => true;
+  try {
+    const buttons = Array.from(document.querySelectorAll('button'));
+    const button = buttons.find((item) => {
+      const label = item.getAttribute('aria-label') || '';
+      return item.classList.contains('javis-history-delete') && label.includes(title);
+    });
+    if (!button) {
+      return 'not found';
+    }
+    button.click();
+    return 'clicked';
+  } finally {
+    window.confirm = previousConfirm;
+  }
+})()
+"@
+  $deleteResult = Get-EvalValue (Eval-Js $restartSession.Socket ([ref]$restartId) $jsDel)
   Start-Sleep -Seconds 2
   Capture-Window $restartSession.Process.MainWindowHandle (Join-Path $qaDir "task-history-deleted-after-restart.png")
+  $countAfterDelete = Get-DbRowCount "task_history"
+  $existsAfterDelete = Get-TaskHistoryExists $qaTaskId
+
+  $restorePassed = $existsAfter -and $existsRestart
+  $deletePassed = $deleteResult -eq "clicked" -and -not $existsAfterDelete
+  $verdict = if ($restorePassed -and $deletePassed) { "PASS" } else { "FAIL" }
+
+  $outputLines = @(
+    "# Task History QA Output",
+    "",
+    "generatedAt: $((Get-Date).ToUniversalTime().ToString("o"))",
+    "dbPath: $dbPath",
+    "qa task id: $qaTaskId",
+    "qa title: $qaTitle",
+    "count before: $countBefore",
+    "count after: $countAfter",
+    "count restart: $countRestart",
+    "count after delete: $countAfterDelete",
+    "exists after insert: $existsAfter",
+    "exists after restart: $existsRestart",
+    "exists after delete: $existsAfterDelete",
+    "delete result: $deleteResult",
+    "",
+    "restore: $(if ($restorePassed) { "PASS" } else { "FAIL" })",
+    "delete: $(if ($deletePassed) { "PASS" } else { "FAIL" })",
+    "verdict: $verdict"
+  )
+  Write-Utf8NoBom $outputPath ($outputLines -join "`n")
 
   # Results
   Write-Host ""
@@ -159,17 +311,25 @@ try {
   Write-Host "Task History QA Results"
   Write-Host "========================================"
   Write-Host "DB path: $dbPath"
-  Write-Host "Count before: $countBefore | after: $countAfter | restart: $countRestart"
+  Write-Host "Count before: $countBefore | after: $countAfter | restart: $countRestart | after delete: $countAfterDelete"
+  Write-Host "Output: $outputPath"
   Write-Host ""
 
-  if ($countAfter -gt 0 -and $countRestart -ge $countAfter) {
+  if ($verdict -eq "PASS") {
     Write-Host "VERDICT: PASS"
   } else {
     Write-Host "VERDICT: FAIL"
-    if ($countAfter -le 0) { Write-Host "  - No task history rows after task" }
-    if ($countRestart -lt $countAfter) { Write-Host "  - Task history count decreased after restart" }
+    if (!$existsAfter) { Write-Host "  - QA task history row was not inserted" }
+    if (!$existsRestart) { Write-Host "  - QA task history row did not restore after restart" }
+    if (!$deletePassed) { Write-Host "  - Task history delete was not verified" }
+    exit 1
   }
 } finally {
+  if ($qaTaskId) {
+    $escaped = $qaTaskId.Replace("'", "''")
+    cmd /c "echo DELETE FROM task_history WHERE id = '$escaped'; | sqlite3 `"$dbPath`"" | Out-Null
+  }
   Stop-Javis $session
   Stop-Javis $restartSession
+  [Environment]::SetEnvironmentVariable("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", $previousWebviewArgs, "Process")
 }

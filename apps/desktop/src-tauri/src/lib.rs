@@ -34,11 +34,13 @@ mod error;
 mod file_write;
 mod files;
 mod git;
+mod global_hotkey;
 mod inspect;
 mod mcpserv;
 mod pdf;
 mod scan;
 mod shell;
+mod skills;
 mod streaming;
 mod terminal;
 mod web;
@@ -98,6 +100,26 @@ struct ModelCompletionResponse {
     model: Option<String>,
     provider: Option<String>,
     token_usage: Option<ModelUsage>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelEmbeddingRequest {
+    provider_id: String,
+    model: String,
+    base_url: String,
+    api_key_reference: String,
+    texts: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiEmbeddingData {
+    embedding: Vec<f32>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiEmbeddingResponse {
+    data: Vec<OpenAiEmbeddingData>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -510,6 +532,14 @@ fn complete_model_prompt(
         _ => run_openai_compatible_completion_request(&request),
     }
 }
+
+#[tauri::command]
+fn embed_model_texts(
+    app: AppHandle,
+    request: ModelEmbeddingRequest,
+) -> Result<Vec<Vec<f32>>, String> {
+    run_openai_compatible_embedding_request(&app, &request)
+}
 #[cfg(windows)]
 pub(crate) fn resolve_command_program(program: &str) -> String {
     match program.to_ascii_lowercase().as_str() {
@@ -685,7 +715,10 @@ fn model_api_key_secret_candidates(
     {
         candidates.push(key_reference);
     }
-    if !candidates.iter().any(|candidate| candidate == &provider_ref) {
+    if !candidates
+        .iter()
+        .any(|candidate| candidate == &provider_ref)
+    {
         candidates.push(provider_ref);
     }
     Ok(candidates)
@@ -1242,6 +1275,79 @@ pub(crate) fn normalize_model_completion_model_name(
             .map(|(_, name)| name.to_string())
             .unwrap_or(model)
     })
+}
+
+fn run_openai_compatible_embedding_request(
+    app: &AppHandle,
+    request: &ModelEmbeddingRequest,
+) -> Result<Vec<Vec<f32>>, String> {
+    let model = request.model.trim();
+    if model.is_empty() {
+        return Err("Embedding request requires a model.".to_string());
+    }
+    let provider_id = normalize_optional_config_value(Some(request.provider_id.as_str()))
+        .unwrap_or_else(|| "openai".to_string());
+    let base_url = normalize_optional_config_value(Some(request.base_url.as_str()))
+        .unwrap_or_else(|| default_openai_compatible_base_url_for_provider(&provider_id));
+    let texts: Vec<String> = request
+        .texts
+        .iter()
+        .map(|text| text.trim().to_string())
+        .collect();
+    if texts.is_empty() || texts.iter().any(|text| text.is_empty()) {
+        return Err("Embedding request texts must be non-empty.".to_string());
+    }
+    let api_key = if openai_compatible_request_requires_api_key(&provider_id, &base_url) {
+        ensure_saved_model_key_matches_base_url(&provider_id, Some(&base_url))?;
+        Some(load_model_api_key_secret_with_fallback(
+            app,
+            &request.api_key_reference,
+            &provider_id,
+        )?)
+    } else {
+        None
+    };
+    let endpoint = create_openai_compatible_embeddings_endpoint(&base_url);
+    let body = serde_json::json!({
+        "model": model,
+        "input": texts,
+    });
+    let body_text = serde_json::to_string(&body).map_err(|error| error.to_string())?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(OPENCODE_PROPOSAL_TIMEOUT)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut request_builder = client
+        .post(&endpoint)
+        .header("Content-Type", "application/json")
+        .body(body_text);
+    if let Some(api_key) = api_key {
+        request_builder = request_builder.header("Authorization", &format!("Bearer {api_key}"));
+    }
+    let response = request_builder
+        .send()
+        .map_err(|error| classify_http_request_error(error, &endpoint))?;
+    let status = response.status();
+    let response_text = response
+        .text()
+        .map_err(|error| format!("Embedding provider could not read response: {error}"))?;
+    if let Some(message) = classify_http_status_error(status, &response_text, &provider_id) {
+        return Err(message.replace("Model completion", "Embedding provider"));
+    }
+    let value = serde_json::from_str::<OpenAiEmbeddingResponse>(&response_text)
+        .map_err(|error| format!("Embedding provider returned invalid JSON: {error}"))?;
+    if value.data.len() != texts.len() || value.data.iter().any(|item| item.embedding.is_empty()) {
+        return Err("Embedding provider returned an invalid embedding response.".to_string());
+    }
+    Ok(value.data.into_iter().map(|item| item.embedding).collect())
+}
+
+fn create_openai_compatible_embeddings_endpoint(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/embeddings") {
+        return trimmed.to_string();
+    }
+    format!("{trimmed}/embeddings")
 }
 
 pub(crate) fn infer_model_completion_provider_id(request: &ModelCompletionRequest) -> String {
@@ -2171,6 +2277,65 @@ mod tests {
         assert_eq!(
             fs::read_to_string(target).expect("read written file"),
             "# Search\n"
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn approved_write_text_rejects_task_id_mismatch() {
+        let root = create_test_directory("write-text-task-binding");
+        let mut request = write_text_file_request(&root, "notes.md", "# Notes\n");
+        request.task_id = Some("task-1".to_string());
+        let approval_state = Mutex::new(file_write::WriteTextApprovalState::default());
+        replace_pending_write_text_approval(&approval_state, "approval-1", &request)
+            .expect("store pending text write approval");
+        approve_pending_write_text(&approval_state, "approval-1", Some("task-1"))
+            .expect("approve text write");
+
+        let result = take_approved_write_text(
+            &approval_state,
+            &ExecuteWriteTextFileRequest {
+                approval_id: "approval-1".to_string(),
+                target_path: request.target_path.clone(),
+                content: request.content.clone(),
+                workspace_path: request.workspace_path.clone(),
+                task_id: Some("task-2".to_string()),
+            },
+        );
+
+        assert_eq!(
+            result
+                .expect_err("task mismatch should be rejected")
+                .to_string(),
+            "Permission denied: Approval task id does not match the approved request."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn approved_write_text_consumes_approval_once() {
+        let root = create_test_directory("write-text-one-shot");
+        let request = write_text_file_request(&root, "notes.md", "# Notes\n");
+        let approval_state = Mutex::new(file_write::WriteTextApprovalState::default());
+        replace_pending_write_text_approval(&approval_state, "approval-1", &request)
+            .expect("store pending text write approval");
+        approve_pending_write_text(&approval_state, "approval-1", None)
+            .expect("approve text write");
+        let execute_request = ExecuteWriteTextFileRequest {
+            approval_id: "approval-1".to_string(),
+            target_path: request.target_path.clone(),
+            content: request.content.clone(),
+            workspace_path: request.workspace_path.clone(),
+            task_id: None,
+        };
+
+        take_approved_write_text(&approval_state, &execute_request)
+            .expect("take approved text write");
+        let second_result = take_approved_write_text(&approval_state, &execute_request);
+
+        assert_eq!(
+            second_result.expect_err("approval should be consumed"),
+            "No approved text write dry-run is pending."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -4000,6 +4165,7 @@ mod tests {
         assert_eq!(body["stream"], false);
         assert_eq!(body["temperature"], 0);
         assert_eq!(body["max_tokens"], 4096);
+        assert_eq!(body["thinking"]["type"], "disabled");
         assert_eq!(body["response_format"]["type"], "json_object");
         // Messages array: system + user
         let messages = body["messages"].as_array().expect("messages array");
@@ -4013,13 +4179,22 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_proposal_body_excludes_thinking_field() {
+    fn creates_openai_compatible_embeddings_endpoint() {
+        assert_eq!(
+            create_openai_compatible_embeddings_endpoint("https://api.example.test/v1"),
+            "https://api.example.test/v1/embeddings"
+        );
+        assert_eq!(
+            create_openai_compatible_embeddings_endpoint("https://api.example.test/v1/embeddings"),
+            "https://api.example.test/v1/embeddings"
+        );
+    }
+
+    #[test]
+    fn deepseek_proposal_body_disables_thinking_like_live_verifier() {
         let body = create_openai_compatible_proposal_body("deepseek-chat", "test prompt");
 
-        assert!(
-            body.get("thinking").is_none(),
-            "DeepSeek API does not support the 'thinking' field for deepseek-chat; it must be omitted"
-        );
+        assert_eq!(body["thinking"]["type"], "disabled");
     }
 
     #[test]
@@ -4096,11 +4271,10 @@ mod tests {
             serde_json::from_str(&json_text).expect("re-parse proposal body");
         assert_eq!(parsed["model"], "deepseek-chat");
 
-        // Must not contain thinking field in serialized form
-        assert!(
-            !json_text.contains("\"thinking\""),
-            "Serialized proposal body must not contain 'thinking' field"
-        );
+        // Keep this aligned with docs/qa/2026-05-26/test_fallback.py, the live
+        // provider verifier that has produced parseable Code Agent proposals.
+        assert!(json_text.contains("\"thinking\""));
+        assert_eq!(parsed["thinking"]["type"], "disabled");
     }
 
     #[test]
@@ -4340,6 +4514,13 @@ pub fn run() {
         .manage(Mutex::new(pdf::PdfOrganizationApprovalState::default()))
         .manage(Mutex::new(file_write::WriteTextApprovalState::default()))
         .manage(Mutex::new(code::CodePatchApprovalState::default()))
+        .manage(Mutex::new(git::GitPushApprovalState::default()))
+        .manage(Mutex::new(git::GitStageApprovalState::default()))
+        .manage(Mutex::new(git::GitCommitApprovalState::default()))
+        .manage(Mutex::new(git::GitCreatePullRequestApprovalState::default()))
+        .manage(Mutex::new(
+            git::GitCommentPullRequestApprovalState::default(),
+        ))
         .manage(browser::BrowserState::new())
         .manage(files::FileWatchState::default())
         .manage(terminal::TerminalState::new())
@@ -4359,6 +4540,7 @@ pub fn run() {
             fetch_provider_models,
             code::propose_code_edit,
             complete_model_prompt,
+            embed_model_texts,
             streaming::stream_model_prompt_l1_start,
             streaming::stream_model_prompt_start,
             streaming::stream_model_prompt_cancel,
@@ -4379,7 +4561,17 @@ pub fn run() {
             scan::list_directory,
             scan::read_file_chunk,
             scan::read_image_data_url,
+            skills::delete_user_skill,
+            skills::install_user_skill_from_github,
+            skills::read_enabled_user_skill_contexts,
+            skills::scan_user_skills,
+            skills::set_user_skill_enabled,
+            mcpserv::call_mcp_server_tool,
+            mcpserv::delete_codex_mcp_server,
+            mcpserv::install_mcp_server_from_github,
             mcpserv::read_mcp_config,
+            mcpserv::scan_codex_mcp_servers,
+            mcpserv::set_codex_mcp_server_enabled,
             mcpserv::write_mcp_config,
             audit::append_task_audit_jsonl_line,
             audit::append_task_session_jsonl_line,
@@ -4402,14 +4594,42 @@ pub fn run() {
             scan::list_mount_roots,
             scan::cancel_scan_all_files,
             git::git_status,
+            git::git_remote_summary,
+            git::git_list_pull_requests,
+            git::git_push_preview,
+            git::git_plan_push,
+            git::git_approve_push,
+            git::git_execute_push,
+            git::git_restore_push_approval,
+            git::git_plan_create_pull_request,
+            git::git_approve_create_pull_request,
+            git::git_execute_create_pull_request,
+            git::git_restore_create_pull_request_approval,
+            git::git_plan_comment_pull_request,
+            git::git_approve_comment_pull_request,
+            git::git_execute_comment_pull_request,
+            git::git_restore_comment_pull_request_approval,
+            git::git_plan_stage_files,
+            git::git_approve_stage_files,
+            git::git_execute_stage_files,
+            git::git_restore_stage_approval,
+            git::git_plan_commit,
+            git::git_approve_commit,
+            git::git_execute_commit,
+            git::git_restore_commit_approval,
             git::git_diff,
             files::files_search,
             files::files_watch_start,
             files::files_watch_stop,
+            terminal::terminal_plan_create,
+            terminal::terminal_plan_input,
+            terminal::terminal_approve,
             terminal::terminal_create,
             terminal::terminal_input,
             terminal::terminal_resize,
             terminal::terminal_kill,
+            browser::browser_plan_write,
+            browser::browser_approve_write,
             browser::browser_navigate,
             browser::browser_status,
             browser::browser_refresh,
@@ -4426,6 +4646,8 @@ pub fn run() {
             browser::browser_close,
             computer::computer_screenshot,
             computer::computer_list_windows,
+            computer::computer_detect_ui_objects,
+            computer::computer_local_vision_default_model_path,
             computer::computer_wait,
             computer::computer_inspect_ui,
             computer::computer_approve_action,
@@ -4437,12 +4659,14 @@ pub fn run() {
             computer::computer_key_combo,
             computer::computer_scroll,
             computer::computer_invoke_ui,
-            computer::computer_set_ui_value
+            computer::computer_set_ui_value,
+            global_hotkey::computer_set_emergency_hotkey_enabled
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app_handle, event| {
             if let tauri::RunEvent::Exit = event {
+                global_hotkey::stop_global_emergency_hotkey();
                 let _ = database::close_database();
             }
         });

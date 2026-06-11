@@ -90,6 +90,46 @@ describe("parseModelAction", () => {
     expect(result).toEqual({ tool: "computer.screenshot", params: {} });
   });
 
+  it("parses a valid screenshot action with a crop region", () => {
+    const raw = JSON.stringify({
+      observation: "Need to inspect a likely target area",
+      action: {
+        tool: "computer.screenshot",
+        params: {
+          windowHandle: 42,
+          region: { x: 100, y: 120, width: 320, height: 180 },
+          method: "auto",
+        },
+      },
+      target: "Take a cropped look at the candidate region",
+      confidence: "medium",
+    });
+    const result = parseModelAction(raw);
+    expect(result).toEqual({
+      tool: "computer.screenshot",
+      params: {
+        windowHandle: 42,
+        region: { x: 100, y: 120, width: 320, height: 180 },
+        method: "auto",
+      },
+    });
+  });
+
+  it("throws on invalid screenshot crop region dimensions", () => {
+    const raw = JSON.stringify({
+      observation: "Need to inspect a likely target area",
+      action: {
+        tool: "computer.screenshot",
+        params: {
+          region: { x: 100, y: 120, width: 0, height: 180 },
+        },
+      },
+      target: "Take a cropped look at the candidate region",
+      confidence: "medium",
+    });
+    expect(() => parseModelAction(raw)).toThrow("Invalid region");
+  });
+
   it("parses a valid wait action", () => {
     const raw = JSON.stringify({
       observation: "Waiting for animation",
@@ -99,6 +139,17 @@ describe("parseModelAction", () => {
     });
     const result = parseModelAction(raw);
     expect(result).toEqual({ tool: "computer.wait", params: { ms: 1000 } });
+  });
+
+  it("rejects negative wait durations before native dispatch", () => {
+    const raw = JSON.stringify({
+      observation: "Need to wait",
+      action: { tool: "computer.wait", params: { ms: -1 } },
+      target: "Wait for UI to settle",
+      confidence: "medium",
+    });
+
+    expect(() => parseModelAction(raw)).toThrow("expected non-negative number");
   });
 
   it("normalizes common parameter aliases before validation", () => {
@@ -165,6 +216,30 @@ describe("parseModelAction", () => {
     });
     const result = parseModelAction(raw);
     expect(result).toBeNull();
+  });
+
+  it("rejects completion with a non-wait action", () => {
+    const raw = JSON.stringify({
+      observation: "Goal achieved",
+      action: { tool: "computer.click", params: { x: 100, y: 200 } },
+      target: "done",
+      confidence: "high",
+      status: "complete",
+    });
+
+    expect(() => parseModelAction(raw)).toThrow("Completion signal must use computer.wait with ms=0");
+  });
+
+  it("rejects low-confidence completion", () => {
+    const raw = JSON.stringify({
+      observation: "Probably done",
+      action: { tool: "computer.wait", params: { ms: 0 } },
+      target: "done",
+      confidence: "medium",
+      status: "complete",
+    });
+
+    expect(() => parseModelAction(raw)).toThrow("Completion signal requires high confidence");
   });
 
   it("strips markdown code fences", () => {

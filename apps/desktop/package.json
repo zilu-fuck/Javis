@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "corepack pnpm --filter javis-browser-sidecar build && tsc && vite build",
+    "build:bundle": "corepack pnpm --workspace-root local-vision:clean-release-resources && corepack pnpm --workspace-root local-vision:prepare-runtime && corepack pnpm build",
     "preview": "vite preview",
     "test": "vitest run",
     "tauri": "tauri"

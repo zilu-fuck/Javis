@@ -3,9 +3,23 @@ $ErrorActionPreference = "Stop"
 $qaDir = $PSScriptRoot
 $repoRoot = (Resolve-Path (Join-Path $qaDir "..\..\..")).Path
 $exe = Join-Path $repoRoot "apps\desktop\src-tauri\target\release\javis-desktop.exe"
+$outputPath = Join-Path $qaDir "research-live-smoke-qa-output.txt"
+$checks = [System.Collections.Generic.List[object]]::new()
 
 if (!(Test-Path $exe)) {
   throw "Release executable not found. Run pnpm --filter @javis/desktop tauri build first."
+}
+
+function Write-Utf8NoBom($path, $value) {
+  [System.IO.File]::WriteAllText($path, $value, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Add-Check($id, $detail) {
+  $checks.Add([ordered]@{
+    id = $id
+    status = "PASS"
+    detail = $detail
+  }) | Out-Null
 }
 
 Add-Type -AssemblyName System.Drawing
@@ -155,6 +169,7 @@ function Run-LiveSmoke($port, $goal, $provider, $screenshot, $disableGithubCli, 
     Wait-ForText $socket ([ref]$id) $provider $providerWaitSeconds | Out-Null
     Wait-ForText $socket ([ref]$id) "searched sources include URL and excerpt" 45 | Out-Null
     Capture-Window $appProcess.MainWindowHandle (Join-Path $qaDir $screenshot)
+    Add-Check "live-$provider" "live research smoke displayed $provider provider metadata and searched source excerpts"
   }
   finally {
     if ($socket) {
@@ -178,5 +193,14 @@ function Run-LiveSmoke($port, $goal, $provider, $screenshot, $disableGithubCli, 
 
 Run-LiveSmoke 9224 "research" "github-cli" "14-search-live-github-cli-smoke.png" $false 45
 Run-LiveSmoke 9225 "research" "agent-chrome" "15-search-live-agent-chrome-smoke.png" $true 90
+
+$outputLines = @(
+  "# Research Live Smoke QA Output",
+  "",
+  "generatedAt: $((Get-Date).ToUniversalTime().ToString("o"))",
+  "verdict: PASS",
+  ""
+) + @($checks | ForEach-Object { "$($_.id): $($_.status) - $($_.detail)" })
+Write-Utf8NoBom $outputPath ($outputLines -join "`n")
 
 Get-ChildItem $qaDir -Filter "*live-*.png" | Sort-Object Name | Select-Object Name,Length

@@ -10,28 +10,40 @@ import {
   createFileScanTaskRuntime,
   createSharedTaskContext,
   createTaskEventBus,
+  DEFAULT_COMPUTER_USE_CONFIG,
   getAdapter,
   isValidCapabilityTag,
+  normalizePromptLocale,
   parseChineseReviewResult,
 } from "@javis/core";
 import type {
   AgentReActDecision,
+  AgentCapabilityVerificationInput,
   CommanderDagPlan,
+  ComputerUseLoopConfig,
+  GoalDecision,
+  GoalState,
   ReActDecisionRequest,
+  RuntimeExecutionConfig,
+  TaskSnapshot,
 } from "@javis/core";
 import { createDefaultAgentRegistry, demoAgents } from "@javis/core";
 import type { AgentKind, ModelRequirements, ProviderCapabilities } from "@javis/core";
 import type {
   BrowserClickRequest,
+  BrowserClickResult,
   BrowserEvaluateRequest,
+  BrowserEvaluateResult,
   BrowserGetContentRequest,
   BrowserGetContentResult,
   BrowserNavigateRequest,
   BrowserNavigateResult,
   BrowserRunTestRequest,
+  BrowserRunTestResult,
   BrowserScreenshotRequest,
   BrowserScreenshotResult,
   BrowserTypeRequest,
+  BrowserTypeResult,
   BrowserExtractLinksRequest,
   BrowserExtractLinksResult,
   BrowserUploadRequest,
@@ -40,9 +52,12 @@ import type {
   BrowserFollowCandidateLinksResult,
   CodeApplyResult,
   CodeProposedEdit,
+  CodeRepositorySearchResult,
   CodeReviewPreview,
   ComputerClickRequest,
   ComputerClickResult,
+  ComputerDetectUiObjectsRequest,
+  ComputerDetectUiObjectsResult,
   ComputerFileCandidate,
   ComputerFocusWindowRequest,
   ComputerFocusWindowResult,
@@ -73,6 +88,14 @@ import type {
   CommanderPlanResult,
   FileOrganizationExecution,
   FileOrganizationPlan,
+  GitCommitExecutionResult,
+  GitCommitPlan,
+  GitCommentPullRequestExecutionResult,
+  GitCommentPullRequestPlan,
+  GitCreatePullRequestExecutionResult,
+  GitCreatePullRequestPlan,
+  GitStageExecutionResult,
+  GitStagePlan,
   MarkdownDocument,
   PlannedPathOperation,
   ProjectInspection,
@@ -82,6 +105,10 @@ import type {
   WebSourceRequest,
   WebSearchRequest,
   WebSearchResult,
+  TrendHotListResult,
+  MemorySearchRequest,
+  MemorySearchResult,
+  McpCallRequest,
   VerifierCheckRequest,
   VerifierCheckResult,
   VisionAnalyzeResult,
@@ -93,9 +120,17 @@ import type {
   VisionOcrRequest,
   WorkspaceTool,
   WriteTextFileRequest,
+  ToolDescriptor,
 } from "@javis/tools";
-import { initialToolDescriptors } from "@javis/tools";
+import { initialToolDescriptors, isDisabledBrowserWriteToolName } from "@javis/tools";
 import { parseGitStatusFiles } from "./git-status";
+import {
+  createLocalTextSemanticReranker,
+  resolveModuleSpecifierWithFileSearch,
+  searchRepositoryWithFileSearch,
+  traceCallChainWithFileSearch,
+} from "./repo-intelligence-service";
+import { fetchTrendHotList } from "./trending-service";
 import {
   createConfiguredModelProvider,
   createModelProviderFromProfile,
@@ -103,6 +138,7 @@ import {
   type CompletionResult,
   type ModelProvider,
 } from "./model-provider";
+import type { SkillContextSelectionRequest } from "./skill-context";
 import {
   DEFAULT_AGENT_SLOT,
   type ModelConfiguration,
@@ -129,14 +165,108 @@ import {
 import type { WorkspaceDefinition } from "@javis/core";
 import { runComputerUseLoop } from "./computer-use-loop";
 import { preprocessChineseInput, type PreprocessedInput } from "./input-preprocessor";
+import {
+  createBrowserWriteExecutionAuditRecord,
+  createBrowserWriteFailedAuditRecord,
+  createBrowserWritePlanAuditRecord,
+  type BrowserWriteAction,
+  type BrowserWriteExecutionResult,
+  type BrowserWritePlanResult,
+} from "./browser-audit";
+import type { ToolCallAuditRecord } from "./tool-call-audit";
 
-const COMMANDER_PROMPT_TOOL_DESCRIPTORS = initialToolDescriptors.map((descriptor) => ({
-  name: descriptor.name,
-  permissionLevel: descriptor.permissionLevel,
-  summary: descriptor.summary,
-  capabilityTags: descriptor.capabilityTags,
-  ownerAgentKinds: descriptor.ownerAgentKinds,
-}));
+function normalizeAvailableToolDescriptors(
+  toolDescriptors: readonly ToolDescriptor[] | undefined,
+): ToolDescriptor[] {
+  const source = toolDescriptors ?? initialToolDescriptors;
+  const seen = new Set<string>();
+  const normalized: ToolDescriptor[] = [];
+  for (const descriptor of source) {
+    if (seen.has(descriptor.name) || isDisabledBrowserWriteToolName(descriptor.name)) {
+      continue;
+    }
+    seen.add(descriptor.name);
+    normalized.push(descriptor);
+  }
+  return normalized;
+}
+
+function commanderPromptToolDescriptors(toolDescriptors: readonly ToolDescriptor[] | undefined) {
+  return limitMcpPromptToolDescriptors(normalizeAvailableToolDescriptors(toolDescriptors)).map((descriptor) => ({
+    name: descriptor.name,
+    permissionLevel: descriptor.permissionLevel,
+    summary: descriptor.summary,
+    capabilityTags: descriptor.capabilityTags,
+    ownerAgentKinds: descriptor.ownerAgentKinds,
+  }));
+}
+
+const MAX_MCP_PROMPT_SUBTOOLS = 80;
+const MAX_MCP_PROMPT_SUBTOOLS_PER_SERVER = 12;
+
+function limitMcpPromptToolDescriptors(toolDescriptors: readonly ToolDescriptor[]): ToolDescriptor[] {
+  const output: ToolDescriptor[] = [];
+  const mcpSubtools: ToolDescriptor[] = [];
+  for (const descriptor of toolDescriptors) {
+    if (isMcpPromptSubtoolDescriptor(descriptor)) {
+      mcpSubtools.push(descriptor);
+    } else {
+      output.push(descriptor);
+    }
+  }
+  const perServerCount = new Map<string, number>();
+  const selectedSubtools = mcpSubtools
+    .sort(compareMcpPromptToolDescriptors)
+    .filter((descriptor) => {
+      const serverKey = mcpPromptServerKey(descriptor);
+      const count = perServerCount.get(serverKey) ?? 0;
+      if (count >= MAX_MCP_PROMPT_SUBTOOLS_PER_SERVER) return false;
+      perServerCount.set(serverKey, count + 1);
+      return true;
+    })
+    .slice(0, MAX_MCP_PROMPT_SUBTOOLS);
+  return [...output, ...selectedSubtools];
+}
+
+function isMcpPromptSubtoolDescriptor(descriptor: ToolDescriptor): boolean {
+  return descriptor.metadata?.mcpAction === "callTool" || /^mcp\.[^.]+\.tool\.[^.]+$/u.test(descriptor.name);
+}
+
+function mcpPromptServerKey(descriptor: ToolDescriptor): string {
+  const metadataKey = `${descriptor.metadata?.mcpSource ?? ""}:${descriptor.metadata?.mcpServerName ?? ""}`;
+  if (metadataKey !== ":") {
+    return metadataKey;
+  }
+  const match = /^mcp\.([^.]+)\.tool\.[^.]+$/u.exec(descriptor.name);
+  return match?.[1] ?? descriptor.name;
+}
+
+function compareMcpPromptToolDescriptors(a: ToolDescriptor, b: ToolDescriptor): number {
+  return mcpPromptToolDescriptorScore(b) - mcpPromptToolDescriptorScore(a)
+    || a.name.localeCompare(b.name);
+}
+
+function mcpPromptToolDescriptorScore(descriptor: ToolDescriptor): number {
+  const tags = new Set(descriptor.capabilityTags);
+  let score = 0;
+  if (tags.has("local_search")) score += 5;
+  if (tags.has("web_fetch")) score += 4;
+  if (tags.has("git_inspect")) score += 3;
+  const summary = descriptor.summary.toLowerCase();
+  if (summary.includes("required") || summary.includes("*:")) score += 2;
+  return score;
+}
+
+function allowedToolNamesForAgent(agentKind: string, toolDescriptors: readonly ToolDescriptor[]) {
+  const agent = demoAgents.find((candidate) => candidate.kind === agentKind);
+  const allowed = new Set(agent?.allowedToolNames ?? []);
+  for (const descriptor of toolDescriptors) {
+    if (descriptor.ownerAgentKinds.includes(agentKind)) {
+      allowed.add(descriptor.name);
+    }
+  }
+  return [...allowed];
+}
 
 const WORKSPACE_SCAFFOLD_SCHEMA_JSON = JSON.stringify({
   id: "kebab-case-id",
@@ -214,7 +344,118 @@ interface CreateJavisRuntimeOptions {
   modelSettings: ModelSettings;
   getModelConfiguration?: () => ModelConfiguration | undefined;
   getScheduledTasksRepository?: () => ScheduledTasksRepository | null;
+  getComputerUseConfig?: () => ComputerUseLoopOptionsConfig | undefined;
+  getAvailableToolDescriptors?: () => ToolDescriptor[] | undefined;
+  getRuntimePreferences?: () => {
+    contextStrategy?: RuntimeExecutionConfig["contextStrategy"];
+    agentMaxRoundsPreset?: "4" | "8" | "12" | "custom";
+    agentMaxRoundsCustom?: number;
+    taskTimeoutPreset?: "standard" | "long" | "custom";
+    taskTimeoutCustomMs?: number;
+    failureRecoveryPolicy?: "replan" | "stop";
+    userWaitTimeoutPreset?: "standard" | "long" | "custom";
+    userWaitTimeoutCustomMs?: number;
+  };
+  getCapabilityVerification?: () => AgentCapabilityVerificationInput | undefined;
+  isAgentMemoryEnabled?: () => boolean;
+  getEnabledSkillContext?: (request: SkillContextSelectionRequest) => Promise<string> | string;
+  searchAgentMemory?: (request: MemorySearchRequest) => Promise<MemorySearchResult[]>;
+  callMcpTool?: (request: McpCallRequest) => Promise<unknown>;
+  recordToolCallAudit?: (record: ToolCallAuditRecord) => void;
+  onWorkspaceToolActivity?: (activity: RuntimeWorkspaceToolActivity) => void;
+  requestBrowserWriteApproval?: (request: BrowserWriteApprovalRequest) => Promise<BrowserWriteApprovalDecision>;
+  buildAgentMemoryPromptContext?: (request: {
+    userGoal: string;
+    taskId: string;
+    agentKind?: string;
+  }) => Promise<string>;
 }
+
+export type RuntimeWorkspaceToolAction = "files" | "browser" | "review" | "terminal";
+
+export interface RuntimeWorkspaceToolActivity {
+  tool: RuntimeWorkspaceToolAction;
+  sourceToolName: string;
+  taskId: string;
+  workspacePath: string;
+  recordedAt: string;
+}
+
+export type BrowserWriteApprovalDecision = "approved" | "denied";
+
+export interface BrowserWriteApprovalRequest {
+  approvalId: string;
+  taskId: string;
+  sessionId: string;
+  toolName: string;
+  action: BrowserWriteAction;
+  previewHash: string;
+  selector?: string;
+  byteCount?: number;
+  scriptByteCount?: number;
+}
+
+type ComputerUseLoopOptionsConfig = Partial<Omit<ComputerUseLoopConfig, "timeouts" | "localVision">> & {
+  enabled?: boolean;
+  timeouts?: Partial<ComputerUseLoopConfig["timeouts"]>;
+  localVision?: Partial<ComputerUseLoopConfig["localVision"]>;
+};
+
+export const COMPUTER_USE_LOCAL_VISION_STORAGE_KEY = "javis.computerUse.localVision.v1";
+export const COMPUTER_USE_BUNDLED_LOCAL_VISION_MODEL_PATH = "models/local-vision/yolo26n-ui.onnx";
+
+export type ComputerUseLocalVisionSettings = {
+  mode: "off" | "passive" | "prompt_hint";
+  modelPath: string;
+  runtime: ComputerUseLoopConfig["localVision"]["runtime"];
+  runtimeAdapterPath: string;
+  imgsz: number;
+  timeoutMs: number;
+  maxDetections: number;
+  minConfidence: number;
+  iouThreshold: number;
+  promptTopK: number;
+  disableAfterConsecutiveTimeouts: number;
+  disableAfterConsecutiveErrors: number;
+  disableAfterConsecutiveActionFailures: number;
+  reuseWorker: boolean;
+};
+
+export type ComputerUseSettings = {
+  enabled: boolean;
+  maxStepsPerTask: number;
+  mouseSpeed: ComputerUseLoopConfig["mouseSpeed"];
+  mouseDurationMs: number;
+  typeDelayMs: number;
+  deniedWindowPatterns: string[];
+};
+
+export const DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS: ComputerUseLocalVisionSettings = {
+  mode: "off",
+  modelPath: COMPUTER_USE_BUNDLED_LOCAL_VISION_MODEL_PATH,
+  runtime: "auto",
+  runtimeAdapterPath: "",
+  imgsz: DEFAULT_COMPUTER_USE_CONFIG.localVision.imgsz,
+  timeoutMs: DEFAULT_COMPUTER_USE_CONFIG.localVision.timeoutMs,
+  maxDetections: DEFAULT_COMPUTER_USE_CONFIG.localVision.maxDetections,
+  minConfidence: DEFAULT_COMPUTER_USE_CONFIG.localVision.minConfidence,
+  iouThreshold: DEFAULT_COMPUTER_USE_CONFIG.localVision.iouThreshold,
+  promptTopK: DEFAULT_COMPUTER_USE_CONFIG.localVision.promptTopK,
+  disableAfterConsecutiveTimeouts: DEFAULT_COMPUTER_USE_CONFIG.localVision.disableAfterConsecutiveTimeouts,
+  disableAfterConsecutiveErrors: DEFAULT_COMPUTER_USE_CONFIG.localVision.disableAfterConsecutiveErrors,
+  disableAfterConsecutiveActionFailures: DEFAULT_COMPUTER_USE_CONFIG.localVision.disableAfterConsecutiveActionFailures,
+  reuseWorker: true,
+};
+export const DEFAULT_COMPUTER_USE_SETTINGS: ComputerUseSettings = {
+  enabled: false,
+  maxStepsPerTask: DEFAULT_COMPUTER_USE_CONFIG.maxSteps,
+  mouseSpeed: DEFAULT_COMPUTER_USE_CONFIG.mouseSpeed,
+  mouseDurationMs: DEFAULT_COMPUTER_USE_CONFIG.mouseDurationMs,
+  typeDelayMs: DEFAULT_COMPUTER_USE_CONFIG.typeDelayMs,
+  deniedWindowPatterns: DEFAULT_COMPUTER_USE_CONFIG.deniedWindowPatterns,
+};
+const LOCAL_VISION_PATH_INPUT_MAX_LENGTH = 1_024;
+const LOCAL_VISION_IMAGE_DATA_URL_PATTERN = /data:image(?:\/|\\\/)[a-z0-9.+-]+;base64,/i;
 
 /**
  * Resolve the ModelProvider for a given agentKind based on ModelConfiguration.
@@ -411,6 +652,7 @@ const AGENT_PROMPT_CONTEXT_KINDS = new Set<AgentKind>([
   "file",
   "shell",
   "browser",
+  "computer",
   "scheduler",
   "research",
   "code",
@@ -423,25 +665,595 @@ function withAgentPromptContext(
   provider: ModelProvider,
   agentKind: string,
   getWorkspacePath: () => string,
+  getMemoryContext?: (agentKind: string, options?: CompletionOptions) => Promise<string>,
+  getSkillContext?: (agentKind: string, options?: CompletionOptions) => Promise<string> | string,
 ): ModelProvider {
   if (!AGENT_PROMPT_CONTEXT_KINDS.has(agentKind as AgentKind)) {
     return provider;
   }
   const kind = agentKind as AgentKind;
-  const withContext = (options?: CompletionOptions): CompletionOptions => ({
-    ...options,
-    agentKind: options?.agentKind ?? kind,
-    workspacePath: options?.workspacePath ?? getWorkspacePath(),
-  });
+  const withContext = async (prompt: string, options?: CompletionOptions): Promise<CompletionOptions> => {
+    const baseOptions: CompletionOptions = {
+      ...options,
+      agentKind: options?.agentKind ?? kind,
+      workspacePath: options?.workspacePath ?? getWorkspacePath(),
+    };
+    let nextOptions = baseOptions;
+    if (!baseOptions.skillContext && getSkillContext) {
+      if (!baseOptions.skipSkillContext) {
+        const trimmedSkillContext = (await getSkillContext(kind, baseOptions)).trim();
+        if (trimmedSkillContext) {
+          nextOptions = { ...nextOptions, skillContext: trimmedSkillContext };
+        }
+      }
+    }
+    if (
+      baseOptions.skipAgentMemory ||
+      baseOptions.memoryContext ||
+      prompt.includes("Local Agent memory context:") ||
+      prompt.includes("Commander task lessons and memory:") ||
+      prompt.includes("Commander 任务经验和记忆:") ||
+      !getMemoryContext
+    ) {
+      return nextOptions;
+    }
+    const trimmedMemoryContext = (await getMemoryContext(kind, nextOptions)).trim();
+    return trimmedMemoryContext ? { ...nextOptions, memoryContext: trimmedMemoryContext } : nextOptions;
+  };
 
   return {
     ...provider,
     complete(prompt, options) {
-      return provider.complete(prompt, withContext(options));
+      return withContext(prompt, options)
+        .then((resolvedOptions) => provider.complete(prompt, resolvedOptions));
     },
     stream(prompt, options) {
-      return provider.stream(prompt, withContext(options));
+      return (async function* streamWithResolvedContext() {
+        yield* provider.stream(prompt, await withContext(prompt, options));
+      })();
     },
+  };
+}
+
+export function loadComputerUseConfigFromStorage(
+  storage: Pick<Storage, "getItem">,
+): ComputerUseLoopOptionsConfig | undefined {
+  const raw = storage.getItem(COMPUTER_USE_LOCAL_VISION_STORAGE_KEY);
+  if (!raw) return undefined;
+  try {
+    return sanitizeStoredComputerUseConfig(JSON.parse(raw));
+  } catch {
+    return undefined;
+  }
+}
+
+export function loadComputerUseSettingsFromStorage(
+  storage: Pick<Storage, "getItem">,
+): ComputerUseSettings {
+  const raw = storage.getItem(COMPUTER_USE_LOCAL_VISION_STORAGE_KEY);
+  if (!raw) {
+    return DEFAULT_COMPUTER_USE_SETTINGS;
+  }
+  try {
+    const value = JSON.parse(raw);
+    if (!value || typeof value !== "object") {
+      return DEFAULT_COMPUTER_USE_SETTINGS;
+    }
+    const candidate = value as Record<string, unknown>;
+    return {
+      enabled: candidate.enabled === true,
+      maxStepsPerTask: clampInteger(
+        candidate.maxSteps,
+        1,
+        60,
+        DEFAULT_COMPUTER_USE_SETTINGS.maxStepsPerTask,
+      ),
+      mouseSpeed: sanitizeComputerUseMouseSpeed(candidate.mouseSpeed),
+      mouseDurationMs: clampInteger(
+        candidate.mouseDurationMs,
+        0,
+        1_000,
+        DEFAULT_COMPUTER_USE_SETTINGS.mouseDurationMs,
+      ),
+      typeDelayMs: clampInteger(
+        candidate.typeDelayMs,
+        0,
+        500,
+        DEFAULT_COMPUTER_USE_SETTINGS.typeDelayMs,
+      ),
+      deniedWindowPatterns: sanitizeDeniedWindowPatterns(candidate.deniedWindowPatterns),
+    };
+  } catch {
+    return DEFAULT_COMPUTER_USE_SETTINGS;
+  }
+}
+
+export function saveComputerUseSettingsToStorage(
+  storage: Pick<Storage, "getItem" | "setItem">,
+  settings: ComputerUseSettings,
+): ComputerUseSettings {
+  const savedSettings: ComputerUseSettings = {
+    enabled: settings.enabled === true,
+    maxStepsPerTask: clampInteger(
+      settings.maxStepsPerTask,
+      1,
+      60,
+      DEFAULT_COMPUTER_USE_SETTINGS.maxStepsPerTask,
+    ),
+    mouseSpeed: sanitizeComputerUseMouseSpeed(settings.mouseSpeed),
+    mouseDurationMs: clampInteger(
+      settings.mouseDurationMs,
+      0,
+      1_000,
+      DEFAULT_COMPUTER_USE_SETTINGS.mouseDurationMs,
+    ),
+    typeDelayMs: clampInteger(
+      settings.typeDelayMs,
+      0,
+      500,
+      DEFAULT_COMPUTER_USE_SETTINGS.typeDelayMs,
+    ),
+    deniedWindowPatterns: sanitizeDeniedWindowPatterns(settings.deniedWindowPatterns),
+  };
+  const existingConfig = loadComputerUseConfigFromStorage(storage) ?? {};
+  const storedConfig: ComputerUseLoopOptionsConfig = {
+    ...existingConfig,
+    enabled: savedSettings.enabled,
+    maxSteps: savedSettings.maxStepsPerTask,
+    mouseSpeed: savedSettings.mouseSpeed,
+    mouseDurationMs: savedSettings.mouseDurationMs,
+    typeDelayMs: savedSettings.typeDelayMs,
+    deniedWindowPatterns: savedSettings.deniedWindowPatterns,
+  };
+  storage.setItem(COMPUTER_USE_LOCAL_VISION_STORAGE_KEY, JSON.stringify(storedConfig));
+  return savedSettings;
+}
+
+export function loadComputerUseLocalVisionSettingsFromStorage(
+  storage: Pick<Storage, "getItem">,
+): ComputerUseLocalVisionSettings {
+  const config = loadStoredLocalVisionSettingsConfig(storage);
+  return {
+    mode: sanitizeLocalVisionSettingsMode(config?.mode),
+    modelPath: config?.modelPath ?? DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.modelPath,
+    runtime: config?.runtime ?? DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.runtime,
+    runtimeAdapterPath: config?.runtimeAdapterPath ?? "",
+    imgsz: config?.imgsz ?? DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.imgsz,
+    timeoutMs: config?.timeoutMs ?? DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.timeoutMs,
+    maxDetections: config?.maxDetections ?? DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.maxDetections,
+    minConfidence: config?.minConfidence ?? DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.minConfidence,
+    iouThreshold: config?.iouThreshold ?? DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.iouThreshold,
+    promptTopK: config?.promptTopK ?? DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.promptTopK,
+    disableAfterConsecutiveTimeouts:
+      config?.disableAfterConsecutiveTimeouts ?? DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.disableAfterConsecutiveTimeouts,
+    disableAfterConsecutiveErrors:
+      config?.disableAfterConsecutiveErrors ?? DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.disableAfterConsecutiveErrors,
+    disableAfterConsecutiveActionFailures:
+      config?.disableAfterConsecutiveActionFailures ??
+      DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.disableAfterConsecutiveActionFailures,
+    reuseWorker: typeof config?.reuseWorker === "boolean"
+      ? config.reuseWorker
+      : DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.reuseWorker,
+  };
+}
+
+export function saveComputerUseLocalVisionSettingsToStorage(
+  storage: Pick<Storage, "getItem" | "setItem">,
+  settings: ComputerUseLocalVisionSettings,
+): ComputerUseLocalVisionSettings {
+  const mode: ComputerUseLocalVisionSettings["mode"] =
+    settings.mode === "passive" || settings.mode === "prompt_hint" ? settings.mode : "off";
+  const modelPath = sanitizeLocalVisionPathInput(settings.modelPath);
+  const runtime = sanitizeLocalVisionRuntime(settings.runtime);
+  const runtimeAdapterPath = sanitizeLocalVisionPathInput(settings.runtimeAdapterPath);
+  const imgsz = clampInteger(settings.imgsz, 320, 1280, DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.imgsz);
+  const timeoutMs = clampInteger(settings.timeoutMs, 20, 2_000, DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.timeoutMs);
+  const maxDetections = clampInteger(settings.maxDetections, 1, 100, DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.maxDetections);
+  const minConfidence = clampNumber(settings.minConfidence, 0, 1, DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.minConfidence);
+  const iouThreshold = clampNumber(settings.iouThreshold, 0, 1, DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.iouThreshold);
+  const promptTopK = clampInteger(settings.promptTopK, 0, 20, DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.promptTopK);
+  const disableAfterConsecutiveTimeouts = clampInteger(
+    settings.disableAfterConsecutiveTimeouts,
+    0,
+    10,
+    DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.disableAfterConsecutiveTimeouts,
+  );
+  const disableAfterConsecutiveErrors = clampInteger(
+    settings.disableAfterConsecutiveErrors,
+    0,
+    10,
+    DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.disableAfterConsecutiveErrors,
+  );
+  const disableAfterConsecutiveActionFailures = clampInteger(
+    settings.disableAfterConsecutiveActionFailures,
+    0,
+    10,
+    DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.disableAfterConsecutiveActionFailures,
+  );
+  const reuseWorker = settings.reuseWorker === true;
+  const existingConfig = loadComputerUseConfigFromStorage(storage) ?? {};
+  const existingLocalVision = existingConfig.localVision ?? {};
+  const runtimeConfig = sanitizeStoredComputerUseConfig({
+    ...existingConfig,
+    localVision: {
+      ...existingLocalVision,
+      enabled: mode !== "off" && Boolean(modelPath),
+      mode,
+      modelPath,
+      runtime,
+      runtimeAdapterPath,
+      imgsz,
+      timeoutMs,
+      maxDetections,
+      minConfidence,
+      iouThreshold,
+      promptTopK,
+      disableAfterConsecutiveTimeouts,
+      disableAfterConsecutiveErrors,
+      disableAfterConsecutiveActionFailures,
+      reuseWorker,
+    },
+  }) ?? { localVision: { enabled: false, mode: "off" as const } };
+  const storedLocalVision: NonNullable<ComputerUseLoopOptionsConfig["localVision"]> = {
+    ...runtimeConfig.localVision,
+    enabled: mode !== "off" && Boolean(modelPath),
+    mode,
+  };
+  const storedConfig: ComputerUseLoopOptionsConfig = {
+    ...existingConfig,
+    localVision: storedLocalVision,
+  };
+
+  storage.setItem(COMPUTER_USE_LOCAL_VISION_STORAGE_KEY, JSON.stringify(storedConfig));
+  return {
+    mode,
+    modelPath: storedConfig.localVision?.modelPath ?? "",
+    runtime: storedConfig.localVision?.runtime ?? DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.runtime,
+    runtimeAdapterPath: storedConfig.localVision?.runtimeAdapterPath ?? "",
+    imgsz: storedConfig.localVision?.imgsz ?? DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.imgsz,
+    timeoutMs: storedConfig.localVision?.timeoutMs ?? DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.timeoutMs,
+    maxDetections: storedConfig.localVision?.maxDetections ?? DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.maxDetections,
+    minConfidence: storedConfig.localVision?.minConfidence ?? DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.minConfidence,
+    iouThreshold: storedConfig.localVision?.iouThreshold ?? DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.iouThreshold,
+    promptTopK: storedConfig.localVision?.promptTopK ?? DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.promptTopK,
+    disableAfterConsecutiveTimeouts:
+      storedConfig.localVision?.disableAfterConsecutiveTimeouts ??
+      DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.disableAfterConsecutiveTimeouts,
+    disableAfterConsecutiveErrors:
+      storedConfig.localVision?.disableAfterConsecutiveErrors ??
+      DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.disableAfterConsecutiveErrors,
+    disableAfterConsecutiveActionFailures:
+      storedConfig.localVision?.disableAfterConsecutiveActionFailures ??
+      DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.disableAfterConsecutiveActionFailures,
+    reuseWorker: storedConfig.localVision?.reuseWorker === true,
+  };
+}
+
+function loadStoredLocalVisionSettingsConfig(
+  storage: Pick<Storage, "getItem">,
+): Partial<ComputerUseLocalVisionSettings> | undefined {
+  const raw = storage.getItem(COMPUTER_USE_LOCAL_VISION_STORAGE_KEY);
+  if (!raw) return undefined;
+  try {
+    const value = JSON.parse(raw) as { localVision?: unknown };
+    if (!value || typeof value !== "object" || !value.localVision || typeof value.localVision !== "object") {
+      return undefined;
+    }
+    const candidate = value.localVision as Record<string, unknown>;
+    return {
+      mode: sanitizeLocalVisionSettingsMode(candidate.mode),
+      modelPath: typeof candidate.modelPath === "string" ? sanitizeLocalVisionPathInput(candidate.modelPath) : "",
+      runtime: sanitizeLocalVisionRuntime(candidate.runtime),
+      runtimeAdapterPath: typeof candidate.runtimeAdapterPath === "string"
+        ? sanitizeLocalVisionPathInput(candidate.runtimeAdapterPath)
+        : "",
+      imgsz: clampInteger(candidate.imgsz, 320, 1280, DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.imgsz),
+      timeoutMs: clampInteger(candidate.timeoutMs, 20, 2_000, DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.timeoutMs),
+      maxDetections: clampInteger(candidate.maxDetections, 1, 100, DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.maxDetections),
+      minConfidence: clampNumber(candidate.minConfidence, 0, 1, DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.minConfidence),
+      iouThreshold: clampNumber(candidate.iouThreshold, 0, 1, DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.iouThreshold),
+      promptTopK: clampInteger(candidate.promptTopK, 0, 20, DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.promptTopK),
+      disableAfterConsecutiveTimeouts: clampInteger(
+        candidate.disableAfterConsecutiveTimeouts,
+        0,
+        10,
+        DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.disableAfterConsecutiveTimeouts,
+      ),
+      disableAfterConsecutiveErrors: clampInteger(
+        candidate.disableAfterConsecutiveErrors,
+        0,
+        10,
+        DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.disableAfterConsecutiveErrors,
+      ),
+      disableAfterConsecutiveActionFailures: clampInteger(
+        candidate.disableAfterConsecutiveActionFailures,
+        0,
+        10,
+        DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.disableAfterConsecutiveActionFailures,
+      ),
+      reuseWorker: sanitizeLocalVisionReuseWorker(candidate.reuseWorker),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function sanitizeLocalVisionSettingsMode(value: unknown): ComputerUseLocalVisionSettings["mode"] {
+  return value === "passive" || value === "prompt_hint" ? value : "off";
+}
+
+function sanitizeStoredComputerUseConfig(value: unknown): ComputerUseLoopOptionsConfig | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const candidate = value as {
+    enabled?: unknown;
+    maxSteps?: unknown;
+    mouseSpeed?: unknown;
+    mouseDurationMs?: unknown;
+    typeDelayMs?: unknown;
+    deniedWindowPatterns?: unknown;
+    localVision?: unknown;
+  };
+  const localVision = sanitizeStoredLocalVisionConfig(candidate.localVision);
+  const hasEnabled = hasOwn(candidate as Record<string, unknown>, "enabled");
+  const hasMaxSteps = hasOwn(candidate as Record<string, unknown>, "maxSteps");
+  const hasMouseSpeed = hasOwn(candidate as Record<string, unknown>, "mouseSpeed");
+  const hasMouseDurationMs = hasOwn(candidate as Record<string, unknown>, "mouseDurationMs");
+  const hasTypeDelayMs = hasOwn(candidate as Record<string, unknown>, "typeDelayMs");
+  const hasDeniedWindowPatterns = hasOwn(candidate as Record<string, unknown>, "deniedWindowPatterns");
+  const enabled = hasEnabled ? candidate.enabled === true : undefined;
+  const maxSteps = hasMaxSteps
+    ? clampInteger(candidate.maxSteps, 1, 60, DEFAULT_COMPUTER_USE_CONFIG.maxSteps)
+    : undefined;
+  const mouseSpeed = hasMouseSpeed ? sanitizeComputerUseMouseSpeed(candidate.mouseSpeed) : undefined;
+  const mouseDurationMs = hasMouseDurationMs
+    ? clampInteger(candidate.mouseDurationMs, 0, 1_000, DEFAULT_COMPUTER_USE_CONFIG.mouseDurationMs)
+    : undefined;
+  const typeDelayMs = hasTypeDelayMs
+    ? clampInteger(candidate.typeDelayMs, 0, 500, DEFAULT_COMPUTER_USE_CONFIG.typeDelayMs)
+    : undefined;
+  const deniedWindowPatterns = hasDeniedWindowPatterns
+    ? sanitizeDeniedWindowPatterns(candidate.deniedWindowPatterns)
+    : undefined;
+  if (
+    !localVision &&
+    enabled === undefined &&
+    maxSteps === undefined &&
+    mouseSpeed === undefined &&
+    mouseDurationMs === undefined &&
+    typeDelayMs === undefined &&
+    deniedWindowPatterns === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    ...(enabled === undefined ? {} : { enabled }),
+    ...(maxSteps === undefined ? {} : { maxSteps }),
+    ...(mouseSpeed === undefined ? {} : { mouseSpeed }),
+    ...(mouseDurationMs === undefined ? {} : { mouseDurationMs }),
+    ...(typeDelayMs === undefined ? {} : { typeDelayMs }),
+    ...(deniedWindowPatterns === undefined ? {} : { deniedWindowPatterns }),
+    ...(localVision ? { localVision } : {}),
+  };
+}
+
+function sanitizeComputerUseMouseSpeed(value: unknown): ComputerUseLoopConfig["mouseSpeed"] {
+  return value === "linear" ? "linear" : "instant";
+}
+
+function sanitizeDeniedWindowPatterns(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const output: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const normalized = item.replace(/[\u0000-\u001f\u007f]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 120);
+    const key = normalized.toLowerCase();
+    if (!normalized || seen.has(key)) continue;
+    seen.add(key);
+    output.push(normalized);
+    if (output.length >= 32) break;
+  }
+  return output;
+}
+
+function sanitizeStoredLocalVisionConfig(value: unknown): ComputerUseLoopOptionsConfig["localVision"] | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const candidate = value as Record<string, unknown>;
+  const enabled = candidate.enabled === true;
+  const mode = typeof candidate.mode === "string" ? candidate.mode : undefined;
+  const modelPath = typeof candidate.modelPath === "string" ? sanitizeLocalVisionPathInput(candidate.modelPath) : "";
+  const runtimeAdapterPath = typeof candidate.runtimeAdapterPath === "string" ? sanitizeLocalVisionPathInput(candidate.runtimeAdapterPath) : "";
+  if (!enabled || !modelPath || (mode !== "passive" && mode !== "prompt_hint")) {
+    return {
+      enabled: false,
+      mode: "off",
+      ...(modelPath ? { modelPath } : {}),
+      ...(runtimeAdapterPath ? { runtimeAdapterPath } : {}),
+      ...sanitizeStoredLocalVisionProvidedTuning(candidate),
+    };
+  }
+  return {
+    enabled: true,
+    mode,
+    modelPath: modelPath || undefined,
+    runtimeAdapterPath: runtimeAdapterPath || undefined,
+    reuseWorker: sanitizeLocalVisionReuseWorker(candidate.reuseWorker),
+    ...sanitizeStoredLocalVisionTuning(candidate),
+  };
+}
+
+function sanitizeLocalVisionReuseWorker(value: unknown): boolean {
+  return value === false ? false : DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS.reuseWorker;
+}
+
+function sanitizeStoredLocalVisionTuning(
+  candidate: Record<string, unknown>,
+): Required<Pick<
+  NonNullable<ComputerUseLoopOptionsConfig["localVision"]>,
+  | "runtime"
+  | "imgsz"
+  | "timeoutMs"
+  | "maxDetections"
+  | "promptTopK"
+  | "minConfidence"
+  | "iouThreshold"
+  | "disableAfterConsecutiveTimeouts"
+  | "disableAfterConsecutiveErrors"
+  | "disableAfterConsecutiveActionFailures"
+>> & Pick<NonNullable<ComputerUseLoopOptionsConfig["localVision"]>, "labelMap"> {
+  const labelMap = sanitizeLocalVisionLabelMap(candidate.labelMap);
+  return {
+    runtime: sanitizeLocalVisionRuntime(candidate.runtime),
+    imgsz: clampInteger(candidate.imgsz, 320, 1280, DEFAULT_COMPUTER_USE_CONFIG.localVision.imgsz),
+    timeoutMs: clampInteger(candidate.timeoutMs, 20, 2_000, DEFAULT_COMPUTER_USE_CONFIG.localVision.timeoutMs),
+    maxDetections: clampInteger(candidate.maxDetections, 1, 100, DEFAULT_COMPUTER_USE_CONFIG.localVision.maxDetections),
+    promptTopK: clampInteger(candidate.promptTopK, 0, 20, DEFAULT_COMPUTER_USE_CONFIG.localVision.promptTopK),
+    minConfidence: clampNumber(candidate.minConfidence, 0, 1, DEFAULT_COMPUTER_USE_CONFIG.localVision.minConfidence),
+    iouThreshold: normalizeIouThreshold(candidate.iouThreshold),
+    ...(labelMap ? { labelMap } : {}),
+    disableAfterConsecutiveTimeouts: clampInteger(
+      candidate.disableAfterConsecutiveTimeouts,
+      0,
+      10,
+      DEFAULT_COMPUTER_USE_CONFIG.localVision.disableAfterConsecutiveTimeouts,
+    ),
+    disableAfterConsecutiveErrors: clampInteger(
+      candidate.disableAfterConsecutiveErrors,
+      0,
+      10,
+      DEFAULT_COMPUTER_USE_CONFIG.localVision.disableAfterConsecutiveErrors,
+    ),
+    disableAfterConsecutiveActionFailures: clampInteger(
+      candidate.disableAfterConsecutiveActionFailures,
+      0,
+      10,
+      DEFAULT_COMPUTER_USE_CONFIG.localVision.disableAfterConsecutiveActionFailures,
+    ),
+  };
+}
+
+function sanitizeStoredLocalVisionProvidedTuning(
+  candidate: Record<string, unknown>,
+): Partial<
+  ReturnType<typeof sanitizeStoredLocalVisionTuning>
+  & Pick<NonNullable<ComputerUseLoopOptionsConfig["localVision"]>, "reuseWorker">
+> {
+  const tuning = sanitizeStoredLocalVisionTuning(candidate);
+  const output: Partial<
+    ReturnType<typeof sanitizeStoredLocalVisionTuning>
+    & Pick<NonNullable<ComputerUseLoopOptionsConfig["localVision"]>, "reuseWorker">
+  > = {};
+  if (hasOwn(candidate, "runtime") && isSupportedLocalVisionRuntime(candidate.runtime)) {
+    output.runtime = tuning.runtime;
+  }
+  if (hasOwn(candidate, "reuseWorker")) output.reuseWorker = candidate.reuseWorker === true;
+  if (hasOwn(candidate, "imgsz")) output.imgsz = tuning.imgsz;
+  if (hasOwn(candidate, "timeoutMs")) output.timeoutMs = tuning.timeoutMs;
+  if (hasOwn(candidate, "maxDetections")) output.maxDetections = tuning.maxDetections;
+  if (hasOwn(candidate, "promptTopK")) output.promptTopK = tuning.promptTopK;
+  if (hasOwn(candidate, "minConfidence")) output.minConfidence = tuning.minConfidence;
+  if (hasOwn(candidate, "iouThreshold")) output.iouThreshold = tuning.iouThreshold;
+  if (hasOwn(candidate, "labelMap") && tuning.labelMap) output.labelMap = tuning.labelMap;
+  if (hasOwn(candidate, "disableAfterConsecutiveTimeouts")) {
+    output.disableAfterConsecutiveTimeouts = tuning.disableAfterConsecutiveTimeouts;
+  }
+  if (hasOwn(candidate, "disableAfterConsecutiveErrors")) {
+    output.disableAfterConsecutiveErrors = tuning.disableAfterConsecutiveErrors;
+  }
+  if (hasOwn(candidate, "disableAfterConsecutiveActionFailures")) {
+    output.disableAfterConsecutiveActionFailures = tuning.disableAfterConsecutiveActionFailures;
+  }
+  return output;
+}
+
+function sanitizeLocalVisionRuntime(value: unknown): ComputerUseLoopConfig["localVision"]["runtime"] {
+  return isSupportedLocalVisionRuntime(value) ? value : "auto";
+}
+
+function isSupportedLocalVisionRuntime(value: unknown): value is ComputerUseLoopConfig["localVision"]["runtime"] {
+  return value === "auto" || value === "onnxruntime" || value === "openvino" || value === "tensorrt";
+}
+
+function normalizeIouThreshold(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1
+    ? value
+    : DEFAULT_COMPUTER_USE_CONFIG.localVision.iouThreshold;
+}
+
+function sanitizeLocalVisionLabelMap(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const output: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(value).slice(0, 256)) {
+    if (typeof entry !== "string") continue;
+    const normalizedKey = sanitizeLocalVisionLabelMapText(key, 32);
+    const normalizedValue = sanitizeLocalVisionLabelMapText(entry, 80);
+    if (normalizedKey && normalizedValue) {
+      output[normalizedKey] = normalizedValue;
+    }
+  }
+  return Object.keys(output).length > 0 ? output : undefined;
+}
+
+function sanitizeLocalVisionLabelMapText(value: string, maxLength: number): string {
+  return value.trim().replace(/data:image(?:\/|\\\/)[a-z0-9.+-]+;base64,[a-z0-9+/=_-]+/gi, "[redacted:image data URL]").slice(0, maxLength);
+}
+
+function sanitizeLocalVisionPathInput(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed || LOCAL_VISION_IMAGE_DATA_URL_PATTERN.test(trimmed)) {
+    return "";
+  }
+  return trimmed.slice(0, LOCAL_VISION_PATH_INPUT_MAX_LENGTH);
+}
+
+function hasOwn(object: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
+
+function clampInteger(value: unknown, min: number, max: number, fallback: number): number {
+  const numberValue = typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : fallback;
+  return Math.min(max, Math.max(min, numberValue));
+}
+
+function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
+  const numberValue = typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  return Math.min(max, Math.max(min, numberValue));
+}
+
+function runtimePreferencesToExecutionConfig(
+  preferences: ReturnType<NonNullable<CreateJavisRuntimeOptions["getRuntimePreferences"]>> | undefined,
+): RuntimeExecutionConfig {
+  const presetIterations = preferences?.agentMaxRoundsPreset === "4"
+    ? 4
+    : preferences?.agentMaxRoundsPreset === "12"
+      ? 12
+      : preferences?.agentMaxRoundsPreset === "custom"
+        ? clampInteger(preferences.agentMaxRoundsCustom, 1, 24, 8)
+        : 8;
+  const taskTimeoutMs = preferences?.taskTimeoutPreset === "long"
+    ? 180_000
+    : preferences?.taskTimeoutPreset === "custom"
+      ? clampInteger(preferences.taskTimeoutCustomMs, 30_000, 900_000, 90_000)
+      : 90_000;
+  const userWaitTimeoutMs = preferences?.userWaitTimeoutPreset === "long"
+    ? 30 * 60_000
+    : preferences?.userWaitTimeoutPreset === "custom"
+      ? clampInteger(preferences.userWaitTimeoutCustomMs, 60_000, 120 * 60_000, 5 * 60_000)
+      : 5 * 60_000;
+  const contextStrategy = preferences?.contextStrategy === "short" || preferences?.contextStrategy === "long"
+    ? preferences.contextStrategy
+    : "auto";
+  return {
+    contextStrategy,
+    agentMaxIterations: presetIterations,
+    taskTimeoutMs,
+    failureRecoveryEnabled: preferences?.failureRecoveryPolicy !== "stop",
+    userWaitTimeoutMs,
   };
 }
 
@@ -450,21 +1262,48 @@ export function createJavisRuntime({
   modelSettings,
   getModelConfiguration,
   getScheduledTasksRepository,
+  getComputerUseConfig,
+  getAvailableToolDescriptors,
+  getRuntimePreferences,
+  getCapabilityVerification,
+  isAgentMemoryEnabled,
+  getEnabledSkillContext,
+  searchAgentMemory,
+  callMcpTool,
+  recordToolCallAudit,
+  onWorkspaceToolActivity,
+  requestBrowserWriteApproval,
+  buildAgentMemoryPromptContext,
 }: CreateJavisRuntimeOptions) {
   const fallbackProvider = createConfiguredModelProvider(modelSettings);
   const providerCache = new Map<string, ModelProvider>();
   // Pre-populate cache with fallback for backward compatibility
   providerCache.set("fallback", fallbackProvider);
 
+  const taskIdRef: { current: string | null } = { current: null };
+  const currentUserGoalRef: { current: string } = { current: "" };
   const providerFor = (agentKind: string): ModelProvider => {
     const config = getModelConfiguration?.();
     const provider = config ? resolveModelForAgent(agentKind, config, providerCache) : fallbackProvider;
-    return withAgentPromptContext(provider, agentKind, getWorkspacePath);
+    return withAgentPromptContext(
+      provider,
+      agentKind,
+      getWorkspacePath,
+      getAgentMemoryContextForProvider,
+      getEnabledSkillContext
+        ? (contextAgentKind, options) => getEnabledSkillContext({
+            agentKind: contextAgentKind,
+            userGoal: currentUserGoalRef.current,
+            options,
+            maxSkills: options?.skillContextMaxSkills,
+            maxContextChars: options?.skillContextMaxChars,
+          })
+        : undefined,
+    );
   };
 
   const sharedContext = createSharedTaskContext();
   const eventBus = createTaskEventBus();
-  const taskIdRef: { current: string | null } = { current: null };
   const streamingAgentRef: { current: AgentKind } = { current: "commander" };
   let activeComputerUseAbortController: AbortController | undefined;
   const preprocessingByTaskId = new Map<string, Promise<PreprocessedInput | undefined>>();
@@ -481,7 +1320,190 @@ export function createJavisRuntime({
     });
   };
 
+  function notifyWorkspaceToolActivity(
+    tool: RuntimeWorkspaceToolAction,
+    sourceToolName: string,
+    inputSummary: string,
+  ) {
+    const taskId = taskIdRef.current ?? "task-unknown";
+    const recordedAt = new Date().toISOString();
+    const workspacePath = getWorkspacePath().trim();
+    recordToolCallAudit?.({
+      id: `workspace-tool-sync:${taskId}:${tool}:${recordedAt}`,
+      taskId,
+      toolName: `workspace.${tool}.sync`,
+      permissionLevel: "read",
+      status: "succeeded",
+      inputSummary,
+      outputSummary: `Opened ${tool} workspace panel for ${sourceToolName}.`,
+      startedAt: recordedAt,
+      endedAt: recordedAt,
+    });
+    onWorkspaceToolActivity?.({
+      tool,
+      sourceToolName,
+      taskId,
+      workspacePath,
+      recordedAt,
+    });
+  }
+
+  async function runBrowserWriteAction<
+    Request extends BrowserClickRequest | BrowserTypeRequest | BrowserEvaluateRequest | BrowserRunTestRequest,
+    Result extends BrowserWriteExecutionResult,
+  >(
+    action: BrowserWriteAction,
+    request: Request,
+    execute: (request: Request & BrowserApprovedWriteRequest) => Promise<Result>,
+  ): Promise<Result> {
+    const taskId = taskIdRef.current ?? "task-browser-write";
+    const sessionId = taskId;
+    const plan = await invoke<BrowserWritePlanResult>("browser_plan_write", {
+      request: {
+        taskId,
+        sessionId,
+        action,
+        ...browserWritePlanPreview(action, request),
+      },
+    });
+    recordToolCallAudit?.(createBrowserWritePlanAuditRecord(plan));
+    if (!requestBrowserWriteApproval) {
+      throw new Error(`Browser write ${plan.toolName} requires visible approval.`);
+    }
+    const decision = await requestBrowserWriteApproval({
+      approvalId: plan.approvalId,
+      taskId,
+      sessionId: plan.sessionId,
+      toolName: plan.toolName,
+      action: plan.action,
+      previewHash: plan.previewHash,
+      ...browserWriteApprovalPreview(action, request),
+    });
+    if (decision !== "approved") {
+      throw new Error(`Browser write ${plan.toolName} was denied.`);
+    }
+    await invoke("browser_approve_write", {
+      request: {
+        approvalId: plan.approvalId,
+        taskId,
+        sessionId,
+        action,
+        previewHash: plan.previewHash,
+      },
+    });
+    const startedAt = new Date().toISOString();
+    try {
+      const result = await execute({
+        ...request,
+        taskId,
+        sessionId,
+        approvalId: plan.approvalId,
+      });
+      recordToolCallAudit?.(createBrowserWriteExecutionAuditRecord(plan, result, startedAt));
+      return result;
+    } catch (error) {
+      recordToolCallAudit?.(createBrowserWriteFailedAuditRecord(plan, error, startedAt));
+      throw error;
+    }
+  }
+
+  type BrowserApprovedWriteRequest = {
+    taskId: string;
+    sessionId: string;
+    approvalId: string;
+  };
+
+  function browserWritePlanPreview(
+    action: BrowserWriteAction,
+    request: BrowserClickRequest | BrowserTypeRequest | BrowserEvaluateRequest | BrowserRunTestRequest,
+  ): {
+    selector?: string;
+    expression?: string;
+    testFile?: string;
+    inputSummary?: string;
+    inputHash?: string;
+    inputBytes?: number;
+    scriptHash?: string;
+    scriptBytes?: number;
+  } {
+    if (action === "click" && "selector" in request) {
+      return { selector: request.selector };
+    }
+    if (action === "type" && "selector" in request && "text" in request) {
+      return {
+        selector: request.selector,
+        inputSummary: "text input",
+        inputHash: fnv1aHash(request.text),
+        inputBytes: byteLength(request.text),
+      };
+    }
+    if (action === "evaluate" && "expression" in request) {
+      return { expression: request.expression };
+    }
+    if (action === "runTest" && "script" in request) {
+      return {
+        testFile: request.testFile,
+        inputSummary: "browser test",
+        scriptHash: fnv1aHash(request.script),
+        scriptBytes: byteLength(request.script),
+      };
+    }
+    return { inputSummary: action };
+  }
+
+  function browserWriteApprovalPreview(
+    action: BrowserWriteAction,
+    request: BrowserClickRequest | BrowserTypeRequest | BrowserEvaluateRequest | BrowserRunTestRequest,
+  ): Pick<BrowserWriteApprovalRequest, "selector" | "byteCount" | "scriptByteCount"> {
+    if (action === "click" && "selector" in request) {
+      return { selector: request.selector };
+    }
+    if (action === "type" && "selector" in request && "text" in request) {
+      return { selector: request.selector, byteCount: byteLength(request.text) };
+    }
+    if (action === "evaluate" && "expression" in request) {
+      return { byteCount: byteLength(request.expression) };
+    }
+    if (action === "runTest" && "script" in request) {
+      return { scriptByteCount: byteLength(request.script) };
+    }
+    return {};
+  }
+
+  function byteLength(value: string): number {
+    return new TextEncoder().encode(value).length;
+  }
+
+  function fnv1aHash(value: string): string {
+    const bytes = new TextEncoder().encode(value);
+    let hash = 2166136261;
+    for (const byte of bytes) {
+      hash ^= byte;
+      hash = Math.imul(hash, 16777619);
+    }
+    return `fnv1a-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+  }
+
+  async function getAgentMemoryContextForProvider(agentKind: string, options?: CompletionOptions): Promise<string> {
+    if (!isAgentMemoryEnabled?.() || !buildAgentMemoryPromptContext || options?.skipAgentMemory) {
+      return "";
+    }
+    const taskId = taskIdRef.current ?? "task-unknown";
+    const userGoal = currentUserGoalRef.current.trim();
+    if (!userGoal) {
+      return "";
+    }
+    return buildAgentMemoryPromptContext({
+      userGoal,
+      taskId,
+      agentKind,
+    });
+  }
+
   const runtime = createFileScanTaskRuntime({
+    getRuntimeConfig: () => runtimePreferencesToExecutionConfig(getRuntimePreferences?.()),
+    getAvailableToolDescriptors: () => normalizeAvailableToolDescriptors(getAvailableToolDescriptors?.()),
+    getCapabilityVerification,
     chatTool: {
       complete: (prompt, options) => providerFor("commander").complete(prompt, options),
       stream: (prompt, options) => providerFor("commander").stream(prompt, options),
@@ -507,6 +1529,14 @@ export function createJavisRuntime({
                 agentKind: "commander",
                 text: chunk.text,
               }),
+            isAgentMemoryEnabled?.()
+              ? async () => buildAgentMemoryPromptContext?.({
+                  userGoal: request.userGoal,
+                  taskId,
+                  agentKind: "commander",
+                }) ?? ""
+              : undefined,
+            getAvailableToolDescriptors?.(),
           );
           eventBus.emit({
             kind: "agent.chunk_end",
@@ -538,6 +1568,7 @@ export function createJavisRuntime({
             "You are Javis Commander Agent.",
             "Write a concise natural-language answer to the user's original goal.",
             "Base your answer ONLY on the evidence collected by the agent team below.",
+            "If evidence is missing or inconclusive, say what is unknown; do not fill gaps with guesses.",
             "Write in the same language as the user's goal.",
             "Do NOT describe internal processes — speak directly to the user.",
             `User goal: ${request.userGoal}`,
@@ -594,6 +1625,11 @@ export function createJavisRuntime({
     fileTool: {
       scanMarkdownDocuments: () => {
         const workspacePath = getWorkspacePath();
+        notifyWorkspaceToolActivity(
+          "files",
+          "file.scanMarkdownDocuments",
+          `Scan Markdown documents in ${workspacePath.trim() || "(default workspace)"}.`,
+        );
         return invoke<MarkdownDocument[]>("scan_markdown_documents", {
           workspacePath: workspacePath.trim() || null,
         });
@@ -612,6 +1648,11 @@ export function createJavisRuntime({
       },
       planWriteText: (request: WriteTextFileRequest, taskId?: string) => {
         const workspacePath = getWorkspacePath();
+        notifyWorkspaceToolActivity(
+          "files",
+          "file.planWriteText",
+          `Plan text write for ${request.targetPath}.`,
+        );
         return invoke<TextFileWritePlan>("plan_write_text_file", {
           request: {
             ...request,
@@ -626,6 +1667,11 @@ export function createJavisRuntime({
         taskId?: string,
       ) => {
         const workspacePath = getWorkspacePath();
+        notifyWorkspaceToolActivity(
+          "files",
+          "file.writeText",
+          `Execute approved text write for ${request.targetPath}.`,
+        );
         await invoke("approve_write_text_file", { approvalId, taskId });
         return invoke<TextFileWriteResult>("execute_write_text_file", {
           request: {
@@ -676,6 +1722,8 @@ export function createJavisRuntime({
         invoke<ComputerScreenshotResult>("computer_screenshot", { request }),
       listWindows: (request: ComputerListWindowsRequest) =>
         invoke<ComputerListWindowsResult>("computer_list_windows", { request }),
+      detectUiObjects: (request: ComputerDetectUiObjectsRequest) =>
+        invoke<ComputerDetectUiObjectsResult>("computer_detect_ui_objects", { request }),
       inspectUi: (request: ComputerInspectUiRequest) =>
         invoke<ComputerInspectUiResult>("computer_inspect_ui", { request }),
       focusWindow: (request: ComputerFocusWindowRequest) => {
@@ -785,6 +1833,9 @@ export function createJavisRuntime({
             isZh
               ? "objects 必须是可见物体标签的数组。"
               : "objects must be an array of visible object labels.",
+            isZh
+              ? "只描述图片中可见内容；看不清或没有证据时写 unknown，不要推测。"
+              : "Describe only visible evidence; use unknown when unclear and do not infer unsupported facts.",
             question
               ? (isZh ? `问题：${question}` : `Question: ${question}`)
               : (isZh ? "如无具体问题，可省略 answer。" : "If no question is asked, answer should be omitted."),
@@ -797,7 +1848,7 @@ export function createJavisRuntime({
         const imageDataUrl = await resolveImageDataUrl(request.imagePath, getWorkspacePath());
         const detail = request.detail === "brief" ? "brief" : "detailed";
         const result = await providerFor("vision").complete(
-          `Describe the image in ${detail} terms. Mention only visible details.`,
+          `Describe the image in ${detail} terms. Mention only visible details; if unclear, say unknown rather than guessing.`,
           { imageDataUrl, maxTokens: detail === "brief" ? 200 : 700, temperature: 0.1 },
         );
         return { description: result.text.trim() };
@@ -816,10 +1867,22 @@ export function createJavisRuntime({
       },
     },
     shellTool: {
-      runReadOnlyCommand,
+      runReadOnlyCommand: (request) => {
+        notifyWorkspaceToolActivity(
+          "terminal",
+          "shell.runReadOnlyCommand",
+          `Run read-only command: ${request.program} ${(request.args ?? []).join(" ")}`.trim(),
+        );
+        return runReadOnlyCommand(request);
+      },
     },
     codeTool: {
       inspectRepository: async (): Promise<CodeReviewPreview> => {
+        notifyWorkspaceToolActivity(
+          "review",
+          "code.inspectRepository",
+          "Inspect repository git status and diff.",
+        );
         const [status, diffStat, diff] = await Promise.all([
           runReadOnlyCommand({ program: "git", args: ["status", "--short"], workspacePath: null }),
           runReadOnlyCommand({ program: "git", args: ["diff", "--stat"], workspacePath: null }),
@@ -839,10 +1902,85 @@ export function createJavisRuntime({
           diff: diff.stdout,
         };
       },
+      searchRepository: async (request): Promise<CodeRepositorySearchResult> => {
+        notifyWorkspaceToolActivity(
+          "review",
+          "code.searchRepository",
+          `Search repository for ${request.goal}.`,
+        );
+        const workspaceRoot = getWorkspacePath().trim();
+        if (!workspaceRoot) {
+          throw new Error("Select a workspace before searching the repository.");
+        }
+        const sessionId = taskIdRef.current ?? "repo-intelligence";
+        const priorityPaths = request.priorityPaths && request.priorityPaths.length > 0
+          ? request.priorityPaths
+          : await readChangedFilesForRepositoryPriority(runReadOnlyCommand);
+        return searchRepositoryWithFileSearch({ ...request, priorityPaths }, {
+          searchFiles: ({ query, maxResults }) =>
+            invoke<Array<{ path: string; line?: number; preview?: string; provider?: string }>>("files_search", {
+              request: {
+                sessionId,
+                workspaceRoot,
+                query,
+                maxResults,
+              },
+            }),
+          semanticRerank: createLocalTextSemanticReranker(),
+        });
+      },
+      traceCallChain: async (request) => {
+        notifyWorkspaceToolActivity(
+          "review",
+          "code.traceCallChain",
+          `Trace repository call chain for ${request.target}.`,
+        );
+        const workspaceRoot = getWorkspacePath().trim();
+        if (!workspaceRoot) {
+          throw new Error("Select a workspace before tracing the repository.");
+        }
+        const sessionId = taskIdRef.current ?? "repo-intelligence";
+        const searchFiles = ({ query, maxResults }: { query: string; maxResults: number }) =>
+          invoke<Array<{ path: string; line?: number; preview?: string; provider?: string }>>("files_search", {
+            request: {
+              sessionId,
+              workspaceRoot,
+              query,
+              maxResults,
+            },
+        });
+        return traceCallChainWithFileSearch(request, {
+          searchFiles,
+          readTextFile: (path) => invoke<string>("read_file_chunk", {
+            path,
+            maxLines: 200,
+            workspaceRoot,
+            allowedRootIds: null,
+          }),
+          resolveModuleSpecifier: (moduleRequest) =>
+            resolveModuleSpecifierWithFileSearch(moduleRequest, {
+              searchFiles,
+              readTextFile: (path) => invoke<string>("read_file_chunk", {
+                path,
+                maxLines: 200,
+                workspaceRoot,
+                allowedRootIds: null,
+              }),
+              ...(typeof fetch === "function"
+                ? { externalPackageRegistry: { fetch } }
+                : {}),
+            }),
+        });
+      },
       proposeEdit: ({ userGoal, preview, taskId }) =>
         proposeCodeEditWithModelProvider(userGoal, preview, providerFor("code"), taskId),
-      applyProposedEdit: (edit: CodeProposedEdit, approval) =>
-        invoke("approve_code_patch", {
+      applyProposedEdit: (edit: CodeProposedEdit, approval) => {
+        notifyWorkspaceToolActivity(
+          "review",
+          "code.applyProposedEdit",
+          `Apply approved code proposal ${edit.proposalId}.`,
+        );
+        return invoke("approve_code_patch", {
           request: {
             approvalId: approval.approvalId,
             proposalId: edit.proposalId,
@@ -864,7 +2002,264 @@ export function createJavisRuntime({
               taskId: approval.taskId,
             },
           }),
-        ),
+        );
+      },
+    },
+    gitTool: {
+      planStageFiles: (request) => {
+        notifyWorkspaceToolActivity(
+          "review",
+          "git.stageFiles",
+          `Plan staging for ${request.paths.length} file(s).`,
+        );
+        const workspaceRoot = getWorkspacePath().trim();
+        if (!workspaceRoot) {
+          throw new Error("Select a workspace before preparing Git staging.");
+        }
+        const taskId = request.taskId ?? taskIdRef.current ?? "task-unknown";
+        return invoke<GitStagePlan>("git_plan_stage_files", {
+          request: {
+            sessionId: taskId,
+            workspaceRoot,
+            taskId,
+            paths: request.paths,
+          },
+        });
+      },
+      executeStageFiles: async (approval) => {
+        notifyWorkspaceToolActivity(
+          "review",
+          "git.stageFiles",
+          `Execute approved staging for ${approval.paths.length} file(s).`,
+        );
+        const workspaceRoot = getWorkspacePath().trim();
+        if (!workspaceRoot) {
+          throw new Error("Select a workspace before staging files.");
+        }
+        const taskId = approval.taskId ?? taskIdRef.current ?? "task-unknown";
+        await invoke("git_approve_stage_files", {
+          approvalId: approval.approvalId,
+          taskId,
+        });
+        const execution = await invoke<{
+          workspaceRoot: string;
+          stagedPaths: string[];
+          fileCount: number;
+          staged: boolean;
+          output: string;
+        }>("git_execute_stage_files", {
+          request: {
+            approvalId: approval.approvalId,
+            sessionId: taskId,
+            workspaceRoot,
+            taskId,
+            paths: approval.paths,
+          },
+        });
+        return {
+          workspacePath: execution.workspaceRoot,
+          stagedPaths: execution.stagedPaths,
+          fileCount: execution.fileCount,
+          staged: execution.staged,
+          output: execution.output,
+        } satisfies GitStageExecutionResult;
+      },
+      planCommit: (request) => {
+        notifyWorkspaceToolActivity(
+          "review",
+          "git.createCommit",
+          `Plan commit: ${request.message}`,
+        );
+        const workspaceRoot = getWorkspacePath().trim();
+        if (!workspaceRoot) {
+          throw new Error("Select a workspace before preparing a Git commit.");
+        }
+        const taskId = request.taskId ?? taskIdRef.current ?? "task-unknown";
+        return invoke<GitCommitPlan>("git_plan_commit", {
+          request: {
+            sessionId: taskId,
+            workspaceRoot,
+            taskId,
+            message: request.message,
+            paths: request.paths ?? [],
+          },
+        });
+      },
+      executeCommit: async (approval) => {
+        notifyWorkspaceToolActivity(
+          "review",
+          "git.createCommit",
+          `Execute approved commit: ${approval.message}`,
+        );
+        const workspaceRoot = getWorkspacePath().trim();
+        if (!workspaceRoot) {
+          throw new Error("Select a workspace before creating a Git commit.");
+        }
+        const taskId = approval.taskId ?? taskIdRef.current ?? "task-unknown";
+        await invoke("git_approve_commit", {
+          approvalId: approval.approvalId,
+          taskId,
+        });
+        const execution = await invoke<{
+          workspaceRoot: string;
+          branch?: string;
+          commitHash: string;
+          subject: string;
+          fileCount: number;
+          committed: boolean;
+          output: string;
+        }>("git_execute_commit", {
+          request: {
+            approvalId: approval.approvalId,
+            sessionId: taskId,
+            workspaceRoot,
+            taskId,
+            message: approval.message,
+            paths: approval.paths ?? [],
+          },
+        });
+        return {
+          workspacePath: execution.workspaceRoot,
+          branch: execution.branch,
+          commitHash: execution.commitHash,
+          subject: execution.subject,
+          fileCount: execution.fileCount,
+          committed: execution.committed,
+          output: execution.output,
+        } satisfies GitCommitExecutionResult;
+      },
+      planCreatePullRequest: (request) => {
+        notifyWorkspaceToolActivity(
+          "review",
+          "git.createPullRequest",
+          `Plan draft pull request: ${request.title}`,
+        );
+        const workspaceRoot = getWorkspacePath().trim();
+        if (!workspaceRoot) {
+          throw new Error("Select a workspace before preparing a Git pull request.");
+        }
+        const taskId = request.taskId ?? taskIdRef.current ?? "task-unknown";
+        return invoke<GitCreatePullRequestPlan>("git_plan_create_pull_request", {
+          request: {
+            sessionId: taskId,
+            workspaceRoot,
+            taskId,
+            title: request.title,
+            body: request.body ?? "",
+            baseBranch: request.baseBranch,
+            draft: request.draft ?? true,
+          },
+        });
+      },
+      executeCreatePullRequest: async (approval) => {
+        notifyWorkspaceToolActivity(
+          "review",
+          "git.createPullRequest",
+          `Execute approved draft pull request: ${approval.title}`,
+        );
+        const workspaceRoot = getWorkspacePath().trim();
+        if (!workspaceRoot) {
+          throw new Error("Select a workspace before creating a Git pull request.");
+        }
+        const taskId = approval.taskId ?? taskIdRef.current ?? "task-unknown";
+        await invoke("git_approve_create_pull_request", {
+          approvalId: approval.approvalId,
+          taskId,
+        });
+        const execution = await invoke<{
+          workspaceRoot: string;
+          provider: string;
+          url: string;
+          title: string;
+          baseBranch: string;
+          headBranch: string;
+          draft: boolean;
+          created: boolean;
+          output: string;
+        }>("git_execute_create_pull_request", {
+          request: {
+            approvalId: approval.approvalId,
+            sessionId: taskId,
+            workspaceRoot,
+            taskId,
+            title: approval.title,
+            body: approval.body ?? "",
+            baseBranch: approval.baseBranch,
+            draft: approval.draft ?? true,
+          },
+        });
+        return {
+          workspacePath: execution.workspaceRoot,
+          provider: execution.provider,
+          url: execution.url,
+          title: execution.title,
+          baseBranch: execution.baseBranch,
+          headBranch: execution.headBranch,
+          draft: execution.draft,
+          created: execution.created,
+          output: execution.output,
+        } satisfies GitCreatePullRequestExecutionResult;
+      },
+      planCommentPullRequest: (request) => {
+        notifyWorkspaceToolActivity(
+          "review",
+          "git.commentPullRequest",
+          `Plan pull request comment for ${request.pullRequest}.`,
+        );
+        const workspaceRoot = getWorkspacePath().trim();
+        if (!workspaceRoot) {
+          throw new Error("Select a workspace before preparing a Git pull request comment.");
+        }
+        const taskId = request.taskId ?? taskIdRef.current ?? "task-unknown";
+        return invoke<GitCommentPullRequestPlan>("git_plan_comment_pull_request", {
+          request: {
+            sessionId: taskId,
+            workspaceRoot,
+            taskId,
+            pullRequest: request.pullRequest,
+            body: request.body,
+          },
+        });
+      },
+      executeCommentPullRequest: async (approval) => {
+        notifyWorkspaceToolActivity(
+          "review",
+          "git.commentPullRequest",
+          `Execute approved pull request comment for ${approval.pullRequest}.`,
+        );
+        const workspaceRoot = getWorkspacePath().trim();
+        if (!workspaceRoot) {
+          throw new Error("Select a workspace before commenting on a Git pull request.");
+        }
+        const taskId = approval.taskId ?? taskIdRef.current ?? "task-unknown";
+        await invoke("git_approve_comment_pull_request", {
+          approvalId: approval.approvalId,
+          taskId,
+        });
+        const execution = await invoke<{
+          workspaceRoot: string;
+          provider: string;
+          pullRequest: string;
+          commented: boolean;
+          output: string;
+        }>("git_execute_comment_pull_request", {
+          request: {
+            approvalId: approval.approvalId,
+            sessionId: taskId,
+            workspaceRoot,
+            taskId,
+            pullRequest: approval.pullRequest,
+            body: approval.body,
+          },
+        });
+        return {
+          workspacePath: execution.workspaceRoot,
+          provider: execution.provider,
+          pullRequest: execution.pullRequest,
+          commented: execution.commented,
+          output: execution.output,
+        } satisfies GitCommentPullRequestExecutionResult;
+      },
     },
     projectTool: {
       inspectProject: () => {
@@ -928,11 +2323,17 @@ export function createJavisRuntime({
           "- icon should be a single emoji",
           "- agents, workflows, routes are optional arrays",
           "- All tool names follow {category}.{action} pattern",
+          "- Use only information from the user request; leave optional arrays empty rather than inventing facts.",
           "- Output ONLY the JSON, no markdown fences or explanation",
           "",
           `User request: ${description}`,
         ].join("\n");
-        const result = await commander.complete(prompt, { maxTokens: 2000, temperature: 0.3 });
+        const result = await commander.complete(prompt, {
+          maxTokens: 2000,
+          temperature: 0.3,
+          skipAgentMemory: true,
+          skipSkillContext: true,
+        });
         // Extract outermost JSON object (handles LLM text before/after)
         const startIdx = result.text.indexOf("{");
         const endIdx = result.text.lastIndexOf("}");
@@ -955,22 +2356,68 @@ export function createJavisRuntime({
       searchWeb: (request: WebSearchRequest) =>
         invoke<WebSearchResult[]>("search_web_sources", { request }),
     },
+    trendTool: {
+      fetchHotList: (request): Promise<TrendHotListResult> => fetchTrendHotList(request),
+    },
+    memoryTool: {
+      search: async (request: MemorySearchRequest): Promise<MemorySearchResult[]> => {
+        if (!isAgentMemoryEnabled?.() || !searchAgentMemory) {
+          return [];
+        }
+        return searchAgentMemory({
+          ...request,
+          taskId: request.taskId ?? taskIdRef.current ?? "task-unknown",
+        });
+      },
+    },
+    mcpTool: callMcpTool
+      ? {
+          call: callMcpTool,
+        }
+      : undefined,
     browserTool: {
-      navigate: (request: BrowserNavigateRequest) =>
-        invoke<BrowserNavigateResult>("browser_navigate", { request }),
-      screenshot: (request: BrowserScreenshotRequest) =>
-        invoke<BrowserScreenshotResult>("browser_screenshot", { request }),
-      getContent: (request: BrowserGetContentRequest) =>
-        invoke<BrowserGetContentResult>("browser_get_content", { request }),
-      click: (_request: BrowserClickRequest) => Promise.reject(createBrowserApprovalError()),
-      type: (_request: BrowserTypeRequest) => Promise.reject(createBrowserApprovalError()),
-      evaluate: (_request: BrowserEvaluateRequest) => Promise.reject(createBrowserApprovalError()),
-      runTest: (_request: BrowserRunTestRequest) => Promise.reject(createBrowserApprovalError()),
+      navigate: (request: BrowserNavigateRequest) => {
+        notifyWorkspaceToolActivity("browser", "browser.navigate", `Navigate to ${request.url}.`);
+        return invoke<BrowserNavigateResult>("browser_navigate", { request });
+      },
+      screenshot: (request: BrowserScreenshotRequest) => {
+        notifyWorkspaceToolActivity("browser", "browser.screenshot", "Capture browser screenshot.");
+        return invoke<BrowserScreenshotResult>("browser_screenshot", { request });
+      },
+      getContent: (request: BrowserGetContentRequest) => {
+        notifyWorkspaceToolActivity("browser", "browser.getContent", `Read browser content as ${request.format ?? "text"}.`);
+        return invoke<BrowserGetContentResult>("browser_get_content", { request });
+      },
+      click: (request: BrowserClickRequest) => {
+        notifyWorkspaceToolActivity("browser", "browser.click", `Click selector ${request.selector}.`);
+        return runBrowserWriteAction("click", request, (approvedRequest) =>
+          invoke<BrowserClickResult>("browser_click", { request: approvedRequest })
+        );
+      },
+      type: (request: BrowserTypeRequest) => {
+        notifyWorkspaceToolActivity("browser", "browser.type", `Type into selector ${request.selector}.`);
+        return runBrowserWriteAction("type", request, (approvedRequest) =>
+          invoke<BrowserTypeResult>("browser_type", { request: approvedRequest })
+        );
+      },
+      evaluate: (request: BrowserEvaluateRequest) => {
+        notifyWorkspaceToolActivity("browser", "browser.evaluate", "Evaluate browser script.");
+        return runBrowserWriteAction("evaluate", request, (approvedRequest) =>
+          invoke<BrowserEvaluateResult>("browser_evaluate", { request: approvedRequest })
+        );
+      },
+      runTest: (request: BrowserRunTestRequest) => {
+        notifyWorkspaceToolActivity("browser", "browser.runTest", `Run browser test ${request.testFile ?? "(inline script)"}.`);
+        return runBrowserWriteAction("runTest", request, (approvedRequest) =>
+          invoke<BrowserRunTestResult>("browser_run_test", { request: approvedRequest })
+        );
+      },
       extractLinks: (request: BrowserExtractLinksRequest) =>
         invoke<BrowserExtractLinksResult>("browser_extract_links", { request }),
       upload: (_request: BrowserUploadRequest): Promise<BrowserUploadResult> =>
         Promise.reject(createBrowserApprovalError()),
       followCandidateLinks: async (request: BrowserFollowCandidateLinksRequest): Promise<BrowserFollowCandidateLinksResult> => {
+        notifyWorkspaceToolActivity("browser", "browser.followCandidateLinks", `Follow up to ${request.maxFollow ?? 3} candidate links.`);
         const { candidateLinks, urlPattern, maxFollow = 3 } = request;
         let pattern: RegExp | null = null;
         if (urlPattern) {
@@ -1051,13 +2498,16 @@ export function createJavisRuntime({
     },
     // P0-2: LLM-based ReAct decision maker for agent step execution loops
     reactDecideNext: async (request: ReActDecisionRequest): Promise<AgentReActDecision> => {
-      const prompt = buildReActDecisionPrompt(request);
+      const prompt = buildReActDecisionPrompt({ ...request, locale: "zh-CN" });
       let resultText = "";
       try {
         const result = await providerFor(request.agentKind).complete(prompt, {
           maxTokens: 600,
           temperature: 0,
           locale: "zh-CN",
+          skipAgentMemory: true,
+          skillContextMaxSkills: 2,
+          skillContextMaxChars: 6_000,
         });
         resultText = result.text;
         const parsed = parseJsonObject(result.text) as Record<string, unknown>;
@@ -1069,24 +2519,22 @@ export function createJavisRuntime({
         return {
           status,
           toolName: parsed.toolName as string | undefined,
+          input: isRecord(parsed.input) ? { ...parsed.input } : undefined,
           reason: (parsed.reason as string) ?? "No reason provided.",
           output: parsed.output,
         };
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
-        // When the LLM returns natural text instead of JSON (common for
-        // simple synthesis/greeting steps), treat the response as the
-        // completed step output rather than a failure.
         if (msg.includes("did not contain a JSON object") && resultText.trim().length > 0) {
           eventBus.emit({
             kind: "tool.planned",
             taskId: taskIdRef.current ?? "task-unknown",
             toolName: "reactDecideNext",
-            detail: `ReAct decision LLM returned plain text — treating as completed output.`,
+            detail: "ReAct decision LLM returned plain text; failing decision.",
           });
           return {
-            status: "completed",
-            reason: "Step produced a natural-text response.",
+            status: "failed",
+            reason: "ReAct decision LLM returned plain text instead of JSON.",
             output: resultText.trim(),
           };
         }
@@ -1110,22 +2558,26 @@ export function createJavisRuntime({
       failureReason?: string,
     ): Promise<CommanderDagPlan> => {
       const registry = createDefaultAgentRegistry();
+      const availableTools = commanderPromptToolDescriptors(getAvailableToolDescriptors?.());
+      const availableToolNames = new Set(availableTools.map((tool) => tool.name));
       const availableAgents = demoAgents
         .map((a) => {
           const reg = registry.findByKind(a.kind);
           return {
             kind: a.kind,
-            allowedToolNames: a.allowedToolNames,
+            allowedToolNames: allowedToolNamesForAgent(a.kind, availableTools)
+              .filter((toolName) => availableToolNames.has(toolName)),
             capabilities: reg?.capabilityTags ?? [],
           };
         });
       const prompt = buildCommanderReplanPrompt({
         userGoal,
+        locale: "zh-CN",
         contextSnapshot,
         failedStepId,
         failureReason,
         availableAgents,
-        availableTools: COMMANDER_PROMPT_TOOL_DESCRIPTORS,
+        availableTools,
       });
 
       try {
@@ -1133,6 +2585,7 @@ export function createJavisRuntime({
           maxTokens: 1200,
           temperature: 0,
           locale: "zh-CN",
+          skipSkillContext: true,
         });
         const parsed = parseJsonObject(result.text) as Record<string, unknown>;
         return {
@@ -1151,7 +2604,11 @@ export function createJavisRuntime({
         return { title: "Recovery failed", reasoning: "", steps: [] };
       }
     },
-    computerUseLoopRunner: async ({ userGoal, computerTool, approveAction, onStep, onProgress, signal }) => {
+    computerUseLoopRunner: async ({ userGoal, computerTool, allowedToolNames, approveAction, onStep, onProgress, signal }) => {
+      const config = getComputerUseConfig?.();
+      if (config?.enabled !== true) {
+        throw new Error("Computer Use is disabled in settings.");
+      }
       const controller = new AbortController();
       activeComputerUseAbortController = controller;
       const abortFromParent = () => controller.abort(signal?.reason ?? new Error("Computer Use cancelled."));
@@ -1165,10 +2622,13 @@ export function createJavisRuntime({
           modelProvider: providerFor("computer"),
           computerTool,
           userGoal,
+          allowedToolNames,
           approveAction,
           onStep,
           onProgress,
           signal: controller.signal,
+          includeApprovalScreenshotPreview: true,
+          config,
         });
       } finally {
         signal?.removeEventListener("abort", abortFromParent);
@@ -1201,8 +2661,12 @@ export function createJavisRuntime({
       providerCache.clear();
       providerCache.set("fallback", fallbackProvider);
     },
+    evaluateGoalCompletion(goal: GoalState, task: TaskSnapshot): Promise<GoalDecision> {
+      return evaluateGoalCompletionWithModelProvider(goal, task, providerFor("verifier"));
+    },
     start(userGoal: string, options?: Parameters<typeof runtime.start>[1]) {
       sharedContext.clear();
+      currentUserGoalRef.current = userGoal;
       sharedContext.set(sharedContext.resolveKey(CONTEXT_KEYS.USER_GOAL, "zh-CN"), userGoal);
       preprocessingByTaskId.clear();
       preprocessingForNextTask = options?.mode === "chat"
@@ -1499,6 +2963,7 @@ async function streamOrCompleteWithReview<T>(
   modelProvider: ModelProvider,
   onChunk: (chunk: { text: string }) => void,
   normalize: (value: unknown) => T,
+  completionOptions: Pick<CompletionOptions, "skipAgentMemory" | "skipSkillContext" | "locale"> = {},
 ): Promise<T> {
   let fullText: string;
 
@@ -1507,18 +2972,19 @@ async function streamOrCompleteWithReview<T>(
     for await (const chunk of modelProvider.stream(prompt, {
       ...streamOptions,
       locale: "zh-CN",
+      ...completionOptions,
     })) {
       fullText += chunk.text;
       onChunk(chunk);
     }
   } catch {
     // Provider doesn't support SSE — fall back to non-streaming complete()
-    const result = await modelProvider.complete(prompt, { ...streamOptions, locale: "zh-CN" });
+    const result = await modelProvider.complete(prompt, { ...streamOptions, locale: "zh-CN", ...completionOptions });
     onChunk({ text: result.text });
-    return parseNormalizeWithRepair(prompt, result.text, streamOptions, modelProvider, normalize);
+    return parseNormalizeWithRepair(prompt, result.text, streamOptions, modelProvider, normalize, completionOptions);
   }
 
-  return parseNormalizeWithRepair(prompt, fullText, streamOptions, modelProvider, normalize);
+  return parseNormalizeWithRepair(prompt, fullText, streamOptions, modelProvider, normalize, completionOptions);
 }
 
 async function parseNormalizeWithRepair<T>(
@@ -1527,6 +2993,7 @@ async function parseNormalizeWithRepair<T>(
   streamOptions: { maxTokens: number; temperature: number },
   modelProvider: ModelProvider,
   normalize: (value: unknown) => T,
+  completionOptions: Pick<CompletionOptions, "skipAgentMemory" | "skipSkillContext" | "locale"> = {},
 ): Promise<T> {
   try {
     return normalize(parseJsonObject(rawText));
@@ -1534,26 +3001,44 @@ async function parseNormalizeWithRepair<T>(
     if (!isJsonParseFailure(error)) {
       throw error;
     }
-    const repaired = await modelProvider.complete(buildJsonRepairPrompt(originalPrompt, rawText), {
+    const repairLocale = completionOptions.locale ?? "zh-CN";
+    const repaired = await modelProvider.complete(buildJsonRepairPrompt(originalPrompt, rawText, repairLocale), {
       ...streamOptions,
-      locale: "zh-CN",
+      locale: repairLocale,
+      ...completionOptions,
+      skipSkillContext: true,
     });
     return normalize(parseJsonObject(repaired.text));
   }
 }
 
-function buildJsonRepairPrompt(originalPrompt: string, rawText: string): string {
-  return [
-    "Your previous output was not valid JSON for the required schema.",
-    "Convert it into one valid JSON object that satisfies the original instruction.",
-    "Return ONLY the JSON object. Do not use markdown fences. Do not explain.",
-    "",
-    "Original instruction:",
-    originalPrompt,
-    "",
-    "Previous invalid output:",
-    rawText,
-  ].join("\n");
+function buildJsonRepairPrompt(originalPrompt: string, rawText: string, locale = "en"): string {
+  const promptLocale = normalizePromptLocale(locale);
+  return (promptLocale === "zhCN"
+    ? [
+        "你之前的输出不是所需 schema 的有效 JSON。",
+        "把它转换为一个满足原始指令的有效 JSON 对象。",
+        "只修复语法/结构；保留语义，不补事实，不改变决策。",
+        "只返回 JSON 对象。不要使用 Markdown 代码块。不要解释。",
+        "",
+        "原始指令:",
+        originalPrompt,
+        "",
+        "之前的无效输出:",
+        rawText,
+      ]
+    : [
+        "Your previous output was not valid JSON for the required schema.",
+        "Convert it into one valid JSON object that satisfies the original instruction.",
+        "Only repair syntax/shape; preserve semantics, do not add facts, and do not change decisions.",
+        "Return ONLY the JSON object. Do not use markdown fences. Do not explain.",
+        "",
+        "Original instruction:",
+        originalPrompt,
+        "",
+        "Previous invalid output:",
+        rawText,
+      ]).join("\n");
 }
 
 function isJsonParseFailure(error: unknown): boolean {
@@ -1571,32 +3056,55 @@ async function planWithModelProviderStreaming(
   request: CommanderPlanRequest,
   modelProvider: ModelProvider,
   onChunk: (chunk: { text: string }) => void,
+  buildMemoryContext?: (request: CommanderPlanRequest) => Promise<string>,
+  fallbackToolDescriptors?: ToolDescriptor[],
 ): Promise<CommanderPlanResult> {
   // Enrich available agents with capability tags so the Commander can
   // plan by capability rather than hardcoded agent kind.
   const registry = createDefaultAgentRegistry();
+  const effectiveTools = commanderPromptToolDescriptors(
+    request.availableTools ?? fallbackToolDescriptors,
+  );
+  const effectiveToolNames = new Set(effectiveTools.map((tool) => tool.name));
   const agentsWithCapabilities = request.availableAgents.map((a) => {
     const reg = registry.findByKind(a.kind);
     return {
       kind: a.kind,
-      allowedToolNames: a.allowedToolNames,
+      allowedToolNames: allowedToolNamesForAgent(a.kind, effectiveTools)
+        .filter((toolName) => effectiveToolNames.has(toolName)),
       capabilities: reg?.capabilityTags ?? [],
     };
   });
+  const validationRequest: CommanderPlanRequest = {
+    ...request,
+    availableAgents: agentsWithCapabilities.map(({ kind, allowedToolNames }) => ({
+      kind,
+      allowedToolNames,
+    })),
+    availableTools: effectiveTools,
+  };
 
-  const prompt = buildCommanderPlanPrompt({
-    userGoal: request.userGoal,
-    workflowId: request.workflowId ?? "unknown",
-    availableAgents: agentsWithCapabilities,
-    availableTools: request.availableTools ?? COMMANDER_PROMPT_TOOL_DESCRIPTORS,
-  });
+  const memoryContext = (await buildMemoryContext?.(request))?.trim() ?? "";
+  const prompt = appendCommanderMemoryContext(
+    buildCommanderPlanPrompt({
+      userGoal: request.userGoal,
+      locale: "zh-CN",
+      priorMessages: request.priorMessages,
+      omittedPriorMessageCount: request.omittedPriorMessageCount,
+      workflowId: request.workflowId ?? "unknown",
+      availableAgents: agentsWithCapabilities,
+      availableTools: effectiveTools,
+    }),
+    memoryContext,
+    "zh-CN",
+  );
 
   return streamOrCompleteWithReview(
     prompt,
     { maxTokens: 1600, temperature: 0 },
     modelProvider,
     onChunk,
-    (value) => normalizeCommanderPlan(value, request),
+    (value) => normalizeCommanderPlan(value, validationRequest),
   );
 }
 
@@ -1627,6 +3135,7 @@ async function verifyWithModelProviderStreaming(
     [
       "You are Javis Verifier Agent. Return JSON only.",
       "Check whether the evidence satisfies the success criteria.",
+      "Do not invent missing evidence; use warn/fail when evidence is absent, ambiguous, or only asserted.",
       "Schema: {\"status\":\"pass|warn|fail\",\"summary\":\"string\",\"detail\":\"string\"}",
       `Step id: ${request.stepId}`,
       `Success criteria: ${request.successCriteria}`,
@@ -1636,6 +3145,7 @@ async function verifyWithModelProviderStreaming(
     modelProvider,
     onChunk,
     (value) => normalizeVerifierCheck(value),
+    { skipAgentMemory: true, skipSkillContext: true },
   );
 }
 
@@ -1663,6 +3173,8 @@ async function reviewChineseStyle(
         maxTokens: Math.max(700, Math.min(1600, result.text.length + 400)),
         temperature: 0,
         locale: "zh-CN",
+        skipAgentMemory: true,
+        skipSkillContext: true,
       })).text,
     );
     if (!reviewed.score.needs_revision) {
@@ -1673,12 +3185,146 @@ async function reviewChineseStyle(
         maxTokens: Math.max(700, Math.min(1600, reviewed.text.length + 400)),
         temperature: 0,
         locale: "zh-CN",
+        skipAgentMemory: true,
+        skipSkillContext: true,
       })).text,
     );
     return { ...result, text: revised.text };
   } catch {
     return result;
   }
+}
+
+async function evaluateGoalCompletionWithModelProvider(
+  goal: GoalState,
+  task: TaskSnapshot,
+  modelProvider: ModelProvider,
+): Promise<GoalDecision> {
+  try {
+    const result = await modelProvider.complete(buildGoalEvaluationPrompt(goal, task), {
+      maxTokens: 700,
+      temperature: 0,
+      locale: "zh-CN",
+      skipAgentMemory: true,
+      skipSkillContext: true,
+    });
+    const parsed = parseJsonObject(result.text) as Record<string, unknown>;
+    const rawStatus = typeof parsed.decision === "string"
+      ? parsed.decision
+      : typeof parsed.status === "string"
+        ? parsed.status
+        : "";
+    let status: GoalDecision["status"] =
+      rawStatus === "complete" || rawStatus === "continue" || rawStatus === "blocked"
+        ? rawStatus
+        : "continue";
+    const confidence = normalizeGoalConfidence(parsed.confidence);
+    const satisfiedCriteria = normalizeGoalStringArray(parsed.satisfiedCriteria) ?? [];
+    const unsatisfiedCriteria = normalizeGoalStringArray(parsed.unsatisfiedCriteria) ?? [];
+    const evidence = normalizeGoalStringArray(parsed.evidence) ?? [];
+    const completedChecks = normalizeGoalStringArray(parsed.completedChecks) ?? satisfiedCriteria;
+    const blockedReason = optionalGoalString(parsed.blockedReason);
+    let reason = optionalGoalString(parsed.reason);
+    if (status === "complete" && (confidence === "low" || unsatisfiedCriteria.length > 0 || evidence.length === 0)) {
+      status = "continue";
+      reason = [
+        reason,
+        confidence === "low" ? "Verifier confidence was low, so Goal cannot be marked complete." : "",
+        unsatisfiedCriteria.length > 0 ? `Unsatisfied criteria remain: ${unsatisfiedCriteria.join("; ")}` : "",
+        evidence.length === 0 ? "Verifier did not provide concrete evidence, so Goal cannot be marked complete." : "",
+      ].filter(Boolean).join(" ");
+    }
+    if (status === "blocked" && !blockedReason) {
+      status = "continue";
+      reason = [reason, "Verifier did not provide a blockedReason, so Javis will continue conservatively."]
+        .filter(Boolean)
+        .join(" ");
+    }
+    return {
+      status,
+      confidence,
+      satisfiedCriteria,
+      unsatisfiedCriteria,
+      evidence,
+      completedChecks,
+      blockedReason,
+      nextPrompt: optionalGoalString(parsed.nextPrompt),
+      reason,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      status: "continue",
+      reason: `Goal evaluation failed; continuing conservatively: ${message}`,
+      nextPrompt: buildFallbackGoalContinuationPrompt(goal, task),
+    };
+  }
+}
+
+function buildGoalEvaluationPrompt(goal: GoalState, task: TaskSnapshot): string {
+  const recentLogs = (task.logs ?? [])
+    .slice(-8)
+    .map((log) => `- ${log.title}: ${log.detail}`)
+    .join("\n");
+  const planSummary = (task.plan ?? [])
+    .map((step) => `- ${step.id}: ${step.status}${step.successCriteria ? `; criteria=${step.successCriteria}` : ""}`)
+    .join("\n");
+  return [
+    "You are the Javis Goal Verifier. Decide whether the long-running Goal is complete.",
+    "Return only one JSON object. Do not use markdown or explanatory prose.",
+    "JSON schema: {\"decision\":\"complete|continue|blocked\",\"confidence\":\"low|medium|high\",\"satisfiedCriteria\":string[],\"unsatisfiedCriteria\":string[],\"evidence\":string[],\"completedChecks\":string[],\"blockedReason\"?:string,\"nextPrompt\"?:string,\"reason\":string}",
+    "Decision rules:",
+    "- complete: the latest task evidence proves the objective and acceptance criteria are satisfied.",
+    "- complete requires confidence=medium or high, unsatisfiedCriteria=[], and concrete evidence.",
+    "- continue: the goal is not complete, but there is a clear next step. Include nextPrompt.",
+    "- blocked: user input, external state, or repeated failures prevent progress. Include blockedReason.",
+    "- Do not mark blocked after one ordinary failure when another investigation or fix path remains.",
+    "- Put every still-missing acceptance criterion in unsatisfiedCriteria.",
+    "- Put file paths, test names, terminal summaries, or other concrete proof in evidence.",
+    "",
+    `Goal objective: ${goal.objective}`,
+    `Acceptance criteria: ${goal.acceptanceCriteria.join(" | ")}`,
+    `Completed checks so far: ${goal.completedChecks.join(" | ") || "none"}`,
+    `Run count: ${goal.runCount}/${goal.maxRunCount}`,
+    "",
+    `Latest task status: ${task.status}`,
+    `Latest task goal: ${task.userGoal}`,
+    `Commander message: ${truncateForPrompt(task.commanderMessage, 1800)}`,
+    task.verificationSummary ? `Verification summary: ${truncateForPrompt(task.verificationSummary, 1000)}` : "",
+    task.userFacingError ? `User-facing error: ${truncateForPrompt(task.userFacingError, 1000)}` : "",
+    planSummary ? `Plan summary:\n${truncateForPrompt(planSummary, 1400)}` : "",
+    recentLogs ? `Recent logs:\n${truncateForPrompt(recentLogs, 1400)}` : "",
+    "",
+    "If continuing, nextPrompt must be a direct task prompt for the next Javis project-mode run. Include the Goal objective, completed checks, and the next verification step.",
+  ].filter(Boolean).join("\n");
+}
+
+function buildFallbackGoalContinuationPrompt(goal: GoalState, task: TaskSnapshot): string {
+  return [
+    `Continue the Goal: ${goal.objective}`,
+    goal.completedChecks.length > 0 ? `Completed checks: ${goal.completedChecks.join("; ")}` : "",
+    `Previous task status: ${task.status}`,
+    task.userFacingError ? `Previous task error: ${task.userFacingError}` : "",
+    "Choose the smallest useful next investigation or fix, run the relevant verification, and report the result.",
+  ].filter(Boolean).join("\n");
+}
+
+function truncateForPrompt(value: string | undefined, maxLength: number): string {
+  const text = value?.trim() ?? "";
+  return text.length > maxLength ? `${text.slice(0, maxLength)}... [truncated]` : text;
+}
+
+function normalizeGoalStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.map((item) => String(item).replace(/\s+/g, " ").trim()).filter(Boolean);
+}
+
+function normalizeGoalConfidence(value: unknown): GoalDecision["confidence"] {
+  return value === "low" || value === "medium" || value === "high" ? value : "medium";
+}
+
+function optionalGoalString(value: unknown): string | undefined {
+  return typeof value === "string" ? value.trim() || undefined : undefined;
 }
 
 function parseJsonObject(text: string): unknown {
@@ -1721,6 +3367,21 @@ export async function resolveImageDataUrl(imagePath: string, workspacePath?: str
     workspaceRoot,
     allowedRootIds: null,
   });
+}
+function appendCommanderMemoryContext(prompt: string, memoryContext: string, locale = "en"): string {
+  if (!memoryContext.trim()) {
+    return prompt;
+  }
+  const promptLocale = normalizePromptLocale(locale);
+  return [
+    prompt,
+    "",
+    promptLocale === "zhCN" ? "Commander 任务经验和记忆:" : "Commander task lessons and memory:",
+    promptLocale === "zhCN"
+      ? "仅作低 token 提示；优先压成 lesson/blocker/next/confidence，使用前必须用当前证据验证。"
+      : "Compact hints only; prefer lesson/blocker/next/confidence and verify current evidence before using them.",
+    memoryContext.trim(),
+  ].join("\n");
 }
 
 export function validateImageDataUrl(value: string): string {
@@ -1856,10 +3517,26 @@ function normalizeCommanderStep(
     dependsOn: Array.isArray(step.dependsOn)
       ? step.dependsOn.filter((d): d is string => typeof d === "string")
       : undefined,
+    inputContextKeys: normalizeStringArray(step.inputContextKeys),
+    toolInput: isRecord(step.toolInput) ? { ...step.toolInput } : undefined,
+    outputContextKey: typeof step.outputContextKey === "string" && step.outputContextKey.trim()
+      ? step.outputContextKey.trim()
+      : undefined,
     choices: normalizeAskUserChoices(step.choices),
     executionMode: normalizeStepExecutionMode(step.executionMode),
     successCriteria: stringValue(step.successCriteria, "Step completed with evidence."),
   };
+}
+
+function normalizeStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const items = value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return items.length > 0 ? items : undefined;
 }
 
 function normalizeStepExecutionMode(value: unknown): CommanderPlanResult["steps"][number]["executionMode"] | undefined {
@@ -1923,9 +3600,15 @@ function normalizeVerifierCheck(value: unknown): VerifierCheckResult {
   if (!isRecord(value)) {
     throw new Error("Verifier check response must be an object.");
   }
-  const status = value.status === "warn" || value.status === "fail" ? value.status : "pass";
+  if (value.status !== "pass" && value.status !== "warn" && value.status !== "fail") {
+    return {
+      status: "fail",
+      summary: "Verifier returned invalid status.",
+      detail: "Verifier check response must include status pass, warn, or fail.",
+    };
+  }
   return {
-    status,
+    status: value.status,
     summary: stringValue(value.summary, "Evidence checked."),
     detail: stringValue(value.detail, stringValue(value.summary, "Evidence checked.")),
   };
@@ -1941,6 +3624,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function createBrowserApprovalError(): Error {
   return new Error("Browser write operation requires native approval and is disabled until browser approvals are implemented.");
+}
+
+async function readChangedFilesForRepositoryPriority(
+  runCommand: (request: ShellCommandRequest) => Promise<{ exitCode: number | null; stdout: string }>,
+): Promise<string[]> {
+  try {
+    const status = await runCommand({ program: "git", args: ["status", "--short"], workspacePath: null });
+    if (status.exitCode !== 0) return [];
+    return parseGitStatusFiles(status.stdout);
+  } catch {
+    return [];
+  }
 }
 
 function proposeCodeEditWithModelProvider(
@@ -1963,16 +3658,4 @@ function proposeCodeEditWithModelProvider(
       locale: "zh-CN",
     },
   });
-}
-
-// ── Trusted Computer Apps (stub) ──────────────────────────────────────
-
-import type { TrustedComputerApp } from "@javis/tools";
-
-export function loadTrustedComputerApps(): TrustedComputerApp[] {
-  return [];
-}
-
-export function removeTrustedComputerApp(_title: string): TrustedComputerApp[] {
-  return [];
 }

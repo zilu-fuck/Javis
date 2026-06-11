@@ -231,6 +231,98 @@ describe("model provider", () => {
     });
   });
 
+  it("injects explicit memory context into agent system prompts", async () => {
+    invokeMock.mockResolvedValueOnce({
+      text: "done",
+      model: "gpt-test",
+      provider: "openai",
+    });
+    const provider = createConfiguredModelProvider(createSettings());
+
+    await provider.complete("Answer the current request.", {
+      agentKind: "commander",
+      memoryContext: "[Workspace Memory]\n- Javis memory stays local.",
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("complete_model_prompt", {
+      request: expect.objectContaining({
+        prompt: expect.stringContaining("Local Agent memory context:"),
+      }),
+    });
+    expect(invokeMock).toHaveBeenCalledWith("complete_model_prompt", {
+      request: expect.objectContaining({
+        prompt: expect.stringContaining("Javis memory stays local."),
+      }),
+    });
+  });
+
+  it("skips explicit memory context when requested", async () => {
+    invokeMock.mockResolvedValueOnce({
+      text: "done",
+      model: "gpt-test",
+      provider: "openai",
+    });
+    const provider = createConfiguredModelProvider(createSettings());
+
+    await provider.complete("Return JSON only.", {
+      agentKind: "commander",
+      memoryContext: "[Workspace Memory]\n- Should not appear.",
+      skipAgentMemory: true,
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("complete_model_prompt", {
+      request: expect.objectContaining({
+        prompt: expect.not.stringContaining("Should not appear."),
+      }),
+    });
+  });
+
+  it("injects enabled skill context into agent system prompts", async () => {
+    invokeMock.mockResolvedValueOnce({
+      text: "done",
+      model: "gpt-test",
+      provider: "openai",
+    });
+    const provider = createConfiguredModelProvider(createSettings());
+
+    await provider.complete("Answer the current request.", {
+      agentKind: "commander",
+      skillContext: "Skill: Godot\nInstructions from SKILL.md:\nUse Godot 4 APIs.",
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("complete_model_prompt", {
+      request: expect.objectContaining({
+        prompt: expect.stringContaining("Enabled Javis skill instructions:"),
+      }),
+    });
+    expect(invokeMock).toHaveBeenCalledWith("complete_model_prompt", {
+      request: expect.objectContaining({
+        prompt: expect.stringContaining("Use Godot 4 APIs."),
+      }),
+    });
+  });
+
+  it("skips enabled skill context when requested", async () => {
+    invokeMock.mockResolvedValueOnce({
+      text: "done",
+      model: "gpt-test",
+      provider: "openai",
+    });
+    const provider = createConfiguredModelProvider(createSettings());
+
+    await provider.complete("Return JSON only.", {
+      agentKind: "commander",
+      skillContext: "Should not appear.",
+      skipSkillContext: true,
+    });
+
+    expect(invokeMock).toHaveBeenCalledWith("complete_model_prompt", {
+      request: expect.objectContaining({
+        prompt: expect.not.stringContaining("Should not appear."),
+      }),
+    });
+  });
+
   it("normalizes provider errors for complete and stream", async () => {
     // listen is called before invoke now, so provide a no-op unlisten
     listenMock.mockResolvedValue((() => {}) as () => void);

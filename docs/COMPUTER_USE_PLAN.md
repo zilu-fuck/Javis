@@ -278,7 +278,7 @@ RULES:
 - Never automate browser-internal pages (chrome://, about:, edge://)
 - Never input passwords, credit card numbers, or authentication tokens
 - If you're unsure what to click, screenshot again and describe what you see
-- If the goal is achieved, output {"status":"complete","summary":"..."}`,
+- If the goal is achieved, output {"observation":"Goal achieved","action":{"tool":"computer.wait","params":{"ms":0}},"target":"done","confidence":"high","status":"complete","summary":"..."}`,
     zhCN: `你是 Windows 桌面操控代理。
 通过截图理解桌面状态，通过鼠标键盘执行操作。
 
@@ -300,7 +300,7 @@ RULES:
 - 绝不操作浏览器内部页面
 - 绝不输入密码、信用卡号或认证令牌
 - 不确定点什么时就再截图描述所见
-- 目标达成时输出 {"status":"complete","summary":"..."}`,
+- 目标达成时输出 {"observation":"目标已达成","action":{"tool":"computer.wait","params":{"ms":0}},"target":"完成","confidence":"high","status":"complete","summary":"..."}`,
   },
 },
 ```
@@ -709,7 +709,7 @@ export type ComputerUseAction =
 
 /**
  * 解析模型返回的 JSON 为 ComputerUseAction。
- * 返回 null 表示模型输出了终止信号 {"status":"complete"}。
+ * 返回 null 表示模型输出了终止信号 {"action":{"tool":"computer.wait","params":{"ms":0}},"confidence":"high","status":"complete"}。
  * 抛出错误表示 JSON 格式无效。
  */
 export function parseModelAction(raw: string): ComputerUseAction | null;

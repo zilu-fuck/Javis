@@ -14,8 +14,13 @@ import type {
   WorkbenchLocale,
   WorkbenchModelConfiguration,
   WorkbenchModelSettings,
+  WorkbenchComputerUseSettings,
+  WorkbenchComputerUseLocalVisionSettings,
+  WorkbenchRuntimePreferences,
   WorkbenchAgentStyleState,
   WorkbenchUserProfileMemorySummary,
+  WorkbenchAgentMemorySummary,
+  WorkbenchTrustedComputerApp,
 } from "../types";
 import {
   filterWorkbenchHistoryEntries,
@@ -33,8 +38,13 @@ interface SidebarProps {
   locale: WorkbenchLocale;
   modelSettings: WorkbenchModelSettings;
   modelConfiguration?: WorkbenchModelConfiguration;
+  computerUseSettings?: WorkbenchComputerUseSettings;
+  computerUseLocalVisionSettings?: WorkbenchComputerUseLocalVisionSettings;
+  trustedComputerApps?: WorkbenchTrustedComputerApp[];
+  runtimePreferences?: WorkbenchRuntimePreferences;
   agentCatalog?: WorkbenchAgentCatalogEntry[];
   userProfileMemorySummary?: WorkbenchUserProfileMemorySummary | null;
+  agentMemorySummary?: WorkbenchAgentMemorySummary | null;
   historyEntries: WorkbenchHistoryEntry[];
   currentWorkspacePath?: string;
   recentWorkspacePaths?: string[];
@@ -57,8 +67,16 @@ interface SidebarProps {
   onModelSettingsChange?: (settings: WorkbenchModelSettings) => void;
   onTestModelConnection?: (settings: WorkbenchModelSettings) => Promise<string | void>;
   onModelConfigurationChange?: (config: WorkbenchModelConfiguration) => void;
+  onComputerUseSettingsChange?: (settings: WorkbenchComputerUseSettings) => void;
+  onComputerUseLocalVisionSettingsChange?: (settings: WorkbenchComputerUseLocalVisionSettings) => void;
+  onRemoveTrustedComputerApp?: (title: string) => void;
+  onRuntimePreferencesChange?: (preferences: WorkbenchRuntimePreferences) => void;
   onRebuildUserProfileMemory?: () => void;
   onClearUserProfileMemory?: () => void;
+  onAgentMemoryEnabledChange?: (enabled: boolean) => void;
+  onClearAgentMemory?: () => void;
+  onClearWorkspaceAgentMemory?: () => void;
+  onDeleteAgentMemoryFact?: (id: string) => void;
   onReadAgentStyle?: (kind: string) => Promise<WorkbenchAgentStyleState>;
   onSaveAgentStyle?: (kind: string, content: string) => Promise<WorkbenchAgentStyleState | void>;
   onResetAgentStyle?: (kind: string) => Promise<WorkbenchAgentStyleState | void>;
@@ -93,8 +111,13 @@ export function Sidebar({
   locale,
   modelSettings,
   modelConfiguration,
+  computerUseSettings,
+  computerUseLocalVisionSettings,
+  trustedComputerApps,
+  runtimePreferences,
   agentCatalog,
   userProfileMemorySummary,
+  agentMemorySummary,
   historyEntries,
   currentWorkspacePath,
   recentWorkspacePaths = [],
@@ -116,8 +139,16 @@ export function Sidebar({
   onModelSettingsChange,
   onTestModelConnection,
   onModelConfigurationChange,
+  onComputerUseSettingsChange,
+  onComputerUseLocalVisionSettingsChange,
+  onRemoveTrustedComputerApp,
+  onRuntimePreferencesChange,
   onRebuildUserProfileMemory,
   onClearUserProfileMemory,
+  onAgentMemoryEnabledChange,
+  onClearAgentMemory,
+  onClearWorkspaceAgentMemory,
+  onDeleteAgentMemoryFact,
   onReadAgentStyle,
   onSaveAgentStyle,
   onResetAgentStyle,
@@ -236,7 +267,7 @@ export function Sidebar({
           }
         }}
       >
-        <span className={`javis-nav-icon icon-${view}`}>{item.icon}</span>
+        <span className={`javis-nav-icon icon-${view}`} aria-hidden="true">{item.icon}</span>
         <NavItemText label={item.label} meta={item.meta} />
         {item.status ? <StatusDot status={item.status} /> : null}
         {item.badge != null && item.badge > 0 ? <span className="javis-nav-badge">{item.badge}</span> : null}
@@ -281,11 +312,11 @@ export function Sidebar({
           }
         }}
       >
-        <span className={`javis-nav-icon icon-${viewId}`}>{item.icon}</span>
+        <span className={`javis-nav-icon icon-${viewId}`} aria-hidden="true">{item.icon}</span>
         <NavItemText label={item.label} meta={item.meta} />
         {item.status ? <StatusDot status={item.status} /> : null}
         {item.badge != null && item.badge > 0 ? <span className="javis-nav-badge">{item.badge}</span> : null}
-        <span className="javis-nav-caret">{isCollapsed ? "v" : "^"}</span>
+        <span className="javis-nav-caret" aria-hidden="true">{isCollapsed ? "v" : "^"}</span>
       </div>
     );
   }
@@ -434,7 +465,7 @@ export function Sidebar({
                     }
                     type="button"
                   >
-                    <span className="javis-history-workspace-icon">▣</span>
+                    <span className="javis-history-workspace-icon" aria-hidden="true">▣</span>
                     <span className="javis-history-workspace-name">
                       {group.label}
                       {group.displayPath ? <small>{group.displayPath}</small> : null}
@@ -507,7 +538,7 @@ export function Sidebar({
             })
           ) : (
             <div className="javis-nav-item muted">
-              <span className="javis-nav-icon">*</span>
+              <span className="javis-nav-icon" aria-hidden="true">*</span>
               <span>{hasHistorySearch ? labels.historyNoMatches : labels.historyEmpty}</span>
             </div>
           )}
@@ -518,13 +549,26 @@ export function Sidebar({
         locale={locale}
         modelSettings={modelSettings}
         modelConfiguration={modelConfiguration}
+        computerUseSettings={computerUseSettings}
+        computerUseLocalVisionSettings={computerUseLocalVisionSettings}
+        trustedComputerApps={trustedComputerApps}
+        runtimePreferences={runtimePreferences}
         agentCatalog={agentCatalog}
         userProfileMemorySummary={userProfileMemorySummary}
+        agentMemorySummary={agentMemorySummary}
         onModelSettingsChange={onModelSettingsChange}
         onTestModelConnection={onTestModelConnection}
         onModelConfigurationChange={onModelConfigurationChange}
+        onComputerUseSettingsChange={onComputerUseSettingsChange}
+        onComputerUseLocalVisionSettingsChange={onComputerUseLocalVisionSettingsChange}
+        onRemoveTrustedComputerApp={onRemoveTrustedComputerApp}
+        onRuntimePreferencesChange={onRuntimePreferencesChange}
         onRebuildUserProfileMemory={onRebuildUserProfileMemory}
         onClearUserProfileMemory={onClearUserProfileMemory}
+        onAgentMemoryEnabledChange={onAgentMemoryEnabledChange}
+        onClearAgentMemory={onClearAgentMemory}
+        onClearWorkspaceAgentMemory={onClearWorkspaceAgentMemory}
+        onDeleteAgentMemoryFact={onDeleteAgentMemoryFact}
         onReadAgentStyle={onReadAgentStyle}
         onSaveAgentStyle={onSaveAgentStyle}
         onResetAgentStyle={onResetAgentStyle}

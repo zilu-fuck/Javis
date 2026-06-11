@@ -22,6 +22,7 @@ interface UseTaskRuntimeOptions {
   persistWorkspaceForTask: (status: TaskSnapshot["status"], workspacePath: string) => void;
   persistDurableApprovalRecord: (nextTask: TaskSnapshot) => void;
   onTaskSnapshot?: (nextTask: TaskSnapshot) => void;
+  createInitialTask?: () => TaskSnapshot;
   taskHistoryRepoRef: MutableRefObject<TaskHistoryRepositoryLike>;
   scheduledTasksRepoRef: MutableRefObject<ScheduledTasksRepositoryLike>;
   workspacePathRef: MutableRefObject<string>;
@@ -48,11 +49,12 @@ export function useTaskRuntime({
   persistWorkspaceForTask,
   persistDurableApprovalRecord,
   onTaskSnapshot,
+  createInitialTask,
   taskHistoryRepoRef,
   scheduledTasksRepoRef,
   workspacePathRef,
 }: UseTaskRuntimeOptions): TaskRuntimeControls {
-  const [task, setTask] = useState(createInitialTaskSnapshot);
+  const [task, setTask] = useState(createInitialTask ?? createInitialTaskSnapshot);
   const [isTaskActive, setIsTaskActiveState] = useState(false);
   const isTaskActiveRef = useRef(false);
   const [activeScheduledTaskId, setActiveScheduledTaskId] = useState<string | undefined>();

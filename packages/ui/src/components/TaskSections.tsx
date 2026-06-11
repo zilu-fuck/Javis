@@ -60,9 +60,16 @@ export function TaskSections({ labels, locale, task, onPermissionDecision, onAsk
                 {translateWorkbenchText(task.permissionRequest.reason, locale)}
               </p>
             </div>
-            <span className="javis-status">
-              {translateWorkbenchText(task.permissionRequest.level, locale)}
-            </span>
+            <div className="javis-confirmation-badges">
+              <span className="javis-status">
+                {translateWorkbenchText(task.permissionRequest.level, locale)}
+              </span>
+              {task.permissionRequest.writeRiskLevel ? (
+                <span className={`javis-status javis-risk-status risk-${task.permissionRequest.writeRiskLevel}`}>
+                  {translateWorkbenchText(task.permissionRequest.writeRiskLevel, locale)}
+                </span>
+              ) : null}
+            </div>
           </div>
           <p className="javis-message-body">
             {translateWorkbenchText(task.permissionRequest.dryRun.operation, locale)}
@@ -70,6 +77,13 @@ export function TaskSections({ labels, locale, task, onPermissionDecision, onAsk
           <p className="javis-agent-task">
             {translateWorkbenchText(task.permissionRequest.dryRun.riskSummary, locale)}
           </p>
+          {task.permissionRequest.screenshotDataUrl ? (
+            <img
+              alt={translateWorkbenchText("Desktop preview", locale)}
+              className="javis-permission-screenshot"
+              src={task.permissionRequest.screenshotDataUrl}
+            />
+          ) : null}
           <div className="javis-dry-run-list">
             {task.permissionRequest.dryRun.affectedPaths.map((path) => (
               <article className="javis-dry-run-item" key={`${path.source}-${path.target}`}>
@@ -90,7 +104,7 @@ export function TaskSections({ labels, locale, task, onPermissionDecision, onAsk
             >
               {labels.approve}
             </button>
-            {canShowComputerTaskApproval(task.permissionRequest.dryRun.operation) ? (
+            {canShowComputerTaskApproval(task.permissionRequest) ? (
               <button
                 disabled={task.permissionRequest.status !== "pending"}
                 onClick={() => onPermissionDecision?.("approved_always")}
@@ -98,7 +112,8 @@ export function TaskSections({ labels, locale, task, onPermissionDecision, onAsk
               >
                 {translateWorkbenchText("Allow this task", locale)}
               </button>
-            ) : task.permissionRequest.dryRun.operation.startsWith("computer.") ? null : (
+            ) : task.permissionRequest.dryRun.operation.startsWith("computer.") ||
+              task.permissionRequest.allowAlways === false ? null : (
               <button
                 disabled={task.permissionRequest.status !== "pending"}
                 onClick={() => onPermissionDecision?.("approved_always")}
@@ -178,8 +193,12 @@ export function TaskSections({ labels, locale, task, onPermissionDecision, onAsk
   );
 }
 
-function canShowComputerTaskApproval(operation: string): boolean {
-  return COMPUTER_TASK_APPROVAL_OPERATIONS.has(operation);
+function canShowComputerTaskApproval(request: WorkbenchTask["permissionRequest"]): boolean {
+  return Boolean(
+    request &&
+    request.allowAlways !== false &&
+    COMPUTER_TASK_APPROVAL_OPERATIONS.has(request.dryRun.operation),
+  );
 }
 
 function normalizeAskUserChoice(choice: string | WorkbenchAskUserChoice): WorkbenchAskUserChoice {

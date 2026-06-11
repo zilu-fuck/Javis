@@ -42,7 +42,7 @@ export interface InstalledAppEntry {
 export interface PlannedPathOperation {
   source: string;
   target: string;
-  action: "move" | "copy" | "create" | "modify" | "delete" | "overwrite";
+  action: "move" | "copy" | "create" | "modify" | "delete" | "overwrite" | "stage" | "push" | "create_pr" | "comment_pr";
   conflict?: string;
 }
 
@@ -60,7 +60,10 @@ export interface PermissionRequest {
   writeRiskLevel?: WriteRiskLevel;
   title: string;
   reason: string;
+  /** Ephemeral UI preview for approval cards. Must be redacted before persistence. */
+  screenshotDataUrl?: string;
   dryRun: DryRunSummary;
+  allowAlways?: boolean;
   bindingHash?: string;
   status: "pending" | "approved" | "denied" | "expired" | "cancelled";
   createdAt: string;
@@ -201,8 +204,12 @@ export interface ResearchReport {
   summary: string;
   rows: Array<{
     claim: string;
+    status?: "verified" | "unknown";
     sourceUrl: string;
+    excerpt?: string;
     evidence: string;
+    verificationStatus?: "verified" | "unknown";
+    sourceProvider?: string;
   }>;
   unknowns: string[];
 }
@@ -240,6 +247,13 @@ export interface TokenUsageSummary {
 
 export interface CommanderPlanRequest {
   userGoal: string;
+  /** Recent conversation context for follow-up planning. May be windowed. */
+  priorMessages?: Array<{
+    role: "user" | "assistant";
+    content: string;
+  }>;
+  /** Number of older priorMessages omitted before the supplied window. */
+  omittedPriorMessageCount?: number;
   availableAgents: Array<{
     kind: string;
     allowedToolNames: string[];
@@ -261,6 +275,12 @@ export interface CommanderPlanResult {
     requiredCapabilities?: string[];
     /** Step IDs that must complete before this step starts. Empty = can run immediately. */
     dependsOn?: string[];
+    /** SharedContext keys to read as input for this step. */
+    inputContextKeys?: string[];
+    /** Literal tool input merged with inputContextKeys for direct tool calls. */
+    toolInput?: Record<string, unknown>;
+    /** SharedContext key to write the step's output to. */
+    outputContextKey?: string;
     /** Suggested answers for clarification steps. */
     choices?: Array<string | AskUserChoice>;
     executionMode?: "direct_response" | "direct_tool_call" | "react";
@@ -338,15 +358,445 @@ export interface CodeApplyApproval {
   taskId?: string;
 }
 
+export interface CodeRepositorySearchRequest {
+  goal: string;
+  knownTerms?: string[];
+  entryFile?: string;
+  priorityPaths?: string[];
+  maxAttempts?: number;
+  maxKeyFiles?: number;
+}
+
+export interface CodeRepositorySearchResult {
+  actualFound: Array<{
+    path: string;
+    line?: number;
+    column?: number;
+    excerpt: string;
+    matchedTerms: string[];
+    score?: number;
+  }>;
+  inferred: string[];
+  needsConfirmation: string[];
+  keyFiles: string[];
+  relatedTestFiles: string[];
+  testFileCandidates: string[];
+  clusters: Array<{
+    id: string;
+    label: string;
+    paths: string[];
+    resultCount: number;
+    score: number;
+    topTerms: string[];
+  }>;
+  semanticDiagnostics?: Array<{
+    provider: string;
+    status: "completed" | "failed" | "skipped";
+    candidateCount: number;
+    rerankedCount: number;
+    durationMs?: number;
+    error?: string;
+  }>;
+  attempts: Array<{
+    id: string;
+    query: string;
+    reason: string;
+    resultCount?: number;
+    status?: "completed" | "failed";
+    durationMs?: number;
+    error?: string;
+    errorKind?: CodeRepositorySearchAttemptErrorKind;
+    provider?: string;
+    retryCount?: number;
+  }>;
+}
+
+export type CodeRepositorySearchAttemptErrorKind = "timeout" | "unavailable" | "permission" | "cancelled" | "unknown";
+export type CodeRepositoryTraceDirection = "forward" | "backward" | "bidirectional";
+export type CodeRepositoryTraceRelation = "references" | "may_call" | "imports" | "exports" | "entrypoint_to_candidate";
+export type CodeRepositoryTraceModuleKind = "relative" | "workspace" | "external";
+
+export interface CodeRepositoryTraceRequest {
+  goal: string;
+  target: string;
+  entrypoints?: string[];
+  workspaceModulePrefixes?: string[];
+  direction?: CodeRepositoryTraceDirection;
+  maxDepth?: number;
+  maxEdges?: number;
+  knownTerms?: string[];
+  maxAttempts?: number;
+}
+
+export interface CodeRepositoryTraceEvidence {
+  path: string;
+  line?: number;
+  column?: number;
+  excerpt: string;
+  matchedTerms: string[];
+  symbol?: string;
+  score?: number;
+}
+
+export interface CodeRepositoryTraceNode {
+  id: string;
+  label: string;
+  kind: "target" | "entrypoint" | "candidate";
+  path?: string;
+  symbol?: string;
+  score: number;
+}
+
+export interface CodeRepositoryTraceEdge {
+  from: string;
+  to: string;
+  relation: CodeRepositoryTraceRelation;
+  evidencePath: string;
+  line?: number;
+  excerpt: string;
+  confidence: number;
+  moduleSpecifier?: string;
+  moduleKind?: CodeRepositoryTraceModuleKind;
+}
+
+export interface CodeRepositoryTraceModuleLink {
+  specifier: string;
+  kind: CodeRepositoryTraceModuleKind;
+  evidencePaths: string[];
+  importCount: number;
+  exportCount: number;
+  dynamicImportCount: number;
+  confidence: number;
+  resolutionStatus?: "resolved" | "unresolved" | "failed";
+  resolvedPaths?: string[];
+  resolverProvider?: string;
+  resolutionError?: string;
+  packageHints?: CodeRepositoryTracePackageHint[];
+}
+
+export interface CodeRepositorySymbolGraphNode {
+  id: string;
+  kind: "file" | "symbol";
+  label: string;
+  path?: string;
+  symbol?: string;
+  confidence: number;
+}
+
+export interface CodeRepositorySymbolGraphEdge {
+  from: string;
+  to: string;
+  relation: "declares" | "references" | "imports" | "exports" | "calls";
+  evidencePath: string;
+  line?: number;
+  confidence: number;
+}
+
+export interface CodeRepositorySymbolGraph {
+  nodes: CodeRepositorySymbolGraphNode[];
+  edges: CodeRepositorySymbolGraphEdge[];
+}
+
+export interface CodeRepositoryTracePackageHint {
+  manifestPath: string;
+  name?: string;
+  main?: string;
+  module?: string;
+  types?: string;
+  exports?: string[];
+}
+
+export interface CodeRepositoryTraceResult {
+  target: string;
+  direction: CodeRepositoryTraceDirection;
+  actualFound: CodeRepositoryTraceEvidence[];
+  nodes: CodeRepositoryTraceNode[];
+  edges: CodeRepositoryTraceEdge[];
+  moduleLinks: CodeRepositoryTraceModuleLink[];
+  symbolGraph: CodeRepositorySymbolGraph;
+  inferred: string[];
+  needsConfirmation: string[];
+  keyFiles: string[];
+  attempts: Array<{
+    id: string;
+    query: string;
+    reason: string;
+    resultCount?: number;
+    status?: "completed" | "failed";
+    durationMs?: number;
+    error?: string;
+    errorKind?: CodeRepositorySearchAttemptErrorKind;
+    provider?: string;
+    retryCount?: number;
+  }>;
+}
+
 export interface CodeTool {
   inspectRepository(): Promise<CodeReviewPreview>;
+  searchRepository?(request: CodeRepositorySearchRequest): Promise<CodeRepositorySearchResult>;
+  traceCallChain?(request: CodeRepositoryTraceRequest): Promise<CodeRepositoryTraceResult>;
   proposeEdit?(request: { userGoal: string; preview: CodeReviewPreview; taskId?: string }): Promise<CodeProposedEdit>;
   applyProposedEdit?(edit: CodeProposedEdit, approval: CodeApplyApproval): Promise<CodeApplyResult>;
+}
+
+export interface GitStageFilesRequest {
+  paths: string[];
+  taskId?: string;
+}
+
+export interface GitStageApproval {
+  approvalId: string;
+  paths: string[];
+  taskId?: string;
+}
+
+export interface GitStagePlan {
+  approvalId: string;
+  preview: {
+    workspaceRoot: string;
+    files: Array<{
+      path: string;
+      indexStatus: string;
+      worktreeStatus: string;
+      action: PlannedPathOperation["action"];
+      contentHash: string;
+    }>;
+    diffStat: string;
+    diff: string;
+    dryRun: DryRunSummary;
+  };
+}
+
+export interface GitStageExecutionResult {
+  workspacePath: string;
+  stagedPaths: string[];
+  fileCount: number;
+  staged: boolean;
+  output: string;
+}
+
+export interface GitCommitRequest {
+  message: string;
+  paths?: string[];
+  taskId?: string;
+}
+
+export interface GitCommitApproval {
+  approvalId: string;
+  message: string;
+  paths?: string[];
+  taskId?: string;
+}
+
+export interface GitCommitPlan {
+  approvalId: string;
+  preview: {
+    workspaceRoot: string;
+    branch?: string;
+    message: string;
+    files: Array<{
+      path: string;
+      indexStatus: string;
+      worktreeStatus: string;
+      action: PlannedPathOperation["action"];
+      contentHash: string;
+    }>;
+    diffStat: string;
+    diff: string;
+    dryRun: DryRunSummary;
+  };
+}
+
+export interface GitCommitExecutionResult {
+  workspacePath: string;
+  branch?: string;
+  commitHash: string;
+  subject: string;
+  fileCount: number;
+  committed: boolean;
+  output: string;
+}
+
+export interface GitCreatePullRequestRequest {
+  title: string;
+  body?: string;
+  baseBranch: string;
+  draft?: boolean;
+  taskId?: string;
+}
+
+export interface GitCreatePullRequestApproval {
+  approvalId: string;
+  title: string;
+  body?: string;
+  baseBranch: string;
+  draft?: boolean;
+  taskId?: string;
+}
+
+export interface GitCreatePullRequestPlan {
+  approvalId: string;
+  preview: {
+    workspaceRoot: string;
+    provider: string;
+    title: string;
+    body: string;
+    baseBranch: string;
+    headBranch: string;
+    headCommit: string;
+    remoteName?: string;
+    remoteUrl?: string;
+    draft: boolean;
+    dryRun: DryRunSummary;
+  };
+}
+
+export interface GitCreatePullRequestExecutionResult {
+  workspacePath: string;
+  provider: string;
+  url: string;
+  title: string;
+  baseBranch: string;
+  headBranch: string;
+  draft: boolean;
+  created: boolean;
+  output: string;
+}
+
+export interface GitCommentPullRequestRequest {
+  pullRequest: string;
+  body: string;
+  taskId?: string;
+}
+
+export interface GitCommentPullRequestApproval {
+  approvalId: string;
+  pullRequest: string;
+  body: string;
+  taskId?: string;
+}
+
+export interface GitCommentPullRequestPlan {
+  approvalId: string;
+  preview: {
+    workspaceRoot: string;
+    provider: string;
+    pullRequest: string;
+    body: string;
+    remoteUrl?: string;
+    dryRun: DryRunSummary;
+  };
+}
+
+export interface GitCommentPullRequestExecutionResult {
+  workspacePath: string;
+  provider: string;
+  pullRequest: string;
+  commented: boolean;
+  output: string;
+}
+
+export interface GitTool {
+  planStageFiles?(request: GitStageFilesRequest): Promise<GitStagePlan>;
+  executeStageFiles?(approval: GitStageApproval): Promise<GitStageExecutionResult>;
+  planCommit?(request: GitCommitRequest): Promise<GitCommitPlan>;
+  executeCommit?(approval: GitCommitApproval): Promise<GitCommitExecutionResult>;
+  planCreatePullRequest?(request: GitCreatePullRequestRequest): Promise<GitCreatePullRequestPlan>;
+  executeCreatePullRequest?(approval: GitCreatePullRequestApproval): Promise<GitCreatePullRequestExecutionResult>;
+  planCommentPullRequest?(request: GitCommentPullRequestRequest): Promise<GitCommentPullRequestPlan>;
+  executeCommentPullRequest?(approval: GitCommentPullRequestApproval): Promise<GitCommentPullRequestExecutionResult>;
 }
 
 export interface WebTool {
   fetchWebSource(request: WebSourceRequest): Promise<WebSource>;
   searchWeb?(request: WebSearchRequest): Promise<WebSearchResult[]>;
+}
+
+export type TrendProvider = string;
+
+export interface TrendHotListRequest {
+  provider: TrendProvider;
+  fallbackProviders?: TrendProvider[];
+  limit?: number;
+  taskId?: string;
+}
+
+export interface TrendHotListItem {
+  rank: number;
+  title: string;
+  url?: string;
+  hotScore?: number;
+  label?: string;
+  category?: string;
+  raw?: Record<string, unknown>;
+}
+
+export interface TrendHotListResult {
+  provider: TrendProvider;
+  fetchedAt: string;
+  sourceUrl: string;
+  items: TrendHotListItem[];
+  expectedCount: number;
+  complete: boolean;
+  warnings: string[];
+  diagnostics: TrendFetchDiagnostic[];
+}
+
+export interface TrendFetchDiagnostic {
+  provider: TrendProvider;
+  sourceUrl?: string;
+  requestedLimit: number;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  status: "completed" | "failed";
+  httpStatus?: number;
+  itemCount?: number;
+  errorKind?: "http" | "network" | "parse" | "unsupported_provider" | "unavailable" | "unknown";
+  error?: string;
+}
+
+export interface TrendTool {
+  fetchHotList(request: TrendHotListRequest): Promise<TrendHotListResult>;
+}
+
+export interface MemorySearchRequest {
+  query: string;
+  tags?: string[];
+  kind?: string[];
+  scopeType?: "global" | "workspace" | "session";
+  scopeId?: string;
+  limit?: number;
+  taskId?: string;
+}
+
+export interface MemorySearchResult {
+  id: string;
+  fact: string;
+  kind: string;
+  tags: string[];
+  confidence: number;
+  importance: number;
+  updatedAt: number;
+  sourceSessionId?: string;
+}
+
+export interface MemoryTool {
+  search(request: MemorySearchRequest): Promise<MemorySearchResult[]>;
+}
+
+export interface McpCallRequest {
+  serverName: string;
+  source?: string;
+  action?: "listTools" | "callTool";
+  toolName?: string;
+  arguments?: Record<string, unknown>;
+  input?: Record<string, unknown>;
+  timeoutMs?: number;
+}
+
+export interface McpTool {
+  call(request: McpCallRequest): Promise<unknown>;
 }
 
 // ── Browser Tool ──────────────────────────────────────────────────────────────
@@ -551,6 +1001,13 @@ export interface ComputerScreenshotResult {
   sourceOriginY?: number;
   scaleX?: number;
   scaleY?: number;
+  health?: {
+    sampledPixels: number;
+    dominantColorRatio: number;
+    darkPixelRatio: number;
+    suspiciousBlank: boolean;
+    reason?: "dark" | "solid";
+  };
   capturedAt: string;
   methodUsed?: "bitblt" | "printWindow";
 }
@@ -566,6 +1023,65 @@ export interface ComputerListWindowsResult {
     isVisible: boolean;
     isForeground: boolean;
   }>;
+}
+
+export type ComputerUiCoordinateSpace = "screenshot" | "screen" | "windowClient";
+
+export interface ComputerUiDetectionBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  coordinateSpace: ComputerUiCoordinateSpace;
+  screenshotSize?: {
+    width: number;
+    height: number;
+  };
+  devicePixelRatio?: number;
+  monitorId?: string;
+  windowHandle?: number;
+}
+
+export interface ComputerUiDetection {
+  id: string;
+  label: string;
+  confidence: number;
+  box: ComputerUiDetectionBox;
+  center: {
+    x: number;
+    y: number;
+    coordinateSpace: ComputerUiCoordinateSpace;
+  };
+  source: string;
+}
+
+export interface ComputerDetectUiObjectsRequest {
+  imageDataUrl: string;
+  screenshotId: string;
+  observationId?: string;
+  windowHandle?: number;
+  classes?: string[];
+  modelPath?: string;
+  runtime?: "auto" | "onnxruntime" | "openvino" | "tensorrt";
+  runtimeAdapterPath?: string;
+  reuseWorker?: boolean;
+  imgsz?: number;
+  maxDetections?: number;
+  minConfidence?: number;
+  iouThreshold?: number;
+  timeoutMs?: number;
+  labelMap?: Record<string, string>;
+}
+
+export interface ComputerDetectUiObjectsResult {
+  screenshotId: string;
+  detections: ComputerUiDetection[];
+  latencyMs: number;
+  model: string;
+  runtime: "onnxruntime" | "openvino" | "tensorrt" | "unknown";
+  timedOut: boolean;
+  error?: string;
+  diagnostics?: Record<string, unknown>;
 }
 
 export interface ComputerFocusWindowRequest {
@@ -719,6 +1235,7 @@ export interface ComputerTool {
   listDirectory(request: { path?: string }): Promise<ComputerFileCandidate[]>;
   screenshot(request: ComputerScreenshotRequest): Promise<ComputerScreenshotResult>;
   listWindows(request: ComputerListWindowsRequest): Promise<ComputerListWindowsResult>;
+  detectUiObjects?(request: ComputerDetectUiObjectsRequest): Promise<ComputerDetectUiObjectsResult>;
   inspectUi(request: ComputerInspectUiRequest): Promise<ComputerInspectUiResult>;
   focusWindow(request: ComputerFocusWindowRequest): Promise<ComputerFocusWindowResult>;
   moveMouse(request: ComputerMoveMouseRequest): Promise<ComputerMoveMouseResult>;
@@ -822,4 +1339,5 @@ export interface ToolDescriptor {
   capabilityTags: string[];
   /** Agent kinds that are allowed to use this tool. */
   ownerAgentKinds: string[];
+  metadata?: Record<string, unknown>;
 }

@@ -16,6 +16,12 @@ export interface CompletionOptions {
   streamMode?: "default" | "l1";
   agentKind?: AgentKind;
   workspacePath?: string;
+  memoryContext?: string;
+  skillContext?: string;
+  skipAgentMemory?: boolean;
+  skipSkillContext?: boolean;
+  skillContextMaxSkills?: number;
+  skillContextMaxChars?: number;
 }
 
 export interface StreamOptions extends CompletionOptions {
@@ -341,12 +347,34 @@ async function buildPromptForRequest(prompt: string, options?: CompletionOptions
   }
 
   const customStyle = await readAgentStyle(options.agentKind, options.workspacePath);
+  const runtimeContext = appendRuntimeContext(prompt, options);
   return buildAgentSystemPrompt({
     kind: options.agentKind,
     locale: options.locale,
     customStyle,
-    runtimeContext: prompt,
+    runtimeContext,
   });
+}
+
+function appendRuntimeContext(prompt: string, options?: CompletionOptions): string {
+  const sections: string[] = [];
+  const memoryContext = options?.skipAgentMemory ? "" : options?.memoryContext?.trim();
+  if (memoryContext) {
+    sections.push("Local Agent memory context:", memoryContext);
+  }
+  const skillContext = options?.skipSkillContext ? "" : options?.skillContext?.trim();
+  if (skillContext) {
+    sections.push("Enabled Javis skill instructions:", skillContext);
+  }
+  if (sections.length === 0) {
+    return prompt;
+  }
+  return [
+    ...sections,
+    "",
+    "Current request context:",
+    prompt,
+  ].join("\n");
 }
 
 async function readAgentStyle(

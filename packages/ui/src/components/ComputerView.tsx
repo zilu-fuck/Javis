@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import type { WorkbenchFileEntry, WorkbenchLocale, WorkbenchTrustedComputerApp } from "../types";
-import { formatModifiedTime, formatSize } from "../utils";
+import type { WorkbenchDetailItem, WorkbenchFileEntry, WorkbenchLocale, WorkbenchTrustedComputerApp } from "../types";
+import { createFileDetailItem } from "../detail-items";
+import { formatModifiedTime, formatSize, isChineseLocale } from "../utils";
 import { ProgressBar } from "./ProgressBar";
 import { createCountLabel, ResourceIconButton, ResourceShell } from "./ResourceShell";
 
@@ -13,14 +14,16 @@ interface ComputerViewProps {
   onListDirectory?: (path: string) => Promise<WorkbenchFileEntry[]>;
   onNavigate?: (path: string) => void;
   onOpen?: (path: string) => void;
+  onOpenDetail?: (detail: WorkbenchDetailItem) => void;
   onRemoveTrustedApp?: (title: string) => void;
   trustedApps?: WorkbenchTrustedComputerApp[];
+  mountRoots?: { name: string; path: string }[];
 }
 
 type ComputerLayout = "columns" | "grid" | "list";
 type ComputerSort = "name" | "modified" | "size" | "type";
 
-const ROOT_DRIVES: WorkbenchFileEntry[] = [
+const FALLBACK_ROOT_DRIVES: WorkbenchFileEntry[] = [
   { name: "系统 (C:)", path: "C:\\", isDir: true },
   { name: "固态硬盘 (E:)", path: "E:\\", isDir: true },
   { name: "机械硬盘2 (F:)", path: "F:\\", isDir: true },
@@ -36,8 +39,10 @@ export function ComputerView({
   onListDirectory,
   onNavigate,
   onOpen,
+  onOpenDetail,
   onRemoveTrustedApp,
   trustedApps = [],
+  mountRoots = [],
 }: ComputerViewProps) {
   const labels = locale.labels;
   const [query, setQuery] = useState("");
@@ -46,13 +51,27 @@ export function ComputerView({
   const [columnPaths, setColumnPaths] = useState<string[]>([]);
   const [columnEntries, setColumnEntries] = useState<Record<string, WorkbenchFileEntry[]>>({});
   const [columnLoadingPaths, setColumnLoadingPaths] = useState<Record<string, boolean>>({});
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
 
   const normalizedCurrentPath = normalizeFilePath(currentPath);
   const rootMode = normalizedCurrentPath.length === 0;
-  const sourceEntries = rootMode ? ROOT_DRIVES : entries;
+  const rootDrives = useMemo(
+    () => {
+      const roots = mountRoots
+        .map((root) => ({
+          name: root.name || root.path,
+          path: normalizeFilePath(root.path),
+          isDir: true,
+        }))
+        .filter((root) => root.path);
+      return roots.length > 0 ? roots : FALLBACK_ROOT_DRIVES;
+    },
+    [mountRoots],
+  );
+  const sourceEntries = rootMode ? rootDrives : entries;
   const rootEntries = useMemo(
-    () => sortEntries(filterEntries(ROOT_DRIVES, query), sortBy),
-    [query, sortBy],
+    () => sortEntries(filterEntries(rootDrives, query), sortBy),
+    [query, rootDrives, sortBy],
   );
   const visibleEntries = useMemo(
     () => sortEntries(filterEntries(sourceEntries, query), sortBy),
@@ -135,12 +154,12 @@ export function ComputerView({
       navigateTo(entry.path);
       return;
     }
-    onOpen?.(entry.path);
+    selectEntry(entry);
   }
 
   function selectColumnEntry(columnIndex: number, entry: WorkbenchFileEntry) {
     if (!entry.isDir) {
-      onOpen?.(entry.path);
+      selectEntry(entry);
       return;
     }
 
@@ -149,6 +168,22 @@ export function ComputerView({
     const nextPaths = [...basePaths.slice(0, columnIndex + 1), entryPath];
     setColumnPaths(nextPaths);
     navigateTo(entryPath);
+  }
+
+  function selectEntry(entry: WorkbenchFileEntry) {
+    setSelectedPath(entry.path);
+    onOpenDetail?.(createFileDetailItem(entry, {
+      kindLabel: entry.isDir
+        ? (isChineseLocale(locale) ? "文件夹" : "Folder")
+        : (isChineseLocale(locale) ? "文件" : "File"),
+      locale,
+    }));
+  }
+
+  function openFile(entry: WorkbenchFileEntry) {
+    if (!entry.isDir) {
+      onOpen?.(entry.path);
+    }
   }
 
   function handleBack() {
@@ -307,9 +342,10 @@ export function ComputerView({
         <div className="javis-computer-grid">
           {visibleEntries.map((entry) => (
             <button
-              className="javis-computer-tile"
+              className={`javis-computer-tile${selectedPath === entry.path ? " selected" : ""}`}
               key={entry.path}
               onClick={() => activateEntry(entry)}
+              onDoubleClick={() => openFile(entry)}
               type="button"
             >
               {renderEntryIcon(entry, "large")}
@@ -321,9 +357,10 @@ export function ComputerView({
         <div className="javis-computer-list">
           {visibleEntries.map((entry) => (
             <button
-              className={`javis-computer-row ${entry.isDir ? "dir" : "file"}`}
+              className={`javis-computer-row ${entry.isDir ? "dir" : "file"}${selectedPath === entry.path ? " selected" : ""}`}
               key={entry.path}
               onClick={() => activateEntry(entry)}
+              onDoubleClick={() => openFile(entry)}
               type="button"
             >
               {renderEntryIcon(entry, "small")}
@@ -350,9 +387,10 @@ export function ComputerView({
                   <button
                     className={`javis-computer-column-row ${
                       columnPaths[columnIndex + 1] === normalizeFilePath(entry.path) ? "active" : ""
-                    }`}
+                    }${selectedPath === entry.path ? " selected" : ""}`}
                     key={entry.path}
                     onClick={() => selectColumnEntry(columnIndex, entry)}
+                    onDoubleClick={() => openFile(entry)}
                     type="button"
                   >
                     {renderEntryIcon(entry, "small")}

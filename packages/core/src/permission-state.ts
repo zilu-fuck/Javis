@@ -11,7 +11,9 @@ export interface PendingPermissionRequestInput {
   writeRiskLevel?: "safe" | "risky" | "dangerous";
   title: string;
   reason: string;
+  screenshotDataUrl?: string;
   dryRun: DryRunSummary;
+  allowAlways?: boolean;
 }
 
 export function createPendingPermissionRequest(
@@ -28,7 +30,9 @@ export function createPendingPermissionRequest(
     writeRiskLevel: input.writeRiskLevel,
     title: input.title,
     reason: input.reason,
+    ...(input.screenshotDataUrl ? { screenshotDataUrl: input.screenshotDataUrl } : {}),
     dryRun: input.dryRun,
+    ...(input.allowAlways === false ? { allowAlways: false } : {}),
     bindingHash: createDryRunBindingHash(input.dryRun),
     status: "pending",
     createdAt: now(),

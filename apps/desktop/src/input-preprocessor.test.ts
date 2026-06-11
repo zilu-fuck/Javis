@@ -25,6 +25,8 @@ describe("input preprocessor", () => {
       maxTokens: 700,
       temperature: 0,
       locale: "zh-CN",
+      skipAgentMemory: true,
+      skipSkillContext: true,
     });
   });
 

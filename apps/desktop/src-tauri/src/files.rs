@@ -3,8 +3,7 @@ use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    env,
-    fs,
+    env, fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -41,6 +40,7 @@ pub(crate) struct FileSearchResult {
     path: String,
     line: Option<usize>,
     preview: Option<String>,
+    provider: String,
 }
 
 #[derive(Serialize, Clone)]
@@ -186,6 +186,7 @@ fn search_with_ignore(
                 path: normalize_path(path),
                 line: None,
                 preview: None,
+                provider: "ignore".to_string(),
             });
             continue;
         }
@@ -199,6 +200,7 @@ fn search_with_ignore(
                     path: normalize_path(path),
                     line: Some(index + 1),
                     preview: Some(line.trim().chars().take(240).collect()),
+                    provider: "ignore".to_string(),
                 });
             }
         }
@@ -276,6 +278,7 @@ fn parse_rg_line(cwd: &Path, line: &str) -> Option<FileSearchResult> {
         path: normalize_path(&PathBuf::from(cwd).join(path)),
         line: line_number,
         preview,
+        provider: "rg".to_string(),
     })
 }
 

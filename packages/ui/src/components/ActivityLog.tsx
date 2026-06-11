@@ -1,4 +1,5 @@
 import {
+  useEffect,
   useState,
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -41,12 +42,14 @@ export function ActivityLog({
   resizeMin,
   resizeValue,
 }: ActivityLogProps) {
-  const [activeTab, setActiveTab] = useState<"activity" | "timeline">("activity");
   const [levelFilter, setLevelFilter] = useState<LogFilter>("all");
   const [showDevDetails, setShowDevDetails] = useState(false);
   const [isCleared, setIsCleared] = useState(false);
   void onPermissionDecision;
   void onAskUserAnswer;
+  useEffect(() => {
+    setIsCleared(false);
+  }, [task.id]);
   const rows = isCleared ? [] : buildLogRows(task, locale, labels, showDevDetails);
   const visibleRows = rows.filter((row) => levelFilter === "all" || row.status === levelFilter);
   const isChinese = locale.labels.newChat !== "New chat";
@@ -72,9 +75,8 @@ export function ActivityLog({
         <button
           aria-controls="javis-activity-panel"
           aria-expanded={isActivityOpen}
-          className={`javis-activity-toggle ${activeTab === "activity" ? "active" : ""}`}
+          className="javis-activity-toggle"
           onClick={() => {
-            setActiveTab("activity");
             if (!isActivityOpen) onToggle();
           }}
           type="button"
@@ -82,16 +84,6 @@ export function ActivityLog({
           <span>{labels.activityLog}</span>
           <span className="javis-activity-count">{activityCount}</span>
           <span>{isActivityOpen ? labels.collapseActivityLog : labels.expandActivityLog}</span>
-        </button>
-        <button
-          className={`javis-activity-tab ${activeTab === "timeline" ? "active" : ""}`}
-          onClick={() => {
-            setActiveTab("timeline");
-            if (!isActivityOpen) onToggle();
-          }}
-          type="button"
-        >
-          {labels.executionTimeline}
         </button>
         <div className="javis-activity-tools">
           <select
@@ -105,7 +97,7 @@ export function ActivityLog({
             <option value="waiting">{labels.waiting}</option>
             <option value="failed">{labels.failed}</option>
           </select>
-          <button title={labels.filterLogs} type="button">
+          <button aria-label={labels.filterLogs} title={labels.filterLogs} type="button">
             <span className="javis-log-tool-icon filter" aria-hidden="true" />
           </button>
           <button
@@ -126,9 +118,9 @@ export function ActivityLog({
         <div className="javis-activity-panel" id="javis-activity-panel">
           <header className="javis-activity-header">
             <p className="javis-eyebrow">{labels.activityLog}</p>
-            <h2 className="javis-title">{labels.executionTimeline}</h2>
+            <h2 className="javis-title">{labels.activityLog}</h2>
           </header>
-          <VirtualActivityRows rows={visibleRows} />
+          <VirtualActivityRows resizeValue={resizeValue} rows={visibleRows} />
         </div>
       ) : null}
     </section>
@@ -146,14 +138,14 @@ interface ActivityRow {
   writeRiskLevel?: "safe" | "risky" | "dangerous";
 }
 
-function VirtualActivityRows({ rows }: { rows: ActivityRow[] }) {
+function VirtualActivityRows({ resizeValue, rows }: { resizeValue?: number; rows: ActivityRow[] }) {
   if (rows.length === 0) {
     return <div className="javis-activity-list empty" />;
   }
 
   if (rows.length <= 100) {
     return (
-      <div className="javis-activity-list virtual">
+      <div className="javis-activity-list">
         {rows.map((row) => (
           <ActivityRowItem key={row.id} row={row} />
         ))}
@@ -161,10 +153,12 @@ function VirtualActivityRows({ rows }: { rows: ActivityRow[] }) {
     );
   }
 
+  const listHeight = Math.max(56, (resizeValue ?? 188) - 46);
+
   return (
     <div className="javis-activity-list virtual">
       <FixedSizeList
-        height={Math.min(220, Math.max(56, rows.length * 46))}
+        height={Math.min(listHeight, Math.max(56, rows.length * 46))}
         itemCount={rows.length}
         itemData={rows}
         itemKey={(index, data) => data[index].id}
@@ -240,7 +234,7 @@ function buildLogRows(
     rows.push({
       id: log.id,
       ...formatLogTime(log.createdAt ?? task.updatedAt, index),
-      agent: inferAgentName(log.title, labels.commander),
+      agent: inferAgentName(log.agentId ?? log.title, labels.commander),
       status: normalizeLogStatus(`${log.kind} ${log.title} ${log.detail}`),
       statusLabel: translateWorkbenchText(log.kind, locale),
       message: translateWorkbenchText(message, locale),
@@ -271,11 +265,17 @@ function formatLogTime(timestamp?: string, fallbackIndex = 0): { time: string; f
 
 function inferAgentName(text: string, fallback: string): string {
   const lower = text.toLowerCase();
+  if (lower.includes("commander")) return fallback;
   if (lower.includes("file")) return "File Agent";
   if (lower.includes("code")) return "Code Agent";
   if (lower.includes("research") || lower.includes("search")) return "Research Agent";
   if (lower.includes("computer") || lower.includes("desktop")) return "Computer Agent";
   if (lower.includes("command") || lower.includes("shell")) return "Shell Agent";
+  if (lower.includes("browser")) return "Browser Agent";
+  if (lower.includes("scheduler")) return "Scheduler Agent";
+  if (lower.includes("verifier")) return "Verifier Agent";
+  if (lower.includes("vision")) return "Vision Agent";
+  if (lower.includes("workspace")) return "Workspace Agent";
   return fallback;
 }
 

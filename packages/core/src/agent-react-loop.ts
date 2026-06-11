@@ -18,12 +18,14 @@ export interface AgentReActTool {
     step: WorkbenchWorkflowStep;
     context: SharedTaskContext;
     observations: AgentReActObservation[];
+    input?: Record<string, unknown>;
   }): Promise<unknown>;
 }
 
 export interface AgentReActDecision {
   status: "continue" | "completed" | "failed";
   toolName?: string;
+  input?: Record<string, unknown>;
   reason: string;
   output?: unknown;
 }
@@ -150,6 +152,7 @@ export async function runAgentReActLoop(
           step,
           context,
           observations,
+          input: decision.input,
         }),
         {
           label: `ReAct tool ${decision.toolName} for ${step.id} iteration ${iteration}`,

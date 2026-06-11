@@ -28,8 +28,10 @@ describe("task history persistence", () => {
       permissionRequest: {
         id: "permission-1",
         level: "confirmed_write",
+        writeRiskLevel: "dangerous",
         title: "Approve write",
         reason: "Write requires approval.",
+        screenshotDataUrl: "data:image/png;base64,PREVIEW_SHOULD_NOT_SURVIVE==",
         status: "approved",
         createdAt: "2026-05-23T00:00:00.000Z",
         resolvedAt: "2026-05-23T00:00:01.000Z",
@@ -50,8 +52,45 @@ describe("task history persistence", () => {
     expect(loaded).toHaveLength(1);
     expect(loaded[0]?.permissionRequest?.id).toBe("permission-1");
     expect(loaded[0]?.permissionRequest?.status).toBe("approved");
+    expect(loaded[0]?.permissionRequest?.writeRiskLevel).toBe("dangerous");
+    expect(loaded[0]?.permissionRequest?.screenshotDataUrl).toBeUndefined();
     expect(loaded[0]?.permissionRequest?.bindingHash).toBe("dryrun-fnv1a-test");
     expect(storage.getItem(TASK_HISTORY_STORAGE_KEY)).toContain("permission-1");
+    expect(storage.getItem(TASK_HISTORY_STORAGE_KEY)).not.toContain("data:image");
+  });
+
+  it("keeps resolved Git and PR dry-run actions in completed task history", () => {
+    const storage = createMemoryStorage();
+    const task = {
+      ...createTask("task-git-actions"),
+      permissionRequest: {
+        id: "permission-git",
+        level: "confirmed_write",
+        title: "Approve Git write",
+        reason: "Git write requires approval.",
+        status: "approved",
+        createdAt: "2026-06-11T00:00:00.000Z",
+        bindingHash: "dryrun-fnv1a-git",
+        dryRun: {
+          operation: "Git remote workflow",
+          affectedPaths: [
+            { source: "README.md", target: "index", action: "stage" },
+            { source: "refs/heads/main", target: "origin/main", action: "push" },
+            { source: "origin/main", target: "pull-request", action: "create_pr" },
+            { source: "pull-request", target: "comment", action: "comment_pr" },
+          ],
+          riskSummary: "Remote Git writes.",
+          reversible: false,
+        },
+      },
+    } satisfies TaskSnapshot;
+
+    saveTaskHistory(storage, [task]);
+    const actions = loadTaskHistory(storage)[0]?.permissionRequest?.dryRun.affectedPaths.map(
+      (path) => path.action,
+    );
+
+    expect(actions).toEqual(["stage", "push", "create_pr", "comment_pr"]);
   });
 
   it("strips pending permission requests from task history", () => {
@@ -79,6 +118,35 @@ describe("task history persistence", () => {
 
     expect(loaded[0]?.permissionRequest).toBeUndefined();
     expect(storage.getItem(TASK_HISTORY_STORAGE_KEY)).not.toContain("permission-pending");
+  });
+
+  it("keeps optional resolved permission fields absent after repeated sanitization", () => {
+    const task = {
+      ...createTask("task-1000"),
+      permissionRequest: {
+        id: "permission-optional",
+        level: "confirmed_write",
+        title: "Approve write",
+        reason: "Write requires approval.",
+        status: "approved",
+        createdAt: "2026-05-23T00:00:00.000Z",
+        dryRun: {
+          operation: "Move files",
+          affectedPaths: [],
+          riskSummary: "Risk",
+          reversible: true,
+        },
+      },
+    } satisfies TaskSnapshot;
+
+    const sanitized = sanitizeTaskSnapshot(task);
+    expect(sanitized?.permissionRequest?.id).toBe("permission-optional");
+    expect(Object.prototype.hasOwnProperty.call(sanitized?.permissionRequest ?? {}, "bindingHash")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(sanitized?.permissionRequest ?? {}, "allowAlways")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(sanitized?.permissionRequest ?? {}, "resolvedAt")).toBe(false);
+
+    const sanitizedAgain = sanitizeTaskSnapshot(sanitized);
+    expect(sanitizedAgain?.permissionRequest?.id).toBe("permission-optional");
   });
 
   it("rejects malformed localStorage snapshots", () => {
@@ -348,6 +416,141 @@ describe("task history persistence", () => {
     });
   });
 
+  it("keeps handoff reports and step context keys in completed task history", () => {
+    const storage = createMemoryStorage();
+    const task = {
+      ...createTask("task-handoff-report"),
+      plan: [{
+        id: "review-evidence",
+        title: "Review evidence",
+        assignedAgentKind: "verifier",
+        agentId: "agent-verifier",
+        status: "completed",
+        inputContextKeys: ["repoEvidence"],
+        outputContextKey: "reviewFindings",
+        successCriteria: "Review findings name the handoff artifact.",
+      }],
+      handoffReport: {
+        generatedAt: "2026-06-11T00:00:00.000Z",
+        status: "needs_attention",
+        missingInputContextKeys: [],
+        unconsumedOutputContextKeys: ["reviewFindings"],
+        steps: [{
+          stepId: "review-evidence",
+          title: "Review evidence",
+          assignedAgentKind: "verifier",
+          dependsOn: ["collect-evidence"],
+          inputContextKeys: ["repoEvidence"],
+          outputContextKey: "reviewFindings",
+          missingInputContextKeys: [],
+          successCriteria: "Review findings name the handoff artifact.",
+        }],
+        handoffs: [{
+          contextKey: "reviewFindings",
+          producedByStepId: "review-evidence",
+          consumedByStepIds: [],
+          status: "unconsumed",
+          valueSummary: { type: "array", present: true, itemCount: 2 },
+        }],
+      },
+    } satisfies TaskSnapshot;
+
+    saveTaskHistory(storage, [task]);
+    const loaded = loadTaskHistory(storage);
+
+    expect(loaded[0]?.plan[0]?.inputContextKeys).toEqual(["repoEvidence"]);
+    expect(loaded[0]?.plan[0]?.outputContextKey).toBe("reviewFindings");
+    expect(loaded[0]?.handoffReport).toMatchObject({
+      status: "needs_attention",
+      unconsumedOutputContextKeys: ["reviewFindings"],
+    });
+    expect(loaded[0]?.handoffReport?.handoffs[0]).toMatchObject({
+      contextKey: "reviewFindings",
+      producedByStepId: "review-evidence",
+      status: "unconsumed",
+      valueSummary: { type: "array", itemCount: 2 },
+    });
+  });
+
+  it("drops malformed handoff reports during task history sanitization", () => {
+    const sanitized = sanitizeTaskSnapshot({
+      ...createTask("task-bad-handoff"),
+      handoffReport: {
+        generatedAt: "2026-06-11T00:00:00.000Z",
+        status: "done",
+        steps: [],
+        handoffs: [],
+        missingInputContextKeys: [],
+        unconsumedOutputContextKeys: [],
+      },
+    });
+
+    expect(sanitized?.handoffReport).toBeUndefined();
+  });
+
+  it("keeps recovery reports in completed task history", () => {
+    const storage = createMemoryStorage();
+    const task = {
+      ...createTask("task-recovery-report"),
+      recoveryReport: {
+        generatedAt: "2026-06-11T00:00:00.000Z",
+        status: "recovered",
+        failureCount: 1,
+        recoveredCount: 1,
+        unrecoveredCount: 0,
+        abandonedStepIds: ["collect-evidence"],
+        replannedStepIds: ["recover-with-partial-evidence"],
+        attempts: [{
+          failedStepId: "collect-evidence",
+          failedStepTitle: "Collect evidence",
+          agentKind: "code",
+          errorSummary: "HTTP 503 from repository search provider",
+          failureKind: "network",
+          completedBefore: ["parse-request"],
+          replanAttempted: true,
+          replanStatus: "planned",
+          abandonedFailedStep: true,
+          recoveryStepIds: ["recover-with-partial-evidence"],
+          suggestedAlternatives: ["retry with a fallback provider"],
+          detail: "Commander produced 1 recovery step.",
+        }],
+      },
+    } satisfies TaskSnapshot;
+
+    saveTaskHistory(storage, [task]);
+    const loaded = loadTaskHistory(storage);
+
+    expect(loaded[0]?.recoveryReport).toMatchObject({
+      status: "recovered",
+      abandonedStepIds: ["collect-evidence"],
+      replannedStepIds: ["recover-with-partial-evidence"],
+    });
+    expect(loaded[0]?.recoveryReport?.attempts[0]).toMatchObject({
+      failedStepId: "collect-evidence",
+      failureKind: "network",
+      replanStatus: "planned",
+      recoveryStepIds: ["recover-with-partial-evidence"],
+    });
+  });
+
+  it("drops malformed recovery reports during task history sanitization", () => {
+    const sanitized = sanitizeTaskSnapshot({
+      ...createTask("task-bad-recovery"),
+      recoveryReport: {
+        generatedAt: "2026-06-11T00:00:00.000Z",
+        status: "done",
+        failureCount: 1,
+        recoveredCount: 1,
+        unrecoveredCount: 0,
+        abandonedStepIds: [],
+        replannedStepIds: [],
+        attempts: [],
+      },
+    });
+
+    expect(sanitized?.recoveryReport).toBeUndefined();
+  });
+
   it("restores structured conversation messages after repository restart", async () => {
     const database = createMemoryTaskHistoryDatabase();
     const firstRepository = createTaskHistoryRepository(database);
@@ -582,7 +785,7 @@ describe("task history persistence", () => {
     const repository = createTaskHistoryRepository(database);
     const task = {
       ...createTask("task-1000"),
-      userGoal: "Describe [image: data:image/png;base64,AA==]",
+      userGoal: "Describe [image: data:image\\/png;base64,AA==]",
       commanderMessage: "Saw data:image/png;base64,BB==",
       logs: [
         {
@@ -605,19 +808,142 @@ describe("task history persistence", () => {
           content: "Done.",
         },
       ],
+      commands: [{
+        command: "echo image",
+        cwd: "E:/Javis",
+        stdout: "stdout data:image/png;base64,HH==",
+        stderr: "",
+        exitCode: 0,
+      }],
+      verificationSummary: "verified data:image/png;base64,II==",
+      researchReport: {
+        title: "Report data:image/png;base64,JJ==",
+        summary: "summary data:image/png;base64,KK==",
+        rows: [{
+          claim: "claim data:image/png;base64,LL==",
+          sourceUrl: "https://example.test",
+          evidence: "evidence data:image/png;base64,MM==",
+        }],
+        unknowns: ["unknown data:image/png;base64,NN=="],
+      },
     } satisfies TaskSnapshot;
 
-    await repository.save([task]);
+    const taskWithImageKey = {
+      ...task,
+      extra: {
+        "data:image\\/png;base64,KEY_SHOULD_NOT_SURVIVE==": "safe value",
+      },
+    } as unknown as TaskSnapshot;
+
+    await repository.save([taskWithImageKey]);
     const loaded = await repository.list();
 
     expect(database.rows[0]?.user_goal).not.toContain("data:image");
+    expect(database.rows[0]?.user_goal).not.toContain("data:image\\/");
     expect(database.rows[0]?.snapshot_json).not.toContain("data:image");
+    expect(database.rows[0]?.snapshot_json).not.toContain("data:image\\/");
+    expect(database.rows[0]?.snapshot_json).not.toContain("KEY_SHOULD_NOT_SURVIVE");
     expect(database.rows[0]?.snapshot_json).not.toContain("attachments");
     expect(loaded[0]?.userGoal).toContain("[redacted image data URL]");
     expect(loaded[0]?.conversationMessages?.[0]?.attachments).toBeUndefined();
     expect(loaded[0]?.logs[0]?.detail).toContain("[redacted image data URL]");
     expect(loaded[0]?.logs[0]?.userMessage).toContain("[redacted image data URL]");
     expect(loaded[0]?.logs[0]?.devDetail).toContain("[redacted image data URL]");
+    expect(loaded[0]?.commands?.[0]?.stdout).toContain("[redacted image data URL]");
+    expect(loaded[0]?.verificationSummary).toContain("[redacted image data URL]");
+    expect(loaded[0]?.researchReport?.summary).toContain("[redacted image data URL]");
+    expect(loaded[0]?.researchReport?.rows[0]?.evidence).toContain("[redacted image data URL]");
+  });
+
+  it("redacts local vision model and adapter paths before repository persistence", async () => {
+    const database = createMemoryTaskHistoryDatabase();
+    const repository = createTaskHistoryRepository(database);
+    const task = {
+      ...createTask("task-local-vision-paths"),
+      logs: [
+        {
+          id: "log-local-vision",
+          kind: "tool",
+          title: "computer.detectUiObjects",
+          detail: String.raw`modelPath=C:\Users\alice\Models\yolo26n-ui.onnx runtimeAdapterPath=models\adapters\yolo26-ui.mjs`,
+          devDetail: "adapter /home/alice/.cache/javis/runtime-adapter.mjs failed; source packages/core/src/index.js stayed visible",
+        },
+      ],
+      commands: [{
+        command: String.raw`node scripts\local-vision-smoke.mjs --model C:\Users\alice\Models\yolo26n-ui.onnx`,
+        cwd: "E:/Javis",
+        stdout: "loaded models/yolo26n-ui.onnx",
+        stderr: "adapter /home/alice/.cache/javis/runtime-adapter.mjs failed",
+        exitCode: 2,
+      }],
+      conversationMessages: [
+        {
+          role: "assistant",
+          content: "Checked models/adapters/yolo26-ui.mjs",
+        },
+      ],
+    } satisfies TaskSnapshot;
+
+    await repository.save([task]);
+    const loaded = await repository.list();
+    const persisted = database.rows[0]?.snapshot_json ?? "";
+
+    expect(persisted).toContain("[redacted local path:yolo26n-ui.onnx]");
+    expect(persisted).toContain("[redacted local path:yolo26-ui.mjs]");
+    expect(persisted).toContain("[redacted local path:runtime-adapter.mjs]");
+    expect(persisted).toContain("packages/core/src/index.js");
+    expect(persisted).not.toContain("alice");
+    expect(persisted).not.toContain("C:\\Users");
+    expect(persisted).not.toContain("/home/alice");
+    expect(persisted).not.toContain("models\\adapters");
+    expect(loaded[0]?.logs[0]?.detail).toContain("[redacted local path:yolo26n-ui.onnx]");
+    expect(loaded[0]?.logs[0]?.devDetail).toContain("[redacted local path:runtime-adapter.mjs]");
+    expect(loaded[0]?.conversationMessages?.[0]?.content).toContain("[redacted local path:yolo26-ui.mjs]");
+  });
+
+  it("bounds oversized text before repository persistence", async () => {
+    const database = createMemoryTaskHistoryDatabase();
+    const repository = createTaskHistoryRepository(database);
+    const hugeText = "x".repeat(60_000);
+    const task = {
+      ...createTask("task-oversized"),
+      userGoal: `Inspect desktop ${hugeText}`,
+      commanderMessage: hugeText,
+      logs: [
+        {
+          id: "log-large",
+          kind: "event",
+          title: "computer.detectUiObjects",
+          detail: hugeText,
+          devDetail: `diagnostics ${hugeText}`,
+        },
+      ],
+      commands: [{
+        command: "pnpm test",
+        cwd: "E:/Javis",
+        stdout: hugeText,
+        stderr: "",
+        exitCode: 0,
+      }],
+      conversationMessages: [
+        {
+          role: "assistant",
+          content: hugeText,
+        },
+      ],
+    } satisfies TaskSnapshot;
+
+    await repository.save([task]);
+    const loaded = await repository.list();
+    const persisted = database.rows[0]?.snapshot_json ?? "";
+
+    expect(persisted).toContain("[truncated:");
+    expect(persisted.length).toBeLessThan(140_000);
+    expect(loaded[0]?.userGoal).toContain("[truncated:");
+    expect(loaded[0]?.commanderMessage).toContain("[truncated:");
+    expect(loaded[0]?.logs[0]?.detail).toContain("[truncated:");
+    expect(loaded[0]?.commands?.[0]?.stdout).toContain("[truncated:");
+    expect(loaded[0]?.conversationMessages?.[0]?.content).toContain("[truncated:");
   });
 
   it("upserts repository entries with newest snapshots first", async () => {

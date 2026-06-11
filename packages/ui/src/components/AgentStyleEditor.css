@@ -9,7 +9,7 @@
   display: grid;
   gap: 14px;
   overflow: visible;
-  padding-top: 20px;
+  padding-top: 18px;
 }
 
 .javis-agent-style-grid {
@@ -28,13 +28,30 @@
 
 .javis-agent-style-grid select {
   min-width: 0;
-  height: 34px;
-  border: 1px solid var(--color-line);
-  border-radius: 8px;
-  padding: 0 10px;
+  height: 40px;
+  border: 1px solid var(--color-control-border, var(--glass-border));
+  border-radius: 12px;
+  padding: 0 30px 0 12px;
   color: var(--color-ink);
-  background: var(--color-surface-raised);
+  background:
+    linear-gradient(45deg, transparent 50%, var(--color-subtle) 50%) right 16px center / 6px 6px no-repeat,
+    linear-gradient(135deg, var(--color-subtle) 50%, transparent 50%) right 11px center / 6px 6px no-repeat,
+    var(--color-control-bg, var(--color-surface-raised));
+  appearance: none;
   font: inherit;
+  transition:
+    border-color var(--duration-normal) var(--ease-smooth),
+    box-shadow var(--duration-normal) var(--ease-smooth);
+}
+
+.javis-agent-style-grid select:hover {
+  border-color: var(--color-control-border-hover, rgba(45, 111, 103, 0.22));
+}
+
+.javis-agent-style-grid select:focus {
+  border-color: var(--color-control-border-hover, rgba(45, 111, 103, 0.42));
+  box-shadow: 0 0 0 3px var(--color-control-focus, rgba(45, 111, 103, 0.08));
+  outline: 0;
 }
 
 .javis-agent-style-help {
@@ -53,8 +70,9 @@
 
 .javis-agent-style-path code {
   overflow: hidden;
-  border-radius: 6px;
-  padding: 5px 7px;
+  border: 1px solid var(--glass-border-accent);
+  border-radius: 8px;
+  padding: 6px 8px;
   color: var(--color-accent-strong);
   background: var(--color-accent-soft);
   text-overflow: ellipsis;
@@ -65,14 +83,23 @@
   width: 100%;
   min-height: 220px;
   resize: vertical;
-  border: 1px solid var(--color-line);
-  border-radius: 8px;
+  border: 1px solid var(--color-control-border, var(--glass-border));
+  border-radius: 12px;
   padding: 12px;
   color: var(--color-ink);
-  background: var(--color-surface-raised);
+  background: var(--color-control-bg, var(--color-surface-raised));
   font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
   font-size: 12px;
   line-height: 18px;
+  transition:
+    border-color var(--duration-normal) var(--ease-smooth),
+    box-shadow var(--duration-normal) var(--ease-smooth);
+}
+
+.javis-agent-style-card textarea:focus {
+  border-color: var(--color-control-border-hover, rgba(45, 111, 103, 0.42));
+  box-shadow: 0 0 0 3px var(--color-control-focus, rgba(45, 111, 103, 0.08));
+  outline: 0;
 }
 
 .javis-agent-style-conflicts {
@@ -82,13 +109,13 @@
   border-radius: 8px;
   padding: 10px 12px;
   color: var(--color-amber);
-  background: rgba(255, 248, 232, 0.78);
+  background: color-mix(in srgb, var(--color-amber) 12%, var(--color-control-bg, #ffffff));
   font-size: 12px;
   line-height: 18px;
 }
 
 .javis-agent-style-conflicts strong {
-  color: #8a5a11;
+  color: var(--color-amber);
 }
 
 .javis-agent-style-conflicts ul {
@@ -122,17 +149,27 @@
 
 .javis-agent-style-actions button {
   min-height: 32px;
-  border: 1px solid var(--color-line);
-  border-radius: 8px;
+  border: 1px solid var(--color-control-border, var(--glass-border));
+  border-radius: var(--radius-md);
   padding: 0 12px;
   color: var(--color-ink);
-  background: var(--color-surface-raised);
+  background: var(--color-control-bg, var(--color-surface-raised));
+  font-weight: 680;
 }
 
 .javis-agent-style-actions button:last-child {
-  border-color: var(--color-accent);
-  color: #fff;
-  background: var(--color-accent);
+  border-color: transparent;
+  color: var(--color-action-ink, #fff);
+  background: var(--color-action, var(--color-accent));
+}
+
+.javis-agent-style-actions button:hover:not(:disabled) {
+  border-color: var(--color-control-border-hover, var(--glass-border-accent));
+  transform: translateY(-1px);
+}
+
+.javis-agent-style-actions button:last-child:hover:not(:disabled) {
+  background: var(--color-action-hover, var(--color-accent-strong));
 }
 
 .javis-agent-style-status {
@@ -147,6 +184,43 @@
 
 .javis-agent-style-status.error {
   color: var(--color-danger);
+}
+
+:root[data-theme="glass"] .javis-agent-style-grid select,
+:root[data-theme="glass"] .javis-agent-style-card textarea {
+  background-color: rgba(255, 255, 255, 0.64);
+}
+
+:root[data-theme="dark"] .javis-agent-style-grid select,
+:root[data-theme="dark"] .javis-agent-style-card textarea,
+:root[data-theme="dark"] .javis-agent-style-actions button {
+  color: var(--color-ink);
+  background-color: var(--color-control-bg);
+}
+
+:root[data-theme="dark"] .javis-agent-style-conflicts {
+  border-color: rgba(216, 176, 102, 0.24);
+  background: rgba(41, 34, 24, 0.76);
+}
+
+:root[data-theme="dark"] .javis-agent-style-actions button:last-child {
+  color: var(--color-action-ink);
+  background: var(--color-action);
+}
+
+:root[data-theme="high_contrast"] .javis-agent-style-grid select,
+:root[data-theme="high_contrast"] .javis-agent-style-card textarea,
+:root[data-theme="high_contrast"] .javis-agent-style-actions button,
+:root[data-theme="high_contrast"] .javis-agent-style-path code {
+  border-color: #050505;
+  color: #050505;
+  background-color: #ffffff;
+  box-shadow: none;
+}
+
+:root[data-theme="high_contrast"] .javis-agent-style-actions button:last-child {
+  color: #ffffff;
+  background: #050505;
 }
 
 @media (max-width: 760px) {

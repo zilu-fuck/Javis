@@ -1,4 +1,5 @@
 import type { AgentKind, TaskLogEntry, TaskSnapshot } from "./index";
+import { appendTaskLogEntry, compactTaskLogs } from "./snapshot-utils";
 import { taskEventToLogEntry, type TaskRuntimeEvent } from "./task-event-bus";
 
 export interface DeltaReducer {
@@ -17,6 +18,12 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
   const logs: TaskLogEntry[] = [...initial.logs];
   const partialTexts = new Map<AgentKind, string>();
   let activeStreamingAgentKind: AgentKind | undefined = initial.streamingAgentKind;
+
+  function pushLog(entry: TaskLogEntry): void {
+    const compacted = appendTaskLogEntry(logs, entry);
+    logs.length = 0;
+    logs.push(...compacted);
+  }
 
   return {
     getSnapshot(): TaskSnapshot {
@@ -38,7 +45,7 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
     syncFrom(snapshot: TaskSnapshot) {
       current = structuredClone(snapshot);
       logs.length = 0;
-      logs.push(...snapshot.logs);
+      logs.push(...compactTaskLogs(snapshot.logs));
       activeStreamingAgentKind = snapshot.isStreaming
         ? (snapshot.streamingAgentKind ?? activeStreamingAgentKind)
         : undefined;
@@ -50,7 +57,7 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
           current = { ...current, isStreaming: true };
           partialTexts.set(event.agentKind, "");
           activeStreamingAgentKind = event.agentKind;
-          logs.push(taskEventToLogEntry(event));
+          pushLog(taskEventToLogEntry(event));
           break;
         }
         case "agent.chunk": {
@@ -80,7 +87,7 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
                 break;
             }
           }
-          logs.push(taskEventToLogEntry(event));
+          pushLog(taskEventToLogEntry(event));
           break;
         }
         case "step.progress":
@@ -91,7 +98,7 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
               step.id === event.stepId ? { ...step, status: "running" as const } : step,
             ),
           };
-          logs.push(taskEventToLogEntry(event));
+          pushLog(taskEventToLogEntry(event));
           break;
         }
         case "step.completed": {
@@ -101,7 +108,7 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
               step.id === event.stepId ? { ...step, status: "completed" as const } : step,
             ),
           };
-          logs.push(taskEventToLogEntry(event));
+          pushLog(taskEventToLogEntry(event));
           break;
         }
         case "task.completed":

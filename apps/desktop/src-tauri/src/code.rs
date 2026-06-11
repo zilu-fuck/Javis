@@ -673,6 +673,9 @@ pub(crate) fn create_openai_compatible_proposal_body(
             }
         ],
         "stream": false,
+        "thinking": {
+            "type": "disabled"
+        },
         "response_format": {
             "type": "json_object"
         },

@@ -1,5 +1,8 @@
 use rusqlite::{Connection, OpenFlags};
-use std::{path::{Path, PathBuf}, sync::Mutex};
+use std::{
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 use tauri::{AppHandle, Manager};
 
 static DB: once_cell::sync::Lazy<Mutex<Option<Connection>>> =
@@ -20,9 +23,19 @@ const ALLOWED_TABLES: &[&str] = &[
     "task_session_log",
     "file_scan_cache",
     "file_classifications",
+    "app_classifications",
     "resource_scan_roots",
     "resource_file_cache",
+    "current_goal",
+    "goal_events",
+    "goal_evaluations",
     "user_profile_memory",
+    "agent_session_summaries",
+    "agent_memory_facts",
+    "agent_memory_facts_fts",
+    "memory_injection_logs",
+    "vector_index_items",
+    "vector_index_buckets",
 ];
 
 #[derive(Clone, Copy)]
@@ -389,9 +402,9 @@ pub(crate) fn resource_scan_root_for_id(
         else {
             return Ok(None);
         };
-        Ok(Some(resource_scan_root_record_from_row(row).map_err(|error| {
-            format!("Resource scan root row decode error: {error}")
-        })?))
+        Ok(Some(resource_scan_root_record_from_row(row).map_err(
+            |error| format!("Resource scan root row decode error: {error}"),
+        )?))
     })
 }
 
@@ -519,7 +532,9 @@ fn validate_custom_resource_scan_root_path(path: &str) -> Result<String, String>
         .canonicalize()
         .map_err(|error| format!("Could not resolve user home directory: {error}"))?;
     if !canonical.starts_with(&home) {
-        return Err("Custom resource scan roots must be inside the user home directory.".to_string());
+        return Err(
+            "Custom resource scan roots must be inside the user home directory.".to_string(),
+        );
     }
     if is_sensitive_resource_scan_root_path(&canonical) {
         return Err("Refusing to register a sensitive resource scan root.".to_string());
@@ -652,7 +667,13 @@ fn normalize_single_statement(sql: &str) -> Result<String, String> {
         trimmed = without_semicolon.trim_end();
     }
     if trimmed.contains(';') {
-        return Err("Only single SQL statements are allowed over IPC.".to_string());
+        let lowered = collapse_sql_whitespace(&trimmed.to_ascii_lowercase());
+        if !(lowered.starts_with("create trigger ")
+            && lowered.contains(" begin ")
+            && lowered.ends_with(" end"))
+        {
+            return Err("Only single SQL statements are allowed over IPC.".to_string());
+        }
     }
     Ok(trimmed.to_string())
 }
@@ -695,8 +716,23 @@ fn create_statement_tables(tokens: &[String]) -> Result<Vec<String>, String> {
                 table_after_index(tokens, 2)
             }
         }
+        Some("virtual") => {
+            if tokens.get(2).map(String::as_str) == Some("table") {
+                if tokens.get(3).map(String::as_str) == Some("if")
+                    && tokens.get(4).map(String::as_str) == Some("not")
+                    && tokens.get(5).map(String::as_str) == Some("exists")
+                {
+                    table_after_index(tokens, 6)
+                } else {
+                    table_after_index(tokens, 3)
+                }
+            } else {
+                Err("Only CREATE VIRTUAL TABLE statements are allowed.".to_string())
+            }
+        }
         Some("index") => table_after_keyword(tokens, "on"),
-        _ => Err("Only CREATE TABLE and CREATE INDEX statements are allowed.".to_string()),
+        Some("trigger") => table_after_keyword(tokens, "on"),
+        _ => Err("Only CREATE TABLE, CREATE VIRTUAL TABLE, CREATE TRIGGER, and CREATE INDEX statements are allowed.".to_string()),
     }
 }
 
@@ -748,6 +784,8 @@ fn require_known_select_shape(tokens: &[String], sql_text: &str) -> Result<(), S
             | "select c fc category fc tags_json fc confidence from file_scan_cache c left join file_classifications fc on c path fc file_path where c is_dir 0 order by c modified_at desc"
             | "select c from file_scan_cache c left join file_classifications fc on c path fc file_path where fc file_path is null and c is_dir 0 order by c modified_at desc"
             | "select category count as count from file_classifications group by category order by count desc"
+            | "select app_path category tags_json confidence classified_at source from app_classifications order by classified_at desc"
+            | "select category count as count from app_classifications group by category order by count desc"
             | "select provider model api_key_reference base_url from model_settings where id limit 1"
             | "select id slot display_name provider model api_key_reference base_url capabilities from model_profiles order by slot id"
             | "select agent_kind profile_id from agent_model_overrides"
@@ -759,7 +797,34 @@ fn require_known_select_shape(tokens: &[String], sql_text: &str) -> Result<(), S
             | "select record_json from tool_call_audit where task_id order by coalesce started_at ended_at id asc"
             | "select key value updated_at from user_preferences order by key asc"
             | "select value from user_preferences where key"
+            | "select goal_json from current_goal where id limit 1"
+            | "select event_json from goal_events where goal_id order by created_at desc id desc limit"
+            | "select evaluation_json from goal_evaluations where goal_id order by created_at desc id desc limit"
+            | "select evaluation_json from goal_evaluations where goal_id and task_id order by created_at desc id desc limit 1"
             | "select memory_json from user_profile_memory where id limit 1"
+            | "select rowid from agent_memory_facts_fts where agent_memory_facts_fts match limit"
+            | "select rowid id fact normalized_fact kind tags_json keywords_json search_text scope_type scope_id source_session_id source_message_ids confidence importance status created_at updated_at last_accessed_at access_count expires_at from agent_memory_facts where status order by updated_at desc limit"
+            | "select rowid id fact normalized_fact kind tags_json keywords_json search_text scope_type scope_id source_session_id source_message_ids confidence importance status created_at updated_at last_accessed_at access_count expires_at from agent_memory_facts where status and rowid in"
+            | "select rowid id fact normalized_fact kind tags_json keywords_json search_text scope_type scope_id source_session_id source_message_ids confidence importance status created_at updated_at last_accessed_at access_count expires_at from agent_memory_facts where id limit 1"
+            | "select rowid id fact normalized_fact kind tags_json keywords_json search_text scope_type scope_id source_session_id source_message_ids confidence importance status created_at updated_at last_accessed_at access_count expires_at from agent_memory_facts where status and fact like or normalized_fact like or search_text like or tags_json like or keywords_json like order by updated_at desc limit"
+            | "select rowid id fact normalized_fact kind tags_json keywords_json search_text scope_type scope_id source_session_id source_message_ids confidence importance status created_at updated_at last_accessed_at access_count expires_at from agent_memory_facts where status and scope_type and scope_id order by updated_at desc limit"
+            | "select count as count from agent_memory_facts where status"
+            | "select count as count from agent_memory_facts where status and scope_type and scope_id"
+            | "select count as count from agent_memory_facts where source_session_id"
+            | "select count as count from agent_session_summaries"
+            | "select count as count from agent_session_summaries where workspace_id"
+            | "select count as count from memory_injection_logs"
+            | "select count as count from memory_injection_logs where workspace_id"
+            | "select updated_at from agent_memory_facts where status order by updated_at desc limit 1"
+            | "select id session_id workspace_id summary important_points open_threads created_at updated_at from agent_session_summaries order by updated_at desc limit"
+            | "select id session_id workspace_id summary important_points open_threads created_at updated_at from agent_session_summaries where workspace_id order by updated_at desc limit"
+            | "select id from vector_index_items where owner_type and owner_id"
+            | "select id from vector_index_items where namespace and scope_type and scope_id"
+            | "select id from vector_index_items where namespace"
+            | "select item_id from vector_index_buckets where namespace and bucket_key limit"
+            | "select id namespace owner_id dimensions metric vector_json vector_norm metadata_json from vector_index_items where id limit 1"
+            | "select id namespace owner_id dimensions metric vector_json vector_norm metadata_json from vector_index_items where namespace limit"
+            | "select id namespace owner_id dimensions metric vector_json vector_norm metadata_json from vector_index_items where namespace and scope_type and scope_id limit"
     ) && has_required_select_operator_shape(&signature, sql_text)
     {
         Ok(())
@@ -797,8 +862,97 @@ fn has_required_select_operator_shape(signature: &str, sql_text: &str) -> bool {
             sql_text.contains("where task_id = ?")
         }
         "select value from user_preferences where key" => sql_text.contains("where key = ?"),
+        "select goal_json from current_goal where id limit 1" => {
+            sql_text.contains("where id = ? limit 1")
+        }
+        "select event_json from goal_events where goal_id order by created_at desc id desc limit" => {
+            sql_text.contains("where goal_id = ?")
+                && sql_text.contains("order by created_at desc, id desc")
+                && sql_text.contains("limit ?")
+        }
+        "select evaluation_json from goal_evaluations where goal_id order by created_at desc id desc limit" => {
+            sql_text.contains("where goal_id = ?")
+                && sql_text.contains("order by created_at desc, id desc")
+                && sql_text.contains("limit ?")
+        }
+        "select evaluation_json from goal_evaluations where goal_id and task_id order by created_at desc id desc limit 1" => {
+            sql_text.contains("where goal_id = ? and task_id = ?")
+                && sql_text.contains("order by created_at desc, id desc")
+                && sql_text.contains("limit 1")
+        }
         "select memory_json from user_profile_memory where id limit 1" => {
             sql_text.contains("where id = ? limit 1")
+        }
+        "select rowid from agent_memory_facts_fts where agent_memory_facts_fts match limit" => {
+            sql_text.contains("where agent_memory_facts_fts match ?") && sql_text.contains("limit ?")
+        }
+        "select rowid id fact normalized_fact kind tags_json keywords_json search_text scope_type scope_id source_session_id source_message_ids confidence importance status created_at updated_at last_accessed_at access_count expires_at from agent_memory_facts where status order by updated_at desc limit" => {
+            sql_text.contains("where status = ?") && sql_text.contains("limit ?")
+        }
+        "select rowid id fact normalized_fact kind tags_json keywords_json search_text scope_type scope_id source_session_id source_message_ids confidence importance status created_at updated_at last_accessed_at access_count expires_at from agent_memory_facts where status and rowid in" => {
+            sql_text.contains("where status = ? and rowid in (?")
+        }
+        "select rowid id fact normalized_fact kind tags_json keywords_json search_text scope_type scope_id source_session_id source_message_ids confidence importance status created_at updated_at last_accessed_at access_count expires_at from agent_memory_facts where id limit 1" => {
+            sql_text.contains("where id = ?") && sql_text.contains("limit 1")
+        }
+        "select rowid id fact normalized_fact kind tags_json keywords_json search_text scope_type scope_id source_session_id source_message_ids confidence importance status created_at updated_at last_accessed_at access_count expires_at from agent_memory_facts where status and fact like or normalized_fact like or search_text like or tags_json like or keywords_json like order by updated_at desc limit" => {
+            sql_text.contains("where status = ?")
+                && sql_text.contains("fact like ?")
+                && sql_text.contains("normalized_fact like ?")
+                && sql_text.contains("search_text like ?")
+                && sql_text.contains("tags_json like ?")
+                && sql_text.contains("keywords_json like ?")
+                && sql_text.contains("limit ?")
+        }
+        "select rowid id fact normalized_fact kind tags_json keywords_json search_text scope_type scope_id source_session_id source_message_ids confidence importance status created_at updated_at last_accessed_at access_count expires_at from agent_memory_facts where status and scope_type and scope_id order by updated_at desc limit" => {
+            sql_text.contains("where status = ? and scope_type = ? and scope_id = ?")
+                && sql_text.contains("limit ?")
+        }
+        "select count as count from agent_memory_facts where status" => {
+            sql_text.contains("where status = ?")
+        }
+        "select count as count from agent_memory_facts where status and scope_type and scope_id" => {
+            sql_text.contains("where status = ? and scope_type = ? and scope_id = ?")
+        }
+        "select count as count from agent_memory_facts where source_session_id" => {
+            sql_text.contains("where source_session_id = ?")
+        }
+        "select count as count from agent_session_summaries where workspace_id" => {
+            sql_text.contains("where workspace_id = ?")
+        }
+        "select count as count from memory_injection_logs where workspace_id" => {
+            sql_text.contains("where workspace_id = ?")
+        }
+        "select updated_at from agent_memory_facts where status order by updated_at desc limit 1" => {
+            sql_text.contains("where status = ?") && sql_text.contains("limit 1")
+        }
+        "select id session_id workspace_id summary important_points open_threads created_at updated_at from agent_session_summaries order by updated_at desc limit" => {
+            sql_text.contains("limit ?")
+        }
+        "select id session_id workspace_id summary important_points open_threads created_at updated_at from agent_session_summaries where workspace_id order by updated_at desc limit" => {
+            sql_text.contains("where workspace_id = ?") && sql_text.contains("limit ?")
+        }
+        "select id from vector_index_items where owner_type and owner_id" => {
+            sql_text.contains("where owner_type = ? and owner_id = ?")
+        }
+        "select id from vector_index_items where namespace and scope_type and scope_id" => {
+            sql_text.contains("where namespace = ? and scope_type = ? and scope_id = ?")
+        }
+        "select id from vector_index_items where namespace" => {
+            sql_text.contains("where namespace = ?")
+        }
+        "select item_id from vector_index_buckets where namespace and bucket_key limit" => {
+            sql_text.contains("where namespace = ? and bucket_key = ?") && sql_text.contains("limit ?")
+        }
+        "select id namespace owner_id dimensions metric vector_json vector_norm metadata_json from vector_index_items where id limit 1" => {
+            sql_text.contains("where id = ?") && sql_text.contains("limit 1")
+        }
+        "select id namespace owner_id dimensions metric vector_json vector_norm metadata_json from vector_index_items where namespace limit" => {
+            sql_text.contains("where namespace = ?") && sql_text.contains("limit ?")
+        }
+        "select id namespace owner_id dimensions metric vector_json vector_norm metadata_json from vector_index_items where namespace and scope_type and scope_id limit" => {
+            sql_text.contains("where namespace = ? and scope_type = ? and scope_id = ?")
+                && sql_text.contains("limit ?")
         }
         _ => true,
     }
@@ -820,11 +974,21 @@ fn require_known_execute_shape(tokens: &[String], sql_text: &str) -> Result<(), 
                 | "insert into tool_call_audit_log task_id recorded_at entry_json values"
                 | "insert or replace into file_scan_cache path name is_dir size_bytes modified_at extension scanned_at values"
                 | "insert or replace into file_classifications file_path category tags_json confidence classified_at model_id values"
+                | "insert or replace into app_classifications app_path category tags_json confidence classified_at source values"
                 | "insert or replace into resource_file_cache kind path name source source_root_id source_root_path size_bytes modified_at extension scanned_at values"
                 | "insert into scheduled_tasks id name goal workspace_path schedule_type schedule_value enabled last_run_at last_run_started_at next_run_at created_at source updated_at values"
                 | "insert or replace into user_preferences key value updated_at values"
                 | "insert into user_preferences key value updated_at values"
+                | "insert into current_goal id goal_json updated_at values on conflict id do update set goal_json excluded goal_json updated_at excluded updated_at"
+                | "insert into goal_events id goal_id run_id task_id type created_at event_json values on conflict id do update set goal_id excluded goal_id run_id excluded run_id task_id excluded task_id type excluded type created_at excluded created_at event_json excluded event_json"
+                | "insert into goal_evaluations id goal_id task_id decision created_at evaluation_json values on conflict id do update set goal_id excluded goal_id task_id excluded task_id decision excluded decision created_at excluded created_at evaluation_json excluded evaluation_json"
                 | "insert into user_profile_memory id updated_at memory_json values on conflict id do update set updated_at excluded updated_at memory_json excluded memory_json"
+                | "insert into agent_memory_facts id fact normalized_fact kind tags_json keywords_json search_text scope_type scope_id source_session_id source_message_ids confidence importance status created_at updated_at last_accessed_at access_count expires_at values on conflict id do update set fact excluded fact normalized_fact excluded normalized_fact kind excluded kind tags_json excluded tags_json keywords_json excluded keywords_json search_text excluded search_text scope_type excluded scope_type scope_id excluded scope_id source_session_id excluded source_session_id source_message_ids excluded source_message_ids confidence excluded confidence importance excluded importance status excluded status updated_at excluded updated_at last_accessed_at case when agent_memory_facts last_accessed_at is null then excluded last_accessed_at when excluded last_accessed_at is null then agent_memory_facts last_accessed_at else max agent_memory_facts last_accessed_at excluded last_accessed_at end access_count max agent_memory_facts access_count excluded access_count expires_at excluded expires_at"
+                | "insert into agent_session_summaries id session_id workspace_id summary important_points open_threads created_at updated_at values on conflict id do update set session_id excluded session_id workspace_id excluded workspace_id summary excluded summary important_points excluded important_points open_threads excluded open_threads updated_at excluded updated_at"
+                | "insert into memory_injection_logs id session_id message_id workspace_id injection_type memory_fact_ids query_hash query_terms query_length scope_type scope_id prompt_section score_summary created_at values"
+                | "insert into vector_index_items id namespace owner_type owner_id scope_type scope_id content_hash dimensions metric vector_json vector_norm metadata_json created_at updated_at values on conflict id do update set namespace excluded namespace owner_type excluded owner_type owner_id excluded owner_id scope_type excluded scope_type scope_id excluded scope_id content_hash excluded content_hash dimensions excluded dimensions metric excluded metric vector_json excluded vector_json vector_norm excluded vector_norm metadata_json excluded metadata_json updated_at excluded updated_at"
+                | "insert or ignore into vector_index_buckets namespace bucket_key item_id values"
+                | "update agent_memory_facts set last_accessed_at case when last_accessed_at is null or last_accessed_at then else last_accessed_at end access_count coalesce access_count 0 1 where id and status"
                 | "delete from file_scan_cache where scanned_at"
                 | "delete from file_scan_cache"
                 | "delete from file_classifications where file_path not in select path from file_scan_cache"
@@ -836,7 +1000,22 @@ fn require_known_execute_shape(tokens: &[String], sql_text: &str) -> Result<(), 
                 | "delete from scheduled_tasks"
                 | "delete from task_history"
                 | "delete from user_preferences"
+                | "delete from current_goal where id"
+                | "delete from goal_events where goal_id"
+                | "delete from goal_evaluations where goal_id"
                 | "delete from user_profile_memory where id"
+                | "delete from agent_memory_facts"
+                | "delete from agent_memory_facts where id"
+                | "delete from agent_memory_facts where scope_type and scope_id"
+                | "delete from agent_session_summaries"
+                | "delete from agent_session_summaries where session_id"
+                | "delete from agent_session_summaries where workspace_id"
+                | "delete from memory_injection_logs"
+                | "delete from memory_injection_logs where memory_fact_ids like"
+                | "delete from memory_injection_logs where workspace_id"
+                | "delete from memory_injection_logs where scope_type and scope_id"
+                | "delete from vector_index_buckets where item_id"
+                | "delete from vector_index_items where id"
         ) && has_required_execute_operator_shape(&signature, sql_text)
     {
         Ok(())
@@ -847,6 +1026,13 @@ fn require_known_execute_shape(tokens: &[String], sql_text: &str) -> Result<(), 
 
 fn has_required_execute_operator_shape(signature: &str, sql_text: &str) -> bool {
     match signature {
+        "update agent_memory_facts set last_accessed_at case when last_accessed_at is null or last_accessed_at then else last_accessed_at end access_count coalesce access_count 0 1 where id and status" => {
+            sql_text.contains("set last_accessed_at = case")
+                && sql_text.contains("last_accessed_at is null or last_accessed_at < ?")
+                && sql_text.contains("then ?")
+                && sql_text.contains("access_count = coalesce(access_count, 0) + 1")
+                && sql_text.contains("where id = ? and status = ?")
+        }
         "delete from file_scan_cache where scanned_at" => sql_text.contains("where scanned_at <> ?"),
         "delete from file_classifications where file_path not in select path from file_scan_cache" => {
             sql_text.contains("where file_path not in")
@@ -856,11 +1042,49 @@ fn has_required_execute_operator_shape(signature: &str, sql_text: &str) -> bool 
         }
         "delete from resource_file_cache where kind" => sql_text.contains("where kind = ?"),
         "delete from user_profile_memory where id" => sql_text.contains("where id = ?"),
+        "delete from current_goal where id" => sql_text.contains("where id = ?"),
+        "delete from goal_events where goal_id" => sql_text.contains("where goal_id = ?"),
+        "delete from goal_evaluations where goal_id" => sql_text.contains("where goal_id = ?"),
+        "delete from agent_memory_facts where id" => sql_text.contains("where id = ?"),
+        "delete from agent_memory_facts where scope_type and scope_id" => {
+            sql_text.contains("where scope_type = ? and scope_id = ?")
+        }
+        "delete from agent_session_summaries where workspace_id" => {
+            sql_text.contains("where workspace_id = ?")
+        }
+        "delete from agent_session_summaries where session_id" => {
+            sql_text.contains("where session_id = ?")
+        }
+        "delete from memory_injection_logs where memory_fact_ids like" => {
+            sql_text.contains("where memory_fact_ids like ?")
+        }
+        "delete from memory_injection_logs where workspace_id" => {
+            sql_text.contains("where workspace_id = ?")
+        }
+        "delete from memory_injection_logs where scope_type and scope_id" => {
+            sql_text.contains("where scope_type = ? and scope_id = ?")
+        }
+        "insert into vector_index_items id namespace owner_type owner_id scope_type scope_id content_hash dimensions metric vector_json vector_norm metadata_json created_at updated_at values on conflict id do update set namespace excluded namespace owner_type excluded owner_type owner_id excluded owner_id scope_type excluded scope_type scope_id excluded scope_id content_hash excluded content_hash dimensions excluded dimensions metric excluded metric vector_json excluded vector_json vector_norm excluded vector_norm metadata_json excluded metadata_json updated_at excluded updated_at" => {
+            sql_text.contains("on conflict(id) do update set")
+        }
+        "insert or ignore into vector_index_buckets namespace bucket_key item_id values" => {
+            sql_text.contains("values (?, ?, ?)")
+        }
+        "delete from vector_index_buckets where item_id" => sql_text.contains("where item_id = ?"),
+        "delete from vector_index_items where id" => sql_text.contains("where id = ?"),
         _ => true,
     }
 }
 
 fn is_known_create_shape(tokens: &[String]) -> bool {
+    if is_known_virtual_table_signature(&sql_signature(tokens)) {
+        return true;
+    }
+
+    if is_known_trigger_signature(&sql_signature(tokens)) {
+        return true;
+    }
+
     if matches!(
         tokens,
         [create, index, if_token, not_token, exists_token, index_name, on_token, table_name, ..]
@@ -967,6 +1191,24 @@ fn is_known_create_shape(tokens: &[String]) -> bool {
             "updated_at",
         ],
         "user_preferences" => &["key", "value", "updated_at"],
+        "current_goal" => &["id", "goal_json", "updated_at"],
+        "goal_events" => &[
+            "id",
+            "goal_id",
+            "run_id",
+            "task_id",
+            "type",
+            "created_at",
+            "event_json",
+        ],
+        "goal_evaluations" => &[
+            "id",
+            "goal_id",
+            "task_id",
+            "decision",
+            "created_at",
+            "evaluation_json",
+        ],
         "task_session_log" => &["id", "task_id", "recorded_at", "snapshot_json"],
         "tool_call_audit_log" => &["id", "task_id", "recorded_at", "entry_json"],
         "file_scan_cache" => &[
@@ -985,6 +1227,14 @@ fn is_known_create_shape(tokens: &[String]) -> bool {
             "confidence",
             "classified_at",
             "model_id",
+        ],
+        "app_classifications" => &[
+            "app_path",
+            "category",
+            "tags_json",
+            "confidence",
+            "classified_at",
+            "source",
         ],
         "resource_scan_roots" => &[
             "id",
@@ -1008,6 +1258,70 @@ fn is_known_create_shape(tokens: &[String]) -> bool {
             "scanned_at",
         ],
         "user_profile_memory" => &["id", "updated_at", "memory_json"],
+        "agent_session_summaries" => &[
+            "id",
+            "session_id",
+            "workspace_id",
+            "summary",
+            "important_points",
+            "open_threads",
+            "created_at",
+            "updated_at",
+        ],
+        "agent_memory_facts" => &[
+            "id",
+            "fact",
+            "normalized_fact",
+            "kind",
+            "tags_json",
+            "keywords_json",
+            "search_text",
+            "scope_type",
+            "scope_id",
+            "source_session_id",
+            "source_message_ids",
+            "confidence",
+            "importance",
+            "status",
+            "created_at",
+            "updated_at",
+            "last_accessed_at",
+            "access_count",
+            "expires_at",
+        ],
+        "memory_injection_logs" => &[
+            "id",
+            "session_id",
+            "message_id",
+            "workspace_id",
+            "injection_type",
+            "memory_fact_ids",
+            "query_hash",
+            "query_terms",
+            "query_length",
+            "scope_type",
+            "scope_id",
+            "prompt_section",
+            "score_summary",
+            "created_at",
+        ],
+        "vector_index_items" => &[
+            "id",
+            "namespace",
+            "owner_type",
+            "owner_id",
+            "scope_type",
+            "scope_id",
+            "content_hash",
+            "dimensions",
+            "metric",
+            "vector_json",
+            "vector_norm",
+            "metadata_json",
+            "created_at",
+            "updated_at",
+        ],
+        "vector_index_buckets" => &["namespace", "bucket_key", "item_id"],
         _ => return false,
     };
     required_columns
@@ -1028,7 +1342,36 @@ fn is_known_index(index_name: &str, table_name: &str) -> bool {
             | ("idx_tool_call_audit_log_task_id", "tool_call_audit_log")
             | ("idx_file_scan_cache_ext", "file_scan_cache")
             | ("idx_file_classifications_cat", "file_classifications")
+            | ("idx_app_classifications_cat", "app_classifications")
             | ("idx_resource_cache_kind_root", "resource_file_cache")
+            | ("idx_agent_memory_facts_scope", "agent_memory_facts")
+            | (
+                "idx_agent_session_summaries_workspace",
+                "agent_session_summaries"
+            )
+            | ("idx_memory_injection_logs_session", "memory_injection_logs")
+            | (
+                "idx_memory_injection_logs_workspace",
+                "memory_injection_logs"
+            )
+            | ("idx_vector_index_owner", "vector_index_items")
+            | ("idx_vector_index_scope", "vector_index_items")
+    )
+}
+
+fn is_known_virtual_table_signature(signature: &str) -> bool {
+    matches!(
+        signature,
+        "create virtual table if not exists agent_memory_facts_fts using fts5 fact normalized_fact search_text content agent_memory_facts content_rowid rowid"
+    )
+}
+
+fn is_known_trigger_signature(signature: &str) -> bool {
+    matches!(
+        signature,
+        "create trigger if not exists agent_memory_facts_ai after insert on agent_memory_facts begin insert into agent_memory_facts_fts rowid fact normalized_fact search_text values new rowid new fact new normalized_fact new search_text end"
+            | "create trigger if not exists agent_memory_facts_ad after delete on agent_memory_facts begin insert into agent_memory_facts_fts agent_memory_facts_fts rowid fact normalized_fact search_text values delete old rowid old fact old normalized_fact old search_text end"
+            | "create trigger if not exists agent_memory_facts_au after update on agent_memory_facts begin insert into agent_memory_facts_fts agent_memory_facts_fts rowid fact normalized_fact search_text values delete old rowid old fact old normalized_fact old search_text insert into agent_memory_facts_fts rowid fact normalized_fact search_text values new rowid new fact new normalized_fact new search_text end"
     )
 }
 
@@ -1082,7 +1425,10 @@ fn validate_approval_record_upsert_request(
     if let Some(resolved_at) = request.resolved_at.as_deref() {
         require_iso_like_timestamp(resolved_at, "resolvedAt")?;
     }
-    if !matches!(request.permission_level.as_str(), "preview" | "confirmed_write") {
+    if !matches!(
+        request.permission_level.as_str(),
+        "preview" | "confirmed_write"
+    ) {
         return Err("Approval record permissionLevel is invalid.".to_string());
     }
     if !matches!(
@@ -1173,7 +1519,9 @@ fn require_json_string(
 ) -> Result<(), String> {
     match map.get(field).and_then(|value| value.as_str()) {
         Some(value) if value == expected => Ok(()),
-        _ => Err(format!("Approval record JSON field {field} does not match.")),
+        _ => Err(format!(
+            "Approval record JSON field {field} does not match."
+        )),
     }
 }
 
@@ -1185,7 +1533,9 @@ fn require_optional_json_string(
     match (expected, map.get(field).and_then(|value| value.as_str())) {
         (Some(expected), Some(value)) if value == expected => Ok(()),
         (None, None) => Ok(()),
-        _ => Err(format!("Approval record JSON field {field} does not match.")),
+        _ => Err(format!(
+            "Approval record JSON field {field} does not match."
+        )),
     }
 }
 
@@ -1289,6 +1639,63 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
             "CREATE TABLE IF NOT EXISTS task_history (id TEXT PRIMARY KEY, title TEXT NOT NULL, user_goal TEXT NOT NULL, status TEXT NOT NULL, updated_at TEXT NOT NULL, snapshot_json TEXT NOT NULL)",
             "CREATE INDEX IF NOT EXISTS idx_resource_cache_kind_root ON resource_file_cache (kind, source_root_id)",
+            "CREATE INDEX IF NOT EXISTS idx_app_classifications_cat ON app_classifications (category)",
+            r#"CREATE TABLE IF NOT EXISTS vector_index_items (
+                 id TEXT PRIMARY KEY,
+                 namespace TEXT NOT NULL,
+                 owner_type TEXT NOT NULL,
+                 owner_id TEXT NOT NULL,
+                 scope_type TEXT,
+                 scope_id TEXT,
+                 content_hash TEXT NOT NULL,
+                 dimensions INTEGER NOT NULL,
+                 metric TEXT NOT NULL,
+                 vector_json TEXT NOT NULL,
+                 vector_norm REAL NOT NULL,
+                 metadata_json TEXT,
+                 created_at INTEGER NOT NULL,
+                 updated_at INTEGER NOT NULL
+               )"#,
+            r#"CREATE TABLE IF NOT EXISTS vector_index_buckets (
+                 namespace TEXT NOT NULL,
+                 bucket_key TEXT NOT NULL,
+                 item_id TEXT NOT NULL,
+                 PRIMARY KEY (namespace, bucket_key, item_id)
+               )"#,
+            "CREATE INDEX IF NOT EXISTS idx_vector_index_owner ON vector_index_items(owner_type, owner_id)",
+            "CREATE INDEX IF NOT EXISTS idx_vector_index_scope ON vector_index_items(namespace, scope_type, scope_id)",
+            r#"CREATE TABLE IF NOT EXISTS agent_memory_facts (
+                 rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                 id TEXT UNIQUE NOT NULL,
+                 fact TEXT NOT NULL,
+                 normalized_fact TEXT,
+                 kind TEXT NOT NULL,
+                 tags_json TEXT,
+                 keywords_json TEXT,
+                 search_text TEXT,
+                 scope_type TEXT NOT NULL DEFAULT 'global',
+                 scope_id TEXT,
+                 source_session_id TEXT,
+                 source_message_ids TEXT,
+                 confidence REAL DEFAULT 0.8,
+                 importance INTEGER DEFAULT 3,
+                 status TEXT DEFAULT 'active',
+                 created_at INTEGER NOT NULL,
+                 updated_at INTEGER NOT NULL,
+                 last_accessed_at INTEGER,
+                 access_count INTEGER DEFAULT 0,
+                 expires_at INTEGER)"#,
+            r#"CREATE VIRTUAL TABLE IF NOT EXISTS agent_memory_facts_fts USING fts5(
+                 fact,
+                 normalized_fact,
+                 search_text,
+                 content='agent_memory_facts',
+                 content_rowid='rowid')"#,
+            r#"CREATE TRIGGER IF NOT EXISTS agent_memory_facts_ai
+               AFTER INSERT ON agent_memory_facts BEGIN
+                 INSERT INTO agent_memory_facts_fts(rowid, fact, normalized_fact, search_text)
+                 VALUES (new.rowid, new.fact, new.normalized_fact, new.search_text);
+               END"#,
             r#"INSERT INTO task_history (id, title, user_goal, status, updated_at, snapshot_json)
                VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(id) DO UPDATE SET
@@ -1304,6 +1711,9 @@ mod tests {
             "DELETE FROM file_scan_cache WHERE scanned_at <> ?",
             r#"INSERT OR REPLACE INTO file_classifications
                (file_path, category, tags_json, confidence, classified_at, model_id)
+               VALUES (?, ?, ?, ?, ?, ?)"#,
+            r#"INSERT OR REPLACE INTO app_classifications
+               (app_path, category, tags_json, confidence, classified_at, source)
                VALUES (?, ?, ?, ?, ?, ?)"#,
             r#"INSERT OR REPLACE INTO resource_file_cache
                (kind, path, name, source, source_root_id, source_root_path,
@@ -1322,6 +1732,70 @@ mod tests {
                ON CONFLICT(id) DO UPDATE SET
                  updated_at = excluded.updated_at,
                  memory_json = excluded.memory_json"#,
+            r#"INSERT INTO agent_memory_facts (
+                 id, fact, normalized_fact, kind, tags_json, keywords_json, search_text,
+                 scope_type, scope_id, source_session_id, source_message_ids,
+                 confidence, importance, status, created_at, updated_at,
+                 last_accessed_at, access_count, expires_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 fact = excluded.fact,
+                 normalized_fact = excluded.normalized_fact,
+                 kind = excluded.kind,
+                 tags_json = excluded.tags_json,
+                 keywords_json = excluded.keywords_json,
+                 search_text = excluded.search_text,
+                 scope_type = excluded.scope_type,
+                 scope_id = excluded.scope_id,
+                 source_session_id = excluded.source_session_id,
+                 source_message_ids = excluded.source_message_ids,
+                 confidence = excluded.confidence,
+                 importance = excluded.importance,
+                 status = excluded.status,
+                 updated_at = excluded.updated_at,
+                 last_accessed_at = CASE
+                   WHEN agent_memory_facts.last_accessed_at IS NULL THEN excluded.last_accessed_at
+                   WHEN excluded.last_accessed_at IS NULL THEN agent_memory_facts.last_accessed_at
+                   ELSE MAX(agent_memory_facts.last_accessed_at, excluded.last_accessed_at)
+                 END,
+                 access_count = MAX(agent_memory_facts.access_count, excluded.access_count),
+                 expires_at = excluded.expires_at"#,
+            r#"INSERT INTO memory_injection_logs (
+                 id, session_id, message_id, workspace_id, injection_type, memory_fact_ids,
+                 query_hash, query_terms, query_length, scope_type, scope_id,
+                 prompt_section, score_summary, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+            r#"UPDATE agent_memory_facts
+               SET last_accessed_at = CASE
+                     WHEN last_accessed_at IS NULL OR last_accessed_at < ? THEN ?
+                     ELSE last_accessed_at
+                   END,
+                   access_count = COALESCE(access_count, 0) + 1
+               WHERE id = ? AND status = ?"#,
+            "DELETE FROM agent_memory_facts WHERE scope_type = ? AND scope_id = ?",
+            "DELETE FROM agent_session_summaries WHERE session_id = ?",
+            "DELETE FROM memory_injection_logs WHERE memory_fact_ids LIKE ?",
+            r#"INSERT INTO vector_index_items (
+                 id, namespace, owner_type, owner_id, scope_type, scope_id, content_hash,
+                 dimensions, metric, vector_json, vector_norm, metadata_json, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 namespace = excluded.namespace,
+                 owner_type = excluded.owner_type,
+                 owner_id = excluded.owner_id,
+                 scope_type = excluded.scope_type,
+                 scope_id = excluded.scope_id,
+                 content_hash = excluded.content_hash,
+                 dimensions = excluded.dimensions,
+                 metric = excluded.metric,
+                 vector_json = excluded.vector_json,
+                 vector_norm = excluded.vector_norm,
+                 metadata_json = excluded.metadata_json,
+                 updated_at = excluded.updated_at"#,
+            r#"INSERT OR IGNORE INTO vector_index_buckets (namespace, bucket_key, item_id)
+               VALUES (?, ?, ?)"#,
+            "DELETE FROM vector_index_buckets WHERE item_id = ?",
+            "DELETE FROM vector_index_items WHERE id = ?",
         ];
 
         for sql in statements {
@@ -1349,6 +1823,13 @@ mod tests {
                FROM file_classifications
                GROUP BY category
                ORDER BY count DESC"#,
+            r#"SELECT app_path, category, tags_json, confidence, classified_at, source
+               FROM app_classifications
+               ORDER BY classified_at DESC"#,
+            r#"SELECT category, COUNT(*) as count
+               FROM app_classifications
+               GROUP BY category
+               ORDER BY count DESC"#,
             "SELECT COUNT(*) as count FROM model_profiles",
             "SELECT provider, model, api_key_reference, base_url FROM model_settings WHERE id = ? LIMIT 1",
             "SELECT id, slot, display_name, provider, model, api_key_reference, base_url, capabilities FROM model_profiles ORDER BY slot, id",
@@ -1363,7 +1844,79 @@ mod tests {
             "SELECT record_json FROM tool_call_audit WHERE task_id = ? ORDER BY COALESCE(started_at, ended_at, id) ASC",
             "SELECT key, value, updated_at FROM user_preferences ORDER BY key ASC",
             "SELECT value FROM user_preferences WHERE key = ?",
+            "SELECT goal_json FROM current_goal WHERE id = ? LIMIT 1",
+            "SELECT event_json FROM goal_events WHERE goal_id = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+            "SELECT evaluation_json FROM goal_evaluations WHERE goal_id = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+            "SELECT evaluation_json FROM goal_evaluations WHERE goal_id = ? AND task_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
             "SELECT memory_json FROM user_profile_memory WHERE id = ? LIMIT 1",
+            "SELECT rowid FROM agent_memory_facts_fts WHERE agent_memory_facts_fts MATCH ? LIMIT ?",
+            r#"SELECT rowid, id, fact, normalized_fact, kind, tags_json, keywords_json, search_text,
+                      scope_type, scope_id, source_session_id, source_message_ids, confidence,
+                      importance, status, created_at, updated_at, last_accessed_at, access_count, expires_at
+               FROM agent_memory_facts
+               WHERE status = ?
+               ORDER BY updated_at DESC
+               LIMIT ?"#,
+            r#"SELECT rowid, id, fact, normalized_fact, kind, tags_json, keywords_json, search_text,
+                      scope_type, scope_id, source_session_id, source_message_ids, confidence,
+                      importance, status, created_at, updated_at, last_accessed_at, access_count, expires_at
+               FROM agent_memory_facts
+               WHERE status = ? AND rowid IN (?, ?)"#,
+            r#"SELECT rowid, id, fact, normalized_fact, kind, tags_json, keywords_json, search_text,
+                      scope_type, scope_id, source_session_id, source_message_ids, confidence,
+                      importance, status, created_at, updated_at, last_accessed_at, access_count, expires_at
+               FROM agent_memory_facts
+               WHERE id = ?
+               LIMIT 1"#,
+            r#"SELECT rowid, id, fact, normalized_fact, kind, tags_json, keywords_json, search_text,
+                      scope_type, scope_id, source_session_id, source_message_ids, confidence,
+                      importance, status, created_at, updated_at, last_accessed_at, access_count, expires_at
+               FROM agent_memory_facts
+               WHERE status = ? AND (
+                 fact LIKE ? OR
+                 normalized_fact LIKE ? OR
+                 search_text LIKE ? OR
+                 tags_json LIKE ? OR
+                 keywords_json LIKE ?
+               )
+               ORDER BY updated_at DESC
+               LIMIT ?"#,
+            r#"SELECT rowid, id, fact, normalized_fact, kind, tags_json, keywords_json, search_text,
+                      scope_type, scope_id, source_session_id, source_message_ids, confidence,
+                      importance, status, created_at, updated_at, last_accessed_at, access_count, expires_at
+               FROM agent_memory_facts
+               WHERE status = ? AND scope_type = ? AND scope_id = ?
+               ORDER BY updated_at DESC
+               LIMIT ?"#,
+            "SELECT COUNT(*) as count FROM agent_memory_facts WHERE status = ?",
+            "SELECT COUNT(*) as count FROM agent_memory_facts WHERE status = ? AND scope_type = ? AND scope_id = ?",
+            "SELECT COUNT(*) as count FROM agent_memory_facts WHERE source_session_id = ?",
+            "SELECT COUNT(*) as count FROM agent_session_summaries",
+            "SELECT COUNT(*) as count FROM agent_session_summaries WHERE workspace_id = ?",
+            "SELECT COUNT(*) as count FROM memory_injection_logs",
+            "SELECT COUNT(*) as count FROM memory_injection_logs WHERE workspace_id = ?",
+            "SELECT updated_at FROM agent_memory_facts WHERE status = ? ORDER BY updated_at DESC LIMIT 1",
+            r#"SELECT id, session_id, workspace_id, summary, important_points, open_threads, created_at, updated_at
+               FROM agent_session_summaries
+               WHERE workspace_id = ?
+               ORDER BY updated_at DESC
+               LIMIT ?"#,
+            "SELECT id FROM vector_index_items WHERE owner_type = ? AND owner_id = ?",
+            "SELECT id FROM vector_index_items WHERE namespace = ? AND scope_type = ? AND scope_id = ?",
+            "SELECT id FROM vector_index_items WHERE namespace = ?",
+            "SELECT item_id FROM vector_index_buckets WHERE namespace = ? AND bucket_key = ? LIMIT ?",
+            r#"SELECT id, namespace, owner_id, dimensions, metric, vector_json, vector_norm, metadata_json
+               FROM vector_index_items
+               WHERE id = ?
+               LIMIT 1"#,
+            r#"SELECT id, namespace, owner_id, dimensions, metric, vector_json, vector_norm, metadata_json
+               FROM vector_index_items
+               WHERE namespace = ?
+               LIMIT ?"#,
+            r#"SELECT id, namespace, owner_id, dimensions, metric, vector_json, vector_norm, metadata_json
+               FROM vector_index_items
+               WHERE namespace = ? AND scope_type = ? AND scope_id = ?
+               LIMIT ?"#,
         ];
 
         for sql in statements {

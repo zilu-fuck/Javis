@@ -10,13 +10,24 @@ export function createSourceBackedReport(
   sources: WebSource[],
   options: SourceBackedReportOptions = {},
 ): ResearchReport {
-  const rows = sources.map((source) => ({
-    claim: `${source.title ?? source.url} is available as a public source for this task.`,
-    sourceUrl: source.url,
-    evidence: source.excerpt.slice(0, 220),
-  }));
+  const rows = sources.map((source) => {
+    const excerpt = source.excerpt.trim();
+    const status = source.url && excerpt ? "verified" as const : "unknown" as const;
+    return {
+      claim: excerpt
+      ? `${source.title ?? source.url} is available as a public source for this task.`
+      : `${source.title ?? source.url} could not be verified from fetched text.`,
+      status,
+      sourceUrl: source.url,
+      excerpt: source.excerpt.slice(0, 220),
+      evidence: source.excerpt.slice(0, 220),
+      verificationStatus: status,
+      ...(source.provider ? { sourceProvider: source.provider } : {}),
+    };
+  });
 
   const missingEvidenceCount = rows.filter((row) => !row.evidence).length;
+  const verifiedCount = rows.filter((row) => row.verificationStatus === "verified").length;
   const comparisonNote =
     rows.length >= 3
       ? " The report compares the available sources for overlap and differences."
@@ -26,7 +37,7 @@ export function createSourceBackedReport(
     title: "Source-backed research report",
     summary:
       rows.length > 0
-        ? `Collected ${rows.length} public source(s)${
+        ? `Collected ${rows.length} public source(s), with ${verifiedCount} claim(s) tied to URL-backed excerpts${
             options.providerSummary ? ` via ${options.providerSummary}` : ""
           }. Claims below are limited to fetched source excerpts.${comparisonNote}`
         : "No public source was collected, so no claims are verified.",

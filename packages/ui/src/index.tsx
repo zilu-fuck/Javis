@@ -13,3 +13,9 @@ export { AgentStyleEditor } from "./components/AgentStyleEditor";
 export { getBuiltinSidebarNavItems, mergeSidebarNavItems } from "./builtin-nav";
 export { useStreamingSnapshot } from "./use-streaming-snapshot";
 export { useSmoothStream } from "./use-smooth-stream";
+export {
+  createWorkbenchHandoffReportArtifacts,
+  downloadWorkbenchHandoffReportArtifact,
+  formatWorkbenchHandoffReportMarkdown,
+} from "./handoff-report-export";
+export type { WorkbenchHandoffReportArtifact } from "./handoff-report-export";

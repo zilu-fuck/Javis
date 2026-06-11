@@ -23,6 +23,7 @@ export function agentKind(agent: WorkbenchAgent): string {
   const text = `${agent.name} ${agent.role}`.toLowerCase();
   if (text.includes("research") || text.includes("search")) return "research";
   if (text.includes("file") || text.includes("document") || text.includes("write")) return "file";
+  if (text.includes("browser") || text.includes("web")) return "browser";
   if (text.includes("command") || text.includes("shell")) return "command";
   if (text.includes("code") || text.includes("program")) return "code";
   if (text.includes("computer") || text.includes("desktop")) return "computer";
@@ -38,6 +39,8 @@ export function agentIcon(agent: WorkbenchAgent): string {
       return "F";
     case "command":
       return ">";
+    case "browser":
+      return "B";
     case "code":
       return "</>";
     case "computer":

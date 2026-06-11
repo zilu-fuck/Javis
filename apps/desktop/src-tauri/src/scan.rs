@@ -446,7 +446,8 @@ fn resolve_scan_resource_roots(
             return Err(format!("Resource scan root is disabled: {}", record.id));
         }
         if !requested.path.trim().is_empty()
-            && normalize_root_path_for_match(&requested.path) != normalize_root_path_for_match(&record.path)
+            && normalize_root_path_for_match(&requested.path)
+                != normalize_root_path_for_match(&record.path)
         {
             return Err(format!(
                 "Resource scan root path does not match registered root id: {}",
@@ -1656,7 +1657,9 @@ fn resolve_allowed_read_roots(
         roots.push(record.path);
     }
     if roots.is_empty() {
-        return Err("Reading local file content requires a selected workspace or scan root.".to_string());
+        return Err(
+            "Reading local file content requires a selected workspace or scan root.".to_string(),
+        );
     }
     Ok(roots)
 }
@@ -1976,10 +1979,18 @@ mod tests {
             .write_all(b"line 1")
             .unwrap();
 
-        assert!(read_file_chunk_with_allowed_roots(file_path.to_string_lossy().to_string(), None, None).is_err());
-        assert!(
-            read_file_chunk_with_allowed_roots(file_path.to_string_lossy().to_string(), None, Some(vec![])).is_err()
-        );
+        assert!(read_file_chunk_with_allowed_roots(
+            file_path.to_string_lossy().to_string(),
+            None,
+            None
+        )
+        .is_err());
+        assert!(read_file_chunk_with_allowed_roots(
+            file_path.to_string_lossy().to_string(),
+            None,
+            Some(vec![])
+        )
+        .is_err());
     }
 
     #[test]
@@ -2119,8 +2130,10 @@ mod tests {
             }
         }
 
-        let result =
-            read_image_data_url_with_allowed_roots(link.to_string_lossy().to_string(), allowed_root(tmp.path()));
+        let result = read_image_data_url_with_allowed_roots(
+            link.to_string_lossy().to_string(),
+            allowed_root(tmp.path()),
+        );
 
         assert!(result.is_err());
     }
@@ -2134,10 +2147,16 @@ mod tests {
             .write_all(b"fake image")
             .unwrap();
 
-        assert!(read_image_data_url_with_allowed_roots(image_path.to_string_lossy().to_string(), None).is_err());
-        assert!(
-            read_image_data_url_with_allowed_roots(image_path.to_string_lossy().to_string(), Some(vec![])).is_err()
-        );
+        assert!(read_image_data_url_with_allowed_roots(
+            image_path.to_string_lossy().to_string(),
+            None
+        )
+        .is_err());
+        assert!(read_image_data_url_with_allowed_roots(
+            image_path.to_string_lossy().to_string(),
+            Some(vec![])
+        )
+        .is_err());
     }
 
     #[test]

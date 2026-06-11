@@ -9,6 +9,25 @@ export const PREF_KEYS = {
   IS_ACTIVITY_OPEN: "is_activity_open",
   IS_INSPECTOR_OPEN: "is_inspector_open",
   SKILL_TRANSLATIONS_ZH: "skill_translations_zh",
+  APPEARANCE_THEME: "appearance_theme",
+  DEFAULT_STARTUP_MODE: "default_startup_mode",
+  CONTEXT_STRATEGY: "context_strategy",
+  AGENT_MAX_ROUNDS_PRESET: "agent_max_rounds_preset",
+  AGENT_MAX_ROUNDS_CUSTOM: "agent_max_rounds_custom",
+  TASK_TIMEOUT_PRESET: "task_timeout_preset",
+  TASK_TIMEOUT_CUSTOM_MS: "task_timeout_custom_ms",
+  AGENT_MEMORY_SCOPE: "agent_memory_scope",
+  AGENT_MEMORY_EMBEDDING_MODE: "agent_memory_embedding_mode",
+  AGENT_MEMORY_EMBEDDING_PROVIDER: "agent_memory_embedding_provider",
+  AGENT_MEMORY_EMBEDDING_MODEL: "agent_memory_embedding_model",
+  AGENT_MEMORY_EMBEDDING_BASE_URL: "agent_memory_embedding_base_url",
+  AGENT_MEMORY_EMBEDDING_API_KEY_REFERENCE: "agent_memory_embedding_api_key_reference",
+  AGENT_MEMORY_EMBEDDING_DIMENSIONS: "agent_memory_embedding_dimensions",
+  TASK_QUEUE_POLICY: "task_queue_policy",
+  FAILURE_RECOVERY_POLICY: "failure_recovery_policy",
+  USER_WAIT_TIMEOUT_PRESET: "user_wait_timeout_preset",
+  USER_WAIT_TIMEOUT_CUSTOM_MS: "user_wait_timeout_custom_ms",
+  COMPUTER_TRUSTED_APPS: "computer_trusted_apps",
 } as const;
 
 export const USER_PREFERENCES_STORAGE_KEY = "javis.userPreferences.v1";
@@ -167,6 +186,9 @@ function parseLegacyPreferences(raw: string): Record<string, string> {
       const result: Record<string, string> = {};
       for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
         result[key] = String(value);
+      }
+      if (result.theme && !result[PREF_KEYS.APPEARANCE_THEME]) {
+        result[PREF_KEYS.APPEARANCE_THEME] = result.theme;
       }
       return result;
     }

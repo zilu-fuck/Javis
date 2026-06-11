@@ -9,6 +9,7 @@
  */
 
 import type { Agent } from "./index";
+import type { PermissionLevel } from "@javis/tools";
 import { initialToolDescriptors } from "@javis/tools";
 
 // ── Capability Tags ──────────────────────────────────────────────────────────
@@ -22,10 +23,18 @@ export type AgentCapabilityTag =
   | "document_classify"
   | "shell_readonly"
   | "git_inspect"
+  | "git_stage"
+  | "git_commit"
+  | "git_pr_create"
+  | "git_pr_comment"
+  | "code_search"
+  | "code_trace"
   | "code_propose"
   | "code_apply"
   | "web_search"
   | "web_fetch"
+  | "trend_fetch"
+  | "memory_search"
   | "local_search"
   | "image_scan"
   | "directory_list"
@@ -52,8 +61,8 @@ export type AgentCapabilityTag =
 /** All valid capability tags — single source of truth for validation. */
 export const ALL_CAPABILITY_TAGS: ReadonlyArray<AgentCapabilityTag> = [
   "planning", "synthesis", "file_scan", "file_execute", "document_classify",
-  "shell_readonly", "git_inspect", "code_propose", "code_apply",
-  "web_search", "web_fetch", "local_search", "image_scan", "directory_list",
+  "shell_readonly", "git_inspect", "git_stage", "git_commit", "git_pr_create", "git_pr_comment", "code_search", "code_trace", "code_propose", "code_apply",
+  "web_search", "web_fetch", "trend_fetch", "memory_search", "local_search", "image_scan", "directory_list",
   "schedule_create", "evidence_check",
   "browser_navigate", "browser_interact", "browser_test",
   "workspace_list", "workspace_scaffold", "workspace_create", "workspace_delete",
@@ -90,6 +99,55 @@ export interface AgentRegistration {
   readonly capabilityTags: ReadonlyArray<AgentCapabilityTag>;
   /** What kind of model/context this agent needs */
   readonly modelRequirements: Readonly<ModelRequirements>;
+}
+
+export interface AgentCapabilityVerificationInput {
+  readonly qaPassedAgentKinds?: ReadonlyArray<string>;
+  readonly qaPassedCapabilityTags?: ReadonlyArray<AgentCapabilityTag>;
+  readonly liveVerifiedAgentKinds?: ReadonlyArray<string>;
+  readonly liveVerifiedCapabilityTags?: ReadonlyArray<AgentCapabilityTag>;
+  readonly recentFailureRateByAgentKind?: Readonly<Record<string, number>>;
+  readonly recentFailureRateByCapabilityTag?: Readonly<Partial<Record<AgentCapabilityTag, number>>>;
+  readonly evidenceRefsByAgentKind?: Readonly<Record<string, ReadonlyArray<string>>>;
+  readonly evidenceRefsByCapabilityTag?: Readonly<Partial<Record<AgentCapabilityTag, ReadonlyArray<string>>>>;
+}
+
+export interface AgentCapabilityScore {
+  readonly agentKind: string;
+  readonly score: number;
+  readonly status: "ready" | "usable" | "partial" | "limited";
+  readonly implemented: boolean;
+  readonly permissionReady: boolean;
+  readonly qaPassed: boolean;
+  readonly liveVerified: boolean;
+  readonly recentFailureRate: number;
+  readonly highestPermissionLevel: PermissionLevel;
+  readonly capabilityTags: ReadonlyArray<AgentCapabilityTag>;
+  readonly evidenceRefs: ReadonlyArray<string>;
+  readonly gaps: ReadonlyArray<string>;
+}
+
+export interface AgentCapabilityEvidenceRecord {
+  readonly kind: "qa" | "live";
+  readonly status: "passed" | "failed" | "blocked" | "skipped";
+  readonly agentKind?: string;
+  readonly capabilityTags?: ReadonlyArray<AgentCapabilityTag>;
+  readonly evidenceRef?: string;
+}
+
+export interface AgentCapabilityToolSignal {
+  readonly toolName: string;
+  readonly status: "succeeded" | "failed" | "cancelled" | "blocked";
+}
+
+export interface AgentRepairPriority {
+  readonly agentKind: string;
+  readonly priority: "critical" | "high" | "medium" | "low";
+  readonly score: number;
+  readonly reasons: ReadonlyArray<string>;
+  readonly nextEvidence: ReadonlyArray<string>;
+  readonly capabilityTags: ReadonlyArray<AgentCapabilityTag>;
+  readonly evidenceRefs: ReadonlyArray<string>;
 }
 
 // ── Agent Registry ──────────────────────────────────────────────────────────
@@ -177,6 +235,166 @@ export function createAgentRegistry(agents: ReadonlyArray<Agent>): AgentRegistry
   };
 }
 
+export function scoreAgentCapability(
+  registration: AgentRegistration,
+  verification: AgentCapabilityVerificationInput = {},
+): AgentCapabilityScore {
+  const toolDescriptors = registration.agent.allowedToolNames.map((toolName) => ({
+    toolName,
+    descriptor: getToolDescriptor(toolName),
+  }));
+  const missingTools = toolDescriptors
+    .filter(({ descriptor }) => !descriptor)
+    .map(({ toolName }) => toolName);
+  const highestPermissionLevel = getHighestPermissionLevel(
+    toolDescriptors.map(({ descriptor }) => descriptor?.permissionLevel ?? "dangerous"),
+  );
+  const implemented = registration.capabilityTags.length > 0 && missingTools.length === 0;
+  const permissionReady = missingTools.length === 0 && highestPermissionLevel !== "dangerous";
+  const qaPassed = hasVerificationSignal(
+    registration,
+    verification.qaPassedAgentKinds,
+    verification.qaPassedCapabilityTags,
+  );
+  const liveVerified = hasVerificationSignal(
+    registration,
+    verification.liveVerifiedAgentKinds,
+    verification.liveVerifiedCapabilityTags,
+  );
+  const recentFailureRate = getRecentFailureRate(registration, verification);
+  const evidenceRefs = getCapabilityEvidenceRefs(registration, verification);
+
+  let score = 0;
+  if (implemented) score += 40;
+  if (permissionReady) score += 25;
+  if (qaPassed) score += 25;
+  if (liveVerified) score += 10;
+  score = Math.max(0, score - recentFailurePenalty(recentFailureRate));
+
+  const gaps: string[] = [];
+  if (!implemented) {
+    gaps.push(
+      missingTools.length > 0
+        ? `missing descriptors: ${missingTools.join(", ")}`
+        : "no capability tags inferred",
+    );
+  }
+  if (!permissionReady) {
+    gaps.push(
+      highestPermissionLevel === "dangerous"
+        ? "dangerous permission level still needs a product guard"
+        : "permission metadata is incomplete",
+    );
+  }
+  if (!qaPassed) gaps.push("product QA evidence is not marked as passed");
+  if (!liveVerified) gaps.push("live workflow verification is not marked as passed");
+  if (recentFailureRate >= 0.2) {
+    gaps.push(`recent tool failure rate is ${(recentFailureRate * 100).toFixed(0)}%`);
+  }
+
+  return {
+    agentKind: registration.agent.kind,
+    score,
+    status: getCapabilityScoreStatus(score, liveVerified),
+    implemented,
+    permissionReady,
+    qaPassed,
+    liveVerified,
+    recentFailureRate,
+    highestPermissionLevel,
+    capabilityTags: registration.capabilityTags,
+    evidenceRefs,
+    gaps,
+  };
+}
+
+export function scoreAgentCapabilities(
+  registry: AgentRegistry,
+  verification: AgentCapabilityVerificationInput = {},
+): ReadonlyArray<AgentCapabilityScore> {
+  return registry.list().map((registration) =>
+    scoreAgentCapability(registration, verification),
+  );
+}
+
+export function rankAgentRepairPriorities(
+  scores: ReadonlyArray<AgentCapabilityScore>,
+): ReadonlyArray<AgentRepairPriority> {
+  return scores
+    .map(agentScoreToRepairPriority)
+    .filter((priority) => priority.score > 0)
+    .sort((a, b) =>
+      b.score - a.score ||
+      priorityRank(a.priority) - priorityRank(b.priority) ||
+      a.agentKind.localeCompare(b.agentKind),
+    );
+}
+
+export function deriveAgentCapabilityVerificationInput(
+  evidenceRecords: ReadonlyArray<AgentCapabilityEvidenceRecord>,
+  toolSignals: ReadonlyArray<AgentCapabilityToolSignal> = [],
+): AgentCapabilityVerificationInput {
+  const qaPassedAgentKinds = new Set<string>();
+  const qaPassedCapabilityTags = new Set<AgentCapabilityTag>();
+  const liveVerifiedAgentKinds = new Set<string>();
+  const liveVerifiedCapabilityTags = new Set<AgentCapabilityTag>();
+  const evidenceRefsByAgentKind: Record<string, string[]> = {};
+  const evidenceRefsByCapabilityTag: Partial<Record<AgentCapabilityTag, string[]>> = {};
+
+  for (const record of evidenceRecords) {
+    if (record.status !== "passed") continue;
+    const agentSet = record.kind === "qa" ? qaPassedAgentKinds : liveVerifiedAgentKinds;
+    const capabilitySet = record.kind === "qa" ? qaPassedCapabilityTags : liveVerifiedCapabilityTags;
+    if (record.agentKind) {
+      agentSet.add(record.agentKind);
+      appendEvidenceRef(evidenceRefsByAgentKind, record.agentKind, record.evidenceRef);
+    }
+    for (const tag of record.capabilityTags ?? []) {
+      capabilitySet.add(tag);
+      appendEvidenceRef(evidenceRefsByCapabilityTag, tag, record.evidenceRef);
+    }
+  }
+
+  const recentFailureRateByAgentKind: Record<string, number> = {};
+  const recentFailureRateByCapabilityTag: Partial<Record<AgentCapabilityTag, number>> = {};
+  const agentStats: Record<string, { total: number; failed: number }> = {};
+  const capabilityStats: Partial<Record<AgentCapabilityTag, { total: number; failed: number }>> = {};
+  for (const signal of toolSignals) {
+    const descriptor = getToolDescriptor(signal.toolName);
+    if (!descriptor) continue;
+    const failed = signal.status === "failed" || signal.status === "blocked";
+    for (const agentKind of descriptor.ownerAgentKinds) {
+      const stats = agentStats[agentKind] ?? { total: 0, failed: 0 };
+      stats.total += 1;
+      if (failed) stats.failed += 1;
+      agentStats[agentKind] = stats;
+    }
+    for (const tag of descriptor.capabilityTags.filter(isValidCapabilityTag)) {
+      const stats = capabilityStats[tag] ?? { total: 0, failed: 0 };
+      stats.total += 1;
+      if (failed) stats.failed += 1;
+      capabilityStats[tag] = stats;
+    }
+  }
+  for (const [agentKind, stats] of Object.entries(agentStats)) {
+    recentFailureRateByAgentKind[agentKind] = stats.total > 0 ? stats.failed / stats.total : 0;
+  }
+  for (const [tag, stats] of Object.entries(capabilityStats) as Array<[AgentCapabilityTag, { total: number; failed: number }]>) {
+    recentFailureRateByCapabilityTag[tag] = stats.total > 0 ? stats.failed / stats.total : 0;
+  }
+
+  return {
+    qaPassedAgentKinds: [...qaPassedAgentKinds],
+    qaPassedCapabilityTags: [...qaPassedCapabilityTags],
+    liveVerifiedAgentKinds: [...liveVerifiedAgentKinds],
+    liveVerifiedCapabilityTags: [...liveVerifiedCapabilityTags],
+    recentFailureRateByAgentKind,
+    recentFailureRateByCapabilityTag,
+    evidenceRefsByAgentKind,
+    evidenceRefsByCapabilityTag,
+  };
+}
+
 // ── Capability Tag Inference ─────────────────────────────────────────────────
 
 /** Default model requirements used when an agent has none declared. */
@@ -208,6 +426,164 @@ function getToolCapabilityIndex(): Map<string, string[]> {
 
 function getToolCapabilityTags(toolName: string): string[] {
   return getToolCapabilityIndex().get(toolName) ?? [];
+}
+
+function getToolDescriptor(toolName: string) {
+  return initialToolDescriptors.find((descriptor) => descriptor.name === toolName);
+}
+
+const PERMISSION_LEVEL_RANK: Record<PermissionLevel, number> = {
+  read: 0,
+  preview: 1,
+  confirmed_write: 2,
+  dangerous: 3,
+};
+
+function getHighestPermissionLevel(levels: ReadonlyArray<PermissionLevel>): PermissionLevel {
+  return levels.reduce<PermissionLevel>((highest, level) =>
+    PERMISSION_LEVEL_RANK[level] > PERMISSION_LEVEL_RANK[highest] ? level : highest,
+  "read");
+}
+
+function hasVerificationSignal(
+  registration: AgentRegistration,
+  agentKinds: ReadonlyArray<string> | undefined,
+  capabilityTags: ReadonlyArray<AgentCapabilityTag> | undefined,
+): boolean {
+  return Boolean(
+    agentKinds?.includes(registration.agent.kind) ||
+    capabilityTags?.some((tag) => registration.capabilityTags.includes(tag)),
+  );
+}
+
+function getRecentFailureRate(
+  registration: AgentRegistration,
+  verification: AgentCapabilityVerificationInput,
+): number {
+  const rates = [
+    verification.recentFailureRateByAgentKind?.[registration.agent.kind] ?? 0,
+    ...registration.capabilityTags.map((tag) =>
+      verification.recentFailureRateByCapabilityTag?.[tag] ?? 0,
+    ),
+  ];
+  return clampRate(Math.max(...rates));
+}
+
+function getCapabilityEvidenceRefs(
+  registration: AgentRegistration,
+  verification: AgentCapabilityVerificationInput,
+): string[] {
+  return uniqueStrings([
+    ...(verification.evidenceRefsByAgentKind?.[registration.agent.kind] ?? []),
+    ...registration.capabilityTags.flatMap((tag) =>
+      verification.evidenceRefsByCapabilityTag?.[tag] ?? [],
+    ),
+  ]);
+}
+
+function recentFailurePenalty(rate: number): number {
+  if (rate >= 0.5) return 20;
+  if (rate >= 0.2) return 10;
+  if (rate > 0) return 5;
+  return 0;
+}
+
+function agentScoreToRepairPriority(score: AgentCapabilityScore): AgentRepairPriority {
+  const reasons: string[] = [];
+  const nextEvidence: string[] = [];
+  let priorityScore = 0;
+
+  if (!score.implemented) {
+    priorityScore += 100;
+    reasons.push("implementation is missing or tool descriptors are incomplete");
+    nextEvidence.push("source test proving the agent has descriptors for every allowed tool");
+  }
+  if (!score.permissionReady) {
+    priorityScore += 90;
+    reasons.push("permission readiness is incomplete for one or more tools");
+    nextEvidence.push("approval or permission contract evidence for the highest-risk tool");
+  }
+  if (!score.liveVerified) {
+    priorityScore += 50;
+    reasons.push("live workflow verification is missing or blocked");
+    nextEvidence.push("dated packaged/live workflow output with artifact references");
+  }
+  if (!score.qaPassed) {
+    priorityScore += 40;
+    reasons.push("product QA evidence is missing or blocked");
+    nextEvidence.push("dated product QA output that marks the relevant capability as pass");
+  }
+  if (score.recentFailureRate >= 0.5) {
+    priorityScore += 35;
+    reasons.push(`recent tool failure rate is ${(score.recentFailureRate * 100).toFixed(0)}%`);
+    nextEvidence.push("recent tool-call audit sample showing the failure rate is reduced");
+  } else if (score.recentFailureRate >= 0.2) {
+    priorityScore += 20;
+    reasons.push(`recent tool failure rate is ${(score.recentFailureRate * 100).toFixed(0)}%`);
+    nextEvidence.push("recent tool-call audit sample showing the failure rate is reduced");
+  } else if (score.recentFailureRate > 0) {
+    priorityScore += 10;
+    reasons.push(`recent tool failure rate is ${(score.recentFailureRate * 100).toFixed(0)}%`);
+  }
+  if (score.highestPermissionLevel === "dangerous") {
+    priorityScore += 15;
+    reasons.push("highest permission level is dangerous");
+    nextEvidence.push("explicit safety review for dangerous tool exposure");
+  } else if (score.highestPermissionLevel === "confirmed_write") {
+    priorityScore += 10;
+    reasons.push("highest permission level requires confirmed writes");
+  }
+
+  return {
+    agentKind: score.agentKind,
+    priority: priorityLabel(priorityScore),
+    score: priorityScore,
+    reasons: uniqueStrings([...reasons, ...score.gaps]),
+    nextEvidence: uniqueStrings(nextEvidence),
+    capabilityTags: score.capabilityTags,
+    evidenceRefs: score.evidenceRefs,
+  };
+}
+
+function priorityLabel(score: number): AgentRepairPriority["priority"] {
+  if (score >= 120) return "critical";
+  if (score >= 80) return "high";
+  if (score >= 40) return "medium";
+  return "low";
+}
+
+function priorityRank(priority: AgentRepairPriority["priority"]): number {
+  switch (priority) {
+    case "critical": return 0;
+    case "high": return 1;
+    case "medium": return 2;
+    case "low": return 3;
+  }
+}
+
+function clampRate(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(1, Math.max(0, value));
+}
+
+function appendEvidenceRef<T extends string>(
+  target: Partial<Record<T, string[]>>,
+  key: T,
+  ref: string | undefined,
+): void {
+  if (!ref) return;
+  target[key] = uniqueStrings([...(target[key] ?? []), ref]);
+}
+
+function uniqueStrings(values: ReadonlyArray<string>): string[] {
+  return [...new Set(values.filter((value) => value.trim().length > 0))];
+}
+
+function getCapabilityScoreStatus(score: number, liveVerified: boolean): AgentCapabilityScore["status"] {
+  if (score >= 85 && liveVerified) return "ready";
+  if (score >= 65) return "usable";
+  if (score >= 40) return "partial";
+  return "limited";
 }
 
 function inferCapabilityTags(agent: Agent): AgentCapabilityTag[] {

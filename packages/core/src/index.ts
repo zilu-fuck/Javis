@@ -5,12 +5,15 @@ import type {
   CodeReviewPreview,
   CodeProposedEdit,
   CodeApplyResult,
+  CodeRepositorySearchResult,
+  CodeRepositoryTraceResult,
   CodeTool,
   ComputerTool,
   CommanderTool,
   FileOrganizationExecution,
   FileOrganizationPlan,
   FileTool,
+  GitTool,
   MarkdownDocumentSummary,
   ModelUsage,
   PermissionRequest as ToolPermissionRequest,
@@ -23,19 +26,30 @@ import type {
   VerifierTool,
   WebSource,
   WebTool,
+  TrendTool,
+  MemoryTool,
+  McpTool,
   WorkspaceTool,
   TokenUsageSummary,
   BrowserTool,
+  ToolDescriptor,
   VisionTool,
 } from "@javis/tools";
+import { initialToolDescriptors, isDisabledBrowserWriteToolName } from "@javis/tools";
 import type { AskUserAnswerHandler } from "./ask-user";
 import type { PendingPermissionHandler } from "./confirmed-write";
 import type { AgentReActDecision } from "./agent-react-loop";
 import type { ReActDecisionRequest } from "./agent-react-decider";
 import type { CommanderDagPlan } from "./commander-plan-schema";
+import type { ComputerUseStepTrace } from "./computer-use-types";
+import type { HandoffReport } from "./shared-context";
+import type { RecoveryReport } from "./recovery-report";
 import {
+  createDefaultAgentRegistry,
   demoAgents,
 } from "./agents";
+import { scoreAgentCapability } from "./agent-capability";
+import type { AgentCapabilityScore, AgentCapabilityVerificationInput } from "./agent-capability";
 import { runCodeReviewTask } from "./code-review-flow";
 import { runPdfOrganizationPreviewTask } from "./pdf-organization-flow";
 import { isTextWriteGoal, runTextWriteTask } from "./text-write-flow";
@@ -60,6 +74,10 @@ import {
 import { createRuntimeState } from "./runtime-state";
 import { appendLog } from "./snapshot-utils";
 import { addModelUsage, createEmptyTokenUsageSummary } from "./token-usage";
+import {
+  createRecoveredContextMessages,
+  isContextOverflowError,
+} from "./context-recovery";
 import type { TaskEventBus } from "./task-event-bus";
 import {
   createRouteLog,
@@ -69,6 +87,7 @@ import {
 } from "./local-router";
 import { isTaskCancelledError, throwIfTaskAborted, withTaskTimeout } from "./task-wait";
 import { isTerminalTaskStatus } from "./state/task-state";
+import { inferVisionMode } from "./vision-utils";
 
 export {
   createCodeApplyDryRun,
@@ -94,6 +113,7 @@ export {
   buildAgentSystemPrompt,
   clampCustomStyle,
   defaultAgentStyleFileName,
+  getUiGenerationDesignRules,
   normalizePromptLocale,
   wrapCustomStyle,
 } from "./agents/prompt";
@@ -105,11 +125,24 @@ export type {
 } from "./agents/prompt";
 export type {
   AgentCapabilityTag,
+  AgentCapabilityEvidenceRecord,
+  AgentRepairPriority,
+  AgentCapabilityScore,
+  AgentCapabilityToolSignal,
+  AgentCapabilityVerificationInput,
   ModelRequirements,
   AgentRegistration,
   AgentRegistry,
 } from "./agent-capability";
-export { createAgentRegistry, ALL_CAPABILITY_TAGS, isValidCapabilityTag } from "./agent-capability";
+export {
+  createAgentRegistry,
+  deriveAgentCapabilityVerificationInput,
+  rankAgentRepairPriorities,
+  scoreAgentCapability,
+  scoreAgentCapabilities,
+  ALL_CAPABILITY_TAGS,
+  isValidCapabilityTag,
+} from "./agent-capability";
 export {
   CHINESE_REVIEW_SCORE_SCHEMA,
   createChineseReviewPrompt,
@@ -133,6 +166,61 @@ export {
   listWorkbenchWorkflows,
 } from "./workflows";
 export {
+  buildRepositoryTraceEvidenceReport,
+  buildRepositorySearchEvidenceReport,
+  clusterRepositorySearchResults,
+  createRepositorySearchPlan,
+} from "./repo-intelligence";
+export type {
+  RepositoryTraceDirection,
+  RepositoryTraceEdge,
+  RepositoryTraceEvidence,
+  RepositoryTraceEvidenceReport,
+  RepositoryTraceModuleKind,
+  RepositoryTraceNode,
+  RepositoryTraceRelation,
+  RepositoryTraceRequest,
+  RepositorySearchAttempt,
+  RepositorySearchAttemptErrorKind,
+  RepositorySearchCluster,
+  RepositorySearchEvidenceReport,
+  RepositorySearchPlan,
+  RepositorySearchPlanRequest,
+  RepositorySearchResult,
+  RepositorySearchSemanticDiagnostic,
+} from "./repo-intelligence";
+export {
+  DEFAULT_GOAL_MAX_RUN_COUNT,
+  GOAL_BLOCKED_STREAK_THRESHOLD,
+  applyGoalDecision,
+  bindGoalTask,
+  clearGoal,
+  completeGoal,
+  createGoalState,
+  createGoalEvent,
+  createGoalEvaluationFromDecision,
+  isGoalTerminal,
+  parseGoalAcceptanceCriteria,
+  pauseGoal,
+  resumeGoal,
+  sanitizeGoalState,
+} from "./goal-state";
+export type {
+  CreateGoalStateInput,
+  GoalDecision,
+  GoalDecisionStatus,
+  GoalEvaluation,
+  GoalEvent,
+  GoalEventType,
+  GoalRun,
+  GoalRunStatus,
+  GoalState,
+  GoalStrategy,
+  GoalStrategyContext,
+  GoalStrategyPatch,
+  GoalStatus,
+} from "./goal-state";
+export {
   AGENT_RUN_EVENT_KINDS,
   createTaskEventBus,
   isAgentRunEvent,
@@ -140,8 +228,35 @@ export {
 } from "./task-event-bus";
 export { createDeltaReducer } from "./delta-reducer";
 export type { DeltaReducer } from "./delta-reducer";
-export { createSharedTaskContext, CONTEXT_KEYS, contextKeyForLocale } from "./shared-context";
-export type { ContextKey, SharedTaskContext } from "./shared-context";
+export {
+  buildHandoffReport,
+  createHandoffReportArtifacts,
+  createSharedTaskContext,
+  CONTEXT_KEYS,
+  formatHandoffReportMarkdown,
+  contextKeyForLocale,
+} from "./shared-context";
+export type {
+  ContextKey,
+  HandoffReport,
+  HandoffReportArtifact,
+  HandoffReportRecord,
+  HandoffReportStep,
+  HandoffReportStepRecord,
+  HandoffReportValueSummary,
+  SharedTaskContext,
+} from "./shared-context";
+export {
+  buildRecoveryReport,
+  classifyRecoveryFailure,
+  createRecoveryAttempt,
+} from "./recovery-report";
+export type {
+  RecoveryAttemptRecord,
+  RecoveryFailureKind,
+  RecoveryReplanStatus,
+  RecoveryReport,
+} from "./recovery-report";
 export { localizeError, localizeOpenCodeError } from "./error-localizer";
 export { executeWorkflow } from "./workflow-dag-executor";
 export type {
@@ -202,17 +317,23 @@ export {
   COMPUTER_USE_OUTPUT_SCHEMA,
   DEFAULT_COMPUTER_USE_CONFIG,
 } from "./computer-use-prompt";
-export { parseModelAction, parseModelOutput } from "./computer-use-types";
+export {
+  COMPUTER_USE_ACTION_TOOL_NAMES,
+  parseModelAction,
+  parseModelOutput,
+} from "./computer-use-types";
 export type {
   ComputerUseLoopConfig,
   ComputerUseStep,
   ComputerUsePhase,
   ComputerUseStepTrace,
   ComputerUseAction,
+  ComputerScreenshotRegion,
   ComputerUseModelOutput,
 } from "./computer-use-types";
 export {
   COMMANDER_PLAN_SCHEMA_JSON,
+  COMMANDER_PLAN_SCHEMA_PROMPT,
   buildCommanderPlanPrompt,
   buildCommanderReplanPrompt,
 } from "./commander-plan-schema";
@@ -345,6 +466,8 @@ export interface TaskStep {
   assignedAgentKind: AgentKind;
   agentId?: ID;
   requiredCapabilities?: string[];
+  inputContextKeys?: string[];
+  outputContextKey?: string;
   status: "pending" | "running" | "completed" | "failed" | "skipped";
   successCriteria?: string;
 }
@@ -411,7 +534,7 @@ export interface DryRunSummary {
   affectedPaths?: Array<{
     source?: string;
     target?: string;
-    action: "create" | "modify" | "move" | "copy" | "delete" | "overwrite";
+    action: "create" | "modify" | "move" | "copy" | "delete" | "overwrite" | "push";
     conflict?: string;
   }>;
   command?: {
@@ -485,6 +608,21 @@ export interface AgentSnapshot {
   status: AgentRunStatus;
   task: string;
   tokenUsage?: TokenUsageSummary;
+  capabilityScore?: AgentCapabilityScoreSnapshot;
+}
+
+export interface AgentCapabilityScoreSnapshot {
+  score: number;
+  status: AgentCapabilityScore["status"];
+  implemented: boolean;
+  permissionReady: boolean;
+  qaPassed: boolean;
+  liveVerified: boolean;
+  recentFailureRate: number;
+  highestPermissionLevel: PermissionLevel;
+  capabilityTags: string[];
+  evidenceRefs: string[];
+  gaps: string[];
 }
 
 export interface TaskLogEntry {
@@ -544,6 +682,8 @@ export interface TaskSnapshot {
   codeReviewPreview?: CodeReviewPreview;
   codeProposedEdit?: CodeProposedEdit;
   codeApplyResult?: CodeApplyResult;
+  repoSearchReport?: CodeRepositorySearchResult;
+  repoTraceReport?: CodeRepositoryTraceResult;
   permissionRequest?: ToolPermissionRequest;
   askUserQuestion?: AskUserQuestionRequest;
   project?: ProjectInspection;
@@ -560,6 +700,10 @@ export interface TaskSnapshot {
   isStreaming?: boolean;
   /** Structured execution trace 鈥?per-step wall-clock time and token usage. */
   executionTrace?: ExecutionTrace;
+  /** Serializable multi-agent context handoff audit generated from DAG context keys. */
+  handoffReport?: HandoffReport;
+  /** Serializable recovery audit generated when failed steps trigger alternate paths. */
+  recoveryReport?: RecoveryReport;
   /** User-readable error message set when task fails. Avoids exposing raw stack traces. */
   userFacingError?: string;
 }
@@ -584,6 +728,26 @@ export interface StepTrace {
   wallTimeMs: number;
   tokenUsage?: { input: number; output: number };
   status: "completed" | "failed" | "skipped";
+  localVision?: {
+    mode: NonNullable<ComputerUseStepTrace["localVision"]>["mode"];
+    detectionCount?: number;
+    promptCandidateCount?: number;
+    latencyMs?: number;
+    fullScreenshotVlmCalled?: boolean;
+    cropVlmCalled?: boolean;
+    fullScreenshotVlmSkipped?: boolean;
+    consecutiveTimeouts?: number;
+    consecutiveErrors?: number;
+    consecutiveActionFailures?: number;
+    consecutiveSlowDetections?: number;
+    effectiveImgSize?: number;
+    disabledReason?: NonNullable<ComputerUseStepTrace["localVision"]>["disabledReason"];
+    selectedCandidateSource?: string[];
+    actionType?: string;
+    actionRisk?: NonNullable<ComputerUseStepTrace["localVision"]>["actionRisk"];
+    actionSucceeded?: boolean;
+    fallbackReason?: string;
+  };
 }
 
 export type { ModelUsage, TokenUsageSummary };
@@ -611,22 +775,40 @@ export interface TaskRuntime {
   dispose(): void;
 }
 
+export interface RuntimeExecutionConfig {
+  contextStrategy?: "auto" | "short" | "long";
+  agentMaxIterations?: number;
+  taskTimeoutMs?: number;
+  failureRecoveryEnabled?: boolean;
+  userWaitTimeoutMs?: number;
+}
+
 export interface FileScanRuntimeOptions {
   fileTool: FileTool;
   chatTool?: ChatTool;
   commanderTool?: CommanderTool;
   computerTool?: ComputerTool;
   codeTool?: CodeTool;
+  gitTool?: GitTool;
   projectTool?: ProjectTool;
   shellTool?: ShellTool;
   schedulerTool?: SchedulerTool;
   verifierTool?: VerifierTool;
   webTool?: WebTool;
+  trendTool?: TrendTool;
+  memoryTool?: MemoryTool;
+  mcpTool?: McpTool;
   browserTool?: BrowserTool;
   visionTool?: VisionTool;
   workspaceTool?: WorkspaceTool;
   delayMs?: number;
   eventBus?: TaskEventBus;
+  runtimeConfig?: RuntimeExecutionConfig;
+  getRuntimeConfig?: () => RuntimeExecutionConfig | undefined;
+  availableToolDescriptors?: ToolDescriptor[];
+  getAvailableToolDescriptors?: () => ToolDescriptor[] | undefined;
+  capabilityVerification?: AgentCapabilityVerificationInput;
+  getCapabilityVerification?: () => AgentCapabilityVerificationInput | undefined;
   onTaskStarted?: (taskId: string) => void;
   /** P0-2: LLM-based ReAct decision maker for step execution loops. */
   reactDecideNext?: (request: ReActDecisionRequest) => Promise<AgentReActDecision>;
@@ -644,7 +826,16 @@ export interface FileScanRuntimeOptions {
   computerUseLoopRunner?: (options: {
     userGoal: string;
     computerTool: import("@javis/tools").ComputerTool;
-    approveAction: (action: { tool: string; params: Record<string, unknown> }) => Promise<{ approvalId: string; taskId?: string; sessionWide?: boolean }>;
+    allowedToolNames?: string[];
+    approveAction: (
+      action: { tool: string; params: Record<string, unknown> },
+      options?: {
+        requiresFreshApproval?: boolean;
+        screenshotDataUrl?: string;
+        trustedWindowTitle?: string;
+        timeoutMs?: number;
+      },
+    ) => Promise<{ approvalId: string; taskId?: string; sessionWide?: boolean }>;
     onStep?: (step: unknown) => void;
     onProgress?: (step: unknown) => void;
     signal?: AbortSignal;
@@ -658,6 +849,8 @@ export interface ChatTool {
       maxTokens?: number;
       temperature?: number;
       locale?: string;
+      skipAgentMemory?: boolean;
+      skipSkillContext?: boolean;
     },
   ): Promise<{
     text: string;
@@ -671,13 +864,198 @@ export interface ChatTool {
       locale?: string;
       streamMode?: "default" | "l1";
       onUsage?: (usage: ModelUsage) => void;
+      skipAgentMemory?: boolean;
+      skipSkillContext?: boolean;
     },
   ): AsyncIterable<{
     text: string;
   }>;
 }
 
-export function createInitialTaskSnapshot(): TaskSnapshot {
+const DEFAULT_AVAILABLE_TOOL_DESCRIPTORS = initialToolDescriptors.filter((descriptor) =>
+  !isDisabledBrowserWriteToolName(descriptor.name)
+);
+
+function normalizeRuntimeToolDescriptors(
+  toolDescriptors: readonly ToolDescriptor[] | undefined,
+): ToolDescriptor[] {
+  const source = toolDescriptors ?? DEFAULT_AVAILABLE_TOOL_DESCRIPTORS;
+  const seen = new Set<string>();
+  const normalized: ToolDescriptor[] = [];
+  for (const descriptor of source) {
+    if (seen.has(descriptor.name) || isDisabledBrowserWriteToolName(descriptor.name)) {
+      continue;
+    }
+    seen.add(descriptor.name);
+    normalized.push(descriptor);
+  }
+  return normalized;
+}
+
+function filterRuntimeToolDescriptorsForAvailableTools(
+  toolDescriptors: readonly ToolDescriptor[],
+  tools: { codeTool?: CodeTool; trendTool?: TrendTool },
+): ToolDescriptor[] {
+  return toolDescriptors.filter((descriptor) => {
+    if (descriptor.name === "code.searchRepository") {
+      return Boolean(tools.codeTool?.searchRepository);
+    }
+    if (descriptor.name === "code.traceCallChain") {
+      return Boolean(tools.codeTool?.traceCallChain);
+    }
+    if (descriptor.name === "trend.fetchHotList") {
+      return Boolean(tools.trendTool?.fetchHotList);
+    }
+    return true;
+  });
+}
+
+function getVisionToolNameForGoal(userGoal: string): "vision.analyze" | "vision.describe" | "vision.extractText" {
+  const mode = inferVisionMode(userGoal);
+  if (mode === "ocr") return "vision.extractText";
+  if (mode === "describe") return "vision.describe";
+  return "vision.analyze";
+}
+
+function filterWebToolForAvailability(
+  webTool: WebTool | undefined,
+  hasTool: (toolName: string) => boolean,
+): WebTool | undefined {
+  if (!webTool) {
+    return undefined;
+  }
+  return {
+    fetchWebSource: webTool.fetchWebSource,
+    searchWeb: hasTool("web.search") ? webTool.searchWeb : undefined,
+  };
+}
+
+function filterCodeToolForAvailability(
+  codeTool: CodeTool | undefined,
+  hasTool: (toolName: string) => boolean,
+): CodeTool | undefined {
+  if (!codeTool) {
+    return undefined;
+  }
+  return {
+    inspectRepository: codeTool.inspectRepository,
+    searchRepository: hasTool("code.searchRepository") ? codeTool.searchRepository : undefined,
+    traceCallChain: hasTool("code.traceCallChain") ? codeTool.traceCallChain : undefined,
+    proposeEdit: hasTool("code.proposeEdit") && hasTool("code.applyProposedEdit")
+      ? codeTool.proposeEdit
+      : undefined,
+    applyProposedEdit: hasTool("code.applyProposedEdit") ? codeTool.applyProposedEdit : undefined,
+  };
+}
+
+function filterFileToolForAvailability(
+  fileTool: FileTool | undefined,
+  hasTool: (toolName: string) => boolean,
+): FileTool | undefined {
+  if (!fileTool) {
+    return undefined;
+  }
+  return {
+    scanMarkdownDocuments: fileTool.scanMarkdownDocuments,
+    planPdfOrganization: hasTool("file.planPdfOrganization") ? fileTool.planPdfOrganization : undefined,
+    executePdfOrganization: hasTool("file.executePdfOrganization") ? fileTool.executePdfOrganization : undefined,
+    planWriteText: hasTool("file.planWriteText") ? fileTool.planWriteText : undefined,
+    writeText: hasTool("file.writeText") ? fileTool.writeText : undefined,
+    scanUserDocuments: hasTool("file.scanUserDocuments") ? fileTool.scanUserDocuments : undefined,
+    scanUserImages: hasTool("file.scanUserImages") ? fileTool.scanUserImages : undefined,
+    scanInstalledApps: hasTool("file.scanInstalledApps") ? fileTool.scanInstalledApps : undefined,
+    classifyDocuments: hasTool("file.classifyDocuments") ? fileTool.classifyDocuments : undefined,
+  };
+}
+
+function filterGitToolForAvailability(
+  gitTool: GitTool | undefined,
+  hasTool: (toolName: string) => boolean,
+): GitTool | undefined {
+  if (!gitTool) {
+    return undefined;
+  }
+  return {
+    planStageFiles: hasTool("git.stageFiles") ? gitTool.planStageFiles : undefined,
+    executeStageFiles: hasTool("git.stageFiles") ? gitTool.executeStageFiles : undefined,
+    planCommit: hasTool("git.createCommit") ? gitTool.planCommit : undefined,
+    executeCommit: hasTool("git.createCommit") ? gitTool.executeCommit : undefined,
+    planCreatePullRequest: hasTool("git.createPullRequest") ? gitTool.planCreatePullRequest : undefined,
+    executeCreatePullRequest: hasTool("git.createPullRequest") ? gitTool.executeCreatePullRequest : undefined,
+    planCommentPullRequest: hasTool("git.commentPullRequest") ? gitTool.planCommentPullRequest : undefined,
+    executeCommentPullRequest: hasTool("git.commentPullRequest") ? gitTool.executeCommentPullRequest : undefined,
+  };
+}
+
+function createAgentSnapshots(
+  selectState: (agent: Agent) => Pick<AgentSnapshot, "status" | "task">,
+  verification?: AgentCapabilityVerificationInput,
+): AgentSnapshot[] {
+  return demoAgents.map((agent) => ({
+    id: agent.id,
+    name: agent.displayName,
+    role: agent.description,
+    ...selectState(agent),
+    capabilityScore: getAgentCapabilityScoreSnapshot(agent, verification),
+  }));
+}
+
+let agentCapabilityScoreSnapshotCache: Map<AgentKind, AgentCapabilityScoreSnapshot | undefined> | undefined;
+
+const DEFAULT_PRODUCT_CAPABILITY_VERIFICATION: AgentCapabilityVerificationInput = {
+  qaPassedAgentKinds: ["research", "code"],
+  liveVerifiedAgentKinds: ["research"],
+};
+
+function getAgentCapabilityScoreSnapshot(
+  agent: Agent,
+  verification?: AgentCapabilityVerificationInput,
+): AgentCapabilityScoreSnapshot | undefined {
+  if (verification) {
+    const registration = createDefaultAgentRegistry().findByKind(agent.kind);
+    return registration
+      ? toAgentCapabilityScoreSnapshot(scoreAgentCapability(registration, verification))
+      : undefined;
+  }
+  if (!agentCapabilityScoreSnapshotCache) {
+    const registry = createDefaultAgentRegistry();
+    agentCapabilityScoreSnapshotCache = new Map(
+      demoAgents.map((candidate) => {
+        const registration = registry.findByKind(candidate.kind);
+        return [
+          candidate.kind,
+          registration
+            ? toAgentCapabilityScoreSnapshot(scoreAgentCapability(
+                registration,
+                DEFAULT_PRODUCT_CAPABILITY_VERIFICATION,
+              ))
+            : undefined,
+        ];
+      }),
+    );
+  }
+  return agentCapabilityScoreSnapshotCache.get(agent.kind);
+}
+
+function toAgentCapabilityScoreSnapshot(score: AgentCapabilityScore): AgentCapabilityScoreSnapshot {
+  return {
+    score: score.score,
+    status: score.status,
+    implemented: score.implemented,
+    permissionReady: score.permissionReady,
+    qaPassed: score.qaPassed,
+    liveVerified: score.liveVerified,
+    recentFailureRate: score.recentFailureRate,
+    highestPermissionLevel: score.highestPermissionLevel,
+    capabilityTags: [...score.capabilityTags],
+    evidenceRefs: [...score.evidenceRefs],
+    gaps: [...score.gaps],
+  };
+}
+
+export function createInitialTaskSnapshot(options: {
+  capabilityVerification?: AgentCapabilityVerificationInput;
+} = {}): TaskSnapshot {
   return {
     id: "task-idle",
     title: "Ready",
@@ -686,13 +1064,10 @@ export function createInitialTaskSnapshot(): TaskSnapshot {
     commanderMessage:
       "Javis desktop is ready. Enter a goal to start the Core event stream.",
     plan: [],
-    agents: demoAgents.map((agent) => ({
-      id: agent.id,
-      name: agent.displayName,
-      role: agent.description,
+    agents: createAgentSnapshots(() => ({
       status: "queued",
       task: "Waiting",
-    })),
+    }), options.capabilityVerification),
     logs: [
       {
         id: "log-ready",
@@ -725,6 +1100,76 @@ function routeLogToTaskLog(routeLog: RouteLog): TaskLogEntry {
   };
 }
 
+const MODEL_CONTEXT_LIMITS: Record<NonNullable<RuntimeExecutionConfig["contextStrategy"]>, {
+  maxMessages: number;
+  maxChars: number;
+  messageMaxChars: number;
+}> = {
+  short: { maxMessages: 40, maxChars: 8_000, messageMaxChars: 1_000 },
+  auto: { maxMessages: 120, maxChars: 24_000, messageMaxChars: 2_000 },
+  long: { maxMessages: 240, maxChars: 64_000, messageMaxChars: 4_000 },
+};
+const MODEL_CONTEXT_IMAGE_DATA_URL_PATTERN =
+  /data:image\/(?:png|jpe?g|webp|gif|bmp|tiff?);base64,[A-Za-z0-9+/]+={0,2}/gi;
+
+function selectModelContextMessages(
+  messages: ChatMessage[],
+  strategy: RuntimeExecutionConfig["contextStrategy"] = "auto",
+): { messages: ChatMessage[]; omittedCount: number } {
+  const limits = MODEL_CONTEXT_LIMITS[strategy ?? "auto"] ?? MODEL_CONTEXT_LIMITS.auto;
+  const selected: ChatMessage[] = [];
+  let selectedChars = 0;
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const normalized = normalizeModelContextMessage(messages[index], limits.messageMaxChars);
+    if (!normalized) {
+      continue;
+    }
+    const nextChars = selectedChars + normalized.content.length;
+    if (
+      selected.length >= limits.maxMessages ||
+      (selected.length > 0 && nextChars > limits.maxChars)
+    ) {
+      break;
+    }
+    selected.unshift(normalized);
+    selectedChars = nextChars;
+  }
+
+  return {
+    messages: selected,
+    omittedCount: Math.max(0, messages.length - selected.length),
+  };
+}
+
+function normalizeModelContextMessage(
+  message: ChatMessage | undefined,
+  messageMaxChars: number,
+): ChatMessage | null {
+  if (!message?.content.trim()) {
+    return null;
+  }
+  const content = clipModelContextMessage(
+    message.content
+      .replace(MODEL_CONTEXT_IMAGE_DATA_URL_PATTERN, "[image data omitted]")
+      .replace(/\s+/g, " ")
+      .trim(),
+    messageMaxChars,
+  );
+  if (!content) {
+    return null;
+  }
+  return { role: message.role, content };
+}
+
+function clipModelContextMessage(content: string, messageMaxChars: number): string {
+  if (content.length <= messageMaxChars) {
+    return content;
+  }
+  const half = Math.floor((messageMaxChars - 7) / 2);
+  return `${content.slice(0, half)} ... ${content.slice(-half)}`;
+}
+
 
 
 export function createFileScanTaskRuntime({
@@ -733,24 +1178,45 @@ export function createFileScanTaskRuntime({
   commanderTool,
   computerTool,
   codeTool,
+  gitTool,
   projectTool,
   shellTool,
   schedulerTool,
   verifierTool,
   webTool,
+  trendTool,
+  memoryTool,
+  mcpTool,
   browserTool,
   visionTool,
   workspaceTool,
   delayMs = 250,
   eventBus,
+  runtimeConfig,
+  getRuntimeConfig,
+  availableToolDescriptors,
+  getAvailableToolDescriptors,
+  capabilityVerification,
+  getCapabilityVerification,
   onTaskStarted,
   reactDecideNext,
   replanDag,
   computerUseLoopRunner,
 }: FileScanRuntimeOptions): TaskRuntime {
-  const runtimeState = createRuntimeState(createInitialTaskSnapshot(), delayMs);
+  const currentCapabilityVerification = () =>
+    getCapabilityVerification?.() ?? capabilityVerification;
+  const createRuntimeAgentSnapshots = (
+    selectState: (agent: Agent) => Pick<AgentSnapshot, "status" | "task">,
+  ) => createAgentSnapshots(selectState, currentCapabilityVerification());
+  const runtimeState = createRuntimeState(
+    createInitialTaskSnapshot({ capabilityVerification: currentCapabilityVerification() }),
+    delayMs,
+  );
   const eventBusUnsubscribe = eventBus
     ? eventBus.on((e) => {
+        if (runtimeState.getSnapshot().id !== e.taskId) {
+          return;
+        }
         runtimeState.emitDelta(e);
       })
     : undefined;
@@ -769,6 +1235,12 @@ export function createFileScanTaskRuntime({
   let activeAbortController: AbortController | undefined;
   function emit(nextSnapshot: TaskSnapshot) {
     runtimeState.emit(attachConversationMessages(attachRouteLog(attachTaskMetadata(nextSnapshot))));
+  }
+  function emitForActiveTask(taskId: ID, nextSnapshot: TaskSnapshot) {
+    if (nextSnapshot.id !== taskId || runtimeState.getSnapshot().id !== taskId) {
+      return;
+    }
+    emit(nextSnapshot);
   }
   function attachTaskMetadata(nextSnapshot: TaskSnapshot): TaskSnapshot {
     if (!activeTaskMetadata || activeTaskMetadata.taskId !== nextSnapshot.id) {
@@ -922,12 +1394,37 @@ export function createFileScanTaskRuntime({
     });
   }
   const wait = runtimeState.wait;
-  const controller = {
-    emit,
-    getSnapshot: runtimeState.getSnapshot,
-    wait,
-    setPendingAskUserHandler,
-  };
+  function createTaskScopedController(taskId: ID) {
+    const isCurrentTask = () => runtimeState.getSnapshot().id === taskId;
+    return {
+      emit(nextSnapshot: TaskSnapshot) {
+        if (!isCurrentTask() || nextSnapshot.id !== taskId) {
+          return;
+        }
+        emit(nextSnapshot);
+      },
+      getSnapshot: runtimeState.getSnapshot,
+      wait,
+      setPendingAskUserHandler(
+        requestId: string,
+        handler: AskUserAnswerHandler | undefined,
+      ) {
+        if (!isCurrentTask()) {
+          return;
+        }
+        setPendingAskUserHandler(requestId, handler);
+      },
+      setPendingPermissionHandler(
+        requestId: string,
+        handler: PendingPermissionHandler | undefined,
+      ) {
+        if (!isCurrentTask()) {
+          return;
+        }
+        setPendingPermissionHandler(requestId, handler);
+      },
+    };
+  }
   function emitImmediateFeedback(taskId: ID, userGoal: string) {
     const isChinese = /[\u3400-\u9fff]/u.test(userGoal);
     emit({
@@ -940,10 +1437,7 @@ export function createFileScanTaskRuntime({
         ? "姝ｅ湪鐞嗚В浣犵殑闂..."
         : "Understanding your request...",
       plan: [],
-      agents: demoAgents.map((agent) => ({
-        id: agent.id,
-        name: agent.displayName,
-        role: agent.description,
+      agents: createRuntimeAgentSnapshots((agent) => ({
         status: agent.kind === "commander" ? "running" : "queued",
         task: agent.kind === "commander"
           ? isChinese ? "\u6b63\u5728\u8def\u7531\u5e76\u51c6\u5907\u56de\u590d" : "Routing and preparing a response"
@@ -1005,6 +1499,12 @@ export function createFileScanTaskRuntime({
       const signal = taskAbortController.signal;
       const startMode = options.mode ?? "auto";
       const taskId = options.taskId ?? `task-${Date.now()}`;
+      const controller = createTaskScopedController(taskId);
+      const effectiveRuntimeConfig = getRuntimeConfig?.() ?? runtimeConfig;
+      const modelContext = selectModelContextMessages(
+        options.priorMessages ?? [],
+        effectiveRuntimeConfig?.contextStrategy,
+      );
       activeTaskMetadata = {
         taskId,
         originMode: startMode === "chat" || startMode === "project" ? startMode : undefined,
@@ -1026,6 +1526,19 @@ export function createFileScanTaskRuntime({
       const routeDecision = routeMessage(userGoal);
       const routeLog = createRouteLog(taskId, userGoal, routeDecision);
       activeRouteLog = { taskId, log: routeLogToTaskLog(routeLog) };
+      let effectiveToolDescriptors = normalizeRuntimeToolDescriptors(
+        getAvailableToolDescriptors?.() ?? availableToolDescriptors,
+      );
+      const effectiveToolNames = new Set(effectiveToolDescriptors.map((descriptor) => descriptor.name));
+      const hasTool = (toolName: string) => effectiveToolNames.has(toolName);
+      const availableFileTool = filterFileToolForAvailability(fileTool, hasTool);
+      const availableWebTool = filterWebToolForAvailability(webTool, hasTool);
+      const availableCodeTool = filterCodeToolForAvailability(codeTool, hasTool);
+      const availableGitTool = filterGitToolForAvailability(gitTool, hasTool);
+      effectiveToolDescriptors = filterRuntimeToolDescriptorsForAvailableTools(effectiveToolDescriptors, {
+        codeTool: availableCodeTool,
+        trendTool,
+      });
       const recommendedWorkflowIds = getRecommendedWorkflowIds(userGoal);
       const hasKnownRouteIntent = Boolean(
         extractUrls(userGoal).length > 0 ||
@@ -1045,10 +1558,13 @@ export function createFileScanTaskRuntime({
             userGoal,
             chatTool,
             options.priorMessages ?? [],
+            modelContext.messages,
+            modelContext.omittedCount,
             options.displayGoal,
             options.displayAttachments,
             routeDecision,
             routeLog,
+            effectiveRuntimeConfig,
             signal,
           );
           return;
@@ -1067,10 +1583,13 @@ export function createFileScanTaskRuntime({
           userGoal,
           chatTool,
           options.priorMessages ?? [],
+          modelContext.messages,
+          modelContext.omittedCount,
           options.displayGoal,
           options.displayAttachments,
           routeDecision,
           routeLog,
+          effectiveRuntimeConfig,
           signal,
         );
         return;
@@ -1084,7 +1603,12 @@ export function createFileScanTaskRuntime({
       // Commander uses the primary (non-vision) model and cannot handle
       // image analysis; the vision flow uses the multimodal slot.
       // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
-      if (visionTool && isVisionGoal(userGoal) && !userGoal.includes("<vision-context>")) {
+      if (
+        visionTool &&
+        isVisionGoal(userGoal) &&
+        !userGoal.includes("<vision-context>") &&
+        hasTool(getVisionToolNameForGoal(userGoal))
+      ) {
         void runVisionTask({
           controller,
           visionTool,
@@ -1103,29 +1627,39 @@ export function createFileScanTaskRuntime({
       // Legacy branches below are fallbacks for when Commander is unavailable.
       // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
       if (startMode !== "project" && routeDecision.level === "L2") {
-        if (webTool && extractUrls(userGoal).length > 0) {
-          void runResearchSourceTask({ controller, taskId, userGoal, webTool, commanderTool });
+        if (availableWebTool && hasTool("web.fetchSource") && extractUrls(userGoal).length > 0) {
+          void runResearchSourceTask({ controller, taskId, userGoal, webTool: availableWebTool, commanderTool });
           return;
         }
-        if (shellTool && projectTool && isReadCurrentProjectGoal(userGoal)) {
+        if (
+          shellTool &&
+          projectTool &&
+          hasTool("file.scanMarkdownDocuments") &&
+          hasTool("shell.runReadOnlyCommand") &&
+          isReadCurrentProjectGoal(userGoal)
+        ) {
           void runReadCurrentProjectWorkflow({
             controller,
-            fileTool,
+            fileTool: availableFileTool ?? fileTool,
             commanderTool,
             projectTool,
             shellTool,
-            codeTool,
+            codeTool: availableCodeTool,
             verifierTool,
             taskId,
             userGoal,
+            availableToolDescriptors: effectiveToolDescriptors,
           });
           return;
         }
-        if (fileTool.planWriteText && isTextWriteGoal(userGoal)) {
+        if (
+          availableFileTool?.planWriteText &&
+          isTextWriteGoal(userGoal)
+        ) {
           void runTextWriteTask({
             controller,
-            fileTool,
-            webTool,
+            fileTool: availableFileTool,
+            webTool: availableWebTool,
             taskId,
             userGoal,
             commanderTool,
@@ -1133,11 +1667,16 @@ export function createFileScanTaskRuntime({
           });
           return;
         }
-        if (webTool?.searchWeb && isResearchGoal(userGoal)) {
-          void runResearchSearchTask({ controller, taskId, userGoal, webTool, commanderTool });
+        if (
+          availableWebTool?.searchWeb &&
+          hasTool("web.search") &&
+          hasTool("web.fetchSource") &&
+          isResearchGoal(userGoal)
+        ) {
+          void runResearchSearchTask({ controller, taskId, userGoal, webTool: availableWebTool, commanderTool });
           return;
         }
-        if (shellTool && projectTool && isProjectInspectionGoal(userGoal)) {
+        if (shellTool && projectTool && hasTool("shell.runReadOnlyCommand") && isProjectInspectionGoal(userGoal)) {
           void runProjectInspectionTask(
             controller,
             taskId,
@@ -1148,22 +1687,31 @@ export function createFileScanTaskRuntime({
           );
           return;
         }
-        if (codeTool && shellTool && isCodeReviewGoal(userGoal)) {
+        if (
+          availableCodeTool &&
+          shellTool &&
+          hasTool("code.inspectRepository") &&
+          hasTool("shell.runReadOnlyCommand") &&
+          isCodeReviewGoal(userGoal)
+        ) {
           void runCodeReviewTask({
             controller,
             taskId,
             userGoal,
-            codeTool,
+            codeTool: availableCodeTool,
             shellTool,
             commanderTool,
             setPendingPermissionHandler,
           });
           return;
         }
-        if (fileTool.planPdfOrganization && isPdfOrganizationGoal(userGoal)) {
+        if (
+          availableFileTool?.planPdfOrganization &&
+          isPdfOrganizationGoal(userGoal)
+        ) {
           void runPdfOrganizationPreviewTask({
             controller,
-            fileTool,
+            fileTool: availableFileTool,
             taskId,
             userGoal,
             commanderTool,
@@ -1177,10 +1725,13 @@ export function createFileScanTaskRuntime({
             userGoal,
             chatTool,
             options.priorMessages ?? [],
+            modelContext.messages,
+            modelContext.omittedCount,
             options.displayGoal,
             options.displayAttachments,
             routeDecision,
             routeLog,
+            effectiveRuntimeConfig,
             signal,
           );
           return;
@@ -1189,27 +1740,31 @@ export function createFileScanTaskRuntime({
 
       if (commanderTool) {
         void runCommanderDagTask({
-          controller: {
-            emit,
-            getSnapshot: runtimeState.getSnapshot,
-            wait,
-            setPendingAskUserHandler,
-            setPendingPermissionHandler,
-          },
+          controller,
           commanderTool,
-          codeTool,
+          codeTool: availableCodeTool,
+          gitTool: availableGitTool,
           computerTool,
           fileTool,
           shellTool,
           schedulerTool,
           workspaceTool,
-          webTool,
+          webTool: availableWebTool,
+          trendTool,
+          memoryTool,
+          mcpTool,
           browserTool,
           verifierTool,
           visionTool,
           taskId,
           userGoal,
+          priorMessages: modelContext.messages,
+          omittedPriorMessageCount: modelContext.omittedCount,
+          fullPriorMessages: options.priorMessages ?? [],
+          contextSummaryTool: chatTool,
           initialLogs: [routeLogToTaskLog(routeLog)],
+          runtimeConfig: effectiveRuntimeConfig,
+          availableToolDescriptors: effectiveToolDescriptors,
           reactDecideNext,
           replanDag,
           computerUseLoopRunner,
@@ -1228,30 +1783,40 @@ export function createFileScanTaskRuntime({
       // Do NOT add new features here. New goal types -> Commander DAG path above.
       // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
-      if (webTool && extractUrls(userGoal).length > 0) {
-        void runResearchSourceTask({ controller, taskId, userGoal, webTool, commanderTool });
+      if (availableWebTool && hasTool("web.fetchSource") && extractUrls(userGoal).length > 0) {
+        void runResearchSourceTask({ controller, taskId, userGoal, webTool: availableWebTool, commanderTool });
         return;
       }
       const [recommendedWorkflowId] = recommendedWorkflowIds;
-      if (shellTool && projectTool && isReadCurrentProjectGoal(userGoal)) {
+      if (
+        shellTool &&
+        projectTool &&
+        hasTool("file.scanMarkdownDocuments") &&
+        hasTool("shell.runReadOnlyCommand") &&
+        isReadCurrentProjectGoal(userGoal)
+      ) {
         void runReadCurrentProjectWorkflow({
           controller,
-          fileTool,
+          fileTool: availableFileTool ?? fileTool,
           commanderTool,
           projectTool,
           shellTool,
-          codeTool,
+          codeTool: availableCodeTool,
           verifierTool,
           taskId,
           userGoal,
+          availableToolDescriptors: effectiveToolDescriptors,
         });
         return;
       }
-      if (fileTool.planWriteText && isTextWriteGoal(userGoal)) {
+      if (
+        availableFileTool?.planWriteText &&
+        isTextWriteGoal(userGoal)
+      ) {
         void runTextWriteTask({
           controller,
-          fileTool,
-          webTool,
+          fileTool: availableFileTool,
+          webTool: availableWebTool,
           taskId,
           userGoal,
           commanderTool,
@@ -1259,7 +1824,12 @@ export function createFileScanTaskRuntime({
         });
         return;
       }
-      if (visionTool && isVisionGoal(userGoal) && !userGoal.includes("<vision-context>")) {
+      if (
+        visionTool &&
+        isVisionGoal(userGoal) &&
+        !userGoal.includes("<vision-context>") &&
+        hasTool(getVisionToolNameForGoal(userGoal))
+      ) {
         void runVisionTask({
           controller,
           visionTool,
@@ -1270,8 +1840,13 @@ export function createFileScanTaskRuntime({
         });
         return;
       }
-      if (webTool?.searchWeb && isResearchGoal(userGoal)) {
-        void runResearchSearchTask({ controller, taskId, userGoal, webTool, commanderTool });
+      if (
+        availableWebTool?.searchWeb &&
+        hasTool("web.search") &&
+        hasTool("web.fetchSource") &&
+        isResearchGoal(userGoal)
+      ) {
+        void runResearchSearchTask({ controller, taskId, userGoal, webTool: availableWebTool, commanderTool });
         return;
       }
       if (recommendedWorkflowId && recommendedWorkflowId !== "read-current-project") {
@@ -1289,22 +1864,24 @@ export function createFileScanTaskRuntime({
           void runGenericWorkbenchWorkflow({
             controller,
             commanderTool,
-            codeTool,
+            codeTool: availableCodeTool,
             computerTool,
             fileTool,
             schedulerTool,
-            webTool,
+            webTool: availableWebTool,
+            trendTool,
             browserTool,
             verifierTool,
             taskId,
             userGoal,
             workflowId:
               executableWorkflowIds.length === 1 ? executableWorkflowIds[0] : executableWorkflowIds,
+            availableToolDescriptors: effectiveToolDescriptors,
           });
           return;
         }
       }
-      if (shellTool && projectTool && isProjectInspectionGoal(userGoal)) {
+      if (shellTool && projectTool && hasTool("shell.runReadOnlyCommand") && isProjectInspectionGoal(userGoal)) {
         void runProjectInspectionTask(
           controller,
           taskId,
@@ -1315,22 +1892,31 @@ export function createFileScanTaskRuntime({
         );
         return;
       }
-      if (codeTool && shellTool && isCodeReviewGoal(userGoal)) {
+      if (
+        availableCodeTool &&
+        shellTool &&
+        hasTool("code.inspectRepository") &&
+        hasTool("shell.runReadOnlyCommand") &&
+        isCodeReviewGoal(userGoal)
+      ) {
         void runCodeReviewTask({
           controller,
           taskId,
           userGoal,
-          codeTool,
+          codeTool: availableCodeTool,
           shellTool,
           commanderTool,
           setPendingPermissionHandler,
         });
         return;
       }
-      if (fileTool.planPdfOrganization && isPdfOrganizationGoal(userGoal)) {
+      if (
+        availableFileTool?.planPdfOrganization &&
+        isPdfOrganizationGoal(userGoal)
+      ) {
         void runPdfOrganizationPreviewTask({
           controller,
-          fileTool,
+          fileTool: availableFileTool,
           taskId,
           userGoal,
           commanderTool,
@@ -1344,10 +1930,13 @@ export function createFileScanTaskRuntime({
           userGoal,
           chatTool,
           options.priorMessages ?? [],
+          modelContext.messages,
+          modelContext.omittedCount,
           options.displayGoal,
           options.displayAttachments,
           routeDecision,
           routeLog,
+          effectiveRuntimeConfig,
           signal,
         );
         return;
@@ -1431,10 +2020,13 @@ export function createFileScanTaskRuntime({
     userGoal: string,
     activeChatTool: ChatTool,
     priorMessages: ChatMessage[] = [],
+    modelMessages: ChatMessage[] = priorMessages,
+    omittedPriorMessageCount = 0,
     displayGoal?: string,
     displayAttachments?: string[],
     routeDecision: RouteDecision = routeMessage(userGoal),
     routeLog: RouteLog = createRouteLog(taskId, userGoal, routeDecision),
+    runtimeConfig?: RuntimeExecutionConfig,
     signal?: AbortSignal,
   ) {
     const isChinese = /[\u3400-\u9fff]/u.test(userGoal);
@@ -1447,7 +2039,7 @@ export function createFileScanTaskRuntime({
         ...(displayAttachments ? { attachments: displayAttachments } : {}),
       },
     ];
-    emit({
+    emitForActiveTask(taskId, {
       id: taskId,
       title: isChinese ? "\u6b63\u5728\u56de\u7b54" : "Answering",
       userGoal,
@@ -1457,10 +2049,7 @@ export function createFileScanTaskRuntime({
         ? "\u6211\u6b63\u5728\u4f5c\u4e3a\u666e\u901a\u52a9\u624b\u56de\u7b54\uff0c\u6ca1\u6709\u542f\u52a8\u5de5\u4f5c\u6d41\u6216\u672c\u5730\u5de5\u5177\u3002"
         : "I'm answering as a general assistant without starting a workflow or local tool.",
       plan: [],
-      agents: demoAgents.map((agent) => ({
-        id: agent.id,
-        name: agent.displayName,
-        role: agent.description,
+      agents: createRuntimeAgentSnapshots((agent) => ({
         status: agent.kind === "commander" ? "running" : "completed",
         task:
           agent.kind === "commander"
@@ -1487,21 +2076,28 @@ export function createFileScanTaskRuntime({
     });
 
     try {
+      const chatOptions = {
+        maxTokens: 1200,
+        temperature: 0.7,
+        locale: isChinese ? "zh-CN" : "en",
+      };
+      const chatTimeoutMs = runtimeConfig?.taskTimeoutMs ?? 90_000;
       const result = await withTaskTimeout(
-        () => completeGeneralChat(
+        () => completeGeneralChatWithContextRecovery({
           taskId,
-          createGeneralChatPrompt(userGoal, isChinese, priorMessages),
+          userGoal,
+          isChinese,
           activeChatTool,
-          {
-            maxTokens: 1200,
-            temperature: 0.7,
-            locale: isChinese ? "zh-CN" : "en",
-          },
+          priorMessages,
+          modelMessages,
+          omittedPriorMessageCount,
+          options: chatOptions,
+          timeoutMs: chatTimeoutMs,
           signal,
-        ),
+        }),
         {
           label: "chat.complete",
-          timeoutMs: 90_000,
+          timeoutMs: chatTimeoutMs,
           signal,
         },
       );
@@ -1511,8 +2107,11 @@ export function createFileScanTaskRuntime({
         totalTokens: 0,
       };
       const currentSnapshot = runtimeState.getSnapshot();
+      if (currentSnapshot.id !== taskId) {
+        return;
+      }
 
-      emit({
+      emitForActiveTask(taskId, {
         ...currentSnapshot,
         title: isChinese ? "\u5df2\u56de\u7b54" : "Answered",
         status: "completed",
@@ -1522,10 +2121,7 @@ export function createFileScanTaskRuntime({
           ...startedMessages,
           { role: "assistant", content: result.text },
         ],
-        agents: demoAgents.map((agent) => ({
-          id: agent.id,
-          name: agent.displayName,
-          role: agent.description,
+        agents: createRuntimeAgentSnapshots((agent) => ({
           status: "completed",
           task:
             agent.kind === "commander"
@@ -1547,16 +2143,16 @@ export function createFileScanTaskRuntime({
     } catch (error) {
       if (isTaskCancelledError(error)) {
         const currentSnapshot = runtimeState.getSnapshot();
-        emit({
+        if (currentSnapshot.id !== taskId) {
+          return;
+        }
+        emitForActiveTask(taskId, {
           ...currentSnapshot,
           title: isChinese ? "已取消" : "Cancelled",
           status: "cancelled",
           updatedAt: new Date().toISOString(),
           commanderMessage: "Task cancelled.",
-          agents: demoAgents.map((agent) => ({
-            id: agent.id,
-            name: agent.displayName,
-            role: agent.description,
+          agents: createRuntimeAgentSnapshots((agent) => ({
             status: agent.kind === "commander" ? "cancelled" : "completed",
             task: agent.kind === "commander" ? "Task cancelled" : "No workflow task assigned",
           })),
@@ -1578,10 +2174,13 @@ export function createFileScanTaskRuntime({
     userGoal: string,
     activeChatTool: ChatTool,
     priorMessages: ChatMessage[] = [],
+    modelMessages: ChatMessage[] = priorMessages,
+    omittedPriorMessageCount = 0,
     displayGoal?: string,
     displayAttachments?: string[],
     routeDecision: RouteDecision = routeMessage(userGoal),
     routeLog: RouteLog = createRouteLog(taskId, userGoal, routeDecision),
+    runtimeConfig?: RuntimeExecutionConfig,
     signal?: AbortSignal,
   ) {
     return runChatTask(
@@ -1589,10 +2188,13 @@ export function createFileScanTaskRuntime({
       userGoal,
       activeChatTool,
       priorMessages,
+      modelMessages,
+      omittedPriorMessageCount,
       displayGoal,
       displayAttachments,
       routeDecision,
       routeLog,
+      runtimeConfig,
       signal,
     );
   }
@@ -1605,21 +2207,24 @@ export function createFileScanTaskRuntime({
       maxTokens?: number;
       temperature?: number;
       locale?: string;
+      skipAgentMemory?: boolean;
+      skipSkillContext?: boolean;
     },
+    timeoutMs = 90_000,
     signal?: AbortSignal,
   ): Promise<{ text: string; tokenUsage?: ModelUsage }> {
     throwIfTaskAborted(signal, "chat.complete");
     if (!activeChatTool.stream) {
       return withTaskTimeout(() => activeChatTool.complete(prompt, options), {
         label: "chat.complete",
-        timeoutMs: 90_000,
+        timeoutMs,
         signal,
       });
     }
     if (!eventBus) {
       return withTaskTimeout(() => activeChatTool.complete(prompt, options), {
         label: "chat.complete",
-        timeoutMs: 90_000,
+        timeoutMs,
         signal,
       });
     }
@@ -1655,6 +2260,16 @@ export function createFileScanTaskRuntime({
       return { text, tokenUsage };
     } catch (streamError) {
       throwIfTaskAborted(signal, "chat.stream");
+      if (isContextOverflowError(streamError)) {
+        eventBus.emit({
+          kind: "agent.chunk_end",
+          taskId,
+          agentKind: "commander",
+          fullText: text,
+          error: "context overflow",
+        });
+        throw streamError;
+      }
       console.log("[Javis] stream() threw, falling back to complete():", streamError);
       eventBus.emit({
         kind: "agent.chunk_end",
@@ -1665,9 +2280,69 @@ export function createFileScanTaskRuntime({
       });
       return withTaskTimeout(() => activeChatTool.complete(prompt, options), {
         label: "chat.complete fallback",
-        timeoutMs: 90_000,
+        timeoutMs,
         signal,
       });
+    }
+  }
+
+  async function completeGeneralChatWithContextRecovery(input: {
+    taskId: ID;
+    userGoal: string;
+    isChinese: boolean;
+    activeChatTool: ChatTool;
+    priorMessages: ChatMessage[];
+    modelMessages: ChatMessage[];
+    omittedPriorMessageCount: number;
+    options: {
+      maxTokens?: number;
+      temperature?: number;
+      locale?: string;
+      skipAgentMemory?: boolean;
+      skipSkillContext?: boolean;
+    };
+    timeoutMs: number;
+    signal?: AbortSignal;
+  }): Promise<{ text: string; tokenUsage?: ModelUsage }> {
+    try {
+      return await completeGeneralChat(
+        input.taskId,
+        createGeneralChatPrompt(
+          input.userGoal,
+          input.isChinese,
+          input.modelMessages,
+          input.omittedPriorMessageCount,
+        ),
+        input.activeChatTool,
+        input.options,
+        input.timeoutMs,
+        input.signal,
+      );
+    } catch (error) {
+      throwIfTaskAborted(input.signal, "chat.context_recovery");
+      if (!isContextOverflowError(error) || input.priorMessages.length === 0) {
+        throw error;
+      }
+      const recoveredMessages = await createRecoveredContextMessages({
+        messages: input.priorMessages,
+        summaryTool: input.activeChatTool,
+        locale: input.options.locale,
+        recentRounds: 5,
+      });
+      const recoveredPrompt = createGeneralChatPrompt(
+        input.userGoal,
+        input.isChinese,
+        recoveredMessages,
+        0,
+      );
+      return completeGeneralChat(
+        input.taskId,
+        recoveredPrompt,
+        input.activeChatTool,
+        input.options,
+        input.timeoutMs,
+        input.signal,
+      );
     }
   }
 
@@ -1675,11 +2350,15 @@ export function createFileScanTaskRuntime({
     userGoal: string,
     isChinese: boolean,
     priorMessages: ChatMessage[] = [],
+    omittedPriorMessageCount = 0,
   ): string {
     const transcript = priorMessages.map((message) => {
       const speaker = message.role === "user" ? (isChinese ? "用户" : "User") : "Javis";
       return `${speaker}: ${message.content}`;
     });
+    if (omittedPriorMessageCount > 0) {
+      transcript.unshift(`(${omittedPriorMessageCount} earlier message(s) omitted)`);
+    }
     return [
       isChinese
         ? "\u4f60\u662f Javis\uff0c\u4e00\u4e2a\u53ef\u4ee5\u666e\u901a\u804a\u5929\u3001\u4e5f\u53ef\u4ee5\u5728\u7528\u6237\u660e\u786e\u8981\u6c42\u65f6\u6267\u884c\u5de5\u4f5c\u6d41\u7684\u684c\u9762\u52a9\u624b\u3002"
@@ -1690,6 +2369,9 @@ export function createFileScanTaskRuntime({
       isChinese
         ? "\u8fd9\u4e00\u8f6e\u6ca1\u6709\u5339\u914d\u5230\u5de5\u4f5c\u6d41\u3002\u8bf7\u76f4\u63a5\u56de\u7b54\u7528\u6237\uff0c\u4fdd\u6301\u81ea\u7136\u3001\u7b80\u6d01\uff0c\u4e0d\u8981\u58f0\u79f0\u5df2\u7ecf\u6267\u884c\u672c\u5730\u5de5\u5177\u3002"
         : "This turn did not match a workflow. Answer the user directly, naturally, and concisely. Do not claim that you ran local tools.",
+      isChinese
+        ? "\u6ca1\u6709\u8bc1\u636e\u6216\u4e0d\u786e\u5b9a\u65f6\uff0c\u76f4\u63a5\u8bf4\u4e0d\u786e\u5b9a\u6216\u8bf7\u6c42\u66f4\u591a\u4fe1\u606f\uff1b\u4e0d\u8981\u628a\u63a8\u6d4b\u5199\u6210\u4e8b\u5b9e\u3002"
+        : "When evidence is missing or uncertain, say so or ask for more information; do not present guesses as facts.",
       transcript.length > 0
         ? isChinese ? "\u5bf9\u8bdd\u5386\u53f2\uff1a" : "Conversation history:"
         : "",
@@ -1709,10 +2391,7 @@ export function createFileScanTaskRuntime({
         ? "我还不太确定你想让我执行什么任务。你可以让我检查项目、审查代码、整理文件、搜索文档，或者进行普通问答。"
         : "I'm not sure what task you want me to run. You can ask me to inspect the project, review code, organize files, search for documents, or have a general chat.",
       plan: [],
-      agents: demoAgents.map((agent) => ({
-        id: agent.id,
-        name: agent.displayName,
-        role: agent.description,
+      agents: createRuntimeAgentSnapshots(() => ({
         status: "completed",
         task: isChinese ? "无任务分配" : "No task assigned",
       })),
@@ -1733,13 +2412,16 @@ export function createFileScanTaskRuntime({
     const isChinese = /[\u3400-\u9fff]/u.test(userGoal);
     const detail = error instanceof Error ? error.message : String(error);
     const currentSnapshot = runtimeState.getSnapshot();
+    if (currentSnapshot.id !== taskId) {
+      return;
+    }
     const partialText = currentSnapshot.id === taskId
       ? (currentSnapshot.streamingText || currentSnapshot.commanderMessage || "").trim()
       : "";
     const userFacingError = isChinese
       ? "模型请求失败。已保留当前已生成的内容，请检查服务商、模型、API 密钥和基础 URL 后重试。"
       : "The model request failed. Any generated content was kept; check the provider, model, API key, and base URL before retrying.";
-    emit({
+    emitForActiveTask(taskId, {
       ...(currentSnapshot.id === taskId ? currentSnapshot : {}),
       id: taskId,
       title: isChinese ? "模型调用失败" : "Model call failed",
@@ -1751,10 +2433,7 @@ export function createFileScanTaskRuntime({
           ? "模型请求失败，请检查服务商、模型、API 密钥和基础 URL 后重试。"
           : "The model request failed. Check the provider, model, API key, and base URL before retrying."),
       plan: [],
-      agents: demoAgents.map((agent) => ({
-        id: agent.id,
-        name: agent.displayName,
-        role: agent.description,
+      agents: createRuntimeAgentSnapshots((agent) => ({
         status: agent.kind === "commander" ? "failed" : "completed",
         task: agent.kind === "commander"
           ? isChinese ? "模型请求失败" : "Model request failed"

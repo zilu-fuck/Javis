@@ -1,5 +1,17 @@
 import type { ToolDescriptor } from "./types";
 
+const DISABLED_BROWSER_WRITE_TOOL_NAMES = new Set([
+  "browser.click",
+  "browser.type",
+  "browser.evaluate",
+  "browser.runTest",
+  "browser.upload",
+]);
+
+export function isDisabledBrowserWriteToolName(toolName: string): boolean {
+  return DISABLED_BROWSER_WRITE_TOOL_NAMES.has(toolName);
+}
+
 export const initialToolDescriptors: ToolDescriptor[] = [
   // ── Commander ──────────────────────────────────────────────────────────
   {
@@ -104,6 +116,20 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     ownerAgentKinds: ["code"],
   },
   {
+    name: "code.searchRepository",
+    permissionLevel: "read",
+    summary: "Search the current repository with structured fallback attempts, clustering, key files, and evidence gaps.",
+    capabilityTags: ["code_search"],
+    ownerAgentKinds: ["code"],
+  },
+  {
+    name: "code.traceCallChain",
+    permissionLevel: "read",
+    summary: "Trace a repository call/reference chain from a generic target and optional entrypoints, returning evidence nodes, edges, module-link hints, key files, and confirmation gaps.",
+    capabilityTags: ["code_trace"],
+    ownerAgentKinds: ["code"],
+  },
+  {
     name: "code.proposeEdit",
     permissionLevel: "preview",
     summary: "Produce a patch proposal for user review without modifying files.",
@@ -116,6 +142,38 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     writeRiskLevel: "risky",
     summary: "Apply only the approved Code Agent patch proposal.",
     capabilityTags: ["code_apply"],
+    ownerAgentKinds: ["code"],
+  },
+  {
+    name: "git.stageFiles",
+    permissionLevel: "confirmed_write",
+    writeRiskLevel: "risky",
+    summary: "Stage explicitly selected workspace files in the Git index after approval.",
+    capabilityTags: ["git_stage"],
+    ownerAgentKinds: ["code"],
+  },
+  {
+    name: "git.createCommit",
+    permissionLevel: "confirmed_write",
+    writeRiskLevel: "risky",
+    summary: "Stage current or explicitly selected workspace changes and create a local Git commit after approval.",
+    capabilityTags: ["git_commit"],
+    ownerAgentKinds: ["code"],
+  },
+  {
+    name: "git.createPullRequest",
+    permissionLevel: "confirmed_write",
+    writeRiskLevel: "risky",
+    summary: "Create a draft GitHub pull request from the current branch after approval; requires title and baseBranch, with optional body and draft.",
+    capabilityTags: ["git_pr_create"],
+    ownerAgentKinds: ["code"],
+  },
+  {
+    name: "git.commentPullRequest",
+    permissionLevel: "confirmed_write",
+    writeRiskLevel: "risky",
+    summary: "Add a comment to a GitHub pull request after approval; requires pullRequest and body.",
+    capabilityTags: ["git_pr_comment"],
     ownerAgentKinds: ["code"],
   },
 
@@ -133,6 +191,20 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Fetch a user-provided public web source URL.",
     capabilityTags: ["web_fetch"],
     ownerAgentKinds: ["research"],
+  },
+  {
+    name: "trend.fetchHotList",
+    permissionLevel: "read",
+    summary: "Fetch a structured public hot/trending list from a supported provider such as Weibo, with item count and freshness metadata.",
+    capabilityTags: ["trend_fetch", "web_fetch"],
+    ownerAgentKinds: ["research"],
+  },
+  {
+    name: "memory.search",
+    permissionLevel: "read",
+    summary: "Search local Agent memory facts by query, tags, kind, and scope. Does not create or edit facts; may update local access metadata.",
+    capabilityTags: ["memory_search"],
+    ownerAgentKinds: ["commander", "workspace"],
   },
 
   // ── Computer ──────────────────────────────────────────────────────────
@@ -174,7 +246,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "computer.screenshot",
     permissionLevel: "read",
-    summary: "Capture the current desktop or a specific window as a PNG screenshot.",
+    summary: "Capture the current desktop, a specific window, or a cropped region as a PNG screenshot.",
     capabilityTags: ["desktop_screenshot"],
     ownerAgentKinds: ["computer"],
   },
@@ -331,7 +403,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     name: "browser.click",
     permissionLevel: "confirmed_write",
     writeRiskLevel: "risky",
-    summary: "Click an element on the page. Requires user approval.",
+    summary: "Click an element on the page. Disabled until browser approvals are implemented.",
     capabilityTags: ["browser_interact"],
     ownerAgentKinds: ["browser"],
   },
@@ -339,7 +411,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     name: "browser.type",
     permissionLevel: "confirmed_write",
     writeRiskLevel: "risky",
-    summary: "Type text into an input field. Requires user approval.",
+    summary: "Type text into an input field. Disabled until browser approvals are implemented.",
     capabilityTags: ["browser_interact"],
     ownerAgentKinds: ["browser"],
   },
@@ -347,7 +419,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     name: "browser.evaluate",
     permissionLevel: "confirmed_write",
     writeRiskLevel: "dangerous",
-    summary: "Execute JavaScript in the page context. Requires user approval.",
+    summary: "Execute JavaScript in the page context. Disabled until browser approvals are implemented.",
     capabilityTags: ["browser_interact"],
     ownerAgentKinds: ["browser"],
   },
@@ -355,7 +427,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     name: "browser.runTest",
     permissionLevel: "confirmed_write",
     writeRiskLevel: "risky",
-    summary: "Run a Playwright test script and return pass/fail results. Requires approval — script may contain page interactions.",
+    summary: "Run a Playwright test script and return pass/fail results. Disabled until browser approvals are implemented.",
     capabilityTags: ["browser_test"],
     ownerAgentKinds: ["browser"],
   },
@@ -370,7 +442,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     name: "browser.upload",
     permissionLevel: "confirmed_write",
     writeRiskLevel: "risky",
-    summary: "Upload local file(s) to a file input element on the page. Requires user approval.",
+    summary: "Upload local file(s) to a file input element on the page. Disabled until browser approvals are implemented.",
     capabilityTags: ["browser_interact"],
     ownerAgentKinds: ["browser"],
   },

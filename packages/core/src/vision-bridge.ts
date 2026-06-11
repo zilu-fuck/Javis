@@ -37,6 +37,7 @@ export function stripImageMarkers(message: string): string {
 export function buildVisionBridgePrompt(userRequest: string): string {
   return [
     "Analyze this image for another text-only model. Return a concise structured note:",
+    "Use only visible evidence; write unknown for unclear details and do not infer unsupported facts.",
     "",
     "image_overview: what the image is about.",
     "visible_text: any readable text in the image (quote exactly when possible).",

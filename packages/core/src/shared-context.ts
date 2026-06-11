@@ -34,6 +34,58 @@ export const CONTEXT_KEYS = {
 
 export type ContextKey = (typeof CONTEXT_KEYS)[keyof typeof CONTEXT_KEYS];
 
+export interface HandoffReportStep {
+  id: string;
+  title?: string;
+  assignedAgentKind: string;
+  dependsOn?: string[];
+  inputContextKeys?: string[];
+  outputContextKey?: string;
+  successCriteria?: string;
+}
+
+export interface HandoffReportValueSummary {
+  type: "array" | "object" | "string" | "number" | "boolean" | "null" | "undefined" | "unknown";
+  present: boolean;
+  itemCount?: number;
+  keyCount?: number;
+  preview?: string;
+}
+
+export interface HandoffReportRecord {
+  contextKey: string;
+  producedByStepId?: string;
+  consumedByStepIds: string[];
+  status: "available" | "missing" | "unconsumed" | "input_missing";
+  valueSummary: HandoffReportValueSummary;
+}
+
+export interface HandoffReportStepRecord {
+  stepId: string;
+  title?: string;
+  assignedAgentKind: string;
+  dependsOn: string[];
+  inputContextKeys: string[];
+  outputContextKey?: string;
+  missingInputContextKeys: string[];
+  successCriteria?: string;
+}
+
+export interface HandoffReport {
+  generatedAt: string;
+  steps: HandoffReportStepRecord[];
+  handoffs: HandoffReportRecord[];
+  missingInputContextKeys: string[];
+  unconsumedOutputContextKeys: string[];
+  status: "complete" | "needs_attention";
+}
+
+export interface HandoffReportArtifact {
+  fileName: string;
+  mimeType: "application/json" | "text/markdown";
+  content: string;
+}
+
 export function contextKeyForLocale(key: ContextKey, locale = "en"): string {
   return locale.toLowerCase().startsWith("zh") ? key.zhCN : key.en;
 }
@@ -97,4 +149,209 @@ export function writeStepOutput(
 ): void {
   if (!outputContextKey) return;
   context.set(outputContextKey, output);
+}
+
+export function buildHandoffReport(
+  steps: readonly HandoffReportStep[],
+  context: SharedTaskContext | Record<string, unknown>,
+  options: { generatedAt?: string; previewLength?: number } = {},
+): HandoffReport {
+  const snapshot = isSharedTaskContext(context) ? context.snapshot() : context;
+  const previewLength = Math.max(0, options.previewLength ?? 120);
+  const producers = new Map<string, HandoffReportStep>();
+  const consumers = new Map<string, HandoffReportStep[]>();
+
+  for (const step of steps) {
+    if (step.outputContextKey) {
+      producers.set(step.outputContextKey, step);
+    }
+    for (const key of step.inputContextKeys ?? []) {
+      consumers.set(key, [...(consumers.get(key) ?? []), step]);
+    }
+  }
+
+  const stepRecords = steps.map((step) => {
+    const inputContextKeys = step.inputContextKeys ?? [];
+    const missingInputContextKeys = inputContextKeys.filter((key) => snapshot[key] === undefined);
+    return {
+      stepId: step.id,
+      title: step.title,
+      assignedAgentKind: step.assignedAgentKind,
+      dependsOn: step.dependsOn ?? [],
+      inputContextKeys,
+      outputContextKey: step.outputContextKey,
+      missingInputContextKeys,
+      successCriteria: step.successCriteria,
+    };
+  });
+
+  const allContextKeys = new Set([
+    ...producers.keys(),
+    ...consumers.keys(),
+  ]);
+  const handoffs = [...allContextKeys].sort().map((contextKey) => {
+    const producer = producers.get(contextKey);
+    const consumingSteps = consumers.get(contextKey) ?? [];
+    const present = snapshot[contextKey] !== undefined;
+    return {
+      contextKey,
+      producedByStepId: producer?.id,
+      consumedByStepIds: consumingSteps.map((step) => step.id),
+      status: resolveHandoffStatus({
+        present,
+        hasProducer: Boolean(producer),
+        hasConsumers: consumingSteps.length > 0,
+      }),
+      valueSummary: summarizeHandoffValue(snapshot[contextKey], previewLength),
+    };
+  });
+
+  const missingInputContextKeys = [...new Set(
+    stepRecords.flatMap((step) => step.missingInputContextKeys),
+  )].sort();
+  const unconsumedOutputContextKeys = handoffs
+    .filter((handoff) => handoff.producedByStepId && handoff.consumedByStepIds.length === 0)
+    .map((handoff) => handoff.contextKey)
+    .sort();
+
+  return {
+    generatedAt: options.generatedAt ?? new Date().toISOString(),
+    steps: stepRecords,
+    handoffs,
+    missingInputContextKeys,
+    unconsumedOutputContextKeys,
+    status: missingInputContextKeys.length || unconsumedOutputContextKeys.length
+      ? "needs_attention"
+      : "complete",
+  };
+}
+
+export function createHandoffReportArtifacts(
+  report: HandoffReport,
+  options: { baseName?: string } = {},
+): HandoffReportArtifact[] {
+  const baseName = sanitizeArtifactBaseName(options.baseName ?? "agent-handoff-report");
+  return [
+    {
+      fileName: `${baseName}.json`,
+      mimeType: "application/json",
+      content: `${JSON.stringify(report, null, 2)}\n`,
+    },
+    {
+      fileName: `${baseName}.md`,
+      mimeType: "text/markdown",
+      content: formatHandoffReportMarkdown(report),
+    },
+  ];
+}
+
+export function formatHandoffReportMarkdown(report: HandoffReport): string {
+  const lines = [
+    "# Agent Handoff Report",
+    "",
+    `Generated: ${report.generatedAt}`,
+    `Status: ${report.status}`,
+    "",
+    "## Summary",
+    "",
+    `- Handoffs: ${report.handoffs.length}`,
+    `- Steps: ${report.steps.length}`,
+    `- Missing inputs: ${report.missingInputContextKeys.join(", ") || "none"}`,
+    `- Unconsumed outputs: ${report.unconsumedOutputContextKeys.join(", ") || "none"}`,
+    "",
+    "## Handoffs",
+    "",
+    "| Context key | Producer | Consumers | Status | Value |",
+    "| --- | --- | --- | --- | --- |",
+    ...report.handoffs.map((handoff) => [
+      escapeMarkdownTableCell(handoff.contextKey),
+      escapeMarkdownTableCell(handoff.producedByStepId ?? "external"),
+      escapeMarkdownTableCell(handoff.consumedByStepIds.join(", ") || "none"),
+      escapeMarkdownTableCell(handoff.status),
+      escapeMarkdownTableCell(formatHandoffValueSummary(handoff.valueSummary)),
+    ].join(" | ")).map((row) => `| ${row} |`),
+    "",
+    "## Steps",
+    "",
+    "| Step | Agent | Inputs | Output | Missing inputs |",
+    "| --- | --- | --- | --- | --- |",
+    ...report.steps.map((step) => [
+      escapeMarkdownTableCell(step.stepId),
+      escapeMarkdownTableCell(step.assignedAgentKind),
+      escapeMarkdownTableCell(step.inputContextKeys.join(", ") || "none"),
+      escapeMarkdownTableCell(step.outputContextKey ?? "none"),
+      escapeMarkdownTableCell(step.missingInputContextKeys.join(", ") || "none"),
+    ].join(" | ")).map((row) => `| ${row} |`),
+    "",
+  ];
+  return `${lines.join("\n")}`;
+}
+
+function isSharedTaskContext(value: unknown): value is SharedTaskContext {
+  return typeof value === "object" &&
+    value !== null &&
+    typeof (value as SharedTaskContext).snapshot === "function";
+}
+
+function resolveHandoffStatus(input: {
+  present: boolean;
+  hasProducer: boolean;
+  hasConsumers: boolean;
+}): HandoffReportRecord["status"] {
+  if (!input.present) return "missing";
+  if (!input.hasProducer) return "input_missing";
+  if (!input.hasConsumers) return "unconsumed";
+  return "available";
+}
+
+function summarizeHandoffValue(
+  value: unknown,
+  previewLength: number,
+): HandoffReportValueSummary {
+  if (value === undefined) {
+    return { type: "undefined", present: false };
+  }
+  if (value === null) {
+    return { type: "null", present: true };
+  }
+  if (Array.isArray(value)) {
+    return { type: "array", present: true, itemCount: value.length };
+  }
+  const valueType = typeof value;
+  if (valueType === "string") {
+    const text = value as string;
+    return {
+      type: "string",
+      present: true,
+      preview: previewLength > 0 ? text.slice(0, previewLength) : undefined,
+    };
+  }
+  if (valueType === "number" || valueType === "boolean") {
+    return { type: valueType, present: true, preview: String(value) };
+  }
+  if (valueType === "object") {
+    return { type: "object", present: true, keyCount: Object.keys(value).length };
+  }
+  return { type: "unknown", present: true };
+}
+
+function sanitizeArtifactBaseName(value: string): string {
+  const sanitized = value
+    .trim()
+    .replace(/\.[a-z0-9]+$/i, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^[._-]+|[._-]+$/g, "");
+  return sanitized || "agent-handoff-report";
+}
+
+function formatHandoffValueSummary(value: HandoffReportValueSummary): string {
+  if (!value.present) return value.type;
+  if (value.type === "array") return `${value.type}: ${value.itemCount ?? 0} item(s)`;
+  if (value.type === "object") return `${value.type}: ${value.keyCount ?? 0} key(s)`;
+  if (value.preview) return `${value.type}: ${value.preview}`;
+  return value.type;
+}
+
+function escapeMarkdownTableCell(value: string): string {
+  return value.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
 }

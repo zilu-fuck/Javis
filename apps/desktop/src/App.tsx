@@ -1,18 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  createGoalEvaluationFromDecision,
   createInitialTaskSnapshot,
   getAdapter,
   hasImageAttachments,
   injectDocumentContext,
+  isGoalTerminal,
+  isTerminalTaskStatus,
   PROVIDER_DEFINITIONS,
   type ChatMessage,
+  type GoalDecision,
+  type GoalEvaluation,
+  type GoalEvent,
+  type GoalState,
   type TaskSnapshot,
 } from "@javis/core";
 import { bridgeVisionIfNeeded } from "./vision-bridge";
+import { buildRuntimeCapabilityVerification } from "./capability-verification";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { openPath } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl } from "@tauri-apps/plugin-opener";
 import type {
   ActiveView,
   WorkbenchPermissionDecision,
@@ -35,6 +43,26 @@ import type {
   WorkbenchAgentStyleState,
   BrowserQuickRequest,
   BrowserQuickResult,
+  GitCommitExecutionQuickResult,
+  GitCommitPlanQuickResult,
+  GitCommentPullRequestExecutionQuickResult,
+  GitCommentPullRequestPlanQuickResult,
+  GitCreatePullRequestExecutionQuickResult,
+  GitCreatePullRequestPlanQuickResult,
+  GitPushExecutionQuickResult,
+  GitPushPlanQuickResult,
+  GitStageExecutionQuickResult,
+  GitStagePlanQuickResult,
+  WorkbenchAgentMemorySummary,
+  WorkbenchSkillSuggestion,
+  WorkbenchUserProfileMemorySummary,
+  WorkbenchScheduledTaskDraft,
+  WorkbenchRuntimePreferences,
+  WorkbenchAppearanceTheme,
+  WorkbenchDryRunAction,
+  WorkbenchTerminalSession,
+  WorkbenchBrowserWriteApprovalPreview,
+  WorkbenchWorkspaceToolRequest,
 } from "@javis/ui";
 import { JavisWorkbench, zhCNWorkbenchLocale, defaultWorkbenchLocale } from "@javis/ui";
 import {
@@ -58,16 +86,87 @@ import {
   APPROVAL_RECORDS_MIGRATIONS,
   createApprovalRecordsRepository,
 } from "./approval-records-persistence";
-import { createJavisRuntime, loadTrustedComputerApps, removeTrustedComputerApp } from "./app-runtime";
+import {
+  createJavisRuntime,
+  type BrowserWriteApprovalDecision,
+  type BrowserWriteApprovalRequest,
+  type RuntimeWorkspaceToolActivity,
+  loadComputerUseConfigFromStorage,
+  loadComputerUseLocalVisionSettingsFromStorage,
+  loadComputerUseSettingsFromStorage,
+  saveComputerUseLocalVisionSettingsToStorage,
+  saveComputerUseSettingsToStorage,
+} from "./app-runtime";
+import {
+  addTrustedComputerApp,
+  extractTrustedComputerAppTitleFromPermissionRequest,
+  loadTrustedComputerAppsFromPrefs,
+  removeTrustedComputerApp,
+  serializeTrustedComputerApps,
+} from "./computer-trust";
+import {
+  CURRENT_GOAL_MIGRATIONS,
+  createCurrentGoalRepository,
+  loadCurrentGoal,
+  saveCurrentGoal,
+  type CurrentGoalRepository,
+} from "./goal-persistence";
+import {
+  GOAL_EVENT_MIGRATIONS,
+  createGoalTimelineRepository,
+  type GoalTimelineRepository,
+} from "./goal-event-persistence";
+import {
+  applyGoalEvaluationTransition,
+  applyGoalStrategies,
+  createGoalCreatedTransition,
+  createGoalContinuationPrompt,
+  createGoalEvaluatedEvent,
+  createGoalStrategyContext,
+  createGoalTaskBoundTransition,
+  createGoalTaskTerminalEvent,
+  createManualGoalTransition,
+  findLatestGoalEvaluation as findGoalEvaluation,
+  findLatestGoalTaskSnapshot,
+  goalDecisionFromEvaluation,
+  parseGoalCommand,
+  reconcileGoalWithPersistedEvaluation,
+} from "./goal-runtime";
+import { createDefaultGoalStrategies } from "./goal-strategies";
 import { ErrorBoundary } from "./ErrorBoundary";
 import {
   CODE_PATCH_APPROVAL_TITLE,
   CODE_PATCH_APPROVAL_TOOL_NAME,
+  GIT_CREATE_PR_APPROVAL_TOOL_NAME,
+  GIT_COMMENT_PR_APPROVAL_TOOL_NAME,
+  GIT_COMMIT_APPROVAL_TOOL_NAME,
+  GIT_PUSH_APPROVAL_TOOL_NAME,
+  GIT_STAGE_APPROVAL_TOOL_NAME,
   applyRestoredCodePatch,
   createRestoredCodePatchApprovalTask,
   createRestoredCodePatchApprovedTask,
   createRestoredCodePatchDeniedTask,
   createRestoredCodePatchFailedTask,
+  createRestoredGitCreatePullRequestApprovalTask,
+  createRestoredGitCreatePullRequestApprovedTask,
+  createRestoredGitCreatePullRequestDeniedTask,
+  createRestoredGitCreatePullRequestFailedTask,
+  createRestoredGitCommentPullRequestApprovalTask,
+  createRestoredGitCommentPullRequestApprovedTask,
+  createRestoredGitCommentPullRequestDeniedTask,
+  createRestoredGitCommentPullRequestFailedTask,
+  createRestoredGitCommitApprovalTask,
+  createRestoredGitCommitApprovedTask,
+  createRestoredGitCommitDeniedTask,
+  createRestoredGitCommitFailedTask,
+  createRestoredGitPushApprovalTask,
+  createRestoredGitPushApprovedTask,
+  createRestoredGitPushDeniedTask,
+  createRestoredGitPushFailedTask,
+  createRestoredGitStageApprovalTask,
+  createRestoredGitStageApprovedTask,
+  createRestoredGitStageDeniedTask,
+  createRestoredGitStageFailedTask,
   createRestoredPdfApprovalTask,
   createRestoredPdfApprovedTask,
   createRestoredPdfDeniedTask,
@@ -77,6 +176,11 @@ import {
   getDurableApprovalWorkspacePath,
   isDurableApprovalRequestTitle,
   runRestoredCodePatchVerification,
+  runRestoredGitCreatePullRequest,
+  runRestoredGitCommentPullRequest,
+  runRestoredGitCommit,
+  runRestoredGitPush,
+  runRestoredGitStage,
   runRestoredPdfOrganization,
 } from "./restored-approval";
 import { useModelSettingsControls } from "./use-model-settings";
@@ -85,10 +189,18 @@ import { createConfiguredModelProvider } from "./model-provider";
 import { fetchProviderModels } from "./provider-models";
 import { useModelProfiles, type ModelProfileRepositoryLike } from "./use-model-profiles";
 import { useScannedData } from "./use-scanned-data";
+import {
+  APP_CLASSIFICATION_MIGRATIONS,
+  createAppClassificationRepository,
+  type AppClassificationRepository,
+} from "./app-classification-persistence";
 import { useScheduledTasks } from "./use-scheduled-tasks";
 import { useWorkspaceSessionControls } from "./use-workspace-session";
 import {
+  computeNextRun,
+  createScheduledTask,
   loadScheduledTasks,
+  saveScheduledTasks,
   clearStaleGuards,
   type ScheduledTask,
 } from "./scheduled-tasks";
@@ -96,7 +208,7 @@ import {
   createScheduledTasksRepository,
   SCHEDULED_TASKS_MIGRATIONS,
 } from "./scheduled-tasks-persistence";
-import { loadMcpConfig, type McpServerConfig } from "./mcp-config";
+import { loadMcpConfig, saveMcpConfig, type McpServerConfig } from "./mcp-config";
 import {
   readFileChunk,
 } from "./local-knowledge";
@@ -141,9 +253,53 @@ import {
 } from "./model-profile-persistence";
 import {
   TOOL_CALL_AUDIT_MIGRATIONS,
+  appendToolCallAuditJsonLine,
   appendTaskSnapshotAuditJsonLines,
   createFileBackedTaskAuditJsonLineWriter,
+  listRecentToolCallAuditRecords,
+  upsertToolCallAuditRecord,
+  type ToolCallAuditRecord,
 } from "./tool-call-audit";
+import {
+  GIT_PUSH_AUDIT_TOOL_NAME,
+  createGitPushExecutionAuditRecord,
+  createGitPushFailedAuditRecord,
+  createGitPushPermissionRequest,
+  createGitPushPlanAuditRecord,
+} from "./git-push-audit";
+import {
+  GIT_STAGE_AUDIT_TOOL_NAME,
+  createGitStageExecutionAuditRecord,
+  createGitStageFailedAuditRecord,
+  createGitStagePermissionRequest,
+  createGitStagePlanAuditRecord,
+} from "./git-stage-audit";
+import {
+  createGitCommitExecutionAuditRecord,
+  createGitCommitFailedAuditRecord,
+  createGitCommitPermissionRequest,
+  createGitCommitPlanAuditRecord,
+} from "./git-commit-audit";
+import {
+  GIT_CREATE_PR_AUDIT_TOOL_NAME,
+  createGitCreatePullRequestExecutionAuditRecord,
+  createGitCreatePullRequestFailedAuditRecord,
+  createGitCreatePullRequestPermissionRequest,
+  createGitCreatePullRequestPlanAuditRecord,
+} from "./git-create-pr-audit";
+import {
+  createGitCommentPullRequestExecutionAuditRecord,
+  createGitCommentPullRequestFailedAuditRecord,
+  createGitCommentPullRequestPermissionRequest,
+  createGitCommentPullRequestPlanAuditRecord,
+} from "./git-comment-pr-audit";
+import {
+  createTerminalCreateExecutionAuditRecord,
+  createTerminalFailedAuditRecord,
+  createTerminalInputExecutionAuditRecord,
+  createTerminalPlanAuditRecord,
+  type TerminalPlanResult,
+} from "./terminal-audit";
 import {
   appendTaskSessionSnapshotJsonLine,
   createFileBackedTaskSessionJsonLineWriter,
@@ -161,8 +317,30 @@ import {
   importToolCallAuditJsonlFromLocalStorage,
   JSONL_LOG_MIGRATIONS,
 } from "./jsonl-log-persistence";
-import type { TrustedComputerApp } from "@javis/tools";
-import { initialToolDescriptors } from "@javis/tools";
+import type { ToolDescriptor, TrustedComputerApp } from "@javis/tools";
+import { decodeMcpToolServerName, encodeMcpToolServerName, initialToolDescriptors, isDisabledBrowserWriteToolName } from "@javis/tools";
+import {
+  buildMcpListToolsDescriptor,
+  buildMcpToolDescriptorsFromList,
+  isAllowlistedMcpCallToolRequest,
+  isExecutableMcpServer,
+  isRunnableMcpServerConfig,
+  mcpRuntimeServerKey,
+  type McpRuntimeServerConfig,
+} from "./mcp-tool-descriptors";
+import {
+  getFreshCachedMcpToolDescriptors,
+  loadMcpToolDescriptorCache,
+  pruneMcpToolDescriptorCache,
+  saveMcpToolDescriptorCache,
+  setCachedMcpToolDescriptors,
+  type McpToolDescriptorCache,
+} from "./mcp-tool-descriptor-cache";
+import {
+  formatEnabledSkillContext,
+  type EnabledUserSkillContext,
+  type SkillContextSelectionRequest,
+} from "./skill-context";
 import {
   createDefaultAgentRegistry,
   createWorkflowRegistry,
@@ -195,6 +373,24 @@ import {
   type UserProfileMemory,
   type UserProfileMemoryRepository,
 } from "./user-profile-memory";
+import {
+  AGENT_MEMORY_MIGRATIONS,
+  createAgentMemoryRepository,
+  createCanonicalWorkspaceId,
+  type AgentMemoryRepository,
+  type AgentMemoryScopeType,
+} from "./agent-memory";
+import {
+  VECTOR_INDEX_MIGRATIONS,
+  createVectorIndexRepository,
+} from "./vector-index";
+import { createAgentMemoryEmbeddingProvider } from "./agent-memory-embedding-provider";
+import {
+  buildAgentMemoryPromptContextFromRepository,
+  restoreAgentMemoryFromTaskHistory,
+} from "./agent-memory-runtime";
+import { extractAgentMemoryFactsFromSummary } from "./agent-memory-pipeline";
+import { createAgentSessionSummaryFromTask } from "./agent-session-summary";
 import { getBuiltinSidebarNavItems, mergeSidebarNavItems } from "@javis/ui";
 import appIconUrl from "./assets/app-icon.png";
 import "./App.css";
@@ -204,6 +400,155 @@ const currentWindow =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window
     ? getCurrentWindow()
     : null;
+
+const AGENT_MEMORY_ENABLED_PREFERENCE_KEY = "agent_memory_enabled";
+const AGENT_MEMORY_HISTORY_RESTORE_DONE_PREFERENCE_KEY = "agent_memory_history_restore_done_v1";
+const BUILTIN_TOOL_DISABLED_NAMES_PREFERENCE_KEY = "builtin_tool_disabled_names";
+const BUILTIN_TOOL_LOCKED_NAMES = new Set([
+  "commander.plan",
+  "commander.synthesize",
+  "commander.askUser",
+  "verifier.check",
+]);
+const AGENT_MEMORY_QUERY_HMAC_SECRET_PREFERENCE_KEY = "agent_memory_query_hmac_secret";
+const MCP_DISCOVERY_CONCURRENCY = 2;
+const ACTIVE_COMPUTER_USE_STATUSES = new Set([
+  "planning",
+  "running",
+  "generating",
+  "waiting_permission",
+  "waiting_info",
+  "retrying",
+  "verifying",
+]);
+const COMPUTER_USE_TEXT_MARKERS = [
+  "computer use",
+  "computer-use",
+  "computer-use.loop",
+];
+const SKILL_MARKET_SUGGESTION_LIMIT = 8;
+const SKILL_MARKET_MEMORY_KEYWORD_LIMIT = 4;
+const SKILL_MARKET_KEYWORD_STOPWORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "for",
+  "from",
+  "the",
+  "this",
+  "that",
+  "with",
+  "javis",
+  "codex",
+  "agent",
+  "agents",
+  "skill",
+  "skills",
+  "tool",
+  "tools",
+  "task",
+  "tasks",
+  "project",
+  "projects",
+  "workspace",
+  "workspaces",
+  "file",
+  "files",
+  "github",
+  "用户",
+  "需要",
+  "使用",
+  "可以",
+  "当前",
+  "相关",
+  "任务",
+  "项目",
+  "工作区",
+  "文件",
+  "设置",
+  "技能",
+  "工具",
+  "助手",
+  "模型",
+  "系统",
+]);
+
+type SearchWebSourceResult = {
+  url: string;
+  title?: string;
+  excerpt: string;
+  provider?: string;
+};
+
+void SKILL_MARKET_SUGGESTION_LIMIT;
+void SKILL_MARKET_MEMORY_KEYWORD_LIMIT;
+void SKILL_MARKET_KEYWORD_STOPWORDS;
+const SEARCH_WEB_SOURCE_RESULT_TYPECHECK: SearchWebSourceResult | null = null;
+void SEARCH_WEB_SOURCE_RESULT_TYPECHECK;
+
+const DEFAULT_RUNTIME_PREFERENCES: WorkbenchRuntimePreferences = {
+  appearanceTheme: "light",
+  defaultStartupMode: "chat",
+  contextStrategy: "auto",
+  agentMaxRoundsPreset: "8",
+  agentMaxRoundsCustom: 8,
+  taskTimeoutPreset: "standard",
+  taskTimeoutCustomMs: 90_000,
+  agentMemoryScope: "workspace",
+  agentMemoryEmbeddingMode: "local",
+  agentMemoryEmbeddingProvider: "openai",
+  agentMemoryEmbeddingModel: "text-embedding-3-small",
+  agentMemoryEmbeddingBaseUrl: "https://api.openai.com/v1",
+  agentMemoryEmbeddingApiKeyReference: "model.embedding",
+  agentMemoryEmbeddingDimensions: 1536,
+  taskQueuePolicy: "queue",
+  failureRecoveryPolicy: "replan",
+  userWaitTimeoutPreset: "standard",
+  userWaitTimeoutCustomMs: 5 * 60_000,
+};
+
+const APPEARANCE_THEMES: readonly WorkbenchAppearanceTheme[] = [
+  "light",
+  "dark",
+  "glass",
+  "high_contrast",
+];
+
+interface UserSkillSummary {
+  id: string;
+  name: string;
+  description: string;
+  path: string;
+  source: string;
+  enabled: boolean;
+  removable: boolean;
+  toggleable: boolean;
+}
+
+interface CodexMcpServerSummary {
+  name: string;
+  transport: string;
+  command?: string;
+  url?: string;
+  args: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  enabled: boolean;
+  source: string;
+  removable: boolean;
+}
+
+interface InstalledMcpServerSummary {
+  name: string;
+  transport: "stdio" | "sse";
+  command?: string;
+  url?: string;
+  args: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  enabled: boolean;
+}
 
 type SkillTranslationCache = Record<
   string,
@@ -309,12 +654,386 @@ function logNonFatalError(context: string, error: unknown) {
   console.warn(context, error);
 }
 
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const workerCount = Math.max(1, Math.min(Math.floor(concurrency), items.length));
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }));
+  return results;
+}
+
+async function getOrCreateAgentMemoryQueryHmacSecret(
+  repository: UserPreferencesRepository | null,
+): Promise<string> {
+  const pendingValue = loadPendingPreferencesFromLocalStorage()[AGENT_MEMORY_QUERY_HMAC_SECRET_PREFERENCE_KEY];
+  if (pendingValue?.trim()) {
+    if (repository) {
+      await repository.set(AGENT_MEMORY_QUERY_HMAC_SECRET_PREFERENCE_KEY, pendingValue);
+    }
+    return pendingValue;
+  }
+
+  if (repository) {
+    const existing = await repository.get(AGENT_MEMORY_QUERY_HMAC_SECRET_PREFERENCE_KEY);
+    if (existing?.trim()) {
+      return existing;
+    }
+  }
+
+  const secret = createRandomAgentMemorySecret();
+  if (repository) {
+    await repository.set(AGENT_MEMORY_QUERY_HMAC_SECRET_PREFERENCE_KEY, secret);
+  } else {
+    persistPendingPreferenceToLocalStorage(AGENT_MEMORY_QUERY_HMAC_SECRET_PREFERENCE_KEY, secret);
+  }
+  return secret;
+}
+
+function createAgentMemoryInjectionLogId(taskId: string | undefined): string {
+  const safeTaskId = (taskId?.trim() || "task-unknown").replace(/[^a-zA-Z0-9._:-]/g, "_").slice(0, 80);
+  const unique = globalThis.crypto?.randomUUID?.()
+    ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `mem-injection:${safeTaskId}:${unique}`;
+}
+
+function createRandomAgentMemorySecret(): string {
+  const bytes = new Uint8Array(32);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(bytes);
+    return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function countAgentMemoryScopes(results: Array<{ scopeType: AgentMemoryScopeType }>): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const result of results) {
+    counts[result.scopeType] = (counts[result.scopeType] ?? 0) + 1;
+  }
+  return counts;
+}
+
+async function recordAgentMemoryInjectionAudit(options: {
+  repository: AgentMemoryRepository;
+  preferencesRepository: UserPreferencesRepository | null;
+  taskId: string;
+  workspaceId?: string;
+  injectionType: Parameters<AgentMemoryRepository["recordMemoryInjection"]>[0]["injectionType"];
+  memoryFactIds: string[];
+  query?: string;
+  scopeType?: AgentMemoryScopeType;
+  scopeId?: string;
+  promptSection: string;
+  scoreSummary: Record<string, unknown>;
+}) {
+  const queryHashSecret = options.query?.trim()
+    ? await getOrCreateAgentMemoryQueryHmacSecret(options.preferencesRepository)
+    : undefined;
+  await options.repository.recordMemoryInjection({
+    id: createAgentMemoryInjectionLogId(options.taskId),
+    sessionId: options.taskId,
+    workspaceId: options.workspaceId,
+    injectionType: options.injectionType,
+    memoryFactIds: options.memoryFactIds,
+    query: options.query,
+    queryHashSecret,
+    scopeType: options.scopeType,
+    scopeId: options.scopeId,
+    promptSection: options.promptSection,
+    scoreSummary: options.scoreSummary,
+  });
+}
+
+function runtimePreferencesFromPrefs(
+  prefs: Record<string, string>,
+): WorkbenchRuntimePreferences {
+  const appearanceTheme = stringChoice(
+    prefs[PREF_KEYS.APPEARANCE_THEME],
+    APPEARANCE_THEMES,
+    DEFAULT_RUNTIME_PREFERENCES.appearanceTheme,
+  );
+  const defaultStartupMode = stringChoice(
+    prefs[PREF_KEYS.DEFAULT_STARTUP_MODE],
+    ["chat", "project", "auto"],
+    DEFAULT_RUNTIME_PREFERENCES.defaultStartupMode,
+  );
+  const contextStrategy = stringChoice(
+    prefs[PREF_KEYS.CONTEXT_STRATEGY],
+    ["auto", "short", "long"],
+    DEFAULT_RUNTIME_PREFERENCES.contextStrategy,
+  );
+  const agentMaxRoundsPreset = stringChoice(
+    prefs[PREF_KEYS.AGENT_MAX_ROUNDS_PRESET],
+    ["4", "8", "12", "custom"],
+    DEFAULT_RUNTIME_PREFERENCES.agentMaxRoundsPreset,
+  );
+  const taskTimeoutPreset = stringChoice(
+    prefs[PREF_KEYS.TASK_TIMEOUT_PRESET],
+    ["standard", "long", "custom"],
+    DEFAULT_RUNTIME_PREFERENCES.taskTimeoutPreset,
+  );
+  const legacyMemoryEnabled = prefs[AGENT_MEMORY_ENABLED_PREFERENCE_KEY];
+  const agentMemoryScope = legacyMemoryEnabled === "false"
+    ? "off"
+    : stringChoice(
+        prefs[PREF_KEYS.AGENT_MEMORY_SCOPE],
+        ["off", "workspace", "global_workspace"],
+        DEFAULT_RUNTIME_PREFERENCES.agentMemoryScope,
+      );
+  return {
+    appearanceTheme,
+    defaultStartupMode,
+    contextStrategy,
+    agentMaxRoundsPreset,
+    agentMaxRoundsCustom: clampRuntimeInteger(
+      prefs[PREF_KEYS.AGENT_MAX_ROUNDS_CUSTOM],
+      1,
+      24,
+      DEFAULT_RUNTIME_PREFERENCES.agentMaxRoundsCustom,
+    ),
+    taskTimeoutPreset,
+    taskTimeoutCustomMs: clampRuntimeInteger(
+      prefs[PREF_KEYS.TASK_TIMEOUT_CUSTOM_MS],
+      30_000,
+      900_000,
+      DEFAULT_RUNTIME_PREFERENCES.taskTimeoutCustomMs,
+    ),
+    agentMemoryScope,
+    agentMemoryEmbeddingMode: stringChoice(
+      prefs[PREF_KEYS.AGENT_MEMORY_EMBEDDING_MODE],
+      ["local", "openai_compatible"],
+      DEFAULT_RUNTIME_PREFERENCES.agentMemoryEmbeddingMode,
+    ),
+    agentMemoryEmbeddingProvider: nonEmptyPreference(
+      prefs[PREF_KEYS.AGENT_MEMORY_EMBEDDING_PROVIDER],
+      DEFAULT_RUNTIME_PREFERENCES.agentMemoryEmbeddingProvider,
+    ),
+    agentMemoryEmbeddingModel: nonEmptyPreference(
+      prefs[PREF_KEYS.AGENT_MEMORY_EMBEDDING_MODEL],
+      DEFAULT_RUNTIME_PREFERENCES.agentMemoryEmbeddingModel,
+    ),
+    agentMemoryEmbeddingBaseUrl: nonEmptyPreference(
+      prefs[PREF_KEYS.AGENT_MEMORY_EMBEDDING_BASE_URL],
+      DEFAULT_RUNTIME_PREFERENCES.agentMemoryEmbeddingBaseUrl,
+    ),
+    agentMemoryEmbeddingApiKeyReference: nonEmptyPreference(
+      prefs[PREF_KEYS.AGENT_MEMORY_EMBEDDING_API_KEY_REFERENCE],
+      DEFAULT_RUNTIME_PREFERENCES.agentMemoryEmbeddingApiKeyReference,
+    ),
+    agentMemoryEmbeddingDimensions: clampRuntimeInteger(
+      prefs[PREF_KEYS.AGENT_MEMORY_EMBEDDING_DIMENSIONS],
+      32,
+      4096,
+      DEFAULT_RUNTIME_PREFERENCES.agentMemoryEmbeddingDimensions,
+    ),
+    taskQueuePolicy: stringChoice(
+      prefs[PREF_KEYS.TASK_QUEUE_POLICY],
+      ["queue", "current_only", "interrupt"],
+      DEFAULT_RUNTIME_PREFERENCES.taskQueuePolicy,
+    ),
+    failureRecoveryPolicy: stringChoice(
+      prefs[PREF_KEYS.FAILURE_RECOVERY_POLICY],
+      ["replan", "stop"],
+      DEFAULT_RUNTIME_PREFERENCES.failureRecoveryPolicy,
+    ),
+    userWaitTimeoutPreset: stringChoice(
+      prefs[PREF_KEYS.USER_WAIT_TIMEOUT_PRESET],
+      ["standard", "long", "custom"],
+      DEFAULT_RUNTIME_PREFERENCES.userWaitTimeoutPreset,
+    ),
+    userWaitTimeoutCustomMs: clampRuntimeInteger(
+      prefs[PREF_KEYS.USER_WAIT_TIMEOUT_CUSTOM_MS],
+      60_000,
+      120 * 60_000,
+      DEFAULT_RUNTIME_PREFERENCES.userWaitTimeoutCustomMs,
+    ),
+  };
+}
+
+function runtimePreferencesToPrefs(
+  preferences: WorkbenchRuntimePreferences,
+): Record<string, string> {
+  return {
+    [PREF_KEYS.APPEARANCE_THEME]: preferences.appearanceTheme,
+    [PREF_KEYS.DEFAULT_STARTUP_MODE]: preferences.defaultStartupMode,
+    [PREF_KEYS.CONTEXT_STRATEGY]: preferences.contextStrategy,
+    [PREF_KEYS.AGENT_MAX_ROUNDS_PRESET]: preferences.agentMaxRoundsPreset,
+    [PREF_KEYS.AGENT_MAX_ROUNDS_CUSTOM]: String(preferences.agentMaxRoundsCustom),
+    [PREF_KEYS.TASK_TIMEOUT_PRESET]: preferences.taskTimeoutPreset,
+    [PREF_KEYS.TASK_TIMEOUT_CUSTOM_MS]: String(preferences.taskTimeoutCustomMs),
+    [PREF_KEYS.AGENT_MEMORY_SCOPE]: preferences.agentMemoryScope,
+    [PREF_KEYS.AGENT_MEMORY_EMBEDDING_MODE]: preferences.agentMemoryEmbeddingMode,
+    [PREF_KEYS.AGENT_MEMORY_EMBEDDING_PROVIDER]: preferences.agentMemoryEmbeddingProvider,
+    [PREF_KEYS.AGENT_MEMORY_EMBEDDING_MODEL]: preferences.agentMemoryEmbeddingModel,
+    [PREF_KEYS.AGENT_MEMORY_EMBEDDING_BASE_URL]: preferences.agentMemoryEmbeddingBaseUrl,
+    [PREF_KEYS.AGENT_MEMORY_EMBEDDING_API_KEY_REFERENCE]: preferences.agentMemoryEmbeddingApiKeyReference,
+    [PREF_KEYS.AGENT_MEMORY_EMBEDDING_DIMENSIONS]: String(preferences.agentMemoryEmbeddingDimensions),
+    [PREF_KEYS.TASK_QUEUE_POLICY]: preferences.taskQueuePolicy,
+    [PREF_KEYS.FAILURE_RECOVERY_POLICY]: preferences.failureRecoveryPolicy,
+    [PREF_KEYS.USER_WAIT_TIMEOUT_PRESET]: preferences.userWaitTimeoutPreset,
+    [PREF_KEYS.USER_WAIT_TIMEOUT_CUSTOM_MS]: String(preferences.userWaitTimeoutCustomMs),
+  };
+}
+
+function sanitizeRuntimePreferences(
+  preferences: WorkbenchRuntimePreferences,
+): WorkbenchRuntimePreferences {
+  return {
+    appearanceTheme: stringChoice(
+      preferences.appearanceTheme,
+      APPEARANCE_THEMES,
+      DEFAULT_RUNTIME_PREFERENCES.appearanceTheme,
+    ),
+    defaultStartupMode: stringChoice(
+      preferences.defaultStartupMode,
+      ["chat", "project", "auto"],
+      DEFAULT_RUNTIME_PREFERENCES.defaultStartupMode,
+    ),
+    contextStrategy: stringChoice(
+      preferences.contextStrategy,
+      ["auto", "short", "long"],
+      DEFAULT_RUNTIME_PREFERENCES.contextStrategy,
+    ),
+    agentMaxRoundsPreset: stringChoice(
+      preferences.agentMaxRoundsPreset,
+      ["4", "8", "12", "custom"],
+      DEFAULT_RUNTIME_PREFERENCES.agentMaxRoundsPreset,
+    ),
+    agentMaxRoundsCustom: clampRuntimeInteger(
+      String(preferences.agentMaxRoundsCustom),
+      1,
+      24,
+      DEFAULT_RUNTIME_PREFERENCES.agentMaxRoundsCustom,
+    ),
+    taskTimeoutPreset: stringChoice(
+      preferences.taskTimeoutPreset,
+      ["standard", "long", "custom"],
+      DEFAULT_RUNTIME_PREFERENCES.taskTimeoutPreset,
+    ),
+    taskTimeoutCustomMs: clampRuntimeInteger(
+      String(preferences.taskTimeoutCustomMs),
+      30_000,
+      900_000,
+      DEFAULT_RUNTIME_PREFERENCES.taskTimeoutCustomMs,
+    ),
+    agentMemoryScope: stringChoice(
+      preferences.agentMemoryScope,
+      ["off", "workspace", "global_workspace"],
+      DEFAULT_RUNTIME_PREFERENCES.agentMemoryScope,
+    ),
+    agentMemoryEmbeddingMode: stringChoice(
+      preferences.agentMemoryEmbeddingMode,
+      ["local", "openai_compatible"],
+      DEFAULT_RUNTIME_PREFERENCES.agentMemoryEmbeddingMode,
+    ),
+    agentMemoryEmbeddingProvider: normalizePreferenceText(
+      preferences.agentMemoryEmbeddingProvider,
+      DEFAULT_RUNTIME_PREFERENCES.agentMemoryEmbeddingProvider,
+    ),
+    agentMemoryEmbeddingModel: normalizePreferenceText(
+      preferences.agentMemoryEmbeddingModel,
+      DEFAULT_RUNTIME_PREFERENCES.agentMemoryEmbeddingModel,
+    ),
+    agentMemoryEmbeddingBaseUrl: normalizePreferenceText(
+      preferences.agentMemoryEmbeddingBaseUrl,
+      DEFAULT_RUNTIME_PREFERENCES.agentMemoryEmbeddingBaseUrl,
+    ),
+    agentMemoryEmbeddingApiKeyReference: normalizePreferenceText(
+      preferences.agentMemoryEmbeddingApiKeyReference,
+      DEFAULT_RUNTIME_PREFERENCES.agentMemoryEmbeddingApiKeyReference,
+    ),
+    agentMemoryEmbeddingDimensions: clampRuntimeInteger(
+      String(preferences.agentMemoryEmbeddingDimensions),
+      32,
+      4096,
+      DEFAULT_RUNTIME_PREFERENCES.agentMemoryEmbeddingDimensions,
+    ),
+    taskQueuePolicy: stringChoice(
+      preferences.taskQueuePolicy,
+      ["queue", "current_only", "interrupt"],
+      DEFAULT_RUNTIME_PREFERENCES.taskQueuePolicy,
+    ),
+    failureRecoveryPolicy: stringChoice(
+      preferences.failureRecoveryPolicy,
+      ["replan", "stop"],
+      DEFAULT_RUNTIME_PREFERENCES.failureRecoveryPolicy,
+    ),
+    userWaitTimeoutPreset: stringChoice(
+      preferences.userWaitTimeoutPreset,
+      ["standard", "long", "custom"],
+      DEFAULT_RUNTIME_PREFERENCES.userWaitTimeoutPreset,
+    ),
+    userWaitTimeoutCustomMs: clampRuntimeInteger(
+      String(preferences.userWaitTimeoutCustomMs),
+      60_000,
+      120 * 60_000,
+      DEFAULT_RUNTIME_PREFERENCES.userWaitTimeoutCustomMs,
+    ),
+  };
+}
+
+function stringChoice<T extends string>(
+  value: string | undefined,
+  allowed: readonly T[],
+  fallback: T,
+): T {
+  return allowed.includes(value as T) ? (value as T) : fallback;
+}
+
+function nonEmptyPreference(value: string | undefined, fallback: string): string {
+  return normalizePreferenceText(value, fallback);
+}
+
+function normalizePreferenceText(value: string | undefined, fallback: string): string {
+  const trimmed = value?.trim() ?? "";
+  return trimmed || fallback;
+}
+
+function clampRuntimeInteger(
+  value: string | undefined,
+  min: number,
+  max: number,
+  fallback: number,
+): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function composeModeForStartupPreference(
+  defaultStartupMode: WorkbenchRuntimePreferences["defaultStartupMode"],
+  workspacePath?: string,
+): "chat" | "project" {
+  if (defaultStartupMode === "project") {
+    return "project";
+  }
+  if (defaultStartupMode === "auto" && workspacePath?.trim()) {
+    return "project";
+  }
+  return "chat";
+}
+
 type SubmitGoalHandler = (
   goalOverride?: string,
   workspacePathOverride?: string,
   scheduledTaskId?: string,
   attachments?: File[],
   imageDataUrls?: string[],
+  forceStart?: boolean,
+  queuedRawGoal?: string,
+  forcedMode?: "chat" | "project",
+  goalId?: string,
 ) => void;
 
 interface PendingGoalSubmission {
@@ -325,6 +1044,8 @@ interface PendingGoalSubmission {
   attachments?: File[];
   imageDataUrls?: string[];
   composeMode: "chat" | "project";
+  forcedMode?: "chat" | "project";
+  goalId?: string;
   clearDraftOnQueue: boolean;
 }
 
@@ -355,6 +1076,42 @@ function allowsLocalModelWithoutKey(settings: { provider: string; baseUrl: strin
     || baseUrl.startsWith("http://::1");
 }
 
+function isActiveComputerUseTaskSnapshot(task: TaskSnapshot, isTaskActive: boolean): boolean {
+  if (!isTaskActive || !ACTIVE_COMPUTER_USE_STATUSES.has(task.status)) {
+    return false;
+  }
+  if (task.permissionRequest?.dryRun.operation.startsWith("computer.")) {
+    return true;
+  }
+  if (task.streamingAgentKind === "computer" && hasComputerUseText(task.commanderMessage)) {
+    return true;
+  }
+  if (task.plan.some((step) =>
+    ACTIVE_COMPUTER_USE_STATUSES.has(step.status) &&
+    (step.agentId === "agent-computer" || hasComputerUseText(step.id)) &&
+    (hasComputerUseText(step.id) || hasComputerUseText(step.title) || hasComputerUseText(step.successCriteria))
+  )) {
+    return true;
+  }
+  if (task.agents.some((agent) =>
+    agent.id === "agent-computer" &&
+    ACTIVE_COMPUTER_USE_STATUSES.has(agent.status) &&
+    hasComputerUseText(agent.task)
+  )) {
+    return true;
+  }
+  return Boolean(task.executionTrace?.steps.some((step) =>
+    step.toolName?.startsWith("computer.") ||
+    hasComputerUseText(step.stepId) ||
+    hasComputerUseText(step.toolName)
+  ));
+}
+
+function hasComputerUseText(value: string | undefined): boolean {
+  const normalized = value?.toLowerCase() ?? "";
+  return COMPUTER_USE_TEXT_MARKERS.some((marker) => normalized.includes(marker));
+}
+
 function App() {
   const databaseRef = useRef<DesktopDatabase | null>(null);
   const taskHistoryRepoRef = useRef<TaskHistoryRepositoryLike>(null);
@@ -362,8 +1119,11 @@ function App() {
   const approvalRecordsRepoRef = useRef<ReturnType<typeof createApprovalRecordsRepository> | null>(null);
   const modelSettingsRepoRef = useRef<ModelSettingsRepository | null>(null);
   const userProfileMemoryRepoRef = useRef<UserProfileMemoryRepository | null>(null);
+  const agentMemoryRepoRef = useRef<AgentMemoryRepository | null>(null);
   const scheduledTasksRepoRef = useRef<ScheduledTasksRepositoryLike>(null);
   const preferencesRepoRef = useRef<UserPreferencesRepository | null>(null);
+  const currentGoalRepoRef = useRef<CurrentGoalRepository | null>(null);
+  const goalTimelineRepoRef = useRef<GoalTimelineRepository | null>(null);
   const agentRegistryRef = useRef<AgentRegistry>(createDefaultAgentRegistry());
   const workflowRegistryRef = useRef<WorkflowRegistry>(createWorkflowRegistry(WORKBENCH_WORKFLOWS));
   const routeRegistryRef = useRef<RouteRegistry>(createRouteRegistry());
@@ -379,6 +1139,11 @@ function App() {
   const queuedSubmissionModeRef = useRef<"chat" | "project" | null>(null);
   const queuedContinuationTaskRef = useRef<TaskSnapshot | null>(null);
   const queuedStartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const suppressNextQueuedGoalForTaskRef = useRef<string | null>(null);
+  const emergencyStopTaskRef = useRef<() => void>(() => {});
+  const pendingGoalBindRef = useRef<{ goalId: string } | null>(null);
+  const evaluatedGoalTaskIdsRef = useRef<Set<string>>(new Set());
+  const goalContinuationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [, setQueuedGoalCount] = useState(0);
   const modelConfigRef = useRef<WorkbenchModelConfiguration | undefined>(undefined);
   const {
@@ -390,7 +1155,38 @@ function App() {
     workspaceSession,
   } = useWorkspaceSessionControls(window.localStorage, workspaceSessionRepoRef);
   const { recentWorkspacePaths, workspacePath } = workspaceSession;
+  const [workspaceToolRequest, setWorkspaceToolRequest] = useState<WorkbenchWorkspaceToolRequest | null>(null);
+  const currentWorkspaceMemoryId = useMemo(
+    () => createCanonicalWorkspaceId(workspacePath),
+    [workspacePath],
+  );
+  const [runtimePreferences, setRuntimePreferences] = useState<WorkbenchRuntimePreferences>(
+    DEFAULT_RUNTIME_PREFERENCES,
+  );
+  useEffect(() => {
+    document.documentElement.dataset.theme = runtimePreferences.appearanceTheme;
+  }, [runtimePreferences.appearanceTheme]);
+  const [isAgentMemoryEnabled, setAgentMemoryEnabled] = useState(
+    DEFAULT_RUNTIME_PREFERENCES.agentMemoryScope !== "off",
+  );
+  const [disabledBuiltinToolNames, setDisabledBuiltinToolNames] = useState<Set<string>>(
+    () => parseDisabledBuiltinToolNames(loadPreference(BUILTIN_TOOL_DISABLED_NAMES_PREFERENCE_KEY)),
+  );
   const { modelSettings, updateModelSettings } = useModelSettingsControls(window.localStorage);
+  const [computerUseSettings, setComputerUseSettings] = useState(() =>
+    loadComputerUseSettingsFromStorage(window.localStorage),
+  );
+  function handleComputerUseSettingsChange(settings: typeof computerUseSettings) {
+    const savedSettings = saveComputerUseSettingsToStorage(window.localStorage, settings);
+    setComputerUseSettings(savedSettings);
+  }
+  const [computerUseLocalVisionSettings, setComputerUseLocalVisionSettings] = useState(() =>
+    loadComputerUseLocalVisionSettingsFromStorage(window.localStorage),
+  );
+  function handleComputerUseLocalVisionSettingsChange(settings: typeof computerUseLocalVisionSettings) {
+    const savedSettings = saveComputerUseLocalVisionSettingsToStorage(window.localStorage, settings);
+    setComputerUseLocalVisionSettings(savedSettings);
+  }
   const providerCatalog = useMemo(
     () =>
       PROVIDER_DEFINITIONS.map((def) => ({
@@ -413,12 +1209,207 @@ function App() {
   // currently-selected UI workspace instead of its own.
   const workspaceRef = useRef(workspacePath);
   workspaceRef.current = workspacePath;
+  const runtimePreferencesRef = useRef(runtimePreferences);
+  runtimePreferencesRef.current = runtimePreferences;
+  const isAgentMemoryEnabledRef = useRef(isAgentMemoryEnabled);
+  isAgentMemoryEnabledRef.current = isAgentMemoryEnabled;
+  const disabledBuiltinToolNamesRef = useRef(disabledBuiltinToolNames);
+  disabledBuiltinToolNamesRef.current = disabledBuiltinToolNames;
+  const mcpConfigRef = useRef<McpServerConfig[]>([]);
+  const codexMcpServersRef = useRef<CodexMcpServerSummary[]>([]);
+  const mcpToolDescriptorsRef = useRef<ToolDescriptor[]>([]);
+  const mcpDiscoveryErrorsRef = useRef<Record<string, string>>({});
+  const mcpToolDescriptorCacheRef = useRef<McpToolDescriptorCache>(new Map());
+  const mcpToolDescriptorCacheLoadedRef = useRef(false);
+  const enabledSkillContextsRef = useRef<EnabledUserSkillContext[]>([]);
+  const enabledSkillContextsLoadedRef = useRef(false);
+  const enabledSkillContextsLoadRef = useRef<Promise<EnabledUserSkillContext[]> | null>(null);
+  const currentWorkspaceMemoryIdRef = useRef(currentWorkspaceMemoryId);
+  currentWorkspaceMemoryIdRef.current = currentWorkspaceMemoryId;
+  const [pendingBrowserWriteApproval, setPendingBrowserWriteApproval] =
+    useState<WorkbenchBrowserWriteApprovalPreview | null>(null);
+  const browserWriteApprovalResolversRef = useRef(
+    new Map<string, (decision: BrowserWriteApprovalDecision) => void>(),
+  );
+
+  function requestBrowserWriteApproval(
+    request: BrowserWriteApprovalRequest,
+  ): Promise<BrowserWriteApprovalDecision> {
+    for (const resolve of browserWriteApprovalResolversRef.current.values()) {
+      resolve("denied");
+    }
+    browserWriteApprovalResolversRef.current.clear();
+    setPendingBrowserWriteApproval({
+      approvalId: request.approvalId,
+      sessionId: request.sessionId,
+      toolName: request.toolName,
+      action: request.action,
+      previewHash: request.previewHash,
+      selector: request.selector,
+      byteCount: request.byteCount,
+      scriptByteCount: request.scriptByteCount,
+    });
+    return new Promise((resolve) => {
+      browserWriteApprovalResolversRef.current.set(request.approvalId, resolve);
+    });
+  }
+
+  function handleRuntimeWorkspaceToolActivity(activity: RuntimeWorkspaceToolActivity) {
+    if (
+      activity.tool !== "files" &&
+      activity.tool !== "browser" &&
+      activity.tool !== "review" &&
+      activity.tool !== "terminal"
+    ) {
+      return;
+    }
+    setWorkspaceToolRequest({
+      id: `${activity.recordedAt}:${activity.tool}:${activity.sourceToolName}`,
+      tool: activity.tool,
+      source: activity.sourceToolName,
+    });
+  }
+
+  function resolveBrowserWriteApproval(approvalId: string, decision: BrowserWriteApprovalDecision) {
+    const resolve = browserWriteApprovalResolversRef.current.get(approvalId);
+    if (!resolve) return;
+    browserWriteApprovalResolversRef.current.delete(approvalId);
+    setPendingBrowserWriteApproval((current) => (
+      current?.approvalId === approvalId ? null : current
+    ));
+    resolve(decision);
+  }
+
+  function getMcpToolDescriptorCache() {
+    if (!mcpToolDescriptorCacheLoadedRef.current) {
+      mcpToolDescriptorCacheRef.current = loadMcpToolDescriptorCache(
+        typeof window === "undefined" ? undefined : window.localStorage,
+      );
+      mcpToolDescriptorCacheLoadedRef.current = true;
+    }
+    return mcpToolDescriptorCacheRef.current;
+  }
+
   const runtime = useMemo(
     () => createJavisRuntime({
       modelSettings,
       getModelConfiguration: () => modelConfigRef.current,
       getWorkspacePath: () => workspaceRef.current,
       getScheduledTasksRepository: () => scheduledTasksRepoRef.current,
+      getComputerUseConfig: () => loadComputerUseConfigFromStorage(window.localStorage),
+      getAvailableToolDescriptors: () => getEnabledToolDescriptors(
+        disabledBuiltinToolNamesRef.current,
+        mcpConfigRef.current,
+        codexMcpServersRef.current,
+        mcpToolDescriptorsRef.current,
+        mcpDiscoveryErrorsRef.current,
+      ),
+      getCapabilityVerification: () => buildRuntimeCapabilityVerification({
+        toolAuditRecords: recentToolCallAuditRecordsRef.current,
+      }),
+      recordToolCallAudit,
+      onWorkspaceToolActivity: handleRuntimeWorkspaceToolActivity,
+      requestBrowserWriteApproval,
+      getRuntimePreferences: () => runtimePreferencesRef.current,
+      getEnabledSkillContext: async (request: SkillContextSelectionRequest) => {
+        try {
+          const contexts = await readEnabledSkillContextsCached();
+          return formatEnabledSkillContext(contexts, request);
+        } catch (error) {
+          logNonFatalError("Failed to read enabled skill contexts", error);
+          return "";
+        }
+      },
+      isAgentMemoryEnabled: () => isAgentMemoryEnabledRef.current,
+      searchAgentMemory: async (request) => {
+        const repository = agentMemoryRepoRef.current;
+        if (!repository) return [];
+        const memoryScope = runtimePreferencesRef.current.agentMemoryScope;
+        if (memoryScope === "off") return [];
+        const scopeType = request.scopeType
+          ?? (memoryScope === "global_workspace" && !currentWorkspaceMemoryIdRef.current ? "global" : "workspace");
+        if (scopeType === "global" && memoryScope !== "global_workspace") return [];
+        const scopeId = scopeType === "workspace" ? (request.scopeId ?? currentWorkspaceMemoryIdRef.current) : request.scopeId;
+        if (scopeType === "workspace" && !scopeId) return [];
+        const rawResults = await repository.searchMemory({
+          query: request.query,
+          tags: request.tags,
+          kind: request.kind as Parameters<typeof repository.searchMemory>[0]["kind"],
+          scopeType,
+          scopeId,
+          limit: request.limit,
+        });
+        const results = memoryScope === "workspace"
+          ? rawResults.filter((result) => result.scopeType === "workspace")
+          : rawResults;
+        if (results.length > 0) {
+          await recordAgentMemoryInjectionAudit({
+            repository,
+            preferencesRepository: preferencesRepoRef.current,
+            taskId: request.taskId ?? "task-unknown",
+            workspaceId: currentWorkspaceMemoryIdRef.current || undefined,
+            injectionType: "retrieved_memory",
+            memoryFactIds: results.map((result) => result.id),
+            query: request.query,
+            scopeType,
+            scopeId,
+            promptSection: "memory.search",
+            scoreSummary: {
+              resultCount: results.length,
+              topScore: results[0]?.score,
+              scopeCounts: countAgentMemoryScopes(results),
+            },
+          });
+          void repository.getSummary(currentWorkspaceMemoryIdRef.current || undefined, isAgentMemoryEnabledRef.current)
+            .then(setAgentMemorySummary)
+            .catch((error) => logNonFatalError("Failed to refresh agent memory summary", error));
+        }
+        return results;
+      },
+      callMcpTool: async (request) => {
+        if ((request.action ?? "callTool") === "callTool") {
+          const enabledDescriptors = getEnabledToolDescriptors(
+            disabledBuiltinToolNamesRef.current,
+            mcpConfigRef.current,
+            codexMcpServersRef.current,
+            mcpToolDescriptorsRef.current,
+            mcpDiscoveryErrorsRef.current,
+          );
+          if (!isAllowlistedMcpCallToolRequest(enabledDescriptors, request)) {
+            throw new Error(`MCP tool ${request.toolName ?? String(request.input?.toolName ?? "")} is not allowlisted for ${request.source ?? "unknown"}:${request.serverName}.`);
+          }
+        }
+        return invoke("call_mcp_server_tool", { request });
+      },
+      buildAgentMemoryPromptContext: async ({ userGoal, taskId }) => {
+        const repository = agentMemoryRepoRef.current;
+        if (!repository) return "";
+        const memoryScope = runtimePreferencesRef.current.agentMemoryScope;
+        if (memoryScope === "off") return "";
+        const workspaceId = currentWorkspaceMemoryIdRef.current || undefined;
+        const userProfileFacts = (userProfileMemoryRef.current?.facts ?? [])
+          .slice(0, 5)
+          .map((fact) => fact.text);
+        const promptContext = await buildAgentMemoryPromptContextFromRepository({
+          repository,
+          userGoal,
+          taskId,
+          memoryScope,
+          workspaceId,
+          userProfileFacts,
+          recordInjection: (injection) => recordAgentMemoryInjectionAudit({
+            repository,
+            preferencesRepository: preferencesRepoRef.current,
+            taskId,
+            workspaceId,
+            ...injection,
+          }),
+        });
+        void repository.getSummary(workspaceId, isAgentMemoryEnabledRef.current)
+          .then(setAgentMemorySummary)
+          .catch((error) => logNonFatalError("Failed to refresh agent memory summary", error));
+        return promptContext;
+      },
     }),
     [modelSettings],
   );
@@ -428,19 +1419,36 @@ function App() {
   const [approvalRecords, setApprovalRecords] = useState(() =>
     loadApprovalRecords(window.localStorage),
   );
+  const [currentGoal, setCurrentGoal] = useState<GoalState | null>(() =>
+    loadCurrentGoal(window.localStorage),
+  );
+  const [currentGoalEvents, setCurrentGoalEvents] = useState<GoalEvent[]>([]);
+  const [currentGoalEvaluations, setCurrentGoalEvaluations] = useState<GoalEvaluation[]>([]);
   const historyCurrentRef = useRef(history);
   historyCurrentRef.current = history;
+  const currentGoalRef = useRef<GoalState | null>(currentGoal);
+  currentGoalRef.current = currentGoal;
+  const currentGoalEventsRef = useRef<GoalEvent[]>(currentGoalEvents);
+  currentGoalEventsRef.current = currentGoalEvents;
+  const currentGoalEvaluationsRef = useRef<GoalEvaluation[]>(currentGoalEvaluations);
+  currentGoalEvaluationsRef.current = currentGoalEvaluations;
   const approvalRecordsInitialRef = useRef(approvalRecords);
   const approvalRecordsCurrentRef = useRef(approvalRecords);
   approvalRecordsCurrentRef.current = approvalRecords;
   const [areDurableApprovalRecordsReady, setDurableApprovalRecordsReady] = useState(false);
   const [isDatabaseInitializing, setDatabaseInitializing] = useState(true);
+  const [knowledgeRepositoriesReadyKey, setKnowledgeRepositoriesReadyKey] = useState(0);
   const didCheckRestoredApproval = useRef(false);
   const didInitDatabaseRef = useRef(false);
   const auditRecordIdsRef = useRef(new Set<string>());
+  const recentToolCallAuditRecordsRef = useRef<ToolCallAuditRecord[]>([]);
+  const savedAgentSessionSummaryIdsRef = useRef(new Set<string>());
   const [draftGoal, setDraftGoal] = useState(DEFAULT_DRAFT_GOAL);
-  const [composeMode, setComposeMode] = useState<"chat" | "project">("chat");
+  const [composeMode, setComposeMode] = useState<"chat" | "project">(
+    DEFAULT_RUNTIME_PREFERENCES.defaultStartupMode === "project" ? "project" : "chat",
+  );
   const [aiConfigPrompt, setAiConfigPrompt] = useState<{ title: string; message: string } | null>(null);
+  const goalStrategies = useMemo(() => createDefaultGoalStrategies(), []);
 
   // ── Sidebar view state ───────────────────────────────────────────
   const [activeView, setActiveView] = useState<ActiveView>("chat");
@@ -491,11 +1499,18 @@ function App() {
   const [userProfileMemory, setUserProfileMemory] = useState<UserProfileMemory | null>(() =>
     loadUserProfileMemory(window.localStorage),
   );
+  const userProfileMemoryRef = useRef(userProfileMemory);
+  userProfileMemoryRef.current = userProfileMemory;
+  const [agentMemorySummary, setAgentMemorySummary] = useState<WorkbenchAgentMemorySummary | null>(null);
   useEffect(() => {
     return () => {
       if (queuedStartTimerRef.current) {
         clearTimeout(queuedStartTimerRef.current);
         queuedStartTimerRef.current = null;
+      }
+      if (goalContinuationTimerRef.current) {
+        clearTimeout(goalContinuationTimerRef.current);
+        goalContinuationTimerRef.current = null;
       }
     };
   }, []);
@@ -543,13 +1558,65 @@ function App() {
     setScheduledTasks,
     persistWorkspaceForTask,
     persistDurableApprovalRecord,
-    onTaskSnapshot: appendRuntimeJsonlLogs,
+    createInitialTask: () => createInitialTaskSnapshot({
+      capabilityVerification: buildRuntimeCapabilityVerification({
+        toolAuditRecords: recentToolCallAuditRecordsRef.current,
+      }),
+    }),
+    onTaskSnapshot: (nextTask) => {
+      appendRuntimeJsonlLogs(nextTask);
+      handleGoalTaskSnapshot(nextTask);
+    },
     taskHistoryRepoRef,
     scheduledTasksRepoRef,
     workspacePathRef: workspaceRef,
   });
 
   // ── Local knowledge base state ────────────────────────────────────
+  const isComputerUseGlobalEmergencyHotkeyActive = isActiveComputerUseTaskSnapshot(task, isTaskActive);
+
+  useEffect(() => {
+    if (!currentWindow) {
+      return;
+    }
+    let disposed = false;
+    let unlistenEvent: (() => void) | undefined;
+    void listen("computer-use://emergency-stop-requested", () => {
+      emergencyStopTaskRef.current();
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+      } else {
+        unlistenEvent = unlisten;
+      }
+    }).catch((error) => {
+      logNonFatalError("Failed to listen for Computer Use emergency hotkey", error);
+    });
+    return () => {
+      disposed = true;
+      unlistenEvent?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!currentWindow) {
+      return;
+    }
+    void invoke("computer_set_emergency_hotkey_enabled", {
+      enabled: isComputerUseGlobalEmergencyHotkeyActive,
+    }).catch((error) => {
+      logNonFatalError("Failed to update Computer Use emergency hotkey", error);
+    });
+
+    return () => {
+      if (isComputerUseGlobalEmergencyHotkeyActive) {
+        void invoke("computer_set_emergency_hotkey_enabled", { enabled: false }).catch((error) => {
+          logNonFatalError("Failed to disable Computer Use emergency hotkey", error);
+        });
+      }
+    };
+  }, [isComputerUseGlobalEmergencyHotkeyActive]);
+
   const [skillEntries, setSkillEntries] = useState<WorkbenchSkillEntry[]>([]);
   const [skillTranslationCache, setSkillTranslationCache] = useState<SkillTranslationCache>({});
   const [skillTranslationStatus, setSkillTranslationStatus] =
@@ -558,13 +1625,25 @@ function App() {
   const [skillSearchStatus, setSkillSearchStatus] =
     useState<"idle" | "searching" | "error">("idle");
   const [skillSearchResults, setSkillSearchResults] = useState<WorkbenchSkillSearchResult[]>([]);
+  const [skillMarketSuggestionStatus, setSkillMarketSuggestionStatus] =
+    useState<"idle" | "refreshing" | "error">("idle");
+  const [skillMarketSuggestions, setSkillMarketSuggestions] = useState<WorkbenchSkillSuggestion[]>([]);
   const [mcpConfig, setMcpConfig] = useState<McpServerConfig[]>([]);
   const [mcpConfigError, setMcpConfigError] = useState<string | null>(null);
+  const [codexMcpServers, setCodexMcpServers] = useState<CodexMcpServerSummary[]>([]);
+  const [mcpToolDescriptors, setMcpToolDescriptors] = useState<ToolDescriptor[]>([]);
+  const [mcpDiscoveryErrors, setMcpDiscoveryErrors] = useState<Record<string, string>>({});
+  mcpConfigRef.current = mcpConfig;
+  codexMcpServersRef.current = codexMcpServers;
+  mcpToolDescriptorsRef.current = mcpToolDescriptors;
+  mcpDiscoveryErrorsRef.current = mcpDiscoveryErrors;
+  const [userSkills, setUserSkills] = useState<UserSkillSummary[]>([]);
   const [trustedComputerApps, setTrustedComputerApps] = useState<TrustedComputerApp[]>(
-    () => loadTrustedComputerApps(),
+    () => loadTrustedComputerAppsFromPrefs(loadPendingPreferencesFromLocalStorage()),
   );
 
   const fileClassificationRepoRef = useRef<FileClassificationRepository | null>(null);
+  const appClassificationRepoRef = useRef<AppClassificationRepository | null>(null);
   const resourceScanRootRepoRef = useRef<ResourceScanRootRepository | null>(null);
   const resourceCacheRepoRef = useRef<ResourceCacheRepository | null>(null);
   const modelProfileRepoRef = useRef<ModelProfileRepositoryLike>(null);
@@ -598,19 +1677,23 @@ function App() {
     imagesProgress,
     classifying,
     classifyProgress,
+    classifyError,
     appsClassifying,
     appsClassifyProgress,
+    appsClassifyError,
     mountRoots,
     categoryStats,
     appCategoryStats,
     resourceScanRoots,
     handleRefreshApps,
     handleUpdateAppCategory,
+    handleUpdateFileCategory,
     handleRefreshDocuments,
     handleRefreshImages,
     handleNavigateDirectory,
     handleListDirectory,
     handleRefreshScan,
+    handleRefreshResourceRoots,
     handleClassifyDocuments: runClassifyDocuments,
     handleClassifyApps: runClassifyApps,
     handleCancelClassify,
@@ -623,6 +1706,8 @@ function App() {
   } = useScannedData({
     activeView,
     runtime,
+    repositoriesReadyKey: knowledgeRepositoriesReadyKey,
+    appClassificationRepoRef,
     fileClassificationRepoRef,
     resourceScanRootRepoRef,
     resourceCacheRepoRef,
@@ -640,15 +1725,124 @@ function App() {
   });
   submitGoalRef.current = submitGoal;
   useEffect(() => {
-    setSkillEntries(applySkillTranslationCache(buildSkillEntries(mcpConfig), skillTranslationCache));
-  }, [mcpConfig, skillTranslationCache]);
+    setSkillEntries(applySkillTranslationCache(
+      buildSkillEntries(mcpConfig, userSkills, codexMcpServers, disabledBuiltinToolNames, mcpDiscoveryErrors),
+      skillTranslationCache,
+    ));
+  }, [codexMcpServers, disabledBuiltinToolNames, mcpConfig, mcpDiscoveryErrors, skillTranslationCache, userSkills]);
 
-  // Keep trusted computer apps in sync with localStorage writes from app-runtime.
   useEffect(() => {
-    const handler = () => setTrustedComputerApps(loadTrustedComputerApps());
-    window.addEventListener("javis:computer-trusted-apps-changed", handler);
-    return () => window.removeEventListener("javis:computer-trusted-apps-changed", handler);
-  }, []);
+    enabledSkillContextsLoadedRef.current = false;
+    void readEnabledSkillContextsCached(true).catch((error) => {
+      logNonFatalError("Failed to refresh enabled skill context cache", error);
+    });
+  }, [userSkills]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const cache = getMcpToolDescriptorCache();
+    const servers = buildMcpRuntimeServers(mcpConfig, codexMcpServers)
+      .filter((server) => isExecutableMcpServer(server));
+    if (servers.length === 0) {
+      if (cache.size > 0) {
+        cache.clear();
+        saveMcpToolDescriptorCache(
+          typeof window === "undefined" ? undefined : window.localStorage,
+          cache,
+        );
+      }
+      setMcpToolDescriptors([]);
+      setMcpDiscoveryErrors({});
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const activeKeys = new Set(servers.map((server) => mcpRuntimeServerKey(server)));
+    const cachedResults: Array<{ key: string; descriptors: ToolDescriptor[] }> = [];
+    const serversToDiscover: McpRuntimeServerConfig[] = [];
+    for (const server of servers) {
+      const key = mcpRuntimeServerKey(server);
+      const cachedDescriptors = getFreshCachedMcpToolDescriptors(cache, server);
+      if (cachedDescriptors) {
+        cachedResults.push({ key, descriptors: cachedDescriptors });
+      } else {
+        serversToDiscover.push(server);
+      }
+    }
+    pruneMcpToolDescriptorCache(cache, activeKeys);
+    setMcpDiscoveryErrors({});
+    setMcpToolDescriptors(dedupeToolDescriptors(cachedResults.flatMap((result) => result.descriptors)));
+    if (serversToDiscover.length === 0) {
+      saveMcpToolDescriptorCache(
+        typeof window === "undefined" ? undefined : window.localStorage,
+        cache,
+      );
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    void (async () => {
+      const descriptorResults = await mapWithConcurrency(serversToDiscover, MCP_DISCOVERY_CONCURRENCY, async (server) => {
+        const key = mcpRuntimeServerKey(server);
+        try {
+          const listToolsResult = await invoke<unknown>("call_mcp_server_tool", {
+            request: {
+              serverName: server.name,
+              source: server.source,
+              action: "listTools",
+              timeoutMs: 5_000,
+            },
+          });
+          const descriptors = buildMcpToolDescriptorsFromList(server, listToolsResult);
+          setCachedMcpToolDescriptors(cache, server, descriptors);
+          return { key, descriptors };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          logNonFatalError(`Failed to discover MCP tools for ${server.source}:${server.name}`, error);
+          return { key, descriptors: [] as ToolDescriptor[], error: message };
+        }
+      });
+      if (cancelled) return;
+      pruneMcpToolDescriptorCache(cache, activeKeys);
+      saveMcpToolDescriptorCache(
+        typeof window === "undefined" ? undefined : window.localStorage,
+        cache,
+      );
+      const nextDiscoveryErrors: Record<string, string> = {};
+      for (const result of descriptorResults) {
+        if (result.error) {
+          nextDiscoveryErrors[result.key] = `tools/list 失败：${result.error}`;
+        }
+      }
+      setMcpDiscoveryErrors(nextDiscoveryErrors);
+      setMcpToolDescriptors(dedupeToolDescriptors([
+        ...cachedResults.flatMap((result) => result.descriptors),
+        ...descriptorResults.flatMap((result) => result.descriptors),
+      ]));
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [codexMcpServers, mcpConfig]);
+
+  useEffect(() => {
+    setSkillSearchResults((current) =>
+      current.map((result) => ({
+        ...result,
+        installed: isSkillSearchResultInstalled(
+          result.url,
+          result.title,
+          result.kind,
+          userSkills,
+          mcpConfig,
+          codexMcpServers,
+        ),
+      })),
+    );
+  }, [codexMcpServers, mcpConfig, userSkills]);
 
   function showAiConfigRequired(feature: string) {
     setAiConfigPrompt({
@@ -686,7 +1880,7 @@ function App() {
     setSkillTranslationStatus("translating");
     setSkillTranslationError(null);
     try {
-      const sourceSkills = buildSkillEntries(mcpConfig);
+      const sourceSkills = buildSkillEntries(mcpConfig, userSkills, codexMcpServers, disabledBuiltinToolNames, mcpDiscoveryErrors);
       const missingSkills = sourceSkills.filter((skill) => {
         const cached = skillTranslationCache[skill.id];
         return !cached || cached.sourceSignature !== getSkillTranslationSourceSignature(skill);
@@ -741,7 +1935,9 @@ function App() {
     try {
       const searchQuery = [
         trimmed,
-        kind === "mcp" ? "MCP server" : "Codex skill",
+        kind === "mcp"
+          ? "\"MCP server\" modelcontextprotocol filename:package.json"
+          : "\"SKILL.md\" filename:SKILL.md \"Codex skill\"",
         source === "github" ? "site:github.com" : "",
       ].filter(Boolean).join(" ");
       const results = await invoke<Array<{
@@ -753,20 +1949,461 @@ function App() {
         request: {
           query: searchQuery,
           maxResults: 8,
+          searchType: source === "github" ? "code" : "auto",
         },
       });
-      setSkillSearchResults(results.map((result, index) => ({
-        id: `${result.url}-${index}`,
-        title: result.title?.trim() || result.url,
-        description: result.excerpt,
-        url: result.url,
-        source: result.provider || source,
-        kind,
-      })));
+      setSkillSearchResults(results
+        .filter((result) => isSupportedSkillMarketUrl(result.url, kind))
+        .map((result, index) => ({
+          id: `${result.url}-${index}`,
+          title: result.title?.trim() || result.url,
+          description: result.excerpt,
+          url: result.url,
+          source: result.provider || source,
+          kind,
+          installed: isSkillSearchResultInstalled(result.url, result.title, kind, userSkills, mcpConfig, codexMcpServers),
+        })));
       setSkillSearchStatus("idle");
     } catch (error) {
       logNonFatalError("Failed to search skill market", error);
       setSkillSearchStatus("error");
+    }
+  }
+
+  async function handleRefreshSkillMarketSuggestions(
+    source: WorkbenchSkillSearchSource,
+    kind: WorkbenchSkillSearchKind,
+  ) {
+    if (skillMarketSuggestionStatus === "refreshing") {
+      return;
+    }
+    setSkillMarketSuggestionStatus("refreshing");
+    try {
+      const keywords = buildSkillMarketSuggestionKeywords(userProfileMemorySummary, agentMemorySummary);
+      const queries = buildSkillMarketSuggestionQueries(kind);
+      const results: SearchWebSourceResult[] = [];
+      const seenUrls = new Set<string>();
+      let lastError: unknown = null;
+
+      for (const searchQuery of queries) {
+        try {
+          const queryResults = await invoke<SearchWebSourceResult[]>("search_web_sources", {
+            request: {
+              query: searchQuery,
+              maxResults: SKILL_MARKET_SUGGESTION_LIMIT,
+              searchType: source === "github" ? "code" : "auto",
+            },
+          });
+          for (const result of queryResults) {
+            if (!isSupportedSkillMarketUrl(result.url, kind) || seenUrls.has(result.url)) {
+              continue;
+            }
+            seenUrls.add(result.url);
+            results.push(result);
+            if (results.length >= SKILL_MARKET_SUGGESTION_LIMIT) {
+              break;
+            }
+          }
+        } catch (error) {
+          lastError = error;
+        }
+        if (results.length >= SKILL_MARKET_SUGGESTION_LIMIT) {
+          break;
+        }
+      }
+
+      if (results.length === 0) {
+        if (lastError) {
+          logNonFatalError("Failed to refresh skill market suggestions", lastError);
+        }
+        setSkillMarketSuggestionStatus("error");
+        return;
+      }
+
+      setSkillMarketSuggestions(rankSkillMarketSuggestionResults(results, keywords)
+        .slice(0, SKILL_MARKET_SUGGESTION_LIMIT)
+        .map((result) => ({
+          title: normalizeSkillSuggestionTitle(result.title, result.url),
+          description: buildSkillSuggestionDescription(
+            result.excerpt,
+            getSkillSuggestionMatchedKeywords(result, keywords),
+          ),
+          url: result.url,
+          source: result.provider || source,
+        })));
+      setSkillMarketSuggestionStatus("idle");
+    } catch (error) {
+      logNonFatalError("Failed to refresh skill market suggestions", error);
+      setSkillMarketSuggestionStatus("error");
+    }
+  }
+
+  function updateSkillSearchResult(id: string, patch: Partial<WorkbenchSkillSearchResult>) {
+    setSkillSearchResults((current) =>
+      current.map((result) => result.id === id ? { ...result, ...patch } : result),
+    );
+  }
+
+  async function refreshUserSkills() {
+    const skills = await invoke<UserSkillSummary[]>("scan_user_skills");
+    invalidateEnabledSkillContextCache();
+    setUserSkills(skills);
+    return skills;
+  }
+
+  function invalidateEnabledSkillContextCache() {
+    enabledSkillContextsLoadedRef.current = false;
+    enabledSkillContextsLoadRef.current = null;
+  }
+
+  async function readEnabledSkillContextsCached(forceRefresh = false): Promise<EnabledUserSkillContext[]> {
+    if (!forceRefresh && enabledSkillContextsLoadedRef.current) {
+      return enabledSkillContextsRef.current;
+    }
+    if (!forceRefresh && enabledSkillContextsLoadRef.current) {
+      return enabledSkillContextsLoadRef.current;
+    }
+    const loadPromise = invoke<EnabledUserSkillContext[]>("read_enabled_user_skill_contexts")
+      .then((contexts) => {
+        if (enabledSkillContextsLoadRef.current === loadPromise) {
+          enabledSkillContextsRef.current = contexts;
+          enabledSkillContextsLoadedRef.current = true;
+        }
+        return contexts;
+      })
+      .finally(() => {
+        if (enabledSkillContextsLoadRef.current === loadPromise) {
+          enabledSkillContextsLoadRef.current = null;
+        }
+      });
+    enabledSkillContextsLoadRef.current = loadPromise;
+    return loadPromise;
+  }
+
+  async function refreshCodexMcpServers() {
+    const servers = await invoke<CodexMcpServerSummary[]>("scan_codex_mcp_servers");
+    setCodexMcpServers(servers);
+    return servers;
+  }
+
+  async function setCodexMcpEnabledOnDisk(serverName: string, enabled: boolean, source?: string) {
+    const servers = await invoke<CodexMcpServerSummary[]>("set_codex_mcp_server_enabled", {
+      name: serverName,
+      source,
+      enabled,
+    });
+    setCodexMcpServers(servers);
+    return servers;
+  }
+
+  async function handleInstallSkillMarketResult(result: WorkbenchSkillSearchResult) {
+    if (result.installing || result.installed) {
+      return;
+    }
+    updateSkillSearchResult(result.id, { installing: true, installError: undefined });
+    try {
+      if (result.kind === "skill") {
+        const installed = await invoke<UserSkillSummary>("install_user_skill_from_github", {
+          request: {
+            url: result.url,
+            title: result.title,
+            description: result.description,
+          },
+        });
+        invalidateEnabledSkillContextCache();
+        setUserSkills((current) => {
+          const next = current.filter((skill) => skill.id !== installed.id);
+          return [...next, installed].sort((a, b) =>
+            a.source.localeCompare(b.source) || a.name.localeCompare(b.name),
+          );
+        });
+      } else {
+        const installed = await invoke<InstalledMcpServerSummary>("install_mcp_server_from_github", {
+          request: {
+            url: result.url,
+            title: result.title,
+          },
+        });
+        const servers = await refreshCodexMcpServers();
+        const installedServer = servers.find((server) =>
+          server.source === "codex" && server.name === installed.name
+        );
+        if (installedServer && isExecutableMcpServer(installedServer)) {
+          try {
+            const listToolsResult = await invoke<unknown>("call_mcp_server_tool", {
+              request: {
+                serverName: installedServer.name,
+                source: installedServer.source,
+                action: "listTools",
+                timeoutMs: 5_000,
+              },
+            });
+            const descriptors = buildMcpToolDescriptorsFromList(installedServer, listToolsResult);
+            const cache = getMcpToolDescriptorCache();
+            setCachedMcpToolDescriptors(cache, installedServer, descriptors);
+            saveMcpToolDescriptorCache(
+              typeof window === "undefined" ? undefined : window.localStorage,
+              cache,
+            );
+            setMcpDiscoveryErrors((current) => {
+              const next = { ...current };
+              delete next[mcpRuntimeServerKey(installedServer)];
+              return next;
+            });
+            setMcpToolDescriptors((current) =>
+              dedupeToolDescriptors([
+                ...current.filter((descriptor) =>
+                  getMcpDescriptorServerKey(descriptor) !== mcpRuntimeServerKey(installedServer)
+                ),
+                ...descriptors,
+              ])
+            );
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            const installError = `MCP installed, but tools/list failed and the server was disabled until fixed: ${message}`;
+            await setCodexMcpEnabledOnDisk(
+              installedServer.name,
+              false,
+              installedServer.source,
+            ).catch((disableError) =>
+              logNonFatalError("Failed to disable MCP server after install discovery error", disableError)
+            );
+            setMcpDiscoveryErrors((current) => ({
+              ...current,
+              [mcpRuntimeServerKey(installedServer)]: installError,
+            }));
+            updateSkillSearchResult(result.id, {
+              installing: false,
+              installed: true,
+              installError,
+            });
+            return;
+          }
+        }
+      }
+      updateSkillSearchResult(result.id, { installing: false, installed: true, installError: undefined });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logNonFatalError("Failed to install skill market result", error);
+      updateSkillSearchResult(result.id, {
+        installing: false,
+        installed: false,
+        installError: message,
+      });
+    }
+  }
+
+  async function handleToggleSkillEnabled(id: string, enabled: boolean) {
+    if (isBuiltinToolToggleable(id)) {
+      setDisabledBuiltinToolNames((current) => {
+        const next = new Set(current);
+        if (enabled) {
+          next.delete(id);
+        } else {
+          next.add(id);
+        }
+        persistPreference(BUILTIN_TOOL_DISABLED_NAMES_PREFERENCE_KEY, serializeDisabledBuiltinToolNames(next));
+        return next;
+      });
+      return;
+    }
+    if (id.startsWith("codex-mcp-")) {
+      const parsed = parseCodexMcpSkillEntryId(id);
+      if (!parsed) return;
+      try {
+        await setCodexMcpEnabledOnDisk(parsed.name, enabled, parsed.source);
+      } catch (error) {
+        logNonFatalError("Failed to save Codex MCP enabled state", error);
+        await refreshCodexMcpServers().catch((refreshError) =>
+          logNonFatalError("Failed to refresh Codex MCP servers after toggle error", refreshError),
+        );
+      }
+      return;
+    }
+    if (id.startsWith("mcp-")) {
+      const serverName = id.slice("mcp-".length);
+      const nextConfig = mcpConfig.map((server) =>
+        server.name === serverName ? { ...server, enabled } : server,
+      );
+      setMcpConfig(nextConfig);
+      try {
+        await saveMcpConfig(nextConfig);
+        setMcpConfigError(null);
+      } catch (error) {
+        logNonFatalError("Failed to save MCP config", error);
+        setMcpConfig(mcpConfig);
+        setMcpConfigError(String(error));
+      }
+      return;
+    }
+    if (id.startsWith("skill-")) {
+      const skillId = id.slice("skill-".length);
+      try {
+        const updated = await invoke<UserSkillSummary>("set_user_skill_enabled", { id: skillId, enabled });
+        invalidateEnabledSkillContextCache();
+        setUserSkills((current) => {
+          const next = current.filter((skill) => skill.id !== updated.id);
+          return [...next, updated].sort((a, b) =>
+            a.source.localeCompare(b.source) || a.name.localeCompare(b.name),
+          );
+        });
+      } catch (error) {
+        logNonFatalError("Failed to toggle user skill", error);
+        await refreshUserSkills().catch((refreshError) =>
+          logNonFatalError("Failed to refresh user skills after toggle error", refreshError),
+        );
+      }
+    }
+  }
+
+  async function handleDeleteSkill(id: string) {
+    if (!window.confirm("确定删除这个用户添加的技能或 MCP 吗？")) {
+      return;
+    }
+    if (id.startsWith("skill-")) {
+      const skillId = id.slice("skill-".length);
+      try {
+        await invoke("delete_user_skill", { id: skillId });
+        const skills = await refreshUserSkills();
+        const removedSkill = userSkills.find((skill) => skill.id === skillId);
+        if (removedSkill) {
+          setSkillSearchResults((current) =>
+            current.map((result) =>
+              result.title === removedSkill.name && result.kind === "skill"
+                ? { ...result, installed: skills.some((skill) => skill.name === removedSkill.name) }
+                : result,
+            ),
+          );
+        }
+      } catch (error) {
+        logNonFatalError("Failed to delete user skill", error);
+      }
+      return;
+    }
+    if (id.startsWith("mcp-")) {
+      const serverName = id.slice("mcp-".length);
+      const nextConfig = mcpConfig.filter((server) => server.name !== serverName);
+      setMcpConfig(nextConfig);
+      try {
+        await saveMcpConfig(nextConfig);
+        setMcpConfigError(null);
+      } catch (error) {
+        logNonFatalError("Failed to delete MCP config", error);
+        setMcpConfig(mcpConfig);
+        setMcpConfigError(String(error));
+      }
+      return;
+    }
+    if (id.startsWith("codex-mcp-")) {
+      const parsed = parseCodexMcpSkillEntryId(id);
+      if (!parsed) return;
+      const server = codexMcpServers.find((item) =>
+        item.name === parsed.name && item.source === parsed.source
+      );
+      try {
+        if (server?.removable) {
+          const servers = await invoke<CodexMcpServerSummary[]>("delete_codex_mcp_server", {
+            name: parsed.name,
+            source: parsed.source,
+          });
+          setCodexMcpServers(servers);
+        } else {
+          await setCodexMcpEnabledOnDisk(parsed.name, false, parsed.source);
+        }
+      } catch (error) {
+        logNonFatalError("Failed to delete or disable Codex MCP config", error);
+        await refreshCodexMcpServers().catch((refreshError) =>
+          logNonFatalError("Failed to refresh Codex MCP servers after delete error", refreshError),
+        );
+      }
+    }
+  }
+
+  async function handleDisableAllSkills() {
+    setDisabledBuiltinToolNames(() => {
+      const next = new Set(
+        initialToolDescriptors
+          .filter((descriptor) => isBuiltinToolToggleable(descriptor.name))
+          .map((descriptor) => descriptor.name),
+      );
+      persistPreference(BUILTIN_TOOL_DISABLED_NAMES_PREFERENCE_KEY, serializeDisabledBuiltinToolNames(next));
+      return next;
+    });
+
+    for (const skill of userSkills.filter((item) => item.enabled)) {
+      try {
+        await invoke("set_user_skill_enabled", { id: skill.id, enabled: false });
+      } catch (error) {
+        logNonFatalError(`Failed to disable user skill ${skill.id}`, error);
+      }
+    }
+    await refreshUserSkills().catch((error) =>
+      logNonFatalError("Failed to refresh user skills after disabling", error),
+    );
+
+    for (const server of codexMcpServers.filter((item) => item.enabled)) {
+      try {
+        await setCodexMcpEnabledOnDisk(server.name, false, server.source);
+      } catch (error) {
+        logNonFatalError(`Failed to disable Codex MCP ${server.name}`, error);
+        await refreshCodexMcpServers().catch((refreshError) =>
+          logNonFatalError("Failed to refresh Codex MCP servers after bulk disable error", refreshError),
+        );
+      }
+    }
+
+    const nextMcpConfig = mcpConfig.map((server) => ({ ...server, enabled: false }));
+    setMcpConfig(nextMcpConfig);
+    try {
+      await saveMcpConfig(nextMcpConfig);
+      setMcpConfigError(null);
+    } catch (error) {
+      logNonFatalError("Failed to disable all MCP config", error);
+      setMcpConfig(mcpConfig);
+      setMcpConfigError(String(error));
+    }
+  }
+
+  async function handleDeleteAllSkills() {
+    if (!window.confirm("确定删除所有用户添加的 Skill、Javis MCP 和 Javis 安装的 Codex MCP 吗？手动配置的 Codex MCP 会保留但关闭。")) {
+      return;
+    }
+
+    const deleteSkillPromises = userSkills.filter((skill) => skill.removable).map((skill) =>
+      invoke("delete_user_skill", { id: skill.id }).catch((error) => {
+        logNonFatalError(`Failed to delete user skill ${skill.id}`, error);
+      }),
+    );
+    await Promise.all(deleteSkillPromises);
+    await refreshUserSkills().catch((error) => logNonFatalError("Failed to refresh user skills", error));
+
+    setMcpConfig([]);
+    try {
+      await saveMcpConfig([]);
+      setMcpConfigError(null);
+    } catch (error) {
+      logNonFatalError("Failed to delete all MCP config", error);
+      setMcpConfig(mcpConfig);
+      setMcpConfigError(String(error));
+    }
+
+    for (const server of codexMcpServers) {
+      try {
+        if (server.removable) {
+          const servers = await invoke<CodexMcpServerSummary[]>("delete_codex_mcp_server", {
+            name: server.name,
+            source: server.source,
+          });
+          setCodexMcpServers(servers);
+        } else {
+          await setCodexMcpEnabledOnDisk(server.name, false, server.source);
+        }
+      } catch (error) {
+        logNonFatalError(`Failed to delete or disable Codex MCP ${server.name}`, error);
+        await refreshCodexMcpServers().catch((refreshError) =>
+          logNonFatalError("Failed to refresh Codex MCP servers after bulk delete error", refreshError),
+        );
+      }
     }
   }
 
@@ -794,6 +2431,27 @@ function App() {
       });
   }, []);
 
+  useEffect(() => {
+    invoke<UserSkillSummary[]>("scan_user_skills")
+      .then((skills) => {
+        invalidateEnabledSkillContextCache();
+        setUserSkills(skills);
+      })
+      .catch((error) => {
+        logNonFatalError("Failed to scan user skills", error);
+      });
+  }, []);
+
+  useEffect(() => {
+    invoke<CodexMcpServerSummary[]>("scan_codex_mcp_servers")
+      .then((servers) => {
+        setCodexMcpServers(servers);
+      })
+      .catch((error) => {
+        logNonFatalError("Failed to scan Codex MCP servers", error);
+      });
+  }, []);
+
   // ── Initialize SQLite database ────────────────────────────────────
   useEffect(() => {
     if (didInitDatabaseRef.current) {
@@ -817,9 +2475,14 @@ function App() {
       await runDesktopDatabaseMigrations(database, USER_PREFERENCES_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, JSONL_LOG_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, FILE_CLASSIFICATION_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, APP_CLASSIFICATION_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, [RESOURCE_SCAN_ROOTS_MIGRATION]);
       await runDesktopDatabaseMigrations(database, [RESOURCE_FILE_CACHE_MIGRATION, RESOURCE_FILE_CACHE_INDEX_MIGRATION]);
       await runDesktopDatabaseMigrations(database, USER_PROFILE_MEMORY_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, VECTOR_INDEX_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, AGENT_MEMORY_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, CURRENT_GOAL_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, GOAL_EVENT_MIGRATIONS);
 
       // One-time import from localStorage
       const taskHistoryRepo = createTaskHistoryRepository(database);
@@ -828,6 +2491,46 @@ function App() {
       const modelSettingsRepo = createModelSettingsRepository(database);
       const modelProfileRepo = createModelProfileRepository(database);
       const userProfileMemoryRepo = createUserProfileMemoryRepository(database);
+      const vectorIndexRepo = createVectorIndexRepository(database);
+      const agentMemoryEmbeddingProvider = {
+        get dimensions() {
+          return runtimePreferencesRef.current.agentMemoryEmbeddingDimensions;
+        },
+        embedTexts: async (texts: string[]) => {
+          const preferences = runtimePreferencesRef.current;
+          const provider = createAgentMemoryEmbeddingProvider(
+            preferences.agentMemoryEmbeddingMode === "openai_compatible"
+              ? {
+                  kind: "openai-compatible",
+                  provider: preferences.agentMemoryEmbeddingProvider,
+                  model: preferences.agentMemoryEmbeddingModel,
+                  baseUrl: preferences.agentMemoryEmbeddingBaseUrl,
+                  apiKeyReference: preferences.agentMemoryEmbeddingApiKeyReference,
+                  dimensions: preferences.agentMemoryEmbeddingDimensions,
+                }
+              : {
+                  kind: "local",
+                  dimensions: preferences.agentMemoryEmbeddingDimensions,
+                },
+            {
+              embedOpenAiCompatible: (request) =>
+                invoke<number[][]>("embed_model_texts", { request }),
+            },
+          );
+          return provider.embedTexts(texts);
+        },
+      };
+      const agentMemoryRepo = createAgentMemoryRepository(database, {
+        vectorIndex: vectorIndexRepo,
+        embeddingProvider: agentMemoryEmbeddingProvider,
+      });
+      try {
+        await agentMemoryRepo.backfillVectorIndex({ limit: 500 });
+      } catch (error) {
+        console.warn("Agent memory vector backfill failed during startup", error);
+      }
+      const currentGoalRepo = createCurrentGoalRepository(database);
+      const goalTimelineRepo = createGoalTimelineRepository(database);
 
       taskHistoryRepoRef.current = taskHistoryRepo;
       workspaceSessionRepoRef.current = workspaceSessionRepo;
@@ -835,6 +2538,9 @@ function App() {
       modelSettingsRepoRef.current = modelSettingsRepo;
       modelProfileRepoRef.current = modelProfileRepo;
       userProfileMemoryRepoRef.current = userProfileMemoryRepo;
+      agentMemoryRepoRef.current = agentMemoryRepo;
+      currentGoalRepoRef.current = currentGoalRepo;
+      goalTimelineRepoRef.current = goalTimelineRepo;
 
       // Load saved model configuration so chat/commands work on first launch
       try {
@@ -861,11 +2567,15 @@ function App() {
       const fileClassificationRepo = createFileClassificationRepository(database);
       fileClassificationRepoRef.current = fileClassificationRepo;
 
+      const appClassificationRepo = createAppClassificationRepository(database);
+      appClassificationRepoRef.current = appClassificationRepo;
+
       const resourceScanRootRepo = createResourceScanRootRepository(database);
       resourceScanRootRepoRef.current = resourceScanRootRepo;
 
       const resourceCacheRepo = createResourceCacheRepository(database);
       resourceCacheRepoRef.current = resourceCacheRepo;
+      setKnowledgeRepositoriesReadyKey((value) => value + 1);
 
       const importedHistory = await taskHistoryRepo.importFromLocalStorage(window.localStorage);
       const importedWorkspaceSession = await workspaceSessionRepo.importFromLocalStorage(
@@ -876,6 +2586,47 @@ function App() {
       );
       const legacySettings = await modelSettingsRepo.importFromLocalStorage(window.localStorage);
       const importedUserProfileMemory = await userProfileMemoryRepo.importFromLocalStorage(window.localStorage);
+      let importedCurrentGoal = await currentGoalRepo.importFromLocalStorage(window.localStorage);
+      currentGoalRef.current = importedCurrentGoal;
+      setCurrentGoal(importedCurrentGoal);
+      if (importedCurrentGoal) {
+        let [events, evaluations] = await Promise.all([
+          goalTimelineRepo.listEvents(importedCurrentGoal.id),
+          goalTimelineRepo.listEvaluations(importedCurrentGoal.id),
+        ]);
+        const latestEvaluation = findGoalEvaluation(importedCurrentGoal, evaluations);
+        if (latestEvaluation) {
+          const reconciliation = reconcileGoalWithPersistedEvaluation(
+            importedCurrentGoal,
+            latestEvaluation,
+          );
+          if (reconciliation.events.length > 0 && reconciliation.goal) {
+            const reconciledGoal = await currentGoalRepo.save(reconciliation.goal);
+            if (reconciledGoal) {
+              importedCurrentGoal = reconciledGoal;
+              currentGoalRef.current = importedCurrentGoal;
+              setCurrentGoal(importedCurrentGoal);
+              for (const event of reconciliation.events) {
+                const savedEvent = await goalTimelineRepo.appendEvent(event);
+                if (savedEvent) {
+                  events = [...events.filter((item) => item.id !== savedEvent.id), savedEvent];
+                }
+              }
+            }
+          }
+        }
+        currentGoalEventsRef.current = events;
+        currentGoalEvaluationsRef.current = evaluations;
+        setCurrentGoalEvents(events);
+        setCurrentGoalEvaluations(evaluations);
+        evaluatedGoalTaskIdsRef.current = new Set(evaluations.map((evaluation) => evaluation.taskId));
+      } else {
+        currentGoalEventsRef.current = [];
+        currentGoalEvaluationsRef.current = [];
+        setCurrentGoalEvents([]);
+        setCurrentGoalEvaluations([]);
+        evaluatedGoalTaskIdsRef.current.clear();
+      }
       const loadedConfig = normalizeModelConfigurationConnections(
         await modelProfileRepo.importFromLegacySettings(legacySettings),
         PROVIDER_DEFINITIONS,
@@ -926,15 +2677,46 @@ function App() {
         importedPrefs = { ...importedPrefs, ...pendingPrefs };
         removePendingPreferencesFromLocalStorage();
       }
+      setTrustedComputerApps(loadTrustedComputerAppsFromPrefs(importedPrefs));
       if (importedPrefs[PREF_KEYS.LOCALE]) setLocalePreference(importedPrefs[PREF_KEYS.LOCALE]);
       if (importedPrefs[PREF_KEYS.SIDEBAR_WIDTH]) setPrefSidebarWidth(Number(importedPrefs[PREF_KEYS.SIDEBAR_WIDTH]));
       if (importedPrefs[PREF_KEYS.ACTIVITY_HEIGHT]) setPrefActivityHeight(Number(importedPrefs[PREF_KEYS.ACTIVITY_HEIGHT]));
       if (importedPrefs[PREF_KEYS.IS_SIDEBAR_OPEN]) setPrefIsSidebarOpen(importedPrefs[PREF_KEYS.IS_SIDEBAR_OPEN] === "true");
       if (importedPrefs[PREF_KEYS.IS_ACTIVITY_OPEN]) setPrefIsActivityOpen(importedPrefs[PREF_KEYS.IS_ACTIVITY_OPEN] === "true");
       if (importedPrefs[PREF_KEYS.IS_INSPECTOR_OPEN]) setPrefIsInspectorOpen(importedPrefs[PREF_KEYS.IS_INSPECTOR_OPEN] === "true");
+      const loadedRuntimePreferences = runtimePreferencesFromPrefs(importedPrefs);
+      setRuntimePreferences(loadedRuntimePreferences);
+      setAgentMemoryEnabled(loadedRuntimePreferences.agentMemoryScope !== "off");
+      setComposeMode(composeModeForStartupPreference(
+        loadedRuntimePreferences.defaultStartupMode,
+        importedWorkspaceSession.workspacePath,
+      ));
+      if (
+        loadedRuntimePreferences.agentMemoryScope !== "off" &&
+        importedPrefs[AGENT_MEMORY_HISTORY_RESTORE_DONE_PREFERENCE_KEY] !== "true"
+      ) {
+        await restoreAgentMemoryFromTaskHistory({
+          repository: agentMemoryRepo,
+          history: importedHistory,
+          workspacePath: importedWorkspaceSession.workspacePath,
+          enabled: true,
+        });
+        await preferencesRepo.set(AGENT_MEMORY_HISTORY_RESTORE_DONE_PREFERENCE_KEY, "true");
+        importedPrefs = {
+          ...importedPrefs,
+          [AGENT_MEMORY_HISTORY_RESTORE_DONE_PREFERENCE_KEY]: "true",
+        };
+      }
+      if (loadedRuntimePreferences.agentMemoryScope !== "off") {
+        const workspaceMemoryId = createCanonicalWorkspaceId(importedWorkspaceSession.workspacePath);
+        setAgentMemorySummary(
+          await agentMemoryRepo.getSummary(workspaceMemoryId || undefined, true),
+        );
+      }
       if (importedPrefs[PREF_KEYS.SKILL_TRANSLATIONS_ZH]) {
         setSkillTranslationCache(parseSkillTranslationCache(importedPrefs[PREF_KEYS.SKILL_TRANSLATIONS_ZH]));
       }
+      setDisabledBuiltinToolNames(parseDisabledBuiltinToolNames(importedPrefs[BUILTIN_TOOL_DISABLED_NAMES_PREFERENCE_KEY] ?? null));
       if (importedPrefs[PREF_KEYS.ACTIVE_VIEW]) {
         const validViews: ActiveView[] = ["chat", "automated", "skills", "apps", "documents", "gallery", "computer"];
         if (validViews.includes(importedPrefs[PREF_KEYS.ACTIVE_VIEW] as ActiveView)) {
@@ -945,6 +2727,14 @@ function App() {
       // Import JSONL logs from localStorage into SQLite
       await importTaskSessionJsonlFromLocalStorage(database, window.localStorage);
       await importToolCallAuditJsonlFromLocalStorage(database, window.localStorage);
+      recentToolCallAuditRecordsRef.current = await listRecentToolCallAuditRecords(database, 200);
+      setTask((current) => current.id === "task-idle"
+        ? createInitialTaskSnapshot({
+            capabilityVerification: buildRuntimeCapabilityVerification({
+              toolAuditRecords: recentToolCallAuditRecordsRef.current,
+            }),
+          })
+        : current);
 
       // Load workspace definitions from disk
       try {
@@ -991,6 +2781,51 @@ function App() {
       setTask(createRestoredCodePatchApprovalTask(pendingRecord));
       return;
     }
+    if (pendingRecord.toolName === GIT_PUSH_APPROVAL_TOOL_NAME) {
+      if (!pendingRecord.gitPushPlan) {
+        updateApprovalRecord(expireApprovalRecord(pendingRecord, new Date().toISOString()));
+        return;
+      }
+      clearQueuedTaskSnapshots();
+      setTask(createRestoredGitPushApprovalTask(pendingRecord));
+      return;
+    }
+    if (pendingRecord.toolName === GIT_COMMIT_APPROVAL_TOOL_NAME) {
+      if (!pendingRecord.gitCommitPlan) {
+        updateApprovalRecord(expireApprovalRecord(pendingRecord, new Date().toISOString()));
+        return;
+      }
+      clearQueuedTaskSnapshots();
+      setTask(createRestoredGitCommitApprovalTask(pendingRecord));
+      return;
+    }
+    if (pendingRecord.toolName === GIT_STAGE_APPROVAL_TOOL_NAME) {
+      if (!pendingRecord.gitStagePlan) {
+        updateApprovalRecord(expireApprovalRecord(pendingRecord, new Date().toISOString()));
+        return;
+      }
+      clearQueuedTaskSnapshots();
+      setTask(createRestoredGitStageApprovalTask(pendingRecord));
+      return;
+    }
+    if (pendingRecord.toolName === GIT_CREATE_PR_APPROVAL_TOOL_NAME) {
+      if (!pendingRecord.gitCreatePullRequestPlan) {
+        updateApprovalRecord(expireApprovalRecord(pendingRecord, new Date().toISOString()));
+        return;
+      }
+      clearQueuedTaskSnapshots();
+      setTask(createRestoredGitCreatePullRequestApprovalTask(pendingRecord));
+      return;
+    }
+    if (pendingRecord.toolName === GIT_COMMENT_PR_APPROVAL_TOOL_NAME) {
+      if (!pendingRecord.gitCommentPullRequestPlan) {
+        updateApprovalRecord(expireApprovalRecord(pendingRecord, new Date().toISOString()));
+        return;
+      }
+      clearQueuedTaskSnapshots();
+      setTask(createRestoredGitCommentPullRequestApprovalTask(pendingRecord));
+      return;
+    }
     clearQueuedTaskSnapshots();
     setTask(createRestoredPdfApprovalTask(pendingRecord));
   }, [approvalRecords, areDurableApprovalRecordsReady]);
@@ -1026,11 +2861,298 @@ function App() {
         next.imageDataUrls,
         true,
         next.rawGoal,
+        next.forcedMode,
+        next.goalId,
       );
       queuedSubmissionModeRef.current = null;
       queuedContinuationTaskRef.current = null;
     }, 0);
   }
+
+  function persistCurrentGoal(nextGoal: GoalState | null): GoalState | null {
+    const savedGoal = saveCurrentGoal(window.localStorage, nextGoal);
+    currentGoalRef.current = savedGoal;
+    setCurrentGoal(savedGoal);
+    const repository = currentGoalRepoRef.current;
+    if (repository) {
+      void (savedGoal ? repository.save(savedGoal) : repository.clear())
+        .catch((error) => logNonFatalError("Failed to persist current Goal", error));
+    }
+    return savedGoal;
+  }
+
+  function storeGoalEvent(event: GoalEvent): void {
+    if (currentGoalRef.current?.id === event.goalId) {
+      const nextEvents = [...currentGoalEventsRef.current.filter((item) => item.id !== event.id), event].slice(-200);
+      currentGoalEventsRef.current = nextEvents;
+      setCurrentGoalEvents(nextEvents);
+    }
+    const repository = goalTimelineRepoRef.current;
+    if (repository) {
+      void repository.appendEvent(event)
+        .catch((error) => logNonFatalError("Failed to persist Goal event", error));
+    }
+  }
+
+  async function saveGoalDecisionEvaluation(
+    goal: GoalState,
+    taskSnapshot: TaskSnapshot,
+    decision: GoalDecision,
+  ): Promise<GoalEvaluation> {
+    const evaluation = createGoalEvaluationFromDecision(goal, taskSnapshot, decision);
+    if (currentGoalRef.current?.id === goal.id) {
+      const nextEvaluations = [
+        ...currentGoalEvaluationsRef.current.filter((item) => item.id !== evaluation.id),
+        evaluation,
+      ].slice(-100);
+      currentGoalEvaluationsRef.current = nextEvaluations;
+      setCurrentGoalEvaluations(nextEvaluations);
+    }
+    const repository = goalTimelineRepoRef.current;
+    if (repository) {
+      await repository.saveEvaluation(evaluation);
+    }
+    return evaluation;
+  }
+
+  function startGoalIteration(
+    goal: GoalState,
+    prompt?: string,
+    latestTask?: TaskSnapshot,
+    latestEvaluation?: GoalEvaluation,
+  ): void {
+    const iterationPrompt = (prompt ?? goal.objective).trim();
+    if (!iterationPrompt) {
+      return;
+    }
+    const strategyApplication = applyGoalStrategies(
+      createGoalStrategyContext({
+        goal,
+        latestTask,
+        latestEvaluation,
+        events: currentGoalEventsRef.current,
+      }),
+      iterationPrompt,
+      goalStrategies,
+    );
+    for (const event of strategyApplication.events) {
+      storeGoalEvent(event);
+    }
+    submitGoal(
+      strategyApplication.prompt,
+      goal.workspacePath ?? workspaceRef.current,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      undefined,
+      "project",
+      goal.id,
+    );
+  }
+
+  function scheduleGoalContinuation(
+    goal: GoalState,
+    decision?: GoalDecision,
+    latestTask?: TaskSnapshot,
+    latestEvaluation?: GoalEvaluation,
+  ): void {
+    if (goalContinuationTimerRef.current) {
+      clearTimeout(goalContinuationTimerRef.current);
+      goalContinuationTimerRef.current = null;
+    }
+    goalContinuationTimerRef.current = setTimeout(() => {
+      goalContinuationTimerRef.current = null;
+      const current = currentGoalRef.current;
+      if (!current || current.id !== goal.id || current.status !== "active" || isGoalTerminal(current.status)) {
+        return;
+      }
+      startGoalIteration(
+        current,
+        createGoalContinuationPrompt({ goal: current, decision, latestTask, latestEvaluation }),
+        latestTask,
+        latestEvaluation,
+      );
+    }, 0);
+  }
+
+  function handleGoalTaskSnapshot(nextTask: TaskSnapshot): void {
+    let goal = currentGoalRef.current;
+    if (!goal || goal.status === "cleared") {
+      return;
+    }
+
+    const pendingBind = pendingGoalBindRef.current;
+    if (pendingBind?.goalId === goal.id && !goal.taskIds.includes(nextTask.id)) {
+      const transition = createGoalTaskBoundTransition(goal, nextTask);
+      goal = persistCurrentGoal(transition.goal) ?? goal;
+      pendingGoalBindRef.current = null;
+      transition.events.forEach(storeGoalEvent);
+    }
+
+    if (!goal.taskIds.includes(nextTask.id) || !isTerminalTaskStatus(nextTask.status)) {
+      return;
+    }
+    if (evaluatedGoalTaskIdsRef.current.has(nextTask.id)) {
+      return;
+    }
+    if (goal.status !== "active") {
+      return;
+    }
+    evaluatedGoalTaskIdsRef.current.add(nextTask.id);
+    storeGoalEvent(createGoalTaskTerminalEvent(goal, nextTask));
+
+    void (async () => {
+      try {
+        const repository = goalTimelineRepoRef.current;
+        let evaluation = repository
+          ? await repository.getEvaluationForTask(goal.id, nextTask.id).catch((error) => {
+              logNonFatalError("Failed to load persisted Goal evaluation", error);
+              return null;
+            })
+          : null;
+        let decision: GoalDecision | null = evaluation ? goalDecisionFromEvaluation(evaluation) : null;
+        if (evaluation) {
+          const restoredEvaluation = evaluation;
+          const nextEvaluations = [
+            ...currentGoalEvaluationsRef.current.filter((item) => item.id !== restoredEvaluation.id),
+            restoredEvaluation,
+          ].slice(-100);
+          currentGoalEvaluationsRef.current = nextEvaluations;
+          setCurrentGoalEvaluations(nextEvaluations);
+        }
+
+        if (!decision || !evaluation) {
+          decision = await runtime.evaluateGoalCompletion(goal, nextTask);
+          evaluation = await saveGoalDecisionEvaluation(goal, nextTask, decision);
+          storeGoalEvent(createGoalEvaluatedEvent(goal, evaluation));
+        }
+        const latestGoal = currentGoalRef.current;
+        if (!latestGoal || latestGoal.id !== goal.id || latestGoal.status !== "active") {
+          return;
+        }
+        const transition = applyGoalEvaluationTransition(latestGoal, nextTask, decision, evaluation);
+        const nextGoal = persistCurrentGoal(transition.goal);
+        transition.events.forEach(storeGoalEvent);
+        if (!nextGoal || nextGoal.status !== "active" || isGoalTerminal(nextGoal.status)) {
+          return;
+        }
+        scheduleGoalContinuation(nextGoal, decision, nextTask, evaluation);
+      } catch (error) {
+        evaluatedGoalTaskIdsRef.current.delete(nextTask.id);
+        logNonFatalError("Failed to evaluate Goal task", error);
+      }
+    })();
+  }
+
+  function findLatestGoalTask(goal: GoalState): TaskSnapshot | undefined {
+    return findLatestGoalTaskSnapshot(goal, task, historyCurrentRef.current);
+  }
+
+  function findLatestGoalEvaluation(goal: GoalState, taskId?: string): GoalEvaluation | undefined {
+    return findGoalEvaluation(goal, currentGoalEvaluationsRef.current, taskId);
+  }
+
+  function handlePauseGoal(): void {
+    const goal = currentGoalRef.current;
+    if (!goal || goal.status !== "active") {
+      return;
+    }
+    if (goalContinuationTimerRef.current) {
+      clearTimeout(goalContinuationTimerRef.current);
+      goalContinuationTimerRef.current = null;
+    }
+    const transition = createManualGoalTransition(goal, "pause");
+    persistCurrentGoal(transition.goal);
+    transition.events.forEach(storeGoalEvent);
+  }
+
+  function handleResumeGoal(): void {
+    const goal = currentGoalRef.current;
+    if (!goal || (goal.status !== "paused" && goal.status !== "blocked")) {
+      return;
+    }
+    const transition = createManualGoalTransition(goal, "resume");
+    const resumedGoal = persistCurrentGoal(transition.goal);
+    if (!resumedGoal) {
+      return;
+    }
+    transition.events.forEach(storeGoalEvent);
+    const latestTask = findLatestGoalTask(resumedGoal);
+    const latestEvaluation = findLatestGoalEvaluation(resumedGoal, latestTask?.id);
+    if (
+      latestTask &&
+      isTerminalTaskStatus(latestTask.status) &&
+      resumedGoal.taskIds.includes(latestTask.id) &&
+      !evaluatedGoalTaskIdsRef.current.has(latestTask.id)
+    ) {
+      handleGoalTaskSnapshot(latestTask);
+      return;
+    }
+    startGoalIteration(
+      resumedGoal,
+      createGoalContinuationPrompt({ goal: resumedGoal, latestTask, latestEvaluation }),
+      latestTask,
+      latestEvaluation,
+    );
+  }
+
+  function handleCompleteGoal(): void {
+    const goal = currentGoalRef.current;
+    if (!goal || goal.status === "complete" || goal.status === "cleared") {
+      return;
+    }
+    if (goalContinuationTimerRef.current) {
+      clearTimeout(goalContinuationTimerRef.current);
+      goalContinuationTimerRef.current = null;
+    }
+    const transition = createManualGoalTransition(goal, "complete");
+    persistCurrentGoal(transition.goal);
+    transition.events.forEach(storeGoalEvent);
+  }
+
+  function handleClearGoal(): void {
+    const goal = currentGoalRef.current;
+    if (goalContinuationTimerRef.current) {
+      clearTimeout(goalContinuationTimerRef.current);
+      goalContinuationTimerRef.current = null;
+    }
+    pendingGoalBindRef.current = null;
+    if (goal) {
+      createManualGoalTransition(goal, "clear").events.forEach(storeGoalEvent);
+    }
+    persistCurrentGoal(null);
+    currentGoalEventsRef.current = [];
+    currentGoalEvaluationsRef.current = [];
+    setCurrentGoalEvents([]);
+    setCurrentGoalEvaluations([]);
+    evaluatedGoalTaskIdsRef.current.clear();
+  }
+
+  useEffect(() => {
+    if (
+      isDatabaseInitializing ||
+      !currentGoal ||
+      currentGoal.status !== "active" ||
+      isTaskActive ||
+      isTaskActiveRef.current ||
+      goalContinuationTimerRef.current
+    ) {
+      return;
+    }
+    const latestTask = findLatestGoalTask(currentGoal);
+    const latestEvaluation = findLatestGoalEvaluation(currentGoal, latestTask?.id);
+    if (
+      latestTask &&
+      isTerminalTaskStatus(latestTask.status) &&
+      currentGoal.taskIds.includes(latestTask.id) &&
+      !evaluatedGoalTaskIdsRef.current.has(latestTask.id)
+    ) {
+      handleGoalTaskSnapshot(latestTask);
+      return;
+    }
+    scheduleGoalContinuation(currentGoal, latestEvaluation ? goalDecisionFromEvaluation(latestEvaluation) : undefined, latestTask, latestEvaluation);
+  }, [currentGoal, isDatabaseInitializing, isTaskActive]);
 
   function submitGoal(
     goalOverride?: string,
@@ -1040,28 +3162,89 @@ function App() {
     imageDataUrls?: string[],
     forceStart = false,
     queuedRawGoal?: string,
+    forcedMode?: "chat" | "project",
+    goalId?: string,
   ) {
     const rawGoal = (queuedRawGoal ?? goalOverride ?? draftGoal).trim();
     if (!rawGoal) {
       return;
     }
-    if (!ensureAiConfigured(composeMode === "project" ? "Agent 模式" : "Chat 模式")) {
+
+    const goalCommandObjective = !goalId && !forcedMode && !scheduledTaskId
+      ? parseGoalCommand(rawGoal)
+      : null;
+    if (goalCommandObjective) {
+      if (!ensureAiConfigured("Agent 模式")) {
+        return;
+      }
+      const transition = createGoalCreatedTransition({
+        objective: goalCommandObjective,
+        workspacePath: workspaceRef.current || undefined,
+      });
+      const goal = persistCurrentGoal(transition.goal);
+      if (!goal) {
+        return;
+      }
+      evaluatedGoalTaskIdsRef.current.clear();
+      currentGoalEventsRef.current = [];
+      currentGoalEvaluationsRef.current = [];
+      setCurrentGoalEvents([]);
+      setCurrentGoalEvaluations([]);
+      pendingGoalBindRef.current = null;
+      if (goalContinuationTimerRef.current) {
+        clearTimeout(goalContinuationTimerRef.current);
+        goalContinuationTimerRef.current = null;
+      }
+      transition.events.forEach(storeGoalEvent);
+      setDraftGoal("");
+      startGoalIteration(goal, goal.objective);
+      return;
+    }
+
+    const requestedComposeMode = forcedMode ?? queuedSubmissionModeRef.current ?? composeMode;
+    if (!ensureAiConfigured(requestedComposeMode === "project" ? "Agent 模式" : "Chat 模式")) {
       return;
     }
     if (isTaskActiveRef.current && !forceStart) {
-      queueGoalSubmission({
+      const queuePolicy = runtimePreferencesRef.current.taskQueuePolicy;
+      if (queuePolicy === "current_only") {
+        return;
+      }
+      if (queuePolicy === "queue") {
+        queueGoalSubmission({
+          goalOverride,
+          rawGoal,
+          workspacePathOverride,
+          scheduledTaskId,
+          attachments: _attachments,
+          imageDataUrls,
+          composeMode: requestedComposeMode,
+          forcedMode,
+          goalId,
+          clearDraftOnQueue: !goalOverride,
+        });
+        return;
+      }
+      queuedContinuationTaskRef.current = null;
+      pendingGoalQueueRef.current = [];
+      setQueuedGoalCount(0);
+      runtime.stopTask();
+      setIsTaskActive(false);
+      isTaskActiveRef.current = false;
+      submitGoal(
         goalOverride,
-        rawGoal,
         workspacePathOverride,
         scheduledTaskId,
-        attachments: _attachments,
+        _attachments,
         imageDataUrls,
-        composeMode,
-        clearDraftOnQueue: !goalOverride,
-      });
+        true,
+        rawGoal,
+        forcedMode,
+        goalId,
+      );
       return;
     }
-    const effectiveComposeMode = queuedSubmissionModeRef.current ?? composeMode;
+    const effectiveComposeMode = requestedComposeMode;
     const queuedContinuationTask =
       forceStart && !goalOverride && !workspacePathOverride && !scheduledTaskId
         ? queuedContinuationTaskRef.current
@@ -1082,14 +3265,16 @@ function App() {
         }
       : undefined;
     const startMode =
-      !goalOverride && !workspacePathOverride && !scheduledTaskId
+      forcedMode ??
+      (!goalOverride && !workspacePathOverride && !scheduledTaskId
         ? effectiveComposeMode
-        : undefined;
+        : undefined);
     const taskWorkspacePath =
       startMode === "project" || workspacePathOverride || scheduledTaskId
         ? workspacePathOverride ?? workspaceRef.current
         : undefined;
     clearQueuedTaskSnapshots();
+    pendingGoalBindRef.current = goalId ? { goalId } : null;
     if (continuationTask) {
       setActiveHistoryEntryId(continuationTask.id);
     } else {
@@ -1195,12 +3380,31 @@ function App() {
   }
 
   function handleStopTask() {
+    suppressNextQueuedGoalForTaskRef.current = null;
     queuedContinuationTaskRef.current = task;
     runtime.stopTask();
     setIsTaskActive(false);
     isTaskActiveRef.current = false;
     scheduleNextQueuedGoal();
   }
+
+  function handleEmergencyStopTask() {
+    if (!isTaskActiveRef.current) {
+      return;
+    }
+    suppressNextQueuedGoalForTaskRef.current = task.id;
+    pendingGoalQueueRef.current = [];
+    setQueuedGoalCount(0);
+    if (queuedStartTimerRef.current) {
+      clearTimeout(queuedStartTimerRef.current);
+      queuedStartTimerRef.current = null;
+    }
+    queuedContinuationTaskRef.current = task;
+    runtime.stopTask();
+    setIsTaskActive(false);
+    isTaskActiveRef.current = false;
+  }
+  emergencyStopTaskRef.current = handleEmergencyStopTask;
 
   function retryCurrentTask() {
     const goal = task.userGoal.trim();
@@ -1273,9 +3477,64 @@ function App() {
       nextTask,
     );
     if (nextTask.status === "completed" || nextTask.status === "failed" || nextTask.status === "cancelled") {
+      persistAgentSessionSummary(nextTask);
+      if (suppressNextQueuedGoalForTaskRef.current === nextTask.id) {
+        suppressNextQueuedGoalForTaskRef.current = null;
+        queuedContinuationTaskRef.current = nextTask;
+        return;
+      }
       queuedContinuationTaskRef.current = nextTask;
       scheduleNextQueuedGoal();
     }
+  }
+
+  function recordToolCallAudit(record: ToolCallAuditRecord) {
+    recentToolCallAuditRecordsRef.current = [
+      ...recentToolCallAuditRecordsRef.current,
+      record,
+    ].slice(-200);
+    const database = databaseRef.current;
+    if (database) {
+      void upsertToolCallAuditRecord(database, record);
+    }
+    void appendToolCallAuditJsonLine(
+      createFileBackedTaskAuditJsonLineWriter(
+        (line) => invoke("append_task_audit_jsonl_line", { request: { line } }).then(() => undefined),
+        window.localStorage,
+      ),
+      record,
+    );
+  }
+
+  function persistAgentSessionSummary(nextTask: TaskSnapshot) {
+    if (!isAgentMemoryEnabledRef.current) {
+      return;
+    }
+    const repository = agentMemoryRepoRef.current;
+    if (!repository) {
+      return;
+    }
+    const summary = createAgentSessionSummaryFromTask(nextTask, workspaceRef.current);
+    if (!summary || savedAgentSessionSummaryIdsRef.current.has(summary.id)) {
+      return;
+    }
+    savedAgentSessionSummaryIdsRef.current.add(summary.id);
+    const shouldExtractLongTermFacts = nextTask.status === "completed";
+    void repository.saveSessionSummary(summary)
+      .then(async (savedSummary) => {
+        if (shouldExtractLongTermFacts) {
+          const facts = extractAgentMemoryFactsFromSummary(savedSummary);
+          for (const fact of facts) {
+            await repository.saveFact(fact);
+          }
+        }
+        return repository.getSummary(currentWorkspaceMemoryIdRef.current || undefined, isAgentMemoryEnabledRef.current);
+      })
+      .then(setAgentMemorySummary)
+      .catch((error) => {
+        savedAgentSessionSummaryIdsRef.current.delete(summary.id);
+        logNonFatalError("Failed to save agent session summary", error);
+      });
   }
 
   function updateApprovalRecord(record: DurableApprovalRecord) {
@@ -1289,6 +3548,26 @@ function App() {
     });
   }
 
+  function resolveApprovalRecordById(
+    approvalId: string,
+    decision: "approved" | "denied",
+    resolvedAt = new Date().toISOString(),
+  ) {
+    setApprovalRecords((current) => {
+      const record = current.find((item) => item.approvalId === approvalId);
+      if (!record || record.status !== "pending") {
+        return current;
+      }
+      const resolved = resolveApprovalRecord(record, decision, resolvedAt);
+      const updated = upsertApprovalRecord(current, resolved);
+      const repository = approvalRecordsRepoRef.current;
+      if (repository) {
+        void repository.upsert(resolved);
+      }
+      return updated;
+    });
+  }
+
   async function resolveRestoredApproval(decision: "approved" | "denied") {
     const record = findRestorableApprovalRecord(approvalRecords);
     if (!record) {
@@ -1296,6 +3575,26 @@ function App() {
     }
     if (record.toolName === CODE_PATCH_APPROVAL_TOOL_NAME) {
       await resolveRestoredCodePatchApproval(record, decision);
+      return;
+    }
+    if (record.toolName === GIT_PUSH_APPROVAL_TOOL_NAME) {
+      await resolveRestoredGitPushApproval(record, decision);
+      return;
+    }
+    if (record.toolName === GIT_COMMIT_APPROVAL_TOOL_NAME) {
+      await resolveRestoredGitCommitApproval(record, decision);
+      return;
+    }
+    if (record.toolName === GIT_STAGE_APPROVAL_TOOL_NAME) {
+      await resolveRestoredGitStageApproval(record, decision);
+      return;
+    }
+    if (record.toolName === GIT_CREATE_PR_APPROVAL_TOOL_NAME) {
+      await resolveRestoredGitCreatePullRequestApproval(record, decision);
+      return;
+    }
+    if (record.toolName === GIT_COMMENT_PR_APPROVAL_TOOL_NAME) {
+      await resolveRestoredGitCommentPullRequestApproval(record, decision);
       return;
     }
     const resolvedAt = new Date().toISOString();
@@ -1342,6 +3641,116 @@ function App() {
     }
   }
 
+  async function resolveRestoredGitPushApproval(
+    record: DurableApprovalRecord,
+    decision: "approved" | "denied",
+  ) {
+    const resolvedAt = new Date().toISOString();
+    if (decision === "denied") {
+      const deniedRecord = resolveApprovalRecord(record, "denied", resolvedAt);
+      updateApprovalRecord(deniedRecord);
+      archiveRestoredTask(createRestoredGitPushDeniedTask(deniedRecord));
+      return;
+    }
+
+    const approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
+    updateApprovalRecord(approvedRecord);
+    try {
+      const execution = await runRestoredGitPush(approvedRecord);
+      archiveRestoredTask(createRestoredGitPushApprovedTask(approvedRecord, execution));
+    } catch (error) {
+      archiveRestoredTask(createRestoredGitPushFailedTask(approvedRecord, error));
+    }
+  }
+
+  async function resolveRestoredGitCommitApproval(
+    record: DurableApprovalRecord,
+    decision: "approved" | "denied",
+  ) {
+    const resolvedAt = new Date().toISOString();
+    if (decision === "denied") {
+      const deniedRecord = resolveApprovalRecord(record, "denied", resolvedAt);
+      updateApprovalRecord(deniedRecord);
+      archiveRestoredTask(createRestoredGitCommitDeniedTask(deniedRecord));
+      return;
+    }
+
+    const approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
+    updateApprovalRecord(approvedRecord);
+    try {
+      const execution = await runRestoredGitCommit(approvedRecord);
+      archiveRestoredTask(createRestoredGitCommitApprovedTask(approvedRecord, execution));
+    } catch (error) {
+      archiveRestoredTask(createRestoredGitCommitFailedTask(approvedRecord, error));
+    }
+  }
+
+  async function resolveRestoredGitStageApproval(
+    record: DurableApprovalRecord,
+    decision: "approved" | "denied",
+  ) {
+    const resolvedAt = new Date().toISOString();
+    if (decision === "denied") {
+      const deniedRecord = resolveApprovalRecord(record, "denied", resolvedAt);
+      updateApprovalRecord(deniedRecord);
+      archiveRestoredTask(createRestoredGitStageDeniedTask(deniedRecord));
+      return;
+    }
+
+    const approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
+    updateApprovalRecord(approvedRecord);
+    try {
+      const execution = await runRestoredGitStage(approvedRecord);
+      archiveRestoredTask(createRestoredGitStageApprovedTask(approvedRecord, execution));
+    } catch (error) {
+      archiveRestoredTask(createRestoredGitStageFailedTask(approvedRecord, error));
+    }
+  }
+
+  async function resolveRestoredGitCreatePullRequestApproval(
+    record: DurableApprovalRecord,
+    decision: "approved" | "denied",
+  ) {
+    const resolvedAt = new Date().toISOString();
+    if (decision === "denied") {
+      const deniedRecord = resolveApprovalRecord(record, "denied", resolvedAt);
+      updateApprovalRecord(deniedRecord);
+      archiveRestoredTask(createRestoredGitCreatePullRequestDeniedTask(deniedRecord));
+      return;
+    }
+
+    const approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
+    updateApprovalRecord(approvedRecord);
+    try {
+      const execution = await runRestoredGitCreatePullRequest(approvedRecord);
+      archiveRestoredTask(createRestoredGitCreatePullRequestApprovedTask(approvedRecord, execution));
+    } catch (error) {
+      archiveRestoredTask(createRestoredGitCreatePullRequestFailedTask(approvedRecord, error));
+    }
+  }
+
+  async function resolveRestoredGitCommentPullRequestApproval(
+    record: DurableApprovalRecord,
+    decision: "approved" | "denied",
+  ) {
+    const resolvedAt = new Date().toISOString();
+    if (decision === "denied") {
+      const deniedRecord = resolveApprovalRecord(record, "denied", resolvedAt);
+      updateApprovalRecord(deniedRecord);
+      archiveRestoredTask(createRestoredGitCommentPullRequestDeniedTask(deniedRecord));
+      return;
+    }
+
+    const approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
+    updateApprovalRecord(approvedRecord);
+    try {
+      const execution = await runRestoredGitCommentPullRequest(approvedRecord);
+      archiveRestoredTask(createRestoredGitCommentPullRequestApprovedTask(approvedRecord, execution));
+    } catch (error) {
+      archiveRestoredTask(createRestoredGitCommentPullRequestFailedTask(approvedRecord, error));
+    }
+  }
+
   function archiveRestoredTask(restoredTask: TaskSnapshot) {
     clearQueuedTaskSnapshots();
     setTask(restoredTask);
@@ -1357,6 +3766,20 @@ function App() {
 
   function handlePermissionDecision(decision: WorkbenchPermissionDecision) {
     const request = task.permissionRequest;
+    if (
+      decision === "approved_always" &&
+      request?.dryRun.operation.startsWith("computer.") &&
+      request.allowAlways !== false
+    ) {
+      const trustedTitle = extractTrustedComputerAppTitleFromPermissionRequest(request);
+      if (trustedTitle) {
+        setTrustedComputerApps((current) => {
+          const next = addTrustedComputerApp(current, trustedTitle);
+          persistTrustedComputerApps(next);
+          return next;
+        });
+      }
+    }
     if (
       task.status === "waiting_permission" &&
       request?.status === "pending" &&
@@ -1414,7 +3837,11 @@ function App() {
   }
 
   function handleRemoveTrustedComputerApp(title: string) {
-    setTrustedComputerApps(removeTrustedComputerApp(title));
+    setTrustedComputerApps((current) => {
+      const next = removeTrustedComputerApp(current, title);
+      persistTrustedComputerApps(next);
+      return next;
+    });
   }
 
   function selectHistoryEntry(id: string) {
@@ -1455,12 +3882,52 @@ function App() {
     deleteScheduledTask(id);
   }
 
+  function handleCreateScheduledTask(draft: WorkbenchScheduledTaskDraft) {
+    const schedule = {
+      type: draft.scheduleType,
+      value: draft.scheduleValue,
+    };
+    if (!computeNextRun(schedule, new Date().toISOString())) {
+      window.alert(
+        localePreference === "en"
+          ? "Schedule value is invalid or already in the past."
+          : "调度值无效，或一次性时间已经过去。",
+      );
+      return;
+    }
+    const created = createScheduledTask(
+      {
+        name: draft.name,
+        goal: draft.goal,
+        workspacePath: draft.workspacePath || workspaceRef.current,
+        schedule,
+      },
+      "user",
+    );
+    setScheduledTasks((current) => {
+      const updated = [...current, created].sort((left, right) =>
+        left.nextRunAt.localeCompare(right.nextRunAt),
+      );
+      const repository = scheduledTasksRepoRef.current;
+      if (repository) {
+        void repository.save(updated);
+      } else {
+        saveScheduledTasks(window.localStorage, updated);
+      }
+      return updated;
+    });
+  }
+
   function handleChangeActiveView(view: ActiveView) {
     const shouldStartFreshChat =
       view === "chat" && (activeView !== "chat" || activeHistoryEntryId || task.id !== "task-idle");
     if (shouldStartFreshChat) {
       clearQueuedTaskSnapshots();
-      setTask(createInitialTaskSnapshot());
+      setTask(createInitialTaskSnapshot({
+        capabilityVerification: buildRuntimeCapabilityVerification({
+          toolAuditRecords: recentToolCallAuditRecordsRef.current,
+        }),
+      }));
       setActiveHistoryEntryId(undefined);
       setDraftGoal(DEFAULT_DRAFT_GOAL);
     }
@@ -1469,6 +3936,10 @@ function App() {
 
   function handleOpenFile(path: string) {
     openPath(path).catch((error) => logNonFatalError(`Failed to open path ${path}`, error));
+  }
+
+  function handleOpenUrl(url: string) {
+    openUrl(url).catch((error) => logNonFatalError(`Failed to open URL ${url}`, error));
   }
 
   const effectiveLocale = localePreference === "en" ? defaultWorkbenchLocale : zhCNWorkbenchLocale;
@@ -1516,6 +3987,44 @@ function App() {
       })),
     [userImages],
   );
+
+  useEffect(() => {
+    const repository = agentMemoryRepoRef.current;
+    if (!repository) {
+      setAgentMemorySummary({
+        enabled: isAgentMemoryEnabled,
+        totalFactCount: 0,
+        workspaceFactCount: 0,
+        sessionSummaryCount: 0,
+        injectionLogCount: 0,
+        recentFacts: [],
+      });
+      return;
+    }
+    let cancelled = false;
+    repository.getSummary(currentWorkspaceMemoryId || undefined, isAgentMemoryEnabled)
+      .then((summary) => {
+        if (!cancelled) {
+          setAgentMemorySummary(summary);
+        }
+      })
+      .catch((error) => {
+        logNonFatalError("Failed to load agent memory summary", error);
+        if (!cancelled) {
+          setAgentMemorySummary({
+            enabled: isAgentMemoryEnabled,
+            totalFactCount: 0,
+            workspaceFactCount: 0,
+            sessionSummaryCount: 0,
+            injectionLogCount: 0,
+            recentFacts: [],
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentWorkspaceMemoryId, isAgentMemoryEnabled, isDatabaseInitializing]);
 
   useEffect(() => {
     setUserProfileMemory((previous) => {
@@ -1579,6 +4088,78 @@ function App() {
     persistUserProfileMemory(null);
   }
 
+  function handleAgentMemoryEnabledChange(enabled: boolean) {
+    const current = runtimePreferencesRef.current;
+    handleRuntimePreferencesChange({
+      ...current,
+      agentMemoryScope: enabled
+        ? current.agentMemoryScope === "off" ? "workspace" : current.agentMemoryScope
+        : "off",
+    });
+  }
+
+  function handleRuntimePreferencesChange(preferences: WorkbenchRuntimePreferences) {
+    const sanitized = sanitizeRuntimePreferences(preferences);
+    setRuntimePreferences(sanitized);
+    setAgentMemoryEnabled(sanitized.agentMemoryScope !== "off");
+    setAgentMemorySummary((current) =>
+      current ? { ...current, enabled: sanitized.agentMemoryScope !== "off" } : current,
+    );
+    for (const [key, value] of Object.entries(runtimePreferencesToPrefs(sanitized))) {
+      persistPreference(key, value);
+    }
+    persistPreference(AGENT_MEMORY_ENABLED_PREFERENCE_KEY, sanitized.agentMemoryScope === "off" ? "false" : "true");
+    setComposeMode(composeModeForStartupPreference(sanitized.defaultStartupMode, workspaceRef.current));
+  }
+
+  function handleClearAgentMemory() {
+    const repository = agentMemoryRepoRef.current;
+    if (!repository) return;
+    const confirmed = window.confirm(
+      localePreference === "en"
+        ? "Clear all Agent memory facts, session summaries, FTS entries, and injection audit logs? Chat and task history will not be deleted."
+        : "清空全部 Agent 记忆事实、会话摘要、FTS 和注入审计日志？原始聊天和任务历史不会被删除。",
+    );
+    if (!confirmed) return;
+    markAgentMemoryHistoryRestoreDone();
+    void repository.clearAll()
+      .then(() => repository.getSummary(currentWorkspaceMemoryId || undefined, isAgentMemoryEnabled))
+      .then(setAgentMemorySummary)
+      .catch((error) => logNonFatalError("Failed to clear agent memory", error));
+  }
+
+  function handleClearWorkspaceAgentMemory() {
+    const repository = agentMemoryRepoRef.current;
+    if (!repository || !currentWorkspaceMemoryId) return;
+    const confirmed = window.confirm(
+      localePreference === "en"
+        ? "Clear Agent memory for the current workspace, including related summaries and injection audit logs? Chat and task history will not be deleted."
+        : "清空当前工作区的 Agent 记忆、相关摘要和注入审计日志？原始聊天和任务历史不会被删除。",
+    );
+    if (!confirmed) return;
+    markAgentMemoryHistoryRestoreDone();
+    void repository.clearWorkspace(currentWorkspaceMemoryId)
+      .then(() => repository.getSummary(currentWorkspaceMemoryId, isAgentMemoryEnabled))
+      .then(setAgentMemorySummary)
+      .catch((error) => logNonFatalError("Failed to clear workspace agent memory", error));
+  }
+
+  function handleDeleteAgentMemoryFact(id: string) {
+    const repository = agentMemoryRepoRef.current;
+    if (!repository) return;
+    const confirmed = window.confirm(
+      localePreference === "en"
+        ? "Delete this Agent memory fact and related injection audit logs? Chat and task history will not be deleted."
+        : "删除这条 Agent 记忆及相关注入审计日志？原始聊天和任务历史不会被删除。",
+    );
+    if (!confirmed) return;
+    markAgentMemoryHistoryRestoreDone();
+    void repository.deleteFact(id)
+      .then(() => repository.getSummary(currentWorkspaceMemoryId || undefined, isAgentMemoryEnabled))
+      .then(setAgentMemorySummary)
+      .catch((error) => logNonFatalError("Failed to delete agent memory fact", error));
+  }
+
   const sidebarWidthTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activityHeightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -1596,24 +4177,113 @@ function App() {
     persistPendingPreferenceToLocalStorage(key, value);
   }
 
+  function persistTrustedComputerApps(apps: TrustedComputerApp[]) {
+    persistPreference(PREF_KEYS.COMPUTER_TRUSTED_APPS, serializeTrustedComputerApps(apps));
+  }
+
+  function markAgentMemoryHistoryRestoreDone() {
+    persistPreference(AGENT_MEMORY_HISTORY_RESTORE_DONE_PREFERENCE_KEY, "true");
+  }
+
   const terminalService = useMemo<WorkbenchTerminalService>(
     () => ({
-      async create(session: WorkbenchAgentSessionContext, cols: number, rows: number, terminalId?: string) {
-        return await invoke("terminal_create", {
+      async planCreate(session: WorkbenchAgentSessionContext, terminalId?: string) {
+        const plan = await invoke<TerminalPlanResult>("terminal_plan_create", {
           request: {
+            taskId: session.taskId,
             sessionId: session.sessionId,
             workspaceRoot: session.workspaceRoot,
             terminalId,
-            permissionMode: session.permissionMode,
-            cols,
-            rows,
           },
         });
+        recordToolCallAudit(createTerminalPlanAuditRecord(session, plan));
+        return plan;
+      },
+      async executeCreate(
+        session: WorkbenchAgentSessionContext,
+        plan: TerminalPlanResult,
+        cols: number,
+        rows: number,
+        terminalId?: string,
+      ) {
+        await invoke("terminal_approve", {
+          request: {
+            approvalId: plan.approvalId,
+            taskId: session.taskId,
+            action: plan.action,
+            previewHash: plan.previewHash,
+          },
+        });
+        const startedAt = new Date().toISOString();
+        try {
+          const result = await invoke<WorkbenchTerminalSession>("terminal_create", {
+            request: {
+              taskId: session.taskId,
+              sessionId: session.sessionId,
+              workspaceRoot: session.workspaceRoot,
+              terminalId: plan.preview.terminalId ?? terminalId,
+              permissionMode: session.permissionMode,
+              approvalId: plan.approvalId,
+              cols,
+              rows,
+            },
+          });
+          recordToolCallAudit(createTerminalCreateExecutionAuditRecord(session, plan.approvalId, result, startedAt));
+          return result;
+        } catch (error) {
+          recordToolCallAudit(createTerminalFailedAuditRecord(session, plan.approvalId, plan.toolName, error, startedAt));
+          throw error;
+        }
+      },
+      async create(session: WorkbenchAgentSessionContext, cols: number, rows: number, terminalId?: string) {
+        const plan = await this.planCreate!(session, terminalId);
+        return this.executeCreate!(session, plan, cols, rows, terminalId);
+      },
+      async planInput(session: WorkbenchAgentSessionContext, terminalId: string, data: string) {
+        const plan = await invoke<TerminalPlanResult>("terminal_plan_input", {
+          request: {
+            taskId: session.taskId,
+            terminalId,
+            data,
+          },
+        });
+        recordToolCallAudit(createTerminalPlanAuditRecord(session, plan));
+        return plan;
+      },
+      async executeInput(
+        session: WorkbenchAgentSessionContext,
+        plan: TerminalPlanResult,
+        terminalId: string,
+        data: string,
+      ) {
+        await invoke("terminal_approve", {
+          request: {
+            approvalId: plan.approvalId,
+            taskId: session.taskId,
+            action: plan.action,
+            previewHash: plan.previewHash,
+          },
+        });
+        const startedAt = new Date().toISOString();
+        try {
+          await invoke("terminal_input", {
+            request: {
+              taskId: session.taskId,
+              terminalId,
+              data,
+              permissionMode: session.permissionMode,
+              approvalId: plan.approvalId,
+            },
+          });
+          recordToolCallAudit(createTerminalInputExecutionAuditRecord(session, plan.approvalId, plan, startedAt));
+        } catch (error) {
+          recordToolCallAudit(createTerminalFailedAuditRecord(session, plan.approvalId, plan.toolName, error, startedAt));
+          throw error;
+        }
       },
       async input(session: WorkbenchAgentSessionContext, terminalId: string, data: string) {
-        await invoke("terminal_input", {
-          request: { terminalId, data, permissionMode: session.permissionMode },
-        });
+        const plan = await this.planInput!(session, terminalId, data);
+        await this.executeInput!(session, plan, terminalId, data);
       },
       async resize(terminalId: string, cols: number, rows: number) {
         await invoke("terminal_resize", { request: { terminalId, cols, rows } });
@@ -1784,6 +4454,9 @@ function App() {
         docsLoading={docsLoading}
         docsProgress={docsProgress}
         draftGoal={draftGoal}
+        currentGoal={currentGoal}
+        currentGoalEvents={currentGoalEvents}
+        currentGoalEvaluations={currentGoalEvaluations}
         currentWorkspacePath={workspacePath}
         historyEntries={history.map((entry) => ({
           id: entry.id,
@@ -1808,8 +4481,12 @@ function App() {
         agentCatalog={agentCatalog}
         locale={effectiveLocale}
         modelSettings={modelSettings}
+        computerUseSettings={computerUseSettings}
+        computerUseLocalVisionSettings={computerUseLocalVisionSettings}
+        runtimePreferences={runtimePreferences}
         newChatRecommendations={newChatRecommendations}
         userProfileMemorySummary={userProfileMemorySummary}
+        agentMemorySummary={agentMemorySummary}
         onBrowseWorkspacePath={browseWorkspacePath}
         onChangeActiveView={handleChangeActiveView}
         onSelectComposeMode={setComposeMode}
@@ -1817,7 +4494,12 @@ function App() {
         onDeleteHistoryEntry={deleteHistoryEntry}
         onDeleteRecentWorkspacePath={deleteRecentWorkspacePath}
         onDeleteScheduledTask={confirmDeleteScheduledTask}
+        onCreateScheduledTask={handleCreateScheduledTask}
         onDraftGoalChange={setDraftGoal}
+        onPauseGoal={handlePauseGoal}
+        onResumeGoal={handleResumeGoal}
+        onCompleteGoal={handleCompleteGoal}
+        onClearGoal={handleClearGoal}
         onModelSettingsChange={async (settings) => {
           await updateModelSettings(settings);
           void modelSettingsRepoRef.current?.save(settings);
@@ -1825,8 +4507,15 @@ function App() {
         onTestModelConnection={testModelConnection}
         modelConfiguration={modelConfiguration}
         onModelConfigurationChange={handleModelConfigurationChange}
+        onComputerUseSettingsChange={handleComputerUseSettingsChange}
+        onComputerUseLocalVisionSettingsChange={handleComputerUseLocalVisionSettingsChange}
+        onRuntimePreferencesChange={handleRuntimePreferencesChange}
         onRebuildUserProfileMemory={handleRebuildUserProfileMemory}
         onClearUserProfileMemory={handleClearUserProfileMemory}
+        onAgentMemoryEnabledChange={handleAgentMemoryEnabledChange}
+        onClearAgentMemory={handleClearAgentMemory}
+        onClearWorkspaceAgentMemory={handleClearWorkspaceAgentMemory}
+        onDeleteAgentMemoryFact={handleDeleteAgentMemoryFact}
         onReadAgentStyle={readAgentStyle}
         onSaveAgentStyle={saveAgentStyle}
         onResetAgentStyle={resetAgentStyle}
@@ -1852,10 +4541,12 @@ function App() {
         onConversationMessagesChange={handleConversationMessagesChange}
         onRefreshApps={handleRefreshApps}
         onUpdateAppCategory={handleUpdateAppCategory}
+        onUpdateFileCategory={handleUpdateFileCategory}
         onRefreshDocuments={handleRefreshDocuments}
         onRefreshImages={handleRefreshImages}
         onRetryTask={retryCurrentTask}
         onStopTask={handleStopTask}
+        onEmergencyStopTask={handleEmergencyStopTask}
         onSelectHistoryEntry={selectHistoryEntry}
         onSubmitGoal={submitGoal}
         onToggleScheduledTask={toggleScheduledTask}
@@ -1899,9 +4590,18 @@ function App() {
         skillTranslationError={skillTranslationError}
         skillSearchResults={skillSearchResults}
         skillSearchStatus={skillSearchStatus}
+        skillMarketSuggestions={skillMarketSuggestions}
+        skillMarketSuggestionStatus={skillMarketSuggestionStatus}
         mcpConfigError={mcpConfigError}
         onTranslateSkillsToChinese={handleTranslateSkillsToChinese}
         onSearchSkillMarket={handleSearchSkillMarket}
+        onRefreshSkillMarketSuggestions={handleRefreshSkillMarketSuggestions}
+        onToggleSkillEnabled={handleToggleSkillEnabled}
+        onDeleteSkill={handleDeleteSkill}
+        onDisableAllSkills={handleDisableAllSkills}
+        onDeleteAllSkills={handleDeleteAllSkills}
+        onInstallSkillMarketResult={handleInstallSkillMarketResult}
+        onOpenUrl={handleOpenUrl}
         sidebarNavItems={sidebarNavItems}
         systemResources={systemResources}
         task={task}
@@ -1911,13 +4611,17 @@ function App() {
         scanProgress={scanProgress}
         classifying={classifying}
         classifyProgress={classifyProgress}
+        classifyError={classifyError}
         appsClassifying={appsClassifying}
         appsClassifyProgress={appsClassifyProgress}
+        appsClassifyError={appsClassifyError}
         mountRoots={mountRoots}
+        workspaceToolRequest={workspaceToolRequest}
         categoryStats={categoryStats}
         appCategoryStats={appCategoryStats}
         resourceScanRoots={resourceScanRoots}
         onRefreshScan={handleRefreshScan}
+        onRefreshResourceRoots={handleRefreshResourceRoots}
         onClassifyDocuments={handleClassifyDocuments}
         onClassifyApps={handleClassifyApps}
         onCancelClassify={handleCancelClassify}
@@ -1994,12 +4698,19 @@ function App() {
             request: { ...sessionRequest, url: nextUrl },
           })));
         }}
+        pendingBrowserWriteApproval={pendingBrowserWriteApproval}
+        onApproveBrowserWrite={async (_session, approvalId) => {
+          resolveBrowserWriteApproval(approvalId, "approved");
+        }}
+        onDenyBrowserWrite={async (_session, approvalId) => {
+          resolveBrowserWriteApproval(approvalId, "denied");
+        }}
         onQuickActionReview={async (session) => {
           const root = session.workspaceRoot;
           if (!root) {
             throw new Error("Select a workspace before opening review.");
           }
-          const [status, diff] = await Promise.all([
+          const [status, diff, remoteSummary, pullRequests, pushPreview] = await Promise.all([
             invoke<{
               files: Array<{ path: string }>;
               diffStat: string;
@@ -2011,14 +4722,458 @@ function App() {
             invoke<{ diff: string }>("git_diff", {
               request: { sessionId: session.sessionId, workspaceRoot: root },
             }),
+            invoke<{
+              branch?: string;
+              upstream?: string;
+              upstreamRemote?: string;
+              ahead?: number;
+              behind?: number;
+              remotes: Array<{ name: string; fetchUrl?: string; pushUrl?: string }>;
+            }>("git_remote_summary", {
+              request: { sessionId: session.sessionId, workspaceRoot: root },
+            }).catch(() => undefined),
+            invoke<{
+              provider: string;
+              unavailableReason?: string;
+              pullRequests: Array<{
+                number: number;
+                title: string;
+                state: string;
+                url: string;
+                author?: string;
+                headRefName?: string;
+                baseRefName?: string;
+                updatedAt?: string;
+              }>;
+            }>("git_list_pull_requests", {
+              request: { sessionId: session.sessionId, workspaceRoot: root },
+            }).catch((error) => ({
+              provider: "github-cli",
+              unavailableReason: error instanceof Error ? error.message : String(error),
+              pullRequests: [],
+            })),
+            invoke<{
+              branch: string;
+              upstream: string;
+              remoteName: string;
+              remoteBranch: string;
+              remoteUrl?: string;
+              ahead: number;
+              behind: number;
+              commits: Array<{ hash: string; subject: string }>;
+              dryRun: {
+                operation: string;
+                riskSummary: string;
+                reversible: boolean;
+                affectedPaths: Array<{
+                  source: string;
+                  target: string;
+                  action: WorkbenchDryRunAction;
+                  conflict?: string;
+                }>;
+              };
+            }>("git_push_preview", {
+              request: { sessionId: session.sessionId, workspaceRoot: root },
+            }).catch(() => undefined),
           ]);
           return {
             changedFiles: status.files.map((file) => file.path),
             diffStat: status.diffStat,
             diff: diff.diff.slice(0, 4000),
             workspacePath: status.workspaceRoot,
-            branch: status.branch,
+            branch: remoteSummary?.branch ?? status.branch,
+            upstream: remoteSummary?.upstream,
+            upstreamRemote: remoteSummary?.upstreamRemote,
+            ahead: remoteSummary?.ahead,
+            behind: remoteSummary?.behind,
+            remotes: remoteSummary?.remotes,
+            pullRequests,
+            pushPreview,
           };
+        }}
+        onQuickActionGitPushPlan={async (session): Promise<GitPushPlanQuickResult> => {
+          const root = session.workspaceRoot;
+          if (!root) {
+            throw new Error("Select a workspace before preparing a Git push.");
+          }
+          const plan = await invoke<GitPushPlanQuickResult>("git_plan_push", {
+            request: {
+              sessionId: session.sessionId,
+              workspaceRoot: root,
+              taskId: session.taskId,
+            },
+          });
+          const permissionRequest = createGitPushPermissionRequest(plan);
+          const approvalRecord = createApprovalRecordFromPermissionRequest({
+            taskId: session.taskId ?? session.sessionId,
+            toolName: GIT_PUSH_AUDIT_TOOL_NAME,
+            workspacePath: root,
+            permissionRequest,
+            gitPushPlan: plan,
+            now: permissionRequest.createdAt,
+          });
+          if (approvalRecord) {
+            updateApprovalRecord(approvalRecord);
+          }
+          recordToolCallAudit(createGitPushPlanAuditRecord(session, plan));
+          return plan;
+        }}
+        onQuickActionGitPushExecute={async (session, approvalId): Promise<GitPushExecutionQuickResult> => {
+          const root = session.workspaceRoot;
+          if (!root) {
+            throw new Error("Select a workspace before pushing.");
+          }
+          const startedAt = new Date().toISOString();
+          try {
+            await invoke("git_approve_push", {
+              approvalId,
+              taskId: session.taskId,
+            });
+            resolveApprovalRecordById(approvalId, "approved");
+            const execution = await invoke<{
+              workspaceRoot: string;
+              branch: string;
+              upstream: string;
+              remoteName: string;
+              remoteBranch: string;
+              commitCount: number;
+              pushed: boolean;
+              output: string;
+            }>("git_execute_push", {
+              request: {
+                approvalId,
+                sessionId: session.sessionId,
+                workspaceRoot: root,
+                taskId: session.taskId,
+              },
+            });
+            const result = {
+              workspacePath: execution.workspaceRoot,
+              branch: execution.branch,
+              upstream: execution.upstream,
+              remoteName: execution.remoteName,
+              remoteBranch: execution.remoteBranch,
+              commitCount: execution.commitCount,
+              pushed: execution.pushed,
+              output: execution.output,
+            };
+            recordToolCallAudit(createGitPushExecutionAuditRecord(session, approvalId, result, startedAt));
+            return result;
+          } catch (error) {
+            recordToolCallAudit(createGitPushFailedAuditRecord(session, approvalId, error, startedAt));
+            throw error;
+          }
+        }}
+        onQuickActionGitPushCancel={async (_session, approvalId) => {
+          resolveApprovalRecordById(approvalId, "denied");
+        }}
+        onQuickActionGitStagePlan={async (session, paths): Promise<GitStagePlanQuickResult> => {
+          const root = session.workspaceRoot;
+          if (!root) {
+            throw new Error("Select a workspace before preparing Git staging.");
+          }
+          const plan = await invoke<GitStagePlanQuickResult>("git_plan_stage_files", {
+            request: {
+              sessionId: session.sessionId,
+              workspaceRoot: root,
+              taskId: session.taskId,
+              paths,
+            },
+          });
+          const permissionRequest = createGitStagePermissionRequest(plan);
+          const approvalRecord = createApprovalRecordFromPermissionRequest({
+            taskId: session.taskId ?? session.sessionId,
+            toolName: GIT_STAGE_AUDIT_TOOL_NAME,
+            workspacePath: root,
+            permissionRequest,
+            gitStagePlan: plan,
+            now: permissionRequest.createdAt,
+          });
+          if (approvalRecord) {
+            updateApprovalRecord(approvalRecord);
+          }
+          recordToolCallAudit(createGitStagePlanAuditRecord(session, plan));
+          return plan;
+        }}
+        onQuickActionGitStageExecute={async (session, approvalId, paths): Promise<GitStageExecutionQuickResult> => {
+          const root = session.workspaceRoot;
+          if (!root) {
+            throw new Error("Select a workspace before staging files.");
+          }
+          const startedAt = new Date().toISOString();
+          try {
+            await invoke("git_approve_stage_files", {
+              approvalId,
+              taskId: session.taskId,
+            });
+            resolveApprovalRecordById(approvalId, "approved");
+            const execution = await invoke<{
+              workspaceRoot: string;
+              stagedPaths: string[];
+              fileCount: number;
+              staged: boolean;
+              output: string;
+            }>("git_execute_stage_files", {
+              request: {
+                approvalId,
+                sessionId: session.sessionId,
+                workspaceRoot: root,
+                taskId: session.taskId,
+                paths,
+              },
+            });
+            const result = {
+              workspacePath: execution.workspaceRoot,
+              stagedPaths: execution.stagedPaths,
+              fileCount: execution.fileCount,
+              staged: execution.staged,
+              output: execution.output,
+            };
+            recordToolCallAudit(createGitStageExecutionAuditRecord(session, approvalId, result, startedAt));
+            return result;
+          } catch (error) {
+            recordToolCallAudit(createGitStageFailedAuditRecord(session, approvalId, error, startedAt));
+            throw error;
+          }
+        }}
+        onQuickActionGitStageCancel={async (_session, approvalId) => {
+          resolveApprovalRecordById(approvalId, "denied");
+        }}
+        onQuickActionGitCommitPlan={async (session, message): Promise<GitCommitPlanQuickResult> => {
+          const root = session.workspaceRoot;
+          if (!root) {
+            throw new Error("Select a workspace before preparing a Git commit.");
+          }
+          const plan = await invoke<GitCommitPlanQuickResult>("git_plan_commit", {
+            request: {
+              sessionId: session.sessionId,
+              workspaceRoot: root,
+              taskId: session.taskId,
+              message,
+            },
+          });
+          const permissionRequest = createGitCommitPermissionRequest(plan);
+          const approvalRecord = createApprovalRecordFromPermissionRequest({
+            taskId: session.taskId ?? session.sessionId,
+            toolName: GIT_COMMIT_APPROVAL_TOOL_NAME,
+            workspacePath: root,
+            permissionRequest,
+            gitCommitPlan: plan,
+            now: permissionRequest.createdAt,
+          });
+          if (approvalRecord) {
+            updateApprovalRecord(approvalRecord);
+          }
+          recordToolCallAudit(createGitCommitPlanAuditRecord(session, plan));
+          return plan;
+        }}
+        onQuickActionGitCommitExecute={async (session, approvalId, message): Promise<GitCommitExecutionQuickResult> => {
+          const root = session.workspaceRoot;
+          if (!root) {
+            throw new Error("Select a workspace before committing.");
+          }
+          const startedAt = new Date().toISOString();
+          try {
+            await invoke("git_approve_commit", {
+              approvalId,
+              taskId: session.taskId,
+            });
+            resolveApprovalRecordById(approvalId, "approved");
+            const execution = await invoke<{
+              workspaceRoot: string;
+              branch?: string;
+              commitHash: string;
+              subject: string;
+              fileCount: number;
+              committed: boolean;
+              output: string;
+            }>("git_execute_commit", {
+              request: {
+                approvalId,
+                sessionId: session.sessionId,
+                workspaceRoot: root,
+                taskId: session.taskId,
+                message,
+              },
+            });
+            const result = {
+              workspacePath: execution.workspaceRoot,
+              branch: execution.branch,
+              commitHash: execution.commitHash,
+              subject: execution.subject,
+              fileCount: execution.fileCount,
+              committed: execution.committed,
+              output: execution.output,
+            };
+            recordToolCallAudit(createGitCommitExecutionAuditRecord(session, approvalId, result, startedAt));
+            return result;
+          } catch (error) {
+            recordToolCallAudit(createGitCommitFailedAuditRecord(session, approvalId, error, startedAt));
+            throw error;
+          }
+        }}
+        onQuickActionGitCommitCancel={async (_session, approvalId) => {
+          resolveApprovalRecordById(approvalId, "denied");
+        }}
+        onQuickActionGitCreatePullRequestPlan={async (session, request): Promise<GitCreatePullRequestPlanQuickResult> => {
+          const root = session.workspaceRoot;
+          if (!root) {
+            throw new Error("Select a workspace before preparing a Git pull request.");
+          }
+          const plan = await invoke<GitCreatePullRequestPlanQuickResult>("git_plan_create_pull_request", {
+            request: {
+              sessionId: session.sessionId,
+              workspaceRoot: root,
+              taskId: session.taskId,
+              title: request.title,
+              body: request.body ?? "",
+              baseBranch: request.baseBranch,
+              draft: request.draft ?? true,
+            },
+          });
+          const permissionRequest = createGitCreatePullRequestPermissionRequest(plan);
+          const approvalRecord = createApprovalRecordFromPermissionRequest({
+            taskId: session.taskId ?? session.sessionId,
+            toolName: GIT_CREATE_PR_AUDIT_TOOL_NAME,
+            workspacePath: root,
+            permissionRequest,
+            gitCreatePullRequestPlan: plan,
+            now: permissionRequest.createdAt,
+          });
+          if (approvalRecord) {
+            updateApprovalRecord(approvalRecord);
+          }
+          recordToolCallAudit(createGitCreatePullRequestPlanAuditRecord(session, plan));
+          return plan;
+        }}
+        onQuickActionGitCreatePullRequestExecute={async (session, approvalId, request): Promise<GitCreatePullRequestExecutionQuickResult> => {
+          const root = session.workspaceRoot;
+          if (!root) {
+            throw new Error("Select a workspace before creating a Git pull request.");
+          }
+          const startedAt = new Date().toISOString();
+          try {
+            await invoke("git_approve_create_pull_request", {
+              approvalId,
+              taskId: session.taskId,
+            });
+            resolveApprovalRecordById(approvalId, "approved");
+            const execution = await invoke<{
+              workspaceRoot: string;
+              provider: string;
+              url: string;
+              title: string;
+              baseBranch: string;
+              headBranch: string;
+              draft: boolean;
+              created: boolean;
+              output: string;
+            }>("git_execute_create_pull_request", {
+              request: {
+                approvalId,
+                sessionId: session.sessionId,
+                workspaceRoot: root,
+                taskId: session.taskId,
+                title: request.title,
+                body: request.body ?? "",
+                baseBranch: request.baseBranch,
+                draft: request.draft ?? true,
+              },
+            });
+            const result = {
+              workspacePath: execution.workspaceRoot,
+              provider: execution.provider,
+              url: execution.url,
+              title: execution.title,
+              baseBranch: execution.baseBranch,
+              headBranch: execution.headBranch,
+              draft: execution.draft,
+              created: execution.created,
+              output: execution.output,
+            };
+            recordToolCallAudit(createGitCreatePullRequestExecutionAuditRecord(session, approvalId, result, startedAt));
+            return result;
+          } catch (error) {
+            recordToolCallAudit(createGitCreatePullRequestFailedAuditRecord(session, approvalId, error, startedAt));
+            throw error;
+          }
+        }}
+        onQuickActionGitCreatePullRequestCancel={async (_session, approvalId) => {
+          resolveApprovalRecordById(approvalId, "denied");
+        }}
+        onQuickActionGitCommentPullRequestPlan={async (session, request): Promise<GitCommentPullRequestPlanQuickResult> => {
+          const root = session.workspaceRoot;
+          if (!root) {
+            throw new Error("Select a workspace before preparing a Git pull request comment.");
+          }
+          const plan = await invoke<GitCommentPullRequestPlanQuickResult>("git_plan_comment_pull_request", {
+            request: {
+              sessionId: session.sessionId,
+              workspaceRoot: root,
+              taskId: session.taskId,
+              pullRequest: request.pullRequest,
+              body: request.body,
+            },
+          });
+          const permissionRequest = createGitCommentPullRequestPermissionRequest(plan);
+          const approvalRecord = createApprovalRecordFromPermissionRequest({
+            taskId: session.taskId ?? session.sessionId,
+            toolName: GIT_COMMENT_PR_APPROVAL_TOOL_NAME,
+            workspacePath: root,
+            permissionRequest,
+            gitCommentPullRequestPlan: plan,
+            now: permissionRequest.createdAt,
+          });
+          if (approvalRecord) {
+            updateApprovalRecord(approvalRecord);
+          }
+          recordToolCallAudit(createGitCommentPullRequestPlanAuditRecord(session, plan));
+          return plan;
+        }}
+        onQuickActionGitCommentPullRequestExecute={async (session, approvalId, request): Promise<GitCommentPullRequestExecutionQuickResult> => {
+          const root = session.workspaceRoot;
+          if (!root) {
+            throw new Error("Select a workspace before commenting on a Git pull request.");
+          }
+          const startedAt = new Date().toISOString();
+          try {
+            await invoke("git_approve_comment_pull_request", {
+              approvalId,
+              taskId: session.taskId,
+            });
+            resolveApprovalRecordById(approvalId, "approved");
+            const execution = await invoke<{
+              workspaceRoot: string;
+              provider: string;
+              pullRequest: string;
+              commented: boolean;
+              output: string;
+            }>("git_execute_comment_pull_request", {
+              request: {
+                approvalId,
+                sessionId: session.sessionId,
+                workspaceRoot: root,
+                taskId: session.taskId,
+                pullRequest: request.pullRequest,
+                body: request.body,
+              },
+            });
+            const result = {
+              workspacePath: execution.workspaceRoot,
+              provider: execution.provider,
+              pullRequest: execution.pullRequest,
+              commented: execution.commented,
+              output: execution.output,
+            };
+            recordToolCallAudit(createGitCommentPullRequestExecutionAuditRecord(session, approvalId, result, startedAt));
+            return result;
+          } catch (error) {
+            recordToolCallAudit(createGitCommentPullRequestFailedAuditRecord(session, approvalId, error, startedAt));
+            throw error;
+          }
+        }}
+        onQuickActionGitCommentPullRequestCancel={async (_session, approvalId) => {
+          resolveApprovalRecordById(approvalId, "denied");
         }}
         onQuickActionSideChat={async (session, message: string) => {
           const sessionPrompt = [
@@ -2155,11 +5310,19 @@ function applySkillTranslationCache(
   });
 }
 
-function buildSkillEntries(mcpConfig: McpServerConfig[]): WorkbenchSkillEntry[] {
+function buildSkillEntries(
+  mcpConfig: McpServerConfig[],
+  userSkills: UserSkillSummary[] = [],
+  codexMcpServers: CodexMcpServerSummary[] = [],
+  disabledBuiltinToolNames: ReadonlySet<string> = new Set(),
+  mcpDiscoveryErrors: Record<string, string> = {},
+): WorkbenchSkillEntry[] {
   const tools: WorkbenchSkillEntry[] = initialToolDescriptors.map((descriptor) => {
     const owners = demoAgents
       .filter((agent) => agent.allowedToolNames.includes(descriptor.name))
       .map((agent) => agent.displayName);
+    const hardDisabled = isDisabledBrowserWriteToolName(descriptor.name);
+    const toggleable = isBuiltinToolToggleable(descriptor.name);
     return {
       id: descriptor.name,
       name: descriptor.name,
@@ -2167,7 +5330,9 @@ function buildSkillEntries(mcpConfig: McpServerConfig[]): WorkbenchSkillEntry[] 
       category: "tool",
       permissionLevel: descriptor.permissionLevel,
       agentOwners: owners,
-      enabled: true,
+      enabled: !hardDisabled && !disabledBuiltinToolNames.has(descriptor.name),
+      source: "builtin",
+      toggleable,
     };
   });
   const agents: WorkbenchSkillEntry[] = demoAgents.map((agent) => ({
@@ -2177,6 +5342,19 @@ function buildSkillEntries(mcpConfig: McpServerConfig[]): WorkbenchSkillEntry[] 
     category: "agent",
     agentOwners: [],
     enabled: true,
+    source: "builtin",
+  }));
+  const skills: WorkbenchSkillEntry[] = userSkills.map((skill) => ({
+    id: `skill-${skill.id}`,
+    name: skill.name,
+    description: skill.description,
+    category: "skill",
+    agentOwners: [`${getSkillSourceLabel(skill.source)} skill`],
+    enabled: skill.enabled,
+    source: "user",
+    path: skill.path,
+    toggleable: skill.toggleable,
+    removable: skill.removable,
   }));
   const mcps: WorkbenchSkillEntry[] = mcpConfig.map((server) => ({
     id: `mcp-${server.name}`,
@@ -2184,9 +5362,371 @@ function buildSkillEntries(mcpConfig: McpServerConfig[]): WorkbenchSkillEntry[] 
     description: `${server.transport} · ${server.command ?? server.url ?? ""}`,
     category: "mcp",
     agentOwners: [],
-    enabled: server.enabled,
+    enabled: isExecutableMcpServer(server),
+    source: "mcp",
+    toggleable: isRunnableMcpServerConfig(server),
+    removable: true,
+    installError: mcpDiscoveryErrors[mcpRuntimeServerKey({ source: "javis", name: server.name })],
   }));
-  return [...tools, ...agents, ...mcps];
+  const codexMcps: WorkbenchSkillEntry[] = codexMcpServers.map((server) => ({
+    id: codexMcpSkillEntryId(server.source, server.name),
+    name: server.name,
+    description: `${server.transport} · ${server.command ?? server.url ?? ""}`,
+    category: "mcp",
+    agentOwners: [`${server.source} MCP`],
+    enabled: isExecutableMcpServer(server),
+    source: "mcp",
+    toggleable: isRunnableMcpServerConfig(server),
+    removable: server.removable,
+    installError: mcpDiscoveryErrors[mcpRuntimeServerKey(server)],
+  }));
+  return [...tools, ...skills, ...agents, ...mcps, ...codexMcps];
+}
+
+function codexMcpSkillEntryId(source: string, name: string): string {
+  return `codex-mcp-${encodeMcpToolServerName(`${source}:${name}`)}`;
+}
+
+function parseCodexMcpSkillEntryId(id: string): { source: string; name: string } | null {
+  const encoded = id.startsWith("codex-mcp-") ? id.slice("codex-mcp-".length) : "";
+  if (!encoded) return null;
+  const decoded = decodeMcpToolServerName(encoded);
+  const separator = decoded.indexOf(":");
+  if (separator <= 0) {
+    return decoded ? { source: "codex", name: decoded } : null;
+  }
+  const source = decoded.slice(0, separator);
+  const name = decoded.slice(separator + 1);
+  return source && name ? { source, name } : null;
+}
+
+function isBuiltinToolToggleable(toolName: string): boolean {
+  return (
+    initialToolDescriptors.some((descriptor) => descriptor.name === toolName) &&
+    !BUILTIN_TOOL_LOCKED_NAMES.has(toolName) &&
+    !isDisabledBrowserWriteToolName(toolName)
+  );
+}
+
+function getSkillSourceLabel(source: string): string {
+  if (source === "javis") return "Javis";
+  if (source === "codex") return "Codex";
+  if (source === "codex-system") return "Codex System";
+  if (source === "agents") return "Agents";
+  const externalMatch = source.match(/^external(\d+)?$/);
+  if (externalMatch) {
+    return externalMatch[1] ? `External ${externalMatch[1]}` : "External";
+  }
+  return source;
+}
+
+function getEnabledToolDescriptors(
+  disabledBuiltinToolNames: ReadonlySet<string>,
+  mcpConfig: readonly McpServerConfig[] = [],
+  codexMcpServers: readonly CodexMcpServerSummary[] = [],
+  mcpToolDescriptors: readonly ToolDescriptor[] = [],
+  mcpDiscoveryErrors: Readonly<Record<string, string>> = {},
+) {
+  return [
+    ...getEnabledBuiltinToolDescriptors(disabledBuiltinToolNames),
+    ...getEnabledMcpToolDescriptors(mcpConfig, codexMcpServers, mcpToolDescriptors, mcpDiscoveryErrors),
+  ];
+}
+
+function getEnabledBuiltinToolDescriptors(disabledBuiltinToolNames: ReadonlySet<string>) {
+  return initialToolDescriptors.filter((descriptor) =>
+    !isDisabledBrowserWriteToolName(descriptor.name) &&
+    !disabledBuiltinToolNames.has(descriptor.name)
+  );
+}
+
+function getEnabledMcpToolDescriptors(
+  mcpConfig: readonly McpServerConfig[],
+  codexMcpServers: readonly CodexMcpServerSummary[],
+  mcpToolDescriptors: readonly ToolDescriptor[],
+  mcpDiscoveryErrors: Readonly<Record<string, string>>,
+) {
+  const descriptors = new Map<string, ToolDescriptor>();
+  const servers = buildMcpRuntimeServers(mcpConfig, codexMcpServers);
+  const enabledServerKeys = new Set<string>();
+  for (const server of servers) {
+    if (!isExecutableMcpServer(server)) continue;
+    const key = mcpRuntimeServerKey(server);
+    if (mcpDiscoveryErrors[key]) continue;
+    enabledServerKeys.add(key);
+    const descriptor = buildMcpListToolsDescriptor(server);
+    if (descriptor) {
+      descriptors.set(descriptor.name, descriptor);
+    }
+  }
+  for (const descriptor of mcpToolDescriptors) {
+    const key = getMcpDescriptorServerKey(descriptor);
+    if (key && enabledServerKeys.has(key)) {
+      descriptors.set(descriptor.name, descriptor);
+    }
+  }
+  return [...descriptors.values()];
+}
+
+function buildMcpRuntimeServers(
+  mcpConfig: readonly McpServerConfig[],
+  codexMcpServers: readonly CodexMcpServerSummary[],
+): McpRuntimeServerConfig[] {
+  return [
+    ...mcpConfig.map((server) => ({ ...server, source: "javis" })),
+    ...codexMcpServers,
+  ];
+}
+
+function getMcpDescriptorServerKey(descriptor: ToolDescriptor): string | null {
+  const serverName = typeof descriptor.metadata?.mcpServerName === "string"
+    ? descriptor.metadata.mcpServerName
+    : "";
+  const source = typeof descriptor.metadata?.mcpSource === "string"
+    ? descriptor.metadata.mcpSource
+    : "";
+  return serverName && source ? `${source}:${serverName}` : null;
+}
+
+function dedupeToolDescriptors(descriptors: readonly ToolDescriptor[]): ToolDescriptor[] {
+  const byName = new Map<string, ToolDescriptor>();
+  for (const descriptor of descriptors) {
+    byName.set(descriptor.name, descriptor);
+  }
+  return [...byName.values()];
+}
+
+function parseDisabledBuiltinToolNames(value: string | null): Set<string> {
+  if (!value) {
+    return new Set();
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) {
+      return new Set();
+    }
+    return new Set(parsed.filter((item): item is string => isBuiltinToolToggleable(item)));
+  } catch {
+    return new Set();
+  }
+}
+
+function loadPreference(key: string): string | null {
+  const pendingValue = loadPendingPreferencesFromLocalStorage()[key];
+  if (pendingValue !== undefined) {
+    return pendingValue;
+  }
+  if (typeof window === "undefined") {
+    return null;
+  }
+  try {
+    const raw = window.localStorage.getItem("javis.userPreferences.v1");
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const value = (parsed as Record<string, unknown>)[key];
+    return value === undefined ? null : String(value);
+  } catch {
+    return null;
+  }
+}
+
+function serializeDisabledBuiltinToolNames(value: ReadonlySet<string>): string {
+  return JSON.stringify([...value].filter(isBuiltinToolToggleable).sort());
+}
+
+function buildSkillMarketSuggestionKeywords(
+  userProfileMemorySummary: WorkbenchUserProfileMemorySummary | null,
+  agentMemorySummary: WorkbenchAgentMemorySummary | null,
+): string[] {
+  const scores = new Map<string, number>();
+  for (const tag of userProfileMemorySummary?.topTags ?? []) {
+    addSkillMarketKeyword(scores, tag, 8);
+  }
+  for (const fact of userProfileMemorySummary?.facts ?? []) {
+    for (const tag of fact.tags) {
+      addSkillMarketKeyword(scores, tag, 5);
+    }
+    addSkillMarketKeyword(scores, fact.text, 2 + fact.confidence + Math.min(fact.hitCount, 3));
+  }
+  for (const fact of agentMemorySummary?.recentFacts ?? []) {
+    for (const tag of fact.tags) {
+      addSkillMarketKeyword(scores, tag, 4);
+    }
+    addSkillMarketKeyword(scores, fact.fact, 2 + fact.importance + fact.confidence);
+  }
+  return [...scores.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([keyword]) => keyword)
+    .slice(0, SKILL_MARKET_MEMORY_KEYWORD_LIMIT);
+}
+
+function buildSkillMarketSuggestionQueries(kind: WorkbenchSkillSearchKind): string[] {
+  const recentPush = getRecentGithubPushQualifier();
+  const focusedKindTerms = kind === "mcp"
+    ? ["mcp", "server", "modelcontextprotocol"]
+    : ["ai", "agent", "automation"];
+  const broadKindTerms = kind === "mcp"
+    ? ["mcp", "server"]
+    : ["developer", "tool"];
+  return [
+    [...focusedKindTerms, "stars:>50", recentPush].join(" "),
+    [...broadKindTerms, "stars:>200", recentPush].join(" "),
+    [...focusedKindTerms, "stars:>500", recentPush].join(" "),
+  ].map((query) => query.trim()).filter((query, index, all) => query && all.indexOf(query) === index);
+}
+
+function addSkillMarketKeyword(scores: Map<string, number>, value: string, score: number) {
+  for (const keyword of extractSkillMarketKeywords(value)) {
+    scores.set(keyword, (scores.get(keyword) ?? 0) + score);
+  }
+}
+
+function extractSkillMarketKeywords(value: string): string[] {
+  const matches = value.match(/[A-Za-z][A-Za-z0-9+#._-]{2,}|[\u4e00-\u9fff]{2,10}/g) ?? [];
+  return matches
+    .map(normalizeSkillMarketKeyword)
+    .filter((keyword): keyword is string => Boolean(keyword));
+}
+
+function normalizeSkillMarketKeyword(value: string): string | null {
+  const trimmed = value.trim().replace(/^#+/, "").replace(/[_-]+/g, " ");
+  if (trimmed.length < 2 || trimmed.length > 28) {
+    return null;
+  }
+  const keyword = /^[\x00-\x7F]+$/.test(trimmed) ? trimmed.toLowerCase() : trimmed;
+  if (SKILL_MARKET_KEYWORD_STOPWORDS.has(keyword)) {
+    return null;
+  }
+  return keyword;
+}
+
+function getRecentGithubPushQualifier(): string {
+  const since = new Date();
+  since.setFullYear(since.getFullYear() - 1);
+  return `pushed:>${since.toISOString().slice(0, 10)}`;
+}
+
+function rankSkillMarketSuggestionResults(
+  results: SearchWebSourceResult[],
+  keywords: string[],
+): SearchWebSourceResult[] {
+  if (keywords.length === 0) {
+    return results;
+  }
+  return results
+    .map((result, index) => ({
+      result,
+      index,
+      score: getSkillSuggestionMatchedKeywords(result, keywords).length,
+    }))
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .map((entry) => entry.result);
+}
+
+function getSkillSuggestionMatchedKeywords(
+  result: SearchWebSourceResult,
+  keywords: string[],
+): string[] {
+  if (keywords.length === 0) {
+    return [];
+  }
+  const haystack = `${result.title ?? ""} ${result.excerpt} ${result.url}`.toLowerCase();
+  return keywords.filter((keyword) => haystack.includes(keyword.toLowerCase()));
+}
+
+function normalizeSkillSuggestionTitle(title: string | undefined, url: string): string {
+  const trimmed = title?.trim();
+  if (trimmed) {
+    return trimmed.length > 60 ? `${trimmed.slice(0, 57)}...` : trimmed;
+  }
+  const repo = githubRepoParts(url, "SKILL.md") ?? githubRepoParts(url, "package.json");
+  return repo ? `${repo.owner}/${repo.repo}` : url;
+}
+
+function buildSkillSuggestionDescription(excerpt: string, keywords: string[]): string {
+  const summary = excerpt.trim() || "GitHub 热门项目";
+  const compactSummary = summary.length > 96 ? `${summary.slice(0, 93)}...` : summary;
+  const memoryHint = keywords.slice(0, 2).join(" / ");
+  return memoryHint ? `${compactSummary} · 贴合：${memoryHint}` : compactSummary;
+}
+
+function isSkillSearchResultInstalled(
+  url: string,
+  title: string | undefined,
+  kind: WorkbenchSkillSearchKind,
+  userSkills: UserSkillSummary[],
+  mcpConfig: McpServerConfig[],
+  codexMcpServers: CodexMcpServerSummary[],
+): boolean {
+  if (kind === "skill") {
+    const repoSkillDirName = skillDirNameFromGithubUrl(url);
+    return repoSkillDirName
+      ? userSkills.some((skill) => {
+          const idParts = skill.id.split(":");
+          return idParts[idParts.length - 1] === repoSkillDirName;
+        })
+      : false;
+  }
+  const titleName = title?.split('/').pop()?.trim();
+  const repo = githubRepoParts(url, "package.json");
+  const names = [
+    titleName,
+    titleName ? sanitizeName(titleName) : undefined,
+    repo ? sanitizeName([repo.owner, repo.repo, ...repo.subdir].join("-")) : undefined,
+    repo ? sanitizeName(repo.repo) : undefined,
+  ].filter((name): name is string => Boolean(name));
+  return [...mcpConfig, ...codexMcpServers].some((server) => names.includes(server.name));
+}
+
+function isSupportedSkillMarketUrl(url: string, kind: WorkbenchSkillSearchKind): boolean {
+  return Boolean(githubRepoParts(url, kind === "mcp" ? "package.json" : "SKILL.md"));
+}
+
+function skillDirNameFromGithubUrl(url: string): string | null {
+  const repo = githubRepoParts(url, "SKILL.md");
+  if (!repo) return null;
+  return sanitizeName([repo.owner, repo.repo, ...repo.subdir].join("-"));
+}
+
+function githubRepoParts(
+  url: string,
+  expectedBlobFileName: "SKILL.md" | "package.json",
+): { owner: string; repo: string; subdir: string[] } | null {
+  const githubPrefix = "https://github.com/";
+  const trimmed = url.trim();
+  if (!trimmed.startsWith(githubPrefix)) return null;
+  const rawPath = trimmed.slice(githubPrefix.length).split(/[?#]/, 1)[0] ?? "";
+  const parts = rawPath.split("/").filter(Boolean);
+  const owner = sanitizeName(parts[0] ?? "");
+  const repo = sanitizeName((parts[1] ?? "").replace(/\.git$/, ""));
+  if (!owner || !repo) return null;
+  if (parts.length === 2) {
+    return { owner, repo, subdir: [] };
+  }
+  if (!["tree", "blob"].includes(parts[2] ?? "") || parts.length < 5) {
+    return null;
+  }
+  const branch = sanitizeName(parts[3] ?? "");
+  const rawSubdir = parts[2] === "blob"
+    ? parts.slice(4, -1)
+    : parts.slice(4);
+  if (parts[2] === "blob" && parts[parts.length - 1] !== expectedBlobFileName) {
+    return null;
+  }
+  const subdir = rawSubdir.map(sanitizeName).filter(Boolean);
+  if (!branch) {
+    return null;
+  }
+  return parts[2] === "blob" || subdir.length > 0 ? { owner, repo, subdir } : null;
+}
+
+function sanitizeName(value: string): string {
+  return [...value].filter((ch) => /[A-Za-z0-9._-]/.test(ch)).join("").slice(0, 96);
 }
 
 function getSkillTranslationSourceSignature(skill: WorkbenchSkillEntry): string {

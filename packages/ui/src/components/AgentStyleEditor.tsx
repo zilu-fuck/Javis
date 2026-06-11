@@ -25,7 +25,7 @@ export interface AgentStyleEditorProps {
   onResetAgentStyle?: (kind: string) => Promise<WorkbenchAgentStyleState | void>;
 }
 
-const MAX_STYLE_LENGTH = 6000;
+const MAX_STYLE_LENGTH = 2000;
 const REFRESH_INTERVAL_MS = 5000;
 
 const FALLBACK_AGENTS: WorkbenchAgentCatalogEntry[] = [

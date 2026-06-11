@@ -6,9 +6,26 @@ import type {
   WorkbenchModelConfiguration,
   WorkbenchModelProfile,
   WorkbenchModelSettings,
+  WorkbenchComputerUseLocalVisionMode,
+  WorkbenchComputerUseLocalVisionRuntime,
+  WorkbenchComputerUseLocalVisionSettings,
+  WorkbenchComputerUseSettings,
+  WorkbenchRuntimePreferences,
+  WorkbenchDefaultStartupMode,
+  WorkbenchContextStrategy,
+  WorkbenchAgentMaxRoundsPreset,
+  WorkbenchTaskTimeoutPreset,
+  WorkbenchAgentMemoryScopeMode,
+  WorkbenchAgentMemoryEmbeddingMode,
+  WorkbenchTaskQueuePolicy,
+  WorkbenchFailureRecoveryPolicy,
+  WorkbenchUserWaitTimeoutPreset,
+  WorkbenchAppearanceTheme,
   WorkbenchModelSlot,
   WorkbenchAgentStyleState,
   WorkbenchUserProfileMemorySummary,
+  WorkbenchAgentMemorySummary,
+  WorkbenchTrustedComputerApp,
 } from "../types";
 import type { ProviderCatalogEntry } from "../types";
 import { translateWorkbenchText } from "../utils";
@@ -27,12 +44,25 @@ interface ModelSettingsProps {
   agentCatalog?: WorkbenchAgentCatalogEntry[];
   modelSettings: WorkbenchModelSettings;
   modelConfiguration?: WorkbenchModelConfiguration;
+  computerUseSettings?: WorkbenchComputerUseSettings;
+  computerUseLocalVisionSettings?: WorkbenchComputerUseLocalVisionSettings;
+  trustedComputerApps?: WorkbenchTrustedComputerApp[];
+  runtimePreferences?: WorkbenchRuntimePreferences;
   userProfileMemorySummary?: WorkbenchUserProfileMemorySummary | null;
+  agentMemorySummary?: WorkbenchAgentMemorySummary | null;
   onModelSettingsChange?: (settings: WorkbenchModelSettings) => void;
   onTestModelConnection?: (settings: WorkbenchModelSettings) => Promise<string | void>;
   onModelConfigurationChange?: (config: WorkbenchModelConfiguration) => void;
+  onComputerUseSettingsChange?: (settings: WorkbenchComputerUseSettings) => void;
+  onComputerUseLocalVisionSettingsChange?: (settings: WorkbenchComputerUseLocalVisionSettings) => void;
+  onRemoveTrustedComputerApp?: (title: string) => void;
+  onRuntimePreferencesChange?: (preferences: WorkbenchRuntimePreferences) => void;
   onRebuildUserProfileMemory?: () => void;
   onClearUserProfileMemory?: () => void;
+  onAgentMemoryEnabledChange?: (enabled: boolean) => void;
+  onClearAgentMemory?: () => void;
+  onClearWorkspaceAgentMemory?: () => void;
+  onDeleteAgentMemoryFact?: (id: string) => void;
   onReadAgentStyle?: (kind: string) => Promise<WorkbenchAgentStyleState>;
   onSaveAgentStyle?: (kind: string, content: string) => Promise<WorkbenchAgentStyleState | void>;
   onResetAgentStyle?: (kind: string) => Promise<WorkbenchAgentStyleState | void>;
@@ -60,6 +90,7 @@ interface ModelSettingsProps {
 }
 
 type SettingsTab = "general" | "ai" | "privacy" | "about";
+type SettingsTabIcon = "general" | "ai" | "privacy" | "about";
 
 const SLOT_LABELS: Record<WorkbenchModelSlot, { zh: string; en: string }> = {
   primary: { zh: "主力模型", en: "Primary" },
@@ -130,6 +161,53 @@ const PROVIDERS_BY_ID = new Map<string, ProviderCatalogEntry>(
   PROVIDER_CATALOG.map((provider) => [provider.id, provider]),
 );
 
+const DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS: WorkbenchComputerUseLocalVisionSettings = {
+  mode: "off",
+  modelPath: "models/local-vision/yolo26n-ui.onnx",
+  runtime: "auto",
+  runtimeAdapterPath: "",
+  imgsz: 640,
+  timeoutMs: 120,
+  maxDetections: 20,
+  minConfidence: 0.75,
+  iouThreshold: 0.45,
+  promptTopK: 8,
+  disableAfterConsecutiveTimeouts: 2,
+  disableAfterConsecutiveErrors: 2,
+  disableAfterConsecutiveActionFailures: 2,
+  reuseWorker: true,
+};
+
+const DEFAULT_COMPUTER_USE_SETTINGS: WorkbenchComputerUseSettings = {
+  enabled: false,
+  maxStepsPerTask: 20,
+  mouseSpeed: "instant",
+  mouseDurationMs: 200,
+  typeDelayMs: 50,
+  deniedWindowPatterns: [],
+};
+
+const DEFAULT_RUNTIME_PREFERENCES: WorkbenchRuntimePreferences = {
+  appearanceTheme: "light",
+  defaultStartupMode: "chat",
+  contextStrategy: "auto",
+  agentMaxRoundsPreset: "8",
+  agentMaxRoundsCustom: 8,
+  taskTimeoutPreset: "standard",
+  taskTimeoutCustomMs: 90_000,
+  agentMemoryScope: "workspace",
+  agentMemoryEmbeddingMode: "local",
+  agentMemoryEmbeddingProvider: "openai",
+  agentMemoryEmbeddingModel: "text-embedding-3-small",
+  agentMemoryEmbeddingBaseUrl: "https://api.openai.com/v1",
+  agentMemoryEmbeddingApiKeyReference: "model.embedding",
+  agentMemoryEmbeddingDimensions: 1536,
+  taskQueuePolicy: "queue",
+  failureRecoveryPolicy: "replan",
+  userWaitTimeoutPreset: "standard",
+  userWaitTimeoutCustomMs: 5 * 60_000,
+};
+
 
 interface ConfiguredModelOption {
   value: string;
@@ -167,12 +245,25 @@ export function ModelSettings({
   agentCatalog,
   modelSettings,
   modelConfiguration,
+  computerUseSettings,
+  computerUseLocalVisionSettings,
+  trustedComputerApps = [],
+  runtimePreferences,
   userProfileMemorySummary,
+  agentMemorySummary,
   onModelSettingsChange,
   onTestModelConnection,
   onModelConfigurationChange,
+  onComputerUseSettingsChange,
+  onComputerUseLocalVisionSettingsChange,
+  onRemoveTrustedComputerApp,
+  onRuntimePreferencesChange,
   onRebuildUserProfileMemory,
   onClearUserProfileMemory,
+  onAgentMemoryEnabledChange,
+  onClearAgentMemory,
+  onClearWorkspaceAgentMemory,
+  onDeleteAgentMemoryFact,
   onReadAgentStyle,
   onSaveAgentStyle,
   onResetAgentStyle,
@@ -301,11 +392,17 @@ export function ModelSettings({
     setSelectedProvider(modelSettings.provider || "openai");
   }, [modelSettings.provider]);
 
-  const tabs: Array<{ id: SettingsTab; icon: string; label: string }> = [
-    { id: "general", icon: "◆", label: labels.generalSettings },
-    { id: "ai", icon: "◇", label: labels.aiModeSettings },
-    { id: "privacy", icon: "✋", label: labels.privacySecuritySettings },
-    { id: "about", icon: "i", label: labels.aboutFeedbackSettings },
+  const tabs: Array<{ id: SettingsTab; icon: SettingsTabIcon; label: string }> = [
+    { id: "general", icon: "general", label: labels.generalSettings },
+    { id: "ai", icon: "ai", label: labels.aiModeSettings },
+    { id: "privacy", icon: "privacy", label: labels.privacySecuritySettings },
+    { id: "about", icon: "about", label: labels.aboutFeedbackSettings },
+  ];
+  const themeOptions: Array<{ value: WorkbenchAppearanceTheme; label: string }> = [
+    { value: "light", label: isZh ? "亮色" : "Light" },
+    { value: "dark", label: isZh ? "暗色" : "Dark" },
+    { value: "glass", label: isZh ? "毛玻璃" : "Glass" },
+    { value: "high_contrast", label: isZh ? "高对比" : "High contrast" },
   ];
 
   function updateModelSetting(field: keyof WorkbenchModelSettings, value: string) {
@@ -318,6 +415,38 @@ export function ModelSettings({
     if (field === "provider") {
       setSelectedProvider(value || "openai");
     }
+  }
+
+  const effectiveLocalVisionSettings =
+    computerUseLocalVisionSettings ?? DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS;
+  const effectiveComputerUseSettings =
+    computerUseSettings ?? DEFAULT_COMPUTER_USE_SETTINGS;
+  const effectiveRuntimePreferences =
+    runtimePreferences ?? DEFAULT_RUNTIME_PREFERENCES;
+
+  function updateComputerUseSetting(
+    patch: Partial<WorkbenchComputerUseSettings>,
+  ) {
+    onComputerUseSettingsChange?.({
+      ...effectiveComputerUseSettings,
+      ...patch,
+    });
+  }
+
+  function updateLocalVisionSetting(
+    patch: Partial<WorkbenchComputerUseLocalVisionSettings>,
+  ) {
+    onComputerUseLocalVisionSettingsChange?.({
+      ...effectiveLocalVisionSettings,
+      ...patch,
+    });
+  }
+
+  function updateRuntimePreferences(patch: Partial<WorkbenchRuntimePreferences>) {
+    onRuntimePreferencesChange?.({
+      ...effectiveRuntimePreferences,
+      ...patch,
+    });
   }
 
   function assignConfiguredModelToSlot(slot: WorkbenchModelSlot, optionValue: string) {
@@ -567,7 +696,7 @@ export function ModelSettings({
         onClick={() => setOpen(true)}
         type="button"
       >
-        <span className="javis-nav-icon icon-settings">⚙</span>
+        <span className="javis-nav-icon icon-settings" aria-hidden="true">⚙</span>
         <span>{labels.settings}</span>
       </button>
       {isOpen && typeof document !== "undefined" ? createPortal((
@@ -592,7 +721,7 @@ export function ModelSettings({
                   onClick={() => setActiveTab(tab.id)}
                   type="button"
                 >
-                  <span>{tab.icon}</span>
+                  <span className={`javis-settings-tab-icon icon-${tab.icon}`} aria-hidden="true" />
                   <span>{tab.label}</span>
                 </button>
               ))}
@@ -604,15 +733,503 @@ export function ModelSettings({
                 onClick={() => setOpen(false)}
                 type="button"
               >
-                ×
+                <span className="javis-settings-close-icon" aria-hidden="true" />
               </button>
               {activeTab === "general" ? (
-                <SettingsPlaceholder
-                  labels={labels}
-                  title={labels.generalSettings}
-                />
+                <section className="javis-settings-section javis-computer-use-settings" aria-label={labels.generalSettings}>
+                  <h2>{isZh ? "运行设置" : "Run Settings"}</h2>
+                  <div className="javis-settings-card">
+                    <div className="javis-settings-field javis-settings-field-wide">
+                      <span>{isZh ? "主题色" : "Theme color"}</span>
+                      <div
+                        aria-label={isZh ? "主题色" : "Theme color"}
+                        className="javis-theme-options"
+                        role="radiogroup"
+                      >
+                        {themeOptions.map((option) => (
+                          <button
+                            aria-checked={effectiveRuntimePreferences.appearanceTheme === option.value}
+                            className={`javis-theme-option theme-${option.value}`}
+                            key={option.value}
+                            onClick={() =>
+                              updateRuntimePreferences({
+                                appearanceTheme: option.value,
+                              })}
+                            role="radio"
+                            type="button"
+                          >
+                            <span className="javis-theme-swatch" aria-hidden="true" />
+                            <span>{option.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <label>
+                      <span>{isZh ? "默认启动模式" : "Default startup mode"}</span>
+                      <RoundedSelect
+                        aria-label={isZh ? "默认启动模式" : "Default startup mode"}
+                        onChange={(value) =>
+                          updateRuntimePreferences({
+                            defaultStartupMode: value as WorkbenchDefaultStartupMode,
+                          })}
+                        options={[
+                          { value: "chat", label: isZh ? "聊天" : "Chat" },
+                          { value: "project", label: isZh ? "Agent 任务" : "Agent task" },
+                          { value: "auto", label: isZh ? "自动" : "Auto" },
+                        ]}
+                        value={effectiveRuntimePreferences.defaultStartupMode}
+                      />
+                    </label>
+                    <label>
+                      <span>{isZh ? "任务排队策略" : "Task queue policy"}</span>
+                      <RoundedSelect
+                        aria-label={isZh ? "任务排队策略" : "Task queue policy"}
+                        onChange={(value) =>
+                          updateRuntimePreferences({
+                            taskQueuePolicy: value as WorkbenchTaskQueuePolicy,
+                          })}
+                        options={[
+                          { value: "queue", label: isZh ? "允许排队" : "Allow queue" },
+                          { value: "current_only", label: isZh ? "仅当前任务" : "Current task only" },
+                          { value: "interrupt", label: isZh ? "新任务打断当前任务" : "Interrupt with new task" },
+                        ]}
+                        value={effectiveRuntimePreferences.taskQueuePolicy}
+                      />
+                    </label>
+                  </div>
+                  <h2>Computer Use</h2>
+                  <div className="javis-settings-card">
+                    <label className="javis-settings-toggle">
+                      <input
+                        aria-label="Enable Computer Use"
+                        checked={effectiveComputerUseSettings.enabled}
+                        onChange={(event) =>
+                          updateComputerUseSetting({ enabled: event.currentTarget.checked })}
+                        type="checkbox"
+                      />
+                      <span>{isZh ? "启用 Computer Use" : "Enable Computer Use"}</span>
+                    </label>
+                    <label>
+                      <span>{isZh ? "每个任务最大步数" : "Maximum steps per task"}</span>
+                      <input
+                        aria-label="Maximum Computer Use steps"
+                        max={60}
+                        min={1}
+                        onChange={(event) =>
+                          updateComputerUseSetting({
+                            maxStepsPerTask: numberInputValue(event.currentTarget.value, 20),
+                          })}
+                        type="number"
+                        value={effectiveComputerUseSettings.maxStepsPerTask}
+                      />
+                    </label>
+                    <label>
+                      <span>{isZh ? "Mouse speed" : "Mouse speed"}</span>
+                      <RoundedSelect
+                        aria-label="Computer Use mouse speed"
+                        onChange={(value) =>
+                          updateComputerUseSetting({
+                            mouseSpeed: value as WorkbenchComputerUseSettings["mouseSpeed"],
+                          })}
+                        options={[
+                          { value: "instant", label: isZh ? "Instant" : "Instant" },
+                          { value: "linear", label: isZh ? "Linear" : "Linear" },
+                        ]}
+                        value={effectiveComputerUseSettings.mouseSpeed}
+                      />
+                    </label>
+                    <label>
+                      <span>{isZh ? "Mouse duration ms" : "Mouse duration ms"}</span>
+                      <input
+                        aria-label="Computer Use mouse duration"
+                        max={1000}
+                        min={0}
+                        onChange={(event) =>
+                          updateComputerUseSetting({
+                            mouseDurationMs: numberInputValue(event.currentTarget.value, 200),
+                          })}
+                        type="number"
+                        value={effectiveComputerUseSettings.mouseDurationMs}
+                      />
+                    </label>
+                    <label>
+                      <span>{isZh ? "Type delay ms" : "Type delay ms"}</span>
+                      <input
+                        aria-label="Computer Use type delay"
+                        max={500}
+                        min={0}
+                        onChange={(event) =>
+                          updateComputerUseSetting({
+                            typeDelayMs: numberInputValue(event.currentTarget.value, 50),
+                          })}
+                        type="number"
+                        value={effectiveComputerUseSettings.typeDelayMs}
+                      />
+                    </label>
+                    <label className="javis-settings-field-wide">
+                      <span>{isZh ? "Denied window title patterns" : "Denied window title patterns"}</span>
+                      <textarea
+                        aria-label="Denied Computer Use window patterns"
+                        onChange={(event) =>
+                          updateComputerUseSetting({
+                            deniedWindowPatterns: event.currentTarget.value.split(/\r?\n/),
+                          })}
+                        rows={3}
+                        value={effectiveComputerUseSettings.deniedWindowPatterns.join("\n")}
+                      />
+                    </label>
+                    <div className="javis-settings-field-wide" aria-label={labels.trustedComputerApps}>
+                      <div className="javis-document-row">
+                        <strong>{labels.trustedComputerApps}</strong>
+                        <span>{trustedComputerApps.length}</span>
+                      </div>
+                      {trustedComputerApps.length > 0 ? (
+                        <div className="javis-computer-list">
+                          {trustedComputerApps.map((app) => (
+                            <div className="javis-computer-row" key={app.title}>
+                              <span className="javis-computer-icon file small" aria-hidden="true">APP</span>
+                              <span className="javis-computer-name">{app.title}</span>
+                              <span className="javis-computer-date">{app.trustedAt.slice(0, 10)}</span>
+                              {onRemoveTrustedComputerApp ? (
+                                <button
+                                  onClick={() => onRemoveTrustedComputerApp(app.title)}
+                                  type="button"
+                                >
+                                  {labels.removeTrustedApp}
+                                </button>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                    <label>
+                      <span>{isZh ? "本地视觉加速" : "Local vision acceleration"}</span>
+                      <RoundedSelect
+                        aria-label="Local vision acceleration"
+                        onChange={(value) =>
+                          updateLocalVisionSetting({
+                            mode: value as WorkbenchComputerUseLocalVisionMode,
+                          })}
+                        options={[
+                          { value: "off", label: isZh ? "关闭" : "Off" },
+                          { value: "passive", label: isZh ? "被动检测" : "Passive" },
+                          { value: "prompt_hint", label: isZh ? "提示词线索" : "Prompt hints" },
+                        ]}
+                        value={effectiveLocalVisionSettings.mode}
+                      />
+                    </label>
+                    <label className="javis-settings-field-wide">
+                      <span>{isZh ? "YOLO ONNX 模型路径" : "YOLO ONNX model path"}</span>
+                      <input
+                        aria-label="YOLO ONNX model path"
+                        onChange={(event) =>
+                          updateLocalVisionSetting({ modelPath: event.currentTarget.value })}
+                        placeholder="E:\\models\\yolo26n-ui.onnx"
+                        value={effectiveLocalVisionSettings.modelPath}
+                      />
+                    </label>
+                    <label>
+                      <span>{isZh ? "运行时" : "Runtime"}</span>
+                      <RoundedSelect
+                        aria-label="Local vision runtime"
+                        onChange={(value) =>
+                          updateLocalVisionSetting({
+                            runtime: value as WorkbenchComputerUseLocalVisionRuntime,
+                          })}
+                        options={[
+                          { value: "auto", label: "Auto" },
+                          { value: "onnxruntime", label: "ONNX Runtime" },
+                          { value: "openvino", label: "OpenVINO" },
+                          { value: "tensorrt", label: "TensorRT" },
+                        ]}
+                        value={effectiveLocalVisionSettings.runtime}
+                      />
+                    </label>
+                    <label className="javis-settings-field-wide">
+                      <span>{isZh ? "运行时适配器路径" : "Runtime adapter path"}</span>
+                      <input
+                        aria-label="Runtime adapter path"
+                        onChange={(event) =>
+                          updateLocalVisionSetting({ runtimeAdapterPath: event.currentTarget.value })}
+                        placeholder="E:\\models\\yolo26-ui-adapter.mjs"
+                        value={effectiveLocalVisionSettings.runtimeAdapterPath}
+                      />
+                    </label>
+                    <label>
+                      <span>{isZh ? "检测超时（毫秒）" : "Detection timeout (ms)"}</span>
+                      <input
+                        aria-label="Detection timeout"
+                        max={2000}
+                        min={20}
+                        onChange={(event) =>
+                          updateLocalVisionSetting({
+                            timeoutMs: numberInputValue(event.currentTarget.value, 120),
+                          })}
+                        type="number"
+                        value={effectiveLocalVisionSettings.timeoutMs}
+                      />
+                    </label>
+                    <label>
+                      <span>{isZh ? "图像尺寸" : "Image size"}</span>
+                      <input
+                        aria-label="Local vision image size"
+                        max={1280}
+                        min={320}
+                        onChange={(event) =>
+                          updateLocalVisionSetting({
+                            imgsz: numberInputValue(event.currentTarget.value, 640),
+                          })}
+                        step={32}
+                        type="number"
+                        value={effectiveLocalVisionSettings.imgsz}
+                      />
+                    </label>
+                    <label>
+                      <span>{isZh ? "最低置信度" : "Minimum confidence"}</span>
+                      <input
+                        aria-label="Minimum confidence"
+                        max={1}
+                        min={0}
+                        onChange={(event) =>
+                          updateLocalVisionSetting({
+                            minConfidence: numberInputFloatValue(event.currentTarget.value, 0.75),
+                          })}
+                        step={0.05}
+                        type="number"
+                        value={effectiveLocalVisionSettings.minConfidence}
+                      />
+                    </label>
+                    <label>
+                      <span>{isZh ? "最大检测数" : "Maximum detections"}</span>
+                      <input
+                        aria-label="Maximum detections"
+                        max={100}
+                        min={1}
+                        onChange={(event) =>
+                          updateLocalVisionSetting({
+                            maxDetections: numberInputValue(event.currentTarget.value, 20),
+                          })}
+                        type="number"
+                        value={effectiveLocalVisionSettings.maxDetections}
+                      />
+                    </label>
+                    <label>
+                      <span>{isZh ? "IoU 阈值" : "IoU threshold"}</span>
+                      <input
+                        aria-label="IoU threshold"
+                        max={1}
+                        min={0}
+                        onChange={(event) =>
+                          updateLocalVisionSetting({
+                            iouThreshold: numberInputFloatValue(event.currentTarget.value, 0.45),
+                          })}
+                        step={0.05}
+                        type="number"
+                        value={effectiveLocalVisionSettings.iouThreshold}
+                      />
+                    </label>
+                    <label>
+                      <span>{isZh ? "提示候选上限" : "Prompt candidate limit"}</span>
+                      <input
+                        aria-label="Prompt candidate limit"
+                        max={20}
+                        min={0}
+                        onChange={(event) =>
+                          updateLocalVisionSetting({
+                            promptTopK: numberInputValue(event.currentTarget.value, 8),
+                          })}
+                        type="number"
+                        value={effectiveLocalVisionSettings.promptTopK}
+                      />
+                    </label>
+                    <label>
+                      <span>{isZh ? "超时后停用阈值" : "Disable after timeouts"}</span>
+                      <input
+                        aria-label="Disable after timeouts"
+                        max={10}
+                        min={0}
+                        onChange={(event) =>
+                          updateLocalVisionSetting({
+                            disableAfterConsecutiveTimeouts: numberInputValue(event.currentTarget.value, 2),
+                          })}
+                        type="number"
+                        value={effectiveLocalVisionSettings.disableAfterConsecutiveTimeouts}
+                      />
+                    </label>
+                    <label>
+                      <span>{isZh ? "错误后停用阈值" : "Disable after errors"}</span>
+                      <input
+                        aria-label="Disable after errors"
+                        max={10}
+                        min={0}
+                        onChange={(event) =>
+                          updateLocalVisionSetting({
+                            disableAfterConsecutiveErrors: numberInputValue(event.currentTarget.value, 2),
+                          })}
+                        type="number"
+                        value={effectiveLocalVisionSettings.disableAfterConsecutiveErrors}
+                      />
+                    </label>
+                    <label>
+                      <span>{isZh ? "动作失败后停用阈值" : "Disable after action failures"}</span>
+                      <input
+                        aria-label="Disable after action failures"
+                        max={10}
+                        min={0}
+                        onChange={(event) =>
+                          updateLocalVisionSetting({
+                            disableAfterConsecutiveActionFailures: numberInputValue(event.currentTarget.value, 2),
+                          })}
+                        type="number"
+                        value={effectiveLocalVisionSettings.disableAfterConsecutiveActionFailures}
+                      />
+                    </label>
+                    <label className="javis-settings-toggle">
+                      <input
+                        aria-label="Reuse local vision worker"
+                        checked={effectiveLocalVisionSettings.reuseWorker}
+                        onChange={(event) =>
+                          updateLocalVisionSetting({ reuseWorker: event.currentTarget.checked })}
+                        type="checkbox"
+                      />
+                      <span>{isZh ? "复用本地视觉 worker" : "Reuse local vision worker"}</span>
+                    </label>
+                  </div>
+                </section>
               ) : activeTab === "ai" ? (
                 <section className="javis-settings-section javis-ai-settings-section" aria-label={labels.aiModeSettings}>
+                  <h2>{isZh ? "任务运行策略" : "Task Runtime"}</h2>
+                  <div className="javis-settings-card javis-ai-agent-card">
+                    <label>
+                      <span>{isZh ? "上下文策略" : "Context strategy"}</span>
+                      <RoundedSelect
+                        aria-label={isZh ? "上下文策略" : "Context strategy"}
+                        onChange={(value) =>
+                          updateRuntimePreferences({
+                            contextStrategy: value as WorkbenchContextStrategy,
+                          })}
+                        options={[
+                          { value: "auto", label: isZh ? "自动" : "Auto" },
+                          { value: "short", label: isZh ? "短上下文" : "Short" },
+                          { value: "long", label: isZh ? "长上下文" : "Long" },
+                        ]}
+                        value={effectiveRuntimePreferences.contextStrategy}
+                      />
+                    </label>
+                    <label>
+                      <span>{isZh ? "Agent 最大轮数" : "Agent max rounds"}</span>
+                      <RoundedSelect
+                        aria-label={isZh ? "Agent 最大轮数" : "Agent max rounds"}
+                        onChange={(value) =>
+                          updateRuntimePreferences({
+                            agentMaxRoundsPreset: value as WorkbenchAgentMaxRoundsPreset,
+                          })}
+                        options={[
+                          { value: "4", label: "4" },
+                          { value: "8", label: "8" },
+                          { value: "12", label: "12" },
+                          { value: "custom", label: isZh ? "自定义" : "Custom" },
+                        ]}
+                        value={effectiveRuntimePreferences.agentMaxRoundsPreset}
+                      />
+                    </label>
+                    {effectiveRuntimePreferences.agentMaxRoundsPreset === "custom" ? (
+                      <label>
+                        <span>{isZh ? "自定义轮数" : "Custom rounds"}</span>
+                        <input
+                          aria-label={isZh ? "自定义轮数" : "Custom rounds"}
+                          max={24}
+                          min={1}
+                          onChange={(event) =>
+                            updateRuntimePreferences({
+                              agentMaxRoundsCustom: numberInputValue(event.currentTarget.value, 8),
+                            })}
+                          type="number"
+                          value={effectiveRuntimePreferences.agentMaxRoundsCustom}
+                        />
+                      </label>
+                    ) : null}
+                    <label>
+                      <span>{isZh ? "任务超时策略" : "Task timeout strategy"}</span>
+                      <RoundedSelect
+                        aria-label={isZh ? "任务超时策略" : "Task timeout strategy"}
+                        onChange={(value) =>
+                          updateRuntimePreferences({
+                            taskTimeoutPreset: value as WorkbenchTaskTimeoutPreset,
+                          })}
+                        options={[
+                          { value: "standard", label: isZh ? "标准" : "Standard" },
+                          { value: "long", label: isZh ? "长任务" : "Long task" },
+                          { value: "custom", label: isZh ? "自定义" : "Custom" },
+                        ]}
+                        value={effectiveRuntimePreferences.taskTimeoutPreset}
+                      />
+                    </label>
+                    {effectiveRuntimePreferences.taskTimeoutPreset === "custom" ? (
+                      <label>
+                        <span>{isZh ? "自定义超时（秒）" : "Custom timeout (seconds)"}</span>
+                        <input
+                          aria-label={isZh ? "自定义超时（秒）" : "Custom timeout seconds"}
+                          max={900}
+                          min={30}
+                          onChange={(event) =>
+                            updateRuntimePreferences({
+                              taskTimeoutCustomMs: numberInputValue(event.currentTarget.value, 90) * 1000,
+                            })}
+                          type="number"
+                          value={Math.round(effectiveRuntimePreferences.taskTimeoutCustomMs / 1000)}
+                        />
+                      </label>
+                    ) : null}
+                    <label>
+                      <span>{isZh ? "失败恢复策略" : "Failure recovery"}</span>
+                      <RoundedSelect
+                        aria-label={isZh ? "失败恢复策略" : "Failure recovery"}
+                        onChange={(value) =>
+                          updateRuntimePreferences({
+                            failureRecoveryPolicy: value as WorkbenchFailureRecoveryPolicy,
+                          })}
+                        options={[
+                          { value: "replan", label: isZh ? "自动重规划" : "Auto replan" },
+                          { value: "stop", label: isZh ? "直接停止" : "Stop on failure" },
+                        ]}
+                        value={effectiveRuntimePreferences.failureRecoveryPolicy}
+                      />
+                    </label>
+                    <label>
+                      <span>{isZh ? "等待用户超时" : "User wait timeout"}</span>
+                      <RoundedSelect
+                        aria-label={isZh ? "等待用户超时" : "User wait timeout"}
+                        onChange={(value) =>
+                          updateRuntimePreferences({
+                            userWaitTimeoutPreset: value as WorkbenchUserWaitTimeoutPreset,
+                          })}
+                        options={[
+                          { value: "standard", label: isZh ? "标准（5 分钟）" : "Standard (5 min)" },
+                          { value: "long", label: isZh ? "长等待（30 分钟）" : "Long wait (30 min)" },
+                          { value: "custom", label: isZh ? "自定义" : "Custom" },
+                        ]}
+                        value={effectiveRuntimePreferences.userWaitTimeoutPreset}
+                      />
+                    </label>
+                    {effectiveRuntimePreferences.userWaitTimeoutPreset === "custom" ? (
+                      <label>
+                        <span>{isZh ? "自定义等待（分钟）" : "Custom wait (minutes)"}</span>
+                        <input
+                          aria-label={isZh ? "自定义等待（分钟）" : "Custom wait minutes"}
+                          max={120}
+                          min={1}
+                          onChange={(event) =>
+                            updateRuntimePreferences({
+                              userWaitTimeoutCustomMs: numberInputValue(event.currentTarget.value, 5) * 60_000,
+                            })}
+                          type="number"
+                          value={Math.round(effectiveRuntimePreferences.userWaitTimeoutCustomMs / 60_000)}
+                        />
+                      </label>
+                    ) : null}
+                  </div>
                   <h2>{isZh ? "供应商" : "Providers"}</h2>
                   <div className="javis-ai-provider-console">
                     <aside className="javis-ai-provider-list" aria-label={isZh ? "供应商列表" : "Provider list"}>
@@ -805,7 +1422,7 @@ export function ModelSettings({
                                 type="button"
                               >
                               <span>{isZh ? "添加模型" : "Add model"}</span>
-                              <span>⌄</span>
+                              <span className="javis-ai-provider-model-caret" aria-hidden="true">⌄</span>
                             </button>
                             {openProviderModelMenu ? createPortal(
                               <div className="javis-ai-provider-model-menu" role="listbox" style={modelMenuStyle}>
@@ -1023,13 +1640,38 @@ export function ModelSettings({
                   </>
                 </section>
               ) : activeTab === "privacy" ? (
-                <ProfileMemorySettings
-                  isZh={isZh}
-                  labels={labels}
-                  summary={userProfileMemorySummary}
-                  onClear={onClearUserProfileMemory}
-                  onRebuild={onRebuildUserProfileMemory}
-                />
+                <div className="javis-settings-section-stack">
+                  <AgentMemorySettings
+                    isZh={isZh}
+                    labels={labels}
+                    embeddingBaseUrl={effectiveRuntimePreferences.agentMemoryEmbeddingBaseUrl}
+                    embeddingDimensions={effectiveRuntimePreferences.agentMemoryEmbeddingDimensions}
+                    embeddingMode={effectiveRuntimePreferences.agentMemoryEmbeddingMode}
+                    embeddingModel={effectiveRuntimePreferences.agentMemoryEmbeddingModel}
+                    embeddingProvider={effectiveRuntimePreferences.agentMemoryEmbeddingProvider}
+                    embeddingApiKeyReference={effectiveRuntimePreferences.agentMemoryEmbeddingApiKeyReference}
+                    embeddingProfileOptions={configuredModels.filter((model) =>
+                      resolveApiType(model.provider) === "openai-compatible"
+                    )}
+                    memoryScope={effectiveRuntimePreferences.agentMemoryScope}
+                    summary={agentMemorySummary}
+                    onClearAll={onClearAgentMemory}
+                    onClearWorkspace={onClearWorkspaceAgentMemory}
+                    onDeleteFact={onDeleteAgentMemoryFact}
+                    onEnabledChange={onAgentMemoryEnabledChange}
+                    onEmbeddingSettingsChange={(next) =>
+                      updateRuntimePreferences(next)}
+                    onMemoryScopeChange={(agentMemoryScope) =>
+                      updateRuntimePreferences({ agentMemoryScope })}
+                  />
+                  <ProfileMemorySettings
+                    isZh={isZh}
+                    labels={labels}
+                    summary={userProfileMemorySummary}
+                    onClear={onClearUserProfileMemory}
+                    onRebuild={onRebuildUserProfileMemory}
+                  />
+                </div>
               ) : (
                 <SettingsPlaceholder
                   labels={labels}
@@ -1076,7 +1718,7 @@ function RoundedSelect({
         type="button"
       >
         <span>{selectedOption?.label ?? ""}</span>
-        <span className="javis-ai-rounded-select-caret">⌄</span>
+        <span className="javis-ai-rounded-select-caret" aria-hidden="true">⌄</span>
       </button>
       {isOpen ? (
         <div className="javis-ai-rounded-select-menu" role="listbox">
@@ -1103,6 +1745,16 @@ function RoundedSelect({
   );
 }
 
+function numberInputValue(value: string, fallback: number): number {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function numberInputFloatValue(value: string, fallback: number): number {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function SettingsPlaceholder({
   labels,
   title,
@@ -1115,6 +1767,228 @@ function SettingsPlaceholder({
       <h2>{title}</h2>
       <div className="javis-settings-card">
         <p>{labels.settingsPlaceholder}</p>
+      </div>
+    </section>
+  );
+}
+
+function AgentMemorySettings({
+  isZh,
+  embeddingApiKeyReference,
+  embeddingBaseUrl,
+  embeddingDimensions,
+  embeddingMode,
+  embeddingModel,
+  embeddingProfileOptions,
+  embeddingProvider,
+  labels,
+  memoryScope,
+  summary,
+  onClearAll,
+  onClearWorkspace,
+  onDeleteFact,
+  onEnabledChange,
+  onEmbeddingSettingsChange,
+  onMemoryScopeChange,
+}: {
+  isZh: boolean;
+  embeddingApiKeyReference: string;
+  embeddingBaseUrl: string;
+  embeddingDimensions: number;
+  embeddingMode: WorkbenchAgentMemoryEmbeddingMode;
+  embeddingModel: string;
+  embeddingProfileOptions?: ConfiguredModelOption[];
+  embeddingProvider: string;
+  labels: WorkbenchLocale["labels"];
+  memoryScope: WorkbenchAgentMemoryScopeMode;
+  summary?: WorkbenchAgentMemorySummary | null;
+  onClearAll?: () => void;
+  onClearWorkspace?: () => void;
+  onDeleteFact?: (id: string) => void;
+  onEnabledChange?: (enabled: boolean) => void;
+  onEmbeddingSettingsChange?: (next: Partial<WorkbenchRuntimePreferences>) => void;
+  onMemoryScopeChange?: (scope: WorkbenchAgentMemoryScopeMode) => void;
+}) {
+  const enabled = memoryScope !== "off" && (summary?.enabled ?? true);
+  const updatedAt = summary?.lastUpdatedAt
+    ? new Date(summary.lastUpdatedAt).toLocaleString(isZh ? "zh-CN" : "en-US")
+    : (isZh ? "暂无" : "Not available");
+
+  const selectedEmbeddingProfile = embeddingProfileOptions?.find((option) =>
+    option.provider === embeddingProvider &&
+    option.model === embeddingModel &&
+    option.baseUrl === embeddingBaseUrl &&
+    option.apiKeyReference === embeddingApiKeyReference,
+  )?.value ?? "";
+
+  return (
+    <section className="javis-settings-section javis-profile-memory-settings" aria-label={labels.privacySecuritySettings}>
+      <h2>{isZh ? "Agent 记忆" : "Agent memory"}</h2>
+      <div className="javis-settings-card">
+        <label>
+          <span>{isZh ? "Agent 记忆范围" : "Agent memory scope"}</span>
+          <RoundedSelect
+            aria-label={isZh ? "Agent 记忆范围" : "Agent memory scope"}
+            onChange={(value) => {
+              const scope = value as WorkbenchAgentMemoryScopeMode;
+              onMemoryScopeChange?.(scope);
+              onEnabledChange?.(scope !== "off");
+            }}
+            options={[
+              { value: "off", label: isZh ? "关闭" : "Off" },
+              { value: "workspace", label: isZh ? "仅当前工作区" : "Current workspace only" },
+              { value: "global_workspace", label: isZh ? "全局+当前工作区" : "Global + workspace" },
+            ]}
+            value={enabled ? memoryScope : "off"}
+          />
+          </label>
+        <div className="javis-profile-memory-embedding">
+          <label>
+            <span>{isZh ? "语义召回" : "Semantic recall"}</span>
+            <RoundedSelect
+              aria-label={isZh ? "Agent 记忆语义召回" : "Agent memory semantic recall"}
+              onChange={(value) =>
+                onEmbeddingSettingsChange?.({ agentMemoryEmbeddingMode: value as WorkbenchAgentMemoryEmbeddingMode })}
+              options={[
+                { value: "local", label: isZh ? "本地 text-hash" : "Local text-hash" },
+                { value: "openai_compatible", label: "OpenAI compatible" },
+              ]}
+              value={embeddingMode}
+            />
+          </label>
+          {embeddingMode === "openai_compatible" ? (
+            <div className="javis-profile-memory-embedding-grid">
+              {embeddingProfileOptions && embeddingProfileOptions.length > 0 ? (
+                <label>
+                  <span>{isZh ? "閰嶇疆鏉ユ簮" : "Configured source"}</span>
+                  <RoundedSelect
+                    aria-label={isZh ? "Agent 璁板繂 embedding 閰嶇疆鏉ユ簮" : "Agent memory embedding configured source"}
+                    onChange={(value) => {
+                      const option = embeddingProfileOptions.find((candidate) => candidate.value === value);
+                      if (!option) return;
+                      onEmbeddingSettingsChange?.({
+                        agentMemoryEmbeddingProvider: option.provider,
+                        agentMemoryEmbeddingModel: option.model,
+                        agentMemoryEmbeddingBaseUrl: option.baseUrl,
+                        agentMemoryEmbeddingApiKeyReference: option.apiKeyReference,
+                      });
+                    }}
+                    options={[
+                      { value: "", label: isZh ? "鎵嬪姩閰嶇疆" : "Manual configuration" },
+                      ...embeddingProfileOptions.map((option) => ({
+                        value: option.value,
+                        label: `${option.label} (${option.apiKeyReference})`,
+                      })),
+                    ]}
+                    value={selectedEmbeddingProfile}
+                  />
+                </label>
+              ) : null}
+              <label>
+                <span>{isZh ? "Provider" : "Provider"}</span>
+                <input
+                  onChange={(event) => onEmbeddingSettingsChange?.({ agentMemoryEmbeddingProvider: event.target.value })}
+                  value={embeddingProvider}
+                />
+              </label>
+              <label>
+                <span>{isZh ? "模型" : "Model"}</span>
+                <input
+                  onChange={(event) => onEmbeddingSettingsChange?.({ agentMemoryEmbeddingModel: event.target.value })}
+                  value={embeddingModel}
+                />
+              </label>
+              <label>
+                <span>{isZh ? "Base URL" : "Base URL"}</span>
+                <input
+                  onChange={(event) => onEmbeddingSettingsChange?.({ agentMemoryEmbeddingBaseUrl: event.target.value })}
+                  value={embeddingBaseUrl}
+                />
+              </label>
+              <label>
+                <span>{isZh ? "Key reference" : "Key reference"}</span>
+                <input
+                  onChange={(event) => onEmbeddingSettingsChange?.({ agentMemoryEmbeddingApiKeyReference: event.target.value })}
+                  value={embeddingApiKeyReference}
+                />
+              </label>
+              <label>
+                <span>{isZh ? "维度" : "Dimensions"}</span>
+                <input
+                  min={32}
+                  max={4096}
+                  onChange={(event) => onEmbeddingSettingsChange?.({
+                    agentMemoryEmbeddingDimensions: numberInputValue(event.target.value, embeddingDimensions),
+                  })}
+                  type="number"
+                  value={embeddingDimensions}
+                />
+              </label>
+            </div>
+          ) : null}
+        </div>
+        <dl className="javis-profile-memory-stats">
+          <div>
+            <dt>{isZh ? "全部事实" : "Facts"}</dt>
+            <dd>{summary?.totalFactCount ?? 0}</dd>
+          </div>
+          <div>
+            <dt>{isZh ? "当前工作区" : "Workspace"}</dt>
+            <dd>{summary?.workspaceFactCount ?? 0}</dd>
+          </div>
+          <div>
+            <dt>{isZh ? "会话摘要" : "Summaries"}</dt>
+            <dd>{summary?.sessionSummaryCount ?? 0}</dd>
+          </div>
+          <div>
+            <dt>{isZh ? "注入审计" : "Injection logs"}</dt>
+            <dd>{summary?.injectionLogCount ?? 0}</dd>
+          </div>
+          <div>
+            <dt>{isZh ? "最近更新" : "Updated"}</dt>
+            <dd>{updatedAt}</dd>
+          </div>
+        </dl>
+        <div className="javis-profile-memory-actions">
+          <button onClick={onClearWorkspace} type="button">
+            {isZh ? "清空当前工作区" : "Clear workspace"}
+          </button>
+          <button className="danger" onClick={onClearAll} type="button">
+            {isZh ? "清空全部 Agent 记忆" : "Clear all agent memory"}
+          </button>
+        </div>
+        {summary?.recentFacts.length ? (
+          <div className="javis-profile-memory-facts">
+            <h3>{isZh ? "最近事实" : "Recent facts"}</h3>
+            {summary.recentFacts.map((fact) => (
+              <details key={fact.id}>
+                <summary>
+                  <span>{fact.fact}</span>
+                  <small>
+                    {agentMemoryScopeLabel(fact.scopeType, isZh)}
+                    {" · "}
+                    {agentMemoryKindLabel(fact.kind)}
+                    {" · "}
+                    {Math.round(fact.confidence * 100)}
+                    %
+                  </small>
+                </summary>
+                <div className="javis-profile-memory-fact-body">
+                  <p>{fact.tags.length ? fact.tags.join(" / ") : (isZh ? "暂无标签" : "No tags")}</p>
+                  <button
+                    aria-label={`Delete memory fact ${fact.id}`}
+                    className="danger"
+                    onClick={() => onDeleteFact?.(fact.id)}
+                    title={isZh ? "删除这条 Agent 记忆" : "Delete this Agent memory fact"}
+                    type="button"
+                  >
+                    {isZh ? "删除" : "Delete"}
+                  </button>
+                </div>
+              </details>
+            ))}
+          </div>
+        ) : null}
       </div>
     </section>
   );
@@ -1207,6 +2081,16 @@ function ProfileMemorySettings({
       </div>
     </section>
   );
+}
+
+function agentMemoryScopeLabel(scope: "global" | "workspace" | "session", isZh: boolean): string {
+  if (scope === "workspace") return isZh ? "工作区" : "Workspace";
+  if (scope === "session") return isZh ? "会话" : "Session";
+  return isZh ? "全局" : "Global";
+}
+
+function agentMemoryKindLabel(kind: string): string {
+  return kind.replace(/_/g, " ");
 }
 
 function profileFactSourceLabel(source: "history" | "workspace", isZh: boolean): string {

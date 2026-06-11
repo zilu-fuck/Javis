@@ -1,9 +1,95 @@
-import { render, fireEvent } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, render, fireEvent } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatComposer } from "./ChatComposer";
-import { zhCNWorkbenchLocale } from "../locale";
+import { defaultWorkbenchLocale, zhCNWorkbenchLocale } from "../locale";
 
 const labels = zhCNWorkbenchLocale.labels;
+
+class FakeSpeechRecognition {
+  static instances: FakeSpeechRecognition[] = [];
+  static autoEndOnStop = true;
+
+  continuous = false;
+  interimResults = false;
+  lang = "";
+  maxAlternatives = 0;
+  onend: (() => void) | null = null;
+  onerror: ((event: { error: string }) => void) | null = null;
+  onresult: ((event: { results: FakeSpeechRecognitionResultList }) => void) | null = null;
+  onstart: (() => void) | null = null;
+
+  constructor() {
+    FakeSpeechRecognition.instances.push(this);
+  }
+
+  start() {
+    this.onstart?.();
+  }
+
+  stop() {
+    if (FakeSpeechRecognition.autoEndOnStop) {
+      this.finish();
+    }
+  }
+
+  abort() {
+    this.finish();
+  }
+
+  emitResult(text: string) {
+    this.onresult?.({ results: createSpeechResults(text) });
+  }
+
+  finish() {
+    this.onend?.();
+  }
+}
+
+interface FakeSpeechRecognitionResultList {
+  readonly length: number;
+  item(index: number): FakeSpeechRecognitionResult;
+  [index: number]: FakeSpeechRecognitionResult;
+}
+
+interface FakeSpeechRecognitionResult {
+  readonly isFinal: boolean;
+  readonly length: number;
+  item(index: number): { transcript: string };
+  [index: number]: { transcript: string };
+}
+
+function createSpeechResults(text: string): FakeSpeechRecognitionResultList {
+  const result: FakeSpeechRecognitionResult = {
+    0: { transcript: text },
+    isFinal: true,
+    length: 1,
+    item(index: number) {
+      return this[index];
+    },
+  };
+  return {
+    0: result,
+    length: 1,
+    item(index: number) {
+      return this[index];
+    },
+  };
+}
+
+function installFakeSpeechRecognition() {
+  FakeSpeechRecognition.instances = [];
+  FakeSpeechRecognition.autoEndOnStop = true;
+  Object.defineProperty(window, "webkitSpeechRecognition", {
+    configurable: true,
+    value: FakeSpeechRecognition,
+  });
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+  FakeSpeechRecognition.autoEndOnStop = true;
+  Reflect.deleteProperty(window, "webkitSpeechRecognition");
+});
 
 describe("ChatComposer", () => {
   it("renders a textarea with the current draft goal", () => {
@@ -133,6 +219,310 @@ describe("ChatComposer", () => {
     expect(container.querySelector(".javis-composer-action-icon.icon-send")).not.toBeNull();
   });
 
+  it("submits when the send button is clicked normally", () => {
+    const onSubmit = vi.fn();
+    const { container } = render(
+      <ChatComposer
+        actionsClassName="actions"
+        className="composer"
+        currentWorkspacePath="/tmp"
+        draftGoal="Hello"
+        labels={labels}
+        recentWorkspacePaths={[]}
+        onDraftGoalChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    fireEvent.click(container.querySelector(".javis-send-button")!);
+
+    expect(onSubmit).toHaveBeenCalled();
+  });
+
+  it("long-presses the send button for voice input and requires a second click to send", () => {
+    vi.useFakeTimers();
+    installFakeSpeechRecognition();
+    const onChange = vi.fn();
+    const onSubmit = vi.fn();
+    const { container } = render(
+      <ChatComposer
+        actionsClassName="actions"
+        className="composer"
+        currentWorkspacePath="/tmp"
+        draftGoal=""
+        labels={defaultWorkbenchLocale.labels}
+        recentWorkspacePaths={[]}
+        onDraftGoalChange={onChange}
+        onSubmit={onSubmit}
+      />,
+    );
+    const sendButton = container.querySelector(".javis-send-button")!;
+
+    fireEvent.pointerDown(sendButton, { button: 0, pointerId: 1 });
+    act(() => {
+      vi.advanceTimersByTime(450);
+    });
+
+    const recognition = FakeSpeechRecognition.instances[0];
+    expect(recognition).toBeTruthy();
+    expect(container.querySelector(".javis-composer-action-icon.icon-mic")).not.toBeNull();
+    recognition.emitResult("review the current diff");
+    expect(onChange).toHaveBeenLastCalledWith("review the current diff");
+
+    fireEvent.pointerUp(sendButton, { pointerId: 1 });
+    fireEvent.click(sendButton);
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    fireEvent.click(sendButton);
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not swallow the next real send click if release produced no click event", () => {
+    vi.useFakeTimers();
+    installFakeSpeechRecognition();
+    FakeSpeechRecognition.autoEndOnStop = false;
+    const onChange = vi.fn();
+    const onSubmit = vi.fn();
+    const { container } = render(
+      <ChatComposer
+        actionsClassName="actions"
+        className="composer"
+        currentWorkspacePath="/tmp"
+        draftGoal=""
+        labels={defaultWorkbenchLocale.labels}
+        recentWorkspacePaths={[]}
+        onDraftGoalChange={onChange}
+        onSubmit={onSubmit}
+      />,
+    );
+    const sendButton = container.querySelector(".javis-send-button")!;
+
+    fireEvent.pointerDown(sendButton, { button: 0, pointerId: 1 });
+    act(() => {
+      vi.advanceTimersByTime(450);
+    });
+    const recognition = FakeSpeechRecognition.instances[0];
+    recognition.emitResult("summarize this file");
+
+    fireEvent.pointerUp(sendButton, { pointerId: 1 });
+    act(() => {
+      vi.runOnlyPendingTimers();
+    });
+    act(() => {
+      recognition.finish();
+    });
+
+    fireEvent.click(sendButton);
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves user edits while voice recognition updates the transcript", () => {
+    vi.useFakeTimers();
+    installFakeSpeechRecognition();
+    const onChange = vi.fn();
+    const { container, rerender } = render(
+      <ChatComposer
+        actionsClassName="actions"
+        className="composer"
+        currentWorkspacePath="/tmp"
+        draftGoal="Start"
+        labels={defaultWorkbenchLocale.labels}
+        recentWorkspacePaths={[]}
+        onDraftGoalChange={onChange}
+        onSubmit={vi.fn()}
+      />,
+    );
+    const sendButton = container.querySelector(".javis-send-button")!;
+
+    fireEvent.pointerDown(sendButton, { button: 0, pointerId: 1 });
+    act(() => {
+      vi.advanceTimersByTime(450);
+    });
+    const recognition = FakeSpeechRecognition.instances[0];
+    recognition.emitResult("first draft");
+    expect(onChange).toHaveBeenLastCalledWith("Start first draft");
+
+    rerender(
+      <ChatComposer
+        actionsClassName="actions"
+        className="composer"
+        currentWorkspacePath="/tmp"
+        draftGoal="Start first draft and typed note"
+        labels={defaultWorkbenchLocale.labels}
+        recentWorkspacePaths={[]}
+        onDraftGoalChange={onChange}
+        onSubmit={vi.fn()}
+      />,
+    );
+    recognition.emitResult("final words");
+
+    expect(onChange).toHaveBeenLastCalledWith("Start and typed note final words");
+  });
+
+  it("keeps punctuation attached when replacing prior voice text", () => {
+    vi.useFakeTimers();
+    installFakeSpeechRecognition();
+    const onChange = vi.fn();
+    const { container, rerender } = render(
+      <ChatComposer
+        actionsClassName="actions"
+        className="composer"
+        currentWorkspacePath="/tmp"
+        draftGoal="Start"
+        labels={defaultWorkbenchLocale.labels}
+        recentWorkspacePaths={[]}
+        onDraftGoalChange={onChange}
+        onSubmit={vi.fn()}
+      />,
+    );
+    const sendButton = container.querySelector(".javis-send-button")!;
+
+    fireEvent.pointerDown(sendButton, { button: 0, pointerId: 1 });
+    act(() => {
+      vi.advanceTimersByTime(450);
+    });
+    const recognition = FakeSpeechRecognition.instances[0];
+    recognition.emitResult("first draft");
+    expect(onChange).toHaveBeenLastCalledWith("Start first draft");
+
+    rerender(
+      <ChatComposer
+        actionsClassName="actions"
+        className="composer"
+        currentWorkspacePath="/tmp"
+        draftGoal="Start first draft, typed note"
+        labels={defaultWorkbenchLocale.labels}
+        recentWorkspacePaths={[]}
+        onDraftGoalChange={onChange}
+        onSubmit={vi.fn()}
+      />,
+    );
+    recognition.emitResult("final words");
+
+    expect(onChange).toHaveBeenLastCalledWith("Start, typed note final words");
+  });
+
+  it("keeps tracking prior voice text when the user edits before it", () => {
+    vi.useFakeTimers();
+    installFakeSpeechRecognition();
+    const onChange = vi.fn();
+    const { container, rerender } = render(
+      <ChatComposer
+        actionsClassName="actions"
+        className="composer"
+        currentWorkspacePath="/tmp"
+        draftGoal="Start"
+        labels={defaultWorkbenchLocale.labels}
+        recentWorkspacePaths={[]}
+        onDraftGoalChange={onChange}
+        onSubmit={vi.fn()}
+      />,
+    );
+    const sendButton = container.querySelector(".javis-send-button")!;
+
+    fireEvent.pointerDown(sendButton, { button: 0, pointerId: 1 });
+    act(() => {
+      vi.advanceTimersByTime(450);
+    });
+    const recognition = FakeSpeechRecognition.instances[0];
+    recognition.emitResult("first draft");
+    expect(onChange).toHaveBeenLastCalledWith("Start first draft");
+
+    rerender(
+      <ChatComposer
+        actionsClassName="actions"
+        className="composer"
+        currentWorkspacePath="/tmp"
+        draftGoal="Note Start first draft"
+        labels={defaultWorkbenchLocale.labels}
+        recentWorkspacePaths={[]}
+        onDraftGoalChange={onChange}
+        onSubmit={vi.fn()}
+      />,
+    );
+    recognition.emitResult("final words");
+
+    expect(onChange).toHaveBeenLastCalledWith("Note Start final words");
+  });
+
+  it("does not remove matching user text when prior voice text was edited away", () => {
+    vi.useFakeTimers();
+    installFakeSpeechRecognition();
+    const onChange = vi.fn();
+    const { container, rerender } = render(
+      <ChatComposer
+        actionsClassName="actions"
+        className="composer"
+        currentWorkspacePath="/tmp"
+        draftGoal="echo"
+        labels={defaultWorkbenchLocale.labels}
+        recentWorkspacePaths={[]}
+        onDraftGoalChange={onChange}
+        onSubmit={vi.fn()}
+      />,
+    );
+    const sendButton = container.querySelector(".javis-send-button")!;
+
+    fireEvent.pointerDown(sendButton, { button: 0, pointerId: 1 });
+    act(() => {
+      vi.advanceTimersByTime(450);
+    });
+    const recognition = FakeSpeechRecognition.instances[0];
+    recognition.emitResult("echo");
+    expect(onChange).toHaveBeenLastCalledWith("echo echo");
+
+    rerender(
+      <ChatComposer
+        actionsClassName="actions"
+        className="composer"
+        currentWorkspacePath="/tmp"
+        draftGoal="echo typed note"
+        labels={defaultWorkbenchLocale.labels}
+        recentWorkspacePaths={[]}
+        onDraftGoalChange={onChange}
+        onSubmit={vi.fn()}
+      />,
+    );
+    recognition.emitResult("final words");
+
+    expect(onChange).toHaveBeenLastCalledWith("echo typed note final words");
+  });
+
+  it("does not submit while voice input is still recording", () => {
+    vi.useFakeTimers();
+    installFakeSpeechRecognition();
+    const onSubmit = vi.fn();
+    const { container } = render(
+      <ChatComposer
+        actionsClassName="actions"
+        className="composer"
+        currentWorkspacePath="/tmp"
+        draftGoal="existing text"
+        labels={defaultWorkbenchLocale.labels}
+        recentWorkspacePaths={[]}
+        onDraftGoalChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+    const sendButton = container.querySelector(".javis-send-button")!;
+    const form = container.querySelector("form")!;
+
+    fireEvent.pointerDown(sendButton, { button: 0, pointerId: 1 });
+    act(() => {
+      vi.advanceTimersByTime(450);
+    });
+
+    fireEvent.submit(form);
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    fireEvent.pointerUp(sendButton, { pointerId: 1 });
+    fireEvent.click(sendButton);
+    fireEvent.click(sendButton);
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
   it("calls onStopTask when stop button is clicked", () => {
     const onStop = vi.fn();
     const { container } = render(
@@ -149,9 +539,8 @@ describe("ChatComposer", () => {
         onSubmit={vi.fn()}
       />,
     );
-    const stopBtn = Array.from(container.querySelectorAll("button")).find(
-      (b) => b.textContent === labels.stopTask,
-    );
+    const stopBtn = container.querySelector(".javis-composer-stop-action");
+    expect(stopBtn).not.toBeNull();
     fireEvent.click(stopBtn!);
     expect(onStop).toHaveBeenCalled();
   });
@@ -172,9 +561,10 @@ describe("ChatComposer", () => {
         onSubmit={onSubmit}
       />,
     );
-    const queueBtn = Array.from(container.querySelectorAll("button")).find(
-      (b) => b.textContent === "排队",
-    );
+    const queueBtn = container.querySelector(".javis-composer-send-action");
+    const stopBtn = container.querySelector(".javis-composer-stop-action");
+    expect(queueBtn).not.toBeNull();
+    expect(stopBtn).not.toBeNull();
 
     fireEvent.click(queueBtn!);
 

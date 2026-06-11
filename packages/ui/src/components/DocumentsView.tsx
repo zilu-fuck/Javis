@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import type {
   ScanRootItem,
+  WorkbenchDetailItem,
   WorkbenchFileEntry,
   WorkbenchLocale,
   WorkbenchProgress,
 } from "../types";
-import { formatModifiedTime, formatSize } from "../utils";
+import { createFileDetailItem } from "../detail-items";
+import { formatModifiedTime, formatSize, isChineseLocale } from "../utils";
 import { DirectoryPanel } from "./DirectoryPanel";
 import { ProgressBar } from "./ProgressBar";
 import { createCountLabel, ResourceIconButton, ResourceShell } from "./ResourceShell";
@@ -20,6 +22,7 @@ interface DocumentsViewProps {
   scanProgress?: WorkbenchProgress;
   classifying?: boolean;
   classifyProgress?: WorkbenchProgress & { completed?: number };
+  classifyError?: string;
   categoryStats?: { category: string; count: number }[];
   selectedCategory?: string | null;
   resourceScanRoots?: ScanRootItem[];
@@ -28,10 +31,13 @@ interface DocumentsViewProps {
   onClassifyDocuments?: () => void;
   onCancelClassify?: () => void;
   onOpen?: (path: string) => void;
+  onOpenDetail?: (detail: WorkbenchDetailItem) => void;
   onToggleScanRoot?: (id: string, enabled: boolean) => void;
   onRemoveScanRoot?: (id: string) => void;
   onAddScanRoot?: (path: string) => void;
   onRefreshScanRoot?: (id: string) => void;
+  onRefreshResourceRoots?: () => void;
+  onUpdateCategory?: (path: string, category: string) => void;
 }
 
 export function DocumentsView({
@@ -44,6 +50,7 @@ export function DocumentsView({
   scanProgress,
   classifying,
   classifyProgress,
+  classifyError,
   categoryStats = [],
   selectedCategory,
   resourceScanRoots = [],
@@ -52,16 +59,22 @@ export function DocumentsView({
   onClassifyDocuments,
   onCancelClassify,
   onOpen,
+  onOpenDetail,
   onToggleScanRoot,
   onRemoveScanRoot,
   onAddScanRoot,
   onRefreshScanRoot,
+  onRefreshResourceRoots,
+  onUpdateCategory,
 }: DocumentsViewProps) {
   const labels = locale.labels;
   const categoryLabels = locale.categoryLabels ?? {};
   const [query, setQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
   const [showDirPanel, setShowDirPanel] = useState(false);
+  const [menuFilePath, setMenuFilePath] = useState<string | null>(null);
+  const [selectedFilePath, setSelectedFilePath] = useState<string | null>(null);
+  const [customCategory, setCustomCategory] = useState("");
 
   useEffect(() => {
     if (selectedCategory !== undefined) {
@@ -94,9 +107,35 @@ export function DocumentsView({
     ? 0
     : Math.max(0, categoryTabs.findIndex((t) => t.key === activeCategory));
   const unclassifiedCount = documents.filter((doc) => doc.category == null).length;
+  const effectiveCategoryStats = categoryTabs
+    .slice(1)
+    .map((tab) => ({ category: tab.key ?? "", count: tab.count }))
+    .filter((stat) => stat.category);
 
   function handleTabChange(index: number) {
     setActiveCategory(categoryTabs[index]?.key ?? null);
+  }
+
+  function closeCategoryMenu() {
+    setMenuFilePath(null);
+    setCustomCategory("");
+  }
+
+  function updateCategory(path: string, category: string) {
+    const trimmed = category.trim();
+    if (!trimmed) return;
+    onUpdateCategory?.(path, trimmed);
+    setActiveCategory(trimmed);
+    closeCategoryMenu();
+  }
+
+  function selectDocument(doc: WorkbenchFileEntry) {
+    setSelectedFilePath(doc.path);
+    onOpenDetail?.(createFileDetailItem(doc, {
+      categoryLabels,
+      kindLabel: isChineseLocale(locale) ? labels.documents : "Document",
+      locale,
+    }));
   }
 
   useEffect(() => {
@@ -110,6 +149,7 @@ export function DocumentsView({
       <label className="javis-resource-search">
         <span className="javis-resource-action-icon icon-search" aria-hidden="true" />
         <input
+          aria-label={labels.searchPlaceholder}
           onChange={(e) => setQuery(e.currentTarget.value)}
           placeholder={labels.searchPlaceholder}
           value={query}
@@ -124,7 +164,7 @@ export function DocumentsView({
       <ResourceIconButton label={labels.retry} onClick={onRefresh}>
         <span className="javis-resource-action-icon icon-refresh" aria-hidden="true" />
       </ResourceIconButton>
-      <ResourceIconButton label={scanning ? labels.scanInProgress : "扫描目录"} onClick={onRefreshScan}>
+      <ResourceIconButton label={scanning ? labels.scanInProgress : "扫描目录"} onClick={onRefreshResourceRoots ?? onRefreshScan}>
         {scanning ? (
           <span className="javis-spinner javis-spinner--small" />
         ) : (
@@ -155,8 +195,10 @@ export function DocumentsView({
     return (
       <ResourceShell
         actions={actions}
+        addLabel="添加目录"
         countLabel={createCountLabel(labels.documents, documents.length)}
         icon="#"
+        onAdd={() => setShowDirPanel(true)}
         title={labels.documents}
       >
         <div className="javis-view-loading">
@@ -177,8 +219,10 @@ export function DocumentsView({
     return (
       <ResourceShell
         actions={actions}
+        addLabel="添加目录"
         countLabel={createCountLabel(labels.documents, documents.length)}
         icon="#"
+        onAdd={() => setShowDirPanel(true)}
         title={labels.documents}
       >
         <div className="javis-view-error">
@@ -192,9 +236,11 @@ export function DocumentsView({
   return (
     <ResourceShell
       actions={actions}
+      addLabel="添加目录"
       activeTabIndex={activeTabIndex}
       countLabel={createCountLabel(labels.documents, filtered.length)}
       icon="#"
+      onAdd={() => setShowDirPanel(true)}
       onTabChange={handleTabChange}
       tabs={categoryTabs.map((t) => `${t.label}(${t.count})`)}
       title={labels.documents}
@@ -210,8 +256,11 @@ export function DocumentsView({
           onToggle={(id, enabled) => onToggleScanRoot?.(id, enabled)}
         />
       )}
-      {(scanning || classifying || classifyProgress) && (
+      {(scanning || classifying || classifyProgress || classifyError) && (
         <div className="javis-classify-status">
+          {classifyError && (
+            <span className="javis-classify-error">{classifyError}</span>
+          )}
           {scanning && (
             <ProgressBar
               current={scanProgress?.current}
@@ -253,10 +302,19 @@ export function DocumentsView({
           </thead>
           <tbody>
             {filtered.map((doc) => (
-              <tr key={doc.path}>
+              <tr
+                className={selectedFilePath === doc.path ? "selected" : undefined}
+                key={doc.path}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setMenuFilePath(doc.path);
+                  setCustomCategory(doc.category ?? "");
+                }}
+              >
                 <td>
                   <button
                     className="javis-doc-link"
+                    onClick={() => selectDocument(doc)}
                     onDoubleClick={() => onOpen?.(doc.path)}
                     type="button"
                   >
@@ -269,6 +327,17 @@ export function DocumentsView({
                         <span className="javis-tag" key={tag}>{tag}</span>
                       ))}
                     </div>
+                  )}
+                  {menuFilePath === doc.path && (
+                    <FileCategoryMenu
+                      categoryLabels={categoryLabels}
+                      customCategory={customCategory}
+                      effectiveCategoryStats={effectiveCategoryStats}
+                      entry={doc}
+                      onClose={closeCategoryMenu}
+                      onCustomCategoryChange={setCustomCategory}
+                      onUpdateCategory={updateCategory}
+                    />
                   )}
                 </td>
                 <td>
@@ -302,4 +371,56 @@ function buildCategoryStats(
   }
   const derived = [...counts.entries()].map(([category, count]) => ({ category, count }));
   return (derived.length > 0 ? derived : fallbackStats).sort((a, b) => b.count - a.count);
+}
+
+function FileCategoryMenu({
+  entry,
+  categoryLabels,
+  customCategory,
+  effectiveCategoryStats,
+  onClose,
+  onCustomCategoryChange,
+  onUpdateCategory,
+}: {
+  entry: WorkbenchFileEntry;
+  categoryLabels: Record<string, string>;
+  customCategory: string;
+  effectiveCategoryStats: { category: string; count: number }[];
+  onClose: () => void;
+  onCustomCategoryChange: (category: string) => void;
+  onUpdateCategory: (path: string, category: string) => void;
+}) {
+  return (
+    <div className="javis-app-context-menu javis-file-context-menu" role="menu">
+      <strong>{entry.name}</strong>
+      {effectiveCategoryStats.length > 0 && (
+        <div className="javis-app-context-options">
+          {effectiveCategoryStats.map((stat) => (
+            <button
+              key={stat.category}
+              onClick={() => onUpdateCategory(entry.path, stat.category)}
+              type="button"
+            >
+              {categoryLabels[stat.category] ?? stat.category}
+            </button>
+          ))}
+        </div>
+      )}
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          onUpdateCategory(entry.path, customCategory);
+        }}
+      >
+        <input
+          aria-label="自定义分类"
+          onChange={(event) => onCustomCategoryChange(event.currentTarget.value)}
+          placeholder="自定义分类"
+          value={customCategory}
+        />
+        <button type="submit">保存</button>
+        <button onClick={onClose} type="button">取消</button>
+      </form>
+    </div>
+  );
 }

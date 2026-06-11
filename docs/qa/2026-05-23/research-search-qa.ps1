@@ -4,10 +4,12 @@ $qaDir = $PSScriptRoot
 $repoRoot = (Resolve-Path (Join-Path $qaDir "..\..\..")).Path
 $sourceDir = Join-Path $qaDir "research-search-sources"
 $fixturePath = Join-Path $qaDir "research-search-fixture.json"
+$outputPath = Join-Path $qaDir "research-search-qa-output.txt"
 $exe = Join-Path $repoRoot "apps\desktop\src-tauri\target\release\javis-desktop.exe"
 $serverJob = $null
 $process = $null
 $socket = $null
+$checks = [System.Collections.Generic.List[object]]::new()
 
 New-Item -ItemType Directory -Force -Path $qaDir | Out-Null
 New-Item -ItemType Directory -Force -Path $sourceDir | Out-Null
@@ -18,6 +20,14 @@ if (!(Test-Path $exe)) {
 
 function Write-Utf8NoBom($path, $value) {
   [System.IO.File]::WriteAllText($path, $value, [System.Text.UTF8Encoding]::new($false))
+}
+
+function Add-Check($id, $detail) {
+  $checks.Add([ordered]@{
+    id = $id
+    status = "PASS"
+    detail = $detail
+  }) | Out-Null
 }
 
 Write-Utf8NoBom (Join-Path $sourceDir "alpha.html") "<html><head><title>Alpha Search Source</title></head><body>Alpha searched evidence excerpt for Javis product QA. This page proves the search-backed research report can cite fetched evidence.</body></html>"
@@ -180,6 +190,7 @@ try {
   Wait-ForText $socket ([ref]$id) "Research sources collected" 20 | Out-Null
   Wait-ForText $socket ([ref]$id) "github-cli" 5 | Out-Null
   Capture-Window $appProcess.MainWindowHandle (Join-Path $qaDir "09-search-github-cli-completed.png")
+  Add-Check "github-cli-fixture" "fixture search returned three sources with github-cli provider metadata"
 
   Set-SearchFixture -Items @(
     (Source-Item "Alpha" "agent-chrome" "alpha.html"),
@@ -190,11 +201,13 @@ try {
   Wait-ForText $socket ([ref]$id) "Research sources collected" 20 | Out-Null
   Wait-ForText $socket ([ref]$id) "agent-chrome" 5 | Out-Null
   Capture-Window $appProcess.MainWindowHandle (Join-Path $qaDir "10-search-agent-chrome-fallback-completed.png")
+  Add-Check "agent-chrome-fixture" "fixture search returned three sources with agent-chrome provider metadata"
 
   Set-SearchFixture -Items @((Source-Item "Weak" "agent-chrome" "empty.html"))
   Submit-Goal $socket ([ref]$id) "Research Javis weak evidence product QA"
   Wait-ForText $socket ([ref]$id) "0/1 searched sources" 20 | Out-Null
   Capture-Window $appProcess.MainWindowHandle (Join-Path $qaDir "11-search-weak-evidence-failed.png")
+  Add-Check "weak-evidence-failure" "empty fetched source failed verification with 0/1 searched sources"
 
   Set-SearchFixture -Items @(
     @{
@@ -208,11 +221,13 @@ try {
   Submit-Goal $socket ([ref]$id) "Research Javis failed fetch product QA"
   Wait-ForText $socket ([ref]$id) "Add source URLs manually as a fallback" 20 | Out-Null
   Capture-Window $appProcess.MainWindowHandle (Join-Path $qaDir "12-search-failed-fetch-state.png")
+  Add-Check "failed-fetch-state" "missing searched source showed manual URL fallback guidance"
 
   Set-SearchFixture -Items @()
   Submit-Goal $socket ([ref]$id) "Research Javis no results product QA"
   Wait-ForText $socket ([ref]$id) "Research search returned no sources" 20 | Out-Null
   Capture-Window $appProcess.MainWindowHandle (Join-Path $qaDir "13-search-no-results-state.png")
+  Add-Check "no-results-state" "empty fixture search showed no-sources failure"
 
   $socket.Dispose()
   Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
@@ -233,5 +248,14 @@ finally {
     Remove-Job $serverJob -Force -ErrorAction SilentlyContinue
   }
 }
+
+$outputLines = @(
+  "# Research Search QA Output",
+  "",
+  "generatedAt: $((Get-Date).ToUniversalTime().ToString("o"))",
+  "verdict: PASS",
+  ""
+) + @($checks | ForEach-Object { "$($_.id): $($_.status) - $($_.detail)" })
+Write-Utf8NoBom $outputPath ($outputLines -join "`n")
 
 Get-ChildItem $qaDir -Filter "*-search-*.png" | Sort-Object Name | Select-Object Name,Length

@@ -184,6 +184,7 @@ export function buildAgentSummary(agent: WorkbenchAgent, task: WorkbenchTask, lo
 
 export function AgentSummaryCard({ agent, locale, summary, selected, onSelect }: AgentSummaryCardProps) {
   const badge = statusBadge(agent.status, locale);
+  const capabilityBadge = getCapabilitySummaryBadge(agent);
 
   return (
     <button
@@ -200,8 +201,36 @@ export function AgentSummaryCard({ agent, locale, summary, selected, onSelect }:
         <span className={`javis-agent-summary-card-status status-${agent.status}`}>
           {badge}
         </span>
+        {capabilityBadge ? (
+          <span className={`javis-agent-summary-card-capability priority-${capabilityBadge.priority}`}>
+            {capabilityBadge.label}
+          </span>
+        ) : null}
       </header>
       <p className="javis-agent-summary-card-body">{summary}</p>
     </button>
   );
+}
+
+function getCapabilitySummaryBadge(agent: WorkbenchAgent): { label: string; priority: string } | null {
+  const score = agent.capabilityScore;
+  if (!score) return null;
+  const priorityScore =
+    (!score.implemented ? 100 : 0) +
+    (!score.permissionReady ? 90 : 0) +
+    (!score.liveVerified ? 50 : 0) +
+    (!score.qaPassed ? 40 : 0) +
+    (score.recentFailureRate >= 0.5 ? 35 : score.recentFailureRate >= 0.2 ? 20 : score.recentFailureRate > 0 ? 10 : 0) +
+    (score.highestPermissionLevel === "dangerous" ? 15 : score.highestPermissionLevel === "confirmed_write" ? 10 : 0);
+  if (priorityScore <= 0) {
+    return { label: `ready ${score.score}`, priority: "none" };
+  }
+  const priority = priorityScore >= 120
+    ? "critical"
+    : priorityScore >= 80
+      ? "high"
+      : priorityScore >= 40
+        ? "medium"
+        : "low";
+  return { label: `repair ${priority}`, priority };
 }

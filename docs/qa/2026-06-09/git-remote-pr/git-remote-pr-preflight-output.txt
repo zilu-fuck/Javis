@@ -1,0 +1,18 @@
+# Git Remote and PR Preflight
+
+generatedAt: 2026-06-10T07:51:16.5326946Z
+workspace: E:\Javis
+remote: origin
+result: FAIL
+
+Checks:
+- [PASS] git-present: git executable is available
+- [PASS] git-worktree: workspace=E:\Javis
+- [FAIL] qa-branch-not-protected: branch=master; protected=main,master,develop
+- [FAIL] remote-url: origin=error: No such remote 'origin'
+- [PASS] working-tree-status-readable: status has changes
+- [FAIL] upstream-readable: no upstream configured yet
+- [PASS] gh-present: GitHub CLI availability
+- [PASS] gh-auth-status: gh auth status passed
+- [FAIL] gh-repo-view: no git remotes found
+- [FAIL] gh-pr-list-readable: no git remotes found

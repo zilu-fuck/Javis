@@ -180,7 +180,12 @@ async function classifyEntries(
       chunk.map(async (batch) => {
         try {
           const prompt = createPrompt(batch);
-          const response = await provider.complete(prompt, { maxTokens: 2000, temperature: 0 });
+          const response = await provider.complete(prompt, {
+            maxTokens: 2000,
+            temperature: 0,
+            skipAgentMemory: true,
+            skipSkillContext: true,
+          });
           return parseClassificationResponse(response.text, batch, fallback);
         } catch (error) {
           console.warn(`Classification batch failed: ${error}`);
@@ -387,6 +392,7 @@ function createAppClassificationPrompt(apps: ClassifiableInput[]): string {
     `Allowed categories: ${APP_CATEGORIES.join(", ")}`,
     "",
     "Use application name, executable path, publisher, and install location hints.",
+    "If those hints are weak or ambiguous, choose 其他 with low confidence instead of inventing a purpose.",
     "Prefer a specific category over 其他 when the app name gives a clear signal.",
     "For each app return:",
     "- path: echo the exact input path",

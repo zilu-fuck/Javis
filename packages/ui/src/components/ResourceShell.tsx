@@ -8,6 +8,8 @@ interface ResourceShellProps {
   activeTabIndex?: number;
   onTabChange?: (index: number) => void;
   actions?: ReactNode;
+  addLabel?: string;
+  onAdd?: () => void;
   onBack?: () => void;
   children: ReactNode;
 }
@@ -20,9 +22,13 @@ export function ResourceShell({
   activeTabIndex = 0,
   onTabChange,
   actions,
+  addLabel = "Add",
+  onAdd,
   onBack,
   children,
 }: ResourceShellProps) {
+  const shouldShowIcon = icon.trim() !== "" && icon.trim() !== "#";
+
   return (
     <section className="javis-resource-shell">
       <header className="javis-resource-header">
@@ -37,14 +43,18 @@ export function ResourceShell({
             &lt;
           </button>
           <div className="javis-resource-pill">
-            <span className="javis-resource-pill-icon" aria-hidden="true">
-              {icon}
-            </span>
+            {shouldShowIcon ? (
+              <span className="javis-resource-pill-icon" aria-hidden="true">
+                {icon}
+              </span>
+            ) : null}
             <span>{title}</span>
           </div>
-          <button className="javis-resource-add" type="button" aria-label="Add">
-            +
-          </button>
+          {onAdd && (
+            <button className="javis-resource-add" onClick={onAdd} type="button" aria-label={addLabel} title={addLabel}>
+              +
+            </button>
+          )}
         </div>
         {actions && <div className="javis-resource-actions">{actions}</div>}
       </header>
@@ -52,12 +62,14 @@ export function ResourceShell({
         <div className="javis-resource-kicker">
           <strong>{countLabel ?? title}</strong>
           {tabs && (
-            <nav className="javis-resource-tabs" aria-label={title}>
+            <nav className="javis-resource-tabs" aria-label={title} role="tablist">
               {tabs.map((tab, index) => (
                 <button
+                  aria-selected={index === activeTabIndex}
                   className={index === activeTabIndex ? "active" : ""}
                   key={tab}
                   onClick={() => onTabChange?.(index)}
+                  role="tab"
                   type="button"
                 >
                   {tab}
@@ -66,7 +78,9 @@ export function ResourceShell({
             </nav>
           )}
         </div>
-        {children}
+        <div className="javis-resource-content" key={activeTabIndex}>
+          {children}
+        </div>
       </div>
     </section>
   );

@@ -234,6 +234,44 @@ describe("jsonl log persistence", () => {
       expect(parsed.snapshot.userGoal).toContain("[redacted image data URL]");
     });
 
+    it("stores task session snapshots with redacted local vision paths", async () => {
+      const database = createMemoryJsonlLogDatabase();
+      const writer = createSqliteTaskSessionWriter(database);
+      const line = JSON.stringify({
+        kind: "task_session_snapshot",
+        recordedAt: "2026-05-28T12:00:00.000Z",
+        taskId: "task-local-vision",
+        snapshot: {
+          id: "task-local-vision",
+          title: "Local vision task",
+          userGoal: String.raw`Use C:\Users\alice\Models\yolo26n-ui.onnx`,
+          status: "running",
+          commanderMessage: "Checked models/adapters/yolo26-ui.mjs and packages/core/src/index.js",
+          plan: [],
+          agents: [],
+          logs: [
+            {
+              id: "log-1",
+              kind: "tool",
+              title: "computer.detectUiObjects",
+              detail: "adapter /home/alice/.cache/javis/runtime-adapter.mjs failed",
+            },
+          ],
+        },
+      });
+
+      await writer.appendLine(`${line}\n`);
+
+      const persisted = database.sessionRows[0].snapshot_json;
+      expect(persisted).toContain("[redacted local path:yolo26n-ui.onnx]");
+      expect(persisted).toContain("[redacted local path:yolo26-ui.mjs]");
+      expect(persisted).toContain("[redacted local path:runtime-adapter.mjs]");
+      expect(persisted).toContain("packages/core/src/index.js");
+      expect(persisted).not.toContain("alice");
+      expect(persisted).not.toContain("C:\\Users");
+      expect(persisted).not.toContain("/home/alice");
+    });
+
     it("inserts multiple lines when the JSONL string contains multiple entries", async () => {
       const database = createMemoryJsonlLogDatabase();
       const writer = createSqliteTaskSessionWriter(database);
@@ -275,6 +313,35 @@ describe("jsonl log persistence", () => {
       const parsed = JSON.parse(database.auditRows[0].entry_json);
       expect(parsed.kind).toBe("tool_call_audit");
       expect(parsed.record.id).toBe("audit-xyz");
+    });
+
+    it("stores audit entries with redacted local vision paths", async () => {
+      const database = createMemoryJsonlLogDatabase();
+      const writer = createSqliteToolCallAuditWriter(database);
+      const line = JSON.stringify({
+        kind: "tool_call_audit",
+        recordedAt: "2026-05-28T14:00:00.000Z",
+        record: {
+          id: "audit-local-vision",
+          taskId: "task-local-vision",
+          toolName: "computer.detectUiObjects",
+          permissionLevel: "read",
+          status: "succeeded",
+          inputSummary: String.raw`modelPath=C:\Users\alice\Models\yolo26n-ui.onnx runtimeAdapterPath=models\adapters\yolo26-ui.mjs`,
+          outputSummary: "adapter /home/alice/.cache/javis/runtime-adapter.mjs failed; source packages/core/src/index.js stayed visible",
+        },
+      });
+
+      await writer.appendLine(`${line}\n`);
+
+      const persisted = database.auditRows[0].entry_json;
+      expect(persisted).toContain("[redacted local path:yolo26n-ui.onnx]");
+      expect(persisted).toContain("[redacted local path:yolo26-ui.mjs]");
+      expect(persisted).toContain("[redacted local path:runtime-adapter.mjs]");
+      expect(persisted).toContain("packages/core/src/index.js");
+      expect(persisted).not.toContain("alice");
+      expect(persisted).not.toContain("C:\\Users");
+      expect(persisted).not.toContain("/home/alice");
     });
 
     it("inserts multiple audit entries from a multi-line JSONL string", async () => {

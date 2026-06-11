@@ -1,4 +1,8 @@
 import type { WorkbenchLocale, WorkbenchTask } from "../types";
+import {
+  createWorkbenchHandoffReportArtifacts,
+  downloadWorkbenchHandoffReportArtifact,
+} from "../handoff-report-export";
 import { formatModifiedTime, formatSize, translateWorkbenchText } from "../utils";
 
 interface AgentDetailSectionsProps {
@@ -21,11 +25,24 @@ export function AgentDetailSections({ labels, locale, task }: AgentDetailSection
                 {step.successCriteria ? (
                   <p>{translateWorkbenchText(step.successCriteria, locale)}</p>
                 ) : null}
+                {step.inputContextKeys?.length || step.outputContextKey ? (
+                  <p className="javis-plan-step-handoff">
+                    {step.inputContextKeys?.length
+                      ? `in: ${step.inputContextKeys.join(", ")}`
+                      : null}
+                    {step.inputContextKeys?.length && step.outputContextKey ? " -> " : null}
+                    {step.outputContextKey ? `out: ${step.outputContextKey}` : null}
+                  </p>
+                ) : null}
               </div>
             </div>
           ))}
         </section>
       ) : null}
+
+      {task.handoffReport ? <HandoffReportSection locale={locale} task={task} /> : null}
+
+      {task.recoveryReport ? <RecoveryReportSection locale={locale} task={task} /> : null}
 
       {task.documents && task.documents.length > 0 ? (
         <section className="javis-documents" aria-label={labels.markdownDocuments}>
@@ -286,4 +303,136 @@ export function AgentDetailSections({ labels, locale, task }: AgentDetailSection
       })()}
     </div>
   );
+}
+
+function RecoveryReportSection({
+  locale,
+  task,
+}: {
+  locale: WorkbenchLocale;
+  task: WorkbenchTask;
+}) {
+  const report = task.recoveryReport;
+  if (!report || report.status === "not_needed") return null;
+  return (
+    <section className="javis-documents" aria-label={translateWorkbenchText("Recovery report", locale)}>
+      <p className="javis-message-title">
+        {translateWorkbenchText("Recovery report", locale)}
+      </p>
+      <article className="javis-document">
+        <div className="javis-document-row">
+          <strong>{translateWorkbenchText(report.status, locale)}</strong>
+          <span>
+            {report.recoveredCount}/{report.failureCount} {translateWorkbenchText("recovered", locale)}
+          </span>
+        </div>
+        {report.abandonedStepIds.length > 0 ? (
+          <p>
+            {translateWorkbenchText("Abandoned", locale)}: {report.abandonedStepIds.join(", ")}
+          </p>
+        ) : null}
+        {report.replannedStepIds.length > 0 ? (
+          <p>
+            {translateWorkbenchText("Recovery steps", locale)}: {report.replannedStepIds.join(", ")}
+          </p>
+        ) : null}
+      </article>
+      {report.attempts.slice(0, 6).map((attempt) => (
+        <article className="javis-document" key={`${attempt.failedStepId}-${attempt.replanStatus}`}>
+          <div className="javis-document-row">
+            <strong>{attempt.failedStepTitle ?? attempt.failedStepId}</strong>
+            <span>{attempt.failureKind}</span>
+          </div>
+          <p>{attempt.errorSummary}</p>
+          <p>
+            {translateWorkbenchText("Replan", locale)}: {attempt.replanStatus}
+            {attempt.recoveryStepIds.length > 0 ? ` -> ${attempt.recoveryStepIds.join(", ")}` : ""}
+          </p>
+          {attempt.suggestedAlternatives.length > 0 ? (
+            <span>{attempt.suggestedAlternatives.join("; ")}</span>
+          ) : null}
+        </article>
+      ))}
+    </section>
+  );
+}
+
+function HandoffReportSection({
+  locale,
+  task,
+}: {
+  locale: WorkbenchLocale;
+  task: WorkbenchTask;
+}) {
+  const report = task.handoffReport;
+  if (!report) return null;
+  const needsAttention = report.status === "needs_attention";
+  const artifacts = createWorkbenchHandoffReportArtifacts(report, {
+    baseName: `${task.id ?? "task"}-handoff-report`,
+  });
+  return (
+    <section className="javis-documents" aria-label={translateWorkbenchText("Agent handoff report", locale)}>
+      <p className="javis-message-title">
+        {translateWorkbenchText("Agent handoff report", locale)}
+      </p>
+      <article className="javis-document">
+        <div className="javis-document-row">
+          <strong>{translateWorkbenchText(needsAttention ? "needs attention" : "complete", locale)}</strong>
+          <span>
+            {report.handoffs.length} {translateWorkbenchText("handoff(s)", locale)}
+          </span>
+        </div>
+        <div className="javis-handoff-report-actions">
+          {artifacts.map((artifact) => (
+            <button
+              key={artifact.filename}
+              type="button"
+              onClick={() => downloadWorkbenchHandoffReportArtifact(artifact)}
+            >
+              {translateWorkbenchText(
+                artifact.contentType === "application/json" ? "JSON" : "Markdown",
+                locale,
+              )}
+            </button>
+          ))}
+        </div>
+        {report.missingInputContextKeys.length > 0 ? (
+          <p>
+            {translateWorkbenchText("Missing input", locale)}: {report.missingInputContextKeys.join(", ")}
+          </p>
+        ) : null}
+        {report.unconsumedOutputContextKeys.length > 0 ? (
+          <p>
+            {translateWorkbenchText("Unconsumed output", locale)}: {report.unconsumedOutputContextKeys.join(", ")}
+          </p>
+        ) : null}
+      </article>
+      {report.handoffs.slice(0, 6).map((handoff) => (
+        <article className="javis-document" key={handoff.contextKey}>
+          <div className="javis-document-row">
+            <strong>{handoff.contextKey}</strong>
+            <span>{handoff.status}</span>
+          </div>
+          <p>
+            {handoff.producedByStepId ?? "external"} -&gt; {handoff.consumedByStepIds.join(", ") || "none"}
+          </p>
+          <span>{formatHandoffValueSummary(handoff.valueSummary)}</span>
+        </article>
+      ))}
+    </section>
+  );
+}
+
+function formatHandoffValueSummary(value: {
+  type: string;
+  present: boolean;
+  itemCount?: number;
+  keyCount?: number;
+  preview?: string;
+}): string {
+  if (!value.present) return value.type;
+  if (value.type === "array") return `${value.type}: ${value.itemCount ?? 0} item(s)`;
+  if (value.type === "object") return `${value.type}: ${value.keyCount ?? 0} key(s)`;
+  if (value.preview) return `${value.type}: ${value.preview}`;
+  return value.type;
 }

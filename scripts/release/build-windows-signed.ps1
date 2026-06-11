@@ -5,6 +5,7 @@ param(
   [string]$TimestampUrl = $(if ($env:JAVIS_WINDOWS_TIMESTAMP_URL) { $env:JAVIS_WINDOWS_TIMESTAMP_URL } else { "http://timestamp.digicert.com" }),
   [ValidateSet("sha256")]
   [string]$DigestAlgorithm = "sha256",
+  [string]$QaRoot = "",
   [switch]$SkipChecks
 )
 
@@ -35,6 +36,18 @@ function Invoke-CheckedCommand {
   }
 }
 
+function Write-Utf8NoBom($path, $value) {
+  [System.IO.File]::WriteAllText($path, $value, [System.Text.UTF8Encoding]::new($false))
+}
+
+function ConvertTo-RepoRelativePath($Path) {
+  $fullPath = (Resolve-Path -LiteralPath $Path).Path
+  if ($fullPath.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    return $fullPath.Substring($repoRoot.Length).TrimStart("\", "/")
+  }
+  return $fullPath
+}
+
 $CertificateThumbprint = ([string]$CertificateThumbprint -replace '\s', '').ToUpperInvariant()
 if ($CertificateThumbprint -notmatch '^[0-9A-F]{40}$') {
   throw "Set JAVIS_WINDOWS_CERT_THUMBPRINT, or pass -CertificateThumbprint, to the SHA1 thumbprint of a code signing certificate."
@@ -53,6 +66,11 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
   $Version = [string]$tauriConfig.version
 }
 
+if (!$QaRoot.Trim()) {
+  $QaRoot = Join-Path $repoRoot ("docs\qa\" + (Get-Date -Format "yyyy-MM-dd"))
+}
+New-Item -ItemType Directory -Force -Path $QaRoot | Out-Null
+
 $checkArgs = @()
 if (-not [string]::IsNullOrWhiteSpace($Version)) {
   $checkArgs += @("-ExpectedVersion", $Version)
@@ -62,7 +80,14 @@ if (-not [string]::IsNullOrWhiteSpace($Version)) {
 if (-not $SkipChecks) {
   Push-Location $repoRoot
   try {
-    Invoke-CheckedCommand "pnpm" @("check") "pnpm check failed; signed release build was not created."
+    Invoke-CheckedCommand "corepack" @("pnpm", "check") "pnpm check failed; signed release build was not created."
+    Invoke-CheckedCommand "corepack" @("pnpm", "local-vision:prepare-runtime") "Local vision runtime preparation failed; signed release build was not created."
+    Invoke-CheckedCommand "corepack" @(
+      "pnpm",
+      "local-vision:doctor",
+      "--",
+      "--require-bundled-desktop-node-runtime"
+    ) "Local vision bundled desktop Node runtime check failed; signed release build was not created."
   } finally {
     Pop-Location
   }
@@ -93,13 +118,15 @@ $buildStartedAt = Get-Date
 
 Push-Location $repoRoot
 try {
-  Invoke-CheckedCommand "pnpm" @(
+  Invoke-CheckedCommand "corepack" @(
+    "pnpm",
     "--filter", "@javis/desktop",
     "tauri", "build",
     "--bundles", "msi", "nsis",
     "--ci",
     "--config", $config
-  ) "Tauri signed Windows build failed."
+  ) "Tauri signed Windows build failed. If the failure is LGHT0217/LGHT0216 during WiX ICE validation, check that the Windows Installer service is accessible on this machine."
+  Invoke-CheckedCommand "corepack" @("pnpm", "local-vision:verify-release-resources") "Local vision release resources are missing from the Tauri release output."
 } finally {
   Pop-Location
 }
@@ -146,11 +173,26 @@ foreach ($artifact in $artifacts) {
 
   $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $artifact.FullName
   $summary += [PSCustomObject]@{
-    Artifact = $artifact.FullName
-    Signature = $signature.Status
-    SHA256 = $hash.Hash
+    Artifact = ConvertTo-RepoRelativePath $artifact.FullName
+    Signature = [string]$signature.Status
+    SignerThumbprint = $CertificateThumbprint
+    SHA256 = [string]$hash.Hash
   }
 }
 
 $summary | Format-Table -AutoSize
+$commit = ((& git -C $repoRoot rev-parse HEAD) | Select-Object -First 1).Trim()
+$summaryOutput = [ordered]@{
+  generatedBy = "scripts/release/build-windows-signed.ps1"
+  version = $Version
+  commit = $commit
+  builtAt = (Get-Date).ToUniversalTime().ToString("o")
+  certificateThumbprint = $CertificateThumbprint
+  timestampUrl = $TimestampUrl
+  digestAlgorithm = $DigestAlgorithm
+  artifacts = $summary
+}
+$summaryPath = Join-Path $QaRoot "release-build-summary.json"
+Write-Utf8NoBom $summaryPath ($summaryOutput | ConvertTo-Json -Depth 8)
+Write-Host "Release build summary written: $summaryPath"
 Write-Host "Signed Windows release artifacts are ready for version $Version."

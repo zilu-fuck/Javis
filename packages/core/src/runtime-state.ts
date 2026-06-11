@@ -1,6 +1,7 @@
 import type { TaskSnapshot } from "./index";
 import type { TaskRuntimeEvent } from "./task-event-bus";
 import { createDeltaReducer } from "./delta-reducer";
+import { compactTaskSnapshotLogs } from "./snapshot-utils";
 
 export interface RuntimeState {
   clearTimers(): void;
@@ -71,7 +72,7 @@ export function createRuntimeState(
       if (disposed) {
         return;
       }
-      snapshot = nextSnapshot;
+      snapshot = compactTaskSnapshotLogs(nextSnapshot);
       deltaReducer.syncFrom(nextSnapshot);
       notify();
     },
