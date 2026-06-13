@@ -13,6 +13,7 @@ use crate::{
     create_native_approval_binding, normalize_path, require_native_approval_binding,
     resolve_workspace_path, NativeApprovalBinding,
 };
+use crate::sandbox::{require_interactive_session_backend, workspace_write_policy};
 
 pub(crate) struct TerminalState {
     sessions: Mutex<HashMap<String, TerminalSession>>,
@@ -276,6 +277,11 @@ pub(crate) fn terminal_create(
         "create",
         &payload,
     )?;
+    require_interactive_session_backend(workspace_write_policy(
+        &cwd,
+        vec![cwd.clone()],
+    ))
+    .map_err(|error| format!("Terminal sandbox check failed: {error}"))?;
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
