@@ -2560,16 +2560,13 @@ export function createJavisRuntime({
       const registry = createDefaultAgentRegistry();
       const availableTools = commanderPromptToolDescriptors(getAvailableToolDescriptors?.());
       const availableToolNames = new Set(availableTools.map((tool) => tool.name));
-      const availableAgents = demoAgents
-        .map((a) => {
-          const reg = registry.findByKind(a.kind);
-          return {
-            kind: a.kind,
-            allowedToolNames: allowedToolNamesForAgent(a.kind, availableTools)
-              .filter((toolName) => availableToolNames.has(toolName)),
-            capabilities: reg?.capabilityTags ?? [],
-          };
-        });
+      const availableAgents = registry.list()
+        .map((reg) => ({
+          kind: reg.agent.kind,
+          allowedToolNames: allowedToolNamesForAgent(reg.agent.kind, availableTools)
+            .filter((toolName) => availableToolNames.has(toolName)),
+          capabilities: reg.capabilityTags,
+        }));
       const prompt = buildCommanderReplanPrompt({
         userGoal,
         locale: "zh-CN",
@@ -3623,7 +3620,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function createBrowserApprovalError(): Error {
-  return new Error("Browser write operation requires native approval and is disabled until browser approvals are implemented.");
+  return new Error("Browser upload requires native approval support and is disabled until upload approvals are implemented.");
 }
 
 async function readChangedFilesForRepositoryPriority(
