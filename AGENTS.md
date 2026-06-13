@@ -76,10 +76,47 @@ Never bypass this for convenience. See `CONTRIBUTING.md` for the full safety che
 - pnpm 10.32.1, Node 22, Rust stable.
 - Single job: `pnpm install --frozen-lockfile` then `pnpm check`.
 
+## Agent Coordination
+
+### DAG Execution
+
+Commander outputs a `CommanderDagPlan` — steps with `assignedAgentKind`, `dependsOn`, `inputContextKeys`, `outputContextKey`, `successCriteria`. `workflow-dag-executor.ts` runs independent steps in parallel (`Promise.allSettled`), serial steps sequentially.
+
+### SharedContext & Handoff
+
+Agents communicate through `SharedTaskContext` (typed key-value store). Producer steps write via `outputContextKey`, consumers read via `inputContextKeys`.
+
+**Handoff report** (`buildHandoffReport` in `shared-context.ts`) is generated per-step and at workflow end. Status values:
+- `available` — producer wrote, consumer read
+- `missing` — consumer needs a key that doesn't exist
+- `input_missing` — no producer declared this key
+- `unconsumed` — producer wrote but nobody read
+- `invalid_schema` — value exists but fails schema validation
+
+Handoff report includes `invalidInputContextKeys` and `schemaError` fields. Persisted to task history, visible in Inspector UI, exportable as JSON/Markdown.
+
+### Schema Registry
+
+`DEFAULT_CONTEXT_KEY_SCHEMAS` in `shared-context.ts` defines expected shapes for critical handoff keys (`diffPreview`, `uiEvidence`, `computerResult`, `verificationResult`, etc.). `validateContextValue()` checks values against schemas; unknown keys pass (conservative whitelist strategy).
+
+`validateStepInputContext()` runs before each DAG step — missing or schema-invalid inputs fail the step early and trigger replan.
+
+### ReAct request_input
+
+Agents in ReAct loops can return `status: "request_input"` with `requestedContextKeys` (and optional `requestedAgentKind`) to signal they need upstream context before continuing. The workflow converts this into a replan signal.
+
+### Commander Replan
+
+On step failure, Commander gets a replan prompt with failure classification:
+- `timeout | permission | unavailable | parse | rate_limit | verification | handoff`
+- `handoff` covers `request_input` / context key / handoff failures — recovery hint: produce the missing upstream artifact
+
+Commander reads live agents from `registry.list()` (not hardcoded `demoAgents`), so dynamically registered agents are visible during replanning.
+
 ## Domain Vocabulary
 
 - **Commander**: Main planning agent, coordinates all sub-agents.
-- **Agent kinds**: `commander | file | shell | browser | computer | scheduler | research | code | verifier | chinese-reviewer`
+- **Agent kinds**: `commander | file | shell | browser | computer | scheduler | research | code | verifier | vision | workspace`
 - **Permission levels**: `read | preview | confirmed_write | dangerous`
 - **Task statuses**: `created → planning → running → waiting_permission → running → verifying → completed`
 - **Tool names**: `{category}.{action}` pattern (e.g., `code.inspectRepository`, `file.scanMarkdownDocuments`)
