@@ -4170,7 +4170,8 @@ function computerUseActionRiskLevel(
     const lower = keys.map((k) => String(k).toLowerCase());
     const hasEnter = lower.some((k) => k === "enter" || k === "return");
     const hasCtrl = lower.some((k) => k === "ctrl" || k === "control");
-    if (hasEnter) return "commit";
+    const hasShift = lower.some((k) => k === "shift");
+    if (hasEnter && !hasShift) return "commit";
     if (hasCtrl && lower.some((k) => k === "s" || k === "w" || k === "q")) return "commit";
     return "compose";
   }
@@ -4410,10 +4411,13 @@ async function waitForAskUserAnswer(options: {
         emitSnapshot({
           ...getSnapshot(),
           askUserQuestion: undefined,
-          conversationMessages: updateAskUserConversation(
-            getSnapshot().conversationMessages,
-            resolved,
-          ),
+          conversationMessages: [
+            ...(updateAskUserConversation(
+              getSnapshot().conversationMessages,
+              resolved,
+            ) ?? []),
+            { role: "user", content: resolved.answer ?? "" },
+          ],
         });
         resolve(resolved.answer ?? "");
       },

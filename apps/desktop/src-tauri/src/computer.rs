@@ -608,9 +608,10 @@ fn is_commit_action(tool_name: &str, params: &serde_json::Value) -> bool {
                     .filter_map(|k| k.as_str().map(|s| s.to_lowercase()))
                     .collect();
                 let has_enter = key_strs.iter().any(|k| k == "enter" || k == "return");
-                let has_ctrl = key_strs.iter().any(|k| k == "ctrl" || k == "control");
-                let has_shift = key_strs.iter().any(|k| k == "shift");
-                if has_enter && (has_ctrl || has_shift) {
+                let has_ctrl = key_strs
+                    .iter()
+                    .any(|k| k == "ctrl" || k == "control");
+                if has_enter && has_ctrl {
                     return true;
                 }
                 if has_enter && key_strs.len() == 1 {
