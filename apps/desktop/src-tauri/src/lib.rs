@@ -38,6 +38,7 @@ mod global_hotkey;
 mod inspect;
 mod mcpserv;
 mod pdf;
+mod sandbox;
 mod scan;
 mod shell;
 mod skills;
@@ -91,6 +92,8 @@ pub(crate) struct ModelCompletionRequest {
     locale: Option<String>,
     #[serde(default)]
     protocol: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -818,13 +821,26 @@ fn ensure_saved_model_key_matches_base_url(
     if normalized_provider == "custom" {
         return Err(saved_model_key_base_url_error());
     }
-    let expected = default_model_base_url_for_secret_scope(&normalized_provider);
-    if normalize_base_url_for_secret_scope(&base_url)
-        == normalize_base_url_for_secret_scope(&expected)
-    {
-        return Ok(());
+    let normalized_base_url = normalize_base_url_for_secret_scope(&base_url);
+    for candidate in valid_base_urls_for_provider(&normalized_provider) {
+        if normalized_base_url == normalize_base_url_for_secret_scope(&candidate) {
+            return Ok(());
+        }
     }
     Err(saved_model_key_base_url_error())
+}
+
+/// Returns all known valid base URLs for a provider. Useful for providers
+/// that serve the same API from multiple hostnames (e.g. paid vs token-plan).
+fn valid_base_urls_for_provider(provider_id: &str) -> Vec<String> {
+    let mut urls = vec![default_model_base_url_for_secret_scope(provider_id)];
+    match provider_id {
+        "mimo" => {
+            urls.push("https://token-plan-cn.xiaomimimo.com/v1".to_string());
+        }
+        _ => {}
+    }
+    urls
 }
 
 fn default_model_base_url_for_secret_scope(provider_id: &str) -> String {
@@ -1050,8 +1066,13 @@ fn run_openai_compatible_completion_request(
     let endpoint = create_chat_completions_endpoint(&base_url);
     let body = create_openai_compatible_completion_body(&model, request);
     let body_text = serde_json::to_string(&body).map_err(|error| error.to_string())?;
+    let effective_timeout = request
+        .timeout_ms
+        .filter(|&ms| ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(OPENCODE_PROPOSAL_TIMEOUT);
     let client = reqwest::blocking::Client::builder()
-        .timeout(OPENCODE_PROPOSAL_TIMEOUT)
+        .timeout(effective_timeout)
         .build()
         .map_err(|error| error.to_string())?;
     let mut request_builder = client
@@ -2662,7 +2683,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_code_patch_applies_approved_unified_diff() {
+    fn apply_code_patch_blocks_approved_unified_diff_without_sandbox_backend() {
         let root = create_test_directory("code-patch-success");
         init_git_repo(&root);
         let file = root.join("src").join("message.txt");
@@ -2678,16 +2699,18 @@ mod tests {
             &root,
             code_patch_apply_request(&root, vec!["src/message.txt".to_string()], patch),
             None,
-        )
-        .expect("apply approved patch");
+        );
 
-        assert!(result.applied);
-        assert_eq!(result.changed_files, vec!["src/message.txt"]);
+        let error = result
+            .expect_err("workspace-write backend should be required")
+            .to_string();
+        assert!(error.contains("Workspace-write commands require an OS sandbox backend"));
+        assert!(error.contains("enforced=false"));
         assert_eq!(
             fs::read_to_string(file)
-                .expect("read patched file")
+                .expect("read unpatched file")
                 .replace("\r\n", "\n"),
-            "after\n"
+            "before\n"
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -2798,7 +2821,7 @@ mod tests {
     }
 
     #[test]
-    fn approved_code_patch_apply_is_one_time_use() {
+    fn approved_code_patch_apply_backend_denial_does_not_consume_approval() {
         let root = create_test_directory("code-patch-one-shot");
         init_git_repo(&root);
         let file = root.join("src").join("message.txt");
@@ -2813,17 +2836,17 @@ mod tests {
         let approval_state = Mutex::new(code::CodePatchApprovalState::default());
         register_and_approve_code_patch(&approval_state, &request);
 
-        let result = apply_code_patch_in_workspace(&root, request.clone(), Some(&approval_state))
-            .expect("apply approved patch");
+        let result = apply_code_patch_in_workspace(&root, request.clone(), Some(&approval_state));
         let second_result = apply_code_patch_in_workspace(&root, request, Some(&approval_state));
 
-        assert!(result.applied);
-        assert_eq!(
-            second_result
-                .expect_err("approval should be consumed")
-                .to_string(),
-            "Permission denied: No approved Code Patch proposal is pending."
-        );
+        let first_error = result
+            .expect_err("workspace-write backend should be required")
+            .to_string();
+        assert!(first_error.contains("Workspace-write commands require an OS sandbox backend"));
+        let second_error = second_result
+            .expect_err("approval should remain pending after backend denial")
+            .to_string();
+        assert!(second_error.contains("Workspace-write commands require an OS sandbox backend"));
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
 
@@ -2964,7 +2987,7 @@ mod tests {
     }
 
     #[test]
-    fn code_patch_apply_allows_approved_missing_files_to_be_created() {
+    fn code_patch_apply_blocks_approved_missing_file_creation_without_sandbox_backend() {
         let root = create_test_directory("code-patch-create-missing-file");
         init_git_repo(&root);
         let file = root.join("src").join("new.txt");
@@ -2974,16 +2997,13 @@ mod tests {
         let approval_state = Mutex::new(code::CodePatchApprovalState::default());
         register_and_approve_code_patch(&approval_state, &request);
 
-        let result = apply_code_patch_in_workspace(&root, request, Some(&approval_state))
-            .expect("apply approved patch");
+        let result = apply_code_patch_in_workspace(&root, request, Some(&approval_state));
 
-        assert!(result.applied);
-        assert_eq!(
-            fs::read_to_string(file)
-                .expect("read created file")
-                .replace("\r\n", "\n"),
-            "created\n"
-        );
+        let error = result
+            .expect_err("workspace-write backend should be required")
+            .to_string();
+        assert!(error.contains("Workspace-write commands require an OS sandbox backend"));
+        assert!(!file.exists());
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
 
@@ -3280,6 +3300,7 @@ mod tests {
             stop_sequences: Some(vec!["\n\n".to_string(), " ".to_string()]),
             locale: None,
             protocol: None,
+            timeout_ms: None,
         };
 
         let body = create_openai_compatible_stream_body("gpt-test", &request);
@@ -4214,6 +4235,7 @@ mod tests {
             stop_sequences: None,
             locale: None,
             protocol: None,
+            timeout_ms: None,
         };
         let completion_body = create_openai_compatible_completion_body("deepseek-chat", &request);
 

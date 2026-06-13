@@ -3,7 +3,7 @@ import { localeDefaultModelSettings } from "./model-settings";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { buildAgentSystemPrompt, injectTerminologyPrompt, getAdapter } from "@javis/core";
-import type { AgentKind, AgentStyleRecord, ProviderAdapter } from "@javis/core";
+import type { AgentKind, AgentStyleRecord, ProviderAdapter, WorkspacePromptProfile } from "@javis/core";
 
 export interface CompletionOptions {
   model?: string;
@@ -22,6 +22,7 @@ export interface CompletionOptions {
   skipSkillContext?: boolean;
   skillContextMaxSkills?: number;
   skillContextMaxChars?: number;
+  timeoutMs?: number;
 }
 
 export interface StreamOptions extends CompletionOptions {
@@ -311,6 +312,7 @@ async function createModelRequest(
       temperature: options?.temperature,
       stopSequences: options?.stopSequences,
       locale: options?.locale,
+      timeoutMs: options?.timeoutMs,
     });
   }
 
@@ -326,6 +328,7 @@ async function createModelRequest(
     temperature: options?.temperature,
     stopSequences: options?.stopSequences,
     locale: options?.locale,
+    timeoutMs: options?.timeoutMs,
   };
 }
 
@@ -347,11 +350,13 @@ async function buildPromptForRequest(prompt: string, options?: CompletionOptions
   }
 
   const customStyle = await readAgentStyle(options.agentKind, options.workspacePath);
+  const workspaceProfile = await detectWorkspacePromptProfile(options.workspacePath);
   const runtimeContext = appendRuntimeContext(prompt, options);
   return buildAgentSystemPrompt({
     kind: options.agentKind,
     locale: options.locale,
     customStyle,
+    workspaceProfile,
     runtimeContext,
   });
 }
@@ -375,6 +380,76 @@ function appendRuntimeContext(prompt: string, options?: CompletionOptions): stri
     "Current request context:",
     prompt,
   ].join("\n");
+}
+
+async function detectWorkspacePromptProfile(
+  workspacePath?: string,
+): Promise<WorkspacePromptProfile | undefined> {
+  const root = workspacePath?.trim();
+  if (!root || typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) {
+    return undefined;
+  }
+
+  const manifests = await Promise.all([
+    readWorkspaceManifest(root, "package.json"),
+    readWorkspaceManifest(root, "Cargo.toml"),
+    readWorkspaceManifest(root, "src-tauri/Cargo.toml"),
+    readWorkspaceManifest(root, "src-tauri/tauri.conf.json"),
+    readWorkspaceManifest(root, "vite.config.ts"),
+    readWorkspaceManifest(root, "next.config.js"),
+  ]);
+  const found = manifests.filter((item): item is { path: string; content: string } => Boolean(item));
+  if (found.length === 0) {
+    return undefined;
+  }
+
+  const manifestPaths = found.map((item) => item.path);
+  const text = found.map((item) => `${item.path}\n${item.content}`).join("\n").toLowerCase();
+  const signals = new Set<string>(manifestPaths);
+  if (text.includes("\"react\"") || text.includes("@vitejs/plugin-react")) signals.add("react");
+  if (text.includes("vite")) signals.add("vite");
+  if (text.includes("tauri") || manifestPaths.some((path) => path.includes("src-tauri"))) signals.add("tauri");
+  if (text.includes("[package]") || manifestPaths.some((path) => path.endsWith("Cargo.toml"))) signals.add("rust");
+  if (text.includes("next")) signals.add("nextjs");
+  if (text.includes("\"scripts\"")) signals.add("node-scripts");
+
+  const typeParts: string[] = [];
+  if (signals.has("tauri")) typeParts.push("Tauri desktop");
+  if (signals.has("react")) typeParts.push("React");
+  if (signals.has("vite")) typeParts.push("Vite");
+  if (signals.has("nextjs")) typeParts.push("Next.js");
+  if (signals.has("rust")) typeParts.push("Rust");
+  if (typeParts.length === 0 && manifestPaths.some((path) => path.endsWith("package.json"))) typeParts.push("Node.js");
+
+  return {
+    workspacePath: root,
+    type: typeParts.join(" + ") || "unknown",
+    signals: [...signals],
+    guidance: "Prefer commands, file paths, tests, and implementation conventions that match these workspace signals.",
+  };
+}
+
+async function readWorkspaceManifest(
+  workspaceRoot: string,
+  relativePath: string,
+): Promise<{ path: string; content: string } | undefined> {
+  try {
+    const path = joinWorkspacePath(workspaceRoot, relativePath);
+    const content = await invoke<string>("read_file_chunk", {
+      path,
+      maxLines: 80,
+      workspaceRoot,
+      allowedRootIds: null,
+    });
+    return content.trim() ? { path: relativePath, content } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function joinWorkspacePath(root: string, relativePath: string): string {
+  const separator = root.includes("\\") ? "\\" : "/";
+  return `${root.replace(/[\\/]+$/u, "")}${separator}${relativePath.replace(/\//gu, separator)}`;
 }
 
 async function readAgentStyle(

@@ -169,6 +169,9 @@ export async function runComputerUseLoop(
     disabled: false,
   };
 
+  // Pre-compute app name patterns from the goal for window matching on first observation.
+  const goalAppPatterns = extractAppNamesFromGoal(userGoal);
+
   for (let i = 0; i < config.maxSteps; i++) {
     throwIfAborted(signal);
     const stepStartedAt = Date.now();
@@ -217,6 +220,15 @@ export async function runComputerUseLoop(
       signal: stepController.signal,
     });
     nextScreenshot = undefined;
+
+    // On first iteration, if no preferred handle yet, try to match goal app name
+    // against the window list we just got from observeComputerState.
+    if (i === 0 && !preferredUiWindowHandle && goalAppPatterns.length > 0 && observation.windowList) {
+      const resolvedHandle = resolveTargetWindowFromGoal(goalAppPatterns, observation.windowList);
+      if (resolvedHandle) {
+        preferredUiWindowHandle = resolvedHandle;
+      }
+    }
     const { screenshot, windowList, uiContext } = observation;
     trace.freshAt = observation.freshAt;
     trace.observation = { id: observation.id };
@@ -329,6 +341,7 @@ export async function runComputerUseLoop(
             ...(screenshot ? { imageDataUrl: screenshot.dataUrl } : {}),
             skipAgentMemory: true,
             skipSkillContext: true,
+            timeoutMs: config.timeouts.modelMs,
           }),
           config.timeouts.modelMs,
           "Computer Use model call",
@@ -361,6 +374,7 @@ export async function runComputerUseLoop(
                 ...(screenshot ? { imageDataUrl: screenshot.dataUrl } : {}),
                 skipAgentMemory: true,
                 skipSkillContext: true,
+                timeoutMs: config.timeouts.modelMs,
               }),
               config.timeouts.modelMs,
               "Computer Use model retry",
@@ -408,6 +422,7 @@ export async function runComputerUseLoop(
               ...(screenshot ? { imageDataUrl: screenshot.dataUrl } : {}),
               skipAgentMemory: true,
               skipSkillContext: true,
+              timeoutMs: config.timeouts.modelMs,
             }),
             config.timeouts.modelMs,
             "Computer Use JSON retry",
@@ -809,7 +824,11 @@ export async function runComputerUseLoop(
       if (/denied by user|permission denied/i.test(error)) {
         break;
       }
-      correctionHint = `Your last action (${action.tool}) failed: ${error}. Try a different approach or a different target.`;
+      if (isIrreversibleAction(executedAction) && isUnknownExecutionError(error)) {
+        correctionHint = `Your last action (${executedAction.tool}) has unknown execution state due to timeout or IPC failure. DO NOT repeat this action — it may have already been executed. Instead, observe the current desktop state (screenshot + UIA) to verify whether the action took effect before deciding your next step.`;
+      } else {
+        correctionHint = `Your last action (${action.tool}) failed: ${error}. Try a different approach or a different target.`;
+      }
     }
   }
 
@@ -3965,6 +3984,15 @@ async function runPreflightCheck(
     return { passed: true, reason: "read-only action" };
   }
 
+  const observationAgeMs = Date.now() - new Date(observation.freshAt).getTime();
+  const STALE_THRESHOLD_MS = 8_000;
+  if (observationAgeMs > STALE_THRESHOLD_MS) {
+    return {
+      passed: false,
+      reason: `observation is stale (${Math.round(observationAgeMs / 1000)}s old, threshold ${STALE_THRESHOLD_MS / 1000}s). Re-observe the desktop before executing.`,
+    };
+  }
+
   const localVisionCheck = checkLocalVisionCandidatePreflight(
     options?.candidateAction ?? action,
     observation.localVision,
@@ -4225,6 +4253,89 @@ async function verifyActionResult(
 
 function shouldInspectValuesForVerification(action: ComputerUseAction): boolean {
   return action.tool === "computer.type" || action.tool === "computer.setUiValue";
+}
+
+function isIrreversibleAction(action: ComputerUseAction): boolean {
+  switch (action.tool) {
+    case "computer.type":
+    case "computer.keyCombo":
+    case "computer.setUiValue":
+      return true;
+    case "computer.invokeUi":
+      return isSensitiveSelector((action.params as Record<string, unknown>).selector);
+    case "computer.click":
+      return false;
+    default:
+      return false;
+  }
+}
+
+function isSensitiveSelector(selector: unknown): boolean {
+  if (!selector || typeof selector !== "object") return false;
+  const record = selector as Record<string, unknown>;
+  const texts = [record.name, record.automationId].filter((v): v is string => typeof v === "string");
+  return texts.some((t) => /send|submit|delete|remove|pay|purchase|publish|发送|提交|删除|付款|发布/i.test(t));
+}
+
+function isUnknownExecutionError(error: string): boolean {
+  return /timed?\s*out|timeout|IPC|connection\s*(lost|closed|reset)|transport|ECONNRESET|ETIMEDOUT|aborted|channel\s*closed/i.test(error);
+}
+
+function resolveTargetWindowFromGoal(
+  appPatterns: RegExp[],
+  windowList: ComputerListWindowsResult | undefined,
+): number | undefined {
+  if (!windowList?.windows?.length || appPatterns.length === 0) return undefined;
+  for (const pattern of appPatterns) {
+    const match = windowList.windows.find((w) =>
+      w.title && pattern.test(w.title),
+    );
+    if (match) return match.handle;
+  }
+  return undefined;
+}
+
+function extractAppNamesFromGoal(goal: string): RegExp[] {
+  const patterns: RegExp[] = [];
+  const lower = goal.toLowerCase();
+  const appKeywords: [RegExp, string[]][] = [
+    [/\bqq\b/i, ["qq"]],
+    [/\bwechat|微信\b/i, ["wechat", "微信"]],
+    [/\bwechat\b/i, ["weixin"]],
+    [/\bchrome\b/i, ["chrome"]],
+    [/\bedge\b/i, ["edge"]],
+    [/\bfirefox\b/i, ["firefox"]],
+    [/\bvs\s*code\b/i, ["visual studio code", "vscode"]],
+    [/\btelegram\b/i, ["telegram"]],
+    [/\bdiscord\b/i, ["discord"]],
+    [/\bslack\b/i, ["slack"]],
+    [/\b飞书|feishu|lark\b/i, ["飞书", "feishu", "lark"]],
+    [/\b钉钉|dingtalk\b/i, ["钉钉", "dingtalk"]],
+    [/\bteams\b/i, ["teams"]],
+    [/\bnotepad\b/i, ["notepad"]],
+    [/\bexplorer|资源管理器|文件管理器\b/i, ["explorer", "资源管理器", "文件管理器"]],
+    [/\bword\b/i, ["word"]],
+    [/\bexcel\b/i, ["excel"]],
+    [/\bppt|powerpoint\b/i, ["powerpoint", "ppt"]],
+  ];
+  for (const [trigger, keywords] of appKeywords) {
+    if (trigger.test(lower)) {
+      for (const kw of keywords) {
+        patterns.push(new RegExp(kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
+      }
+    }
+  }
+  // Generic: extract quoted or capitalized words that look like app names
+  const quoted = goal.match(/[""']([^""']+)[""']/g);
+  if (quoted) {
+    for (const q of quoted) {
+      const inner = q.slice(1, -1).trim();
+      if (inner.length >= 2 && inner.length <= 30) {
+        patterns.push(new RegExp(inner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"));
+      }
+    }
+  }
+  return patterns;
 }
 
 function canRetryAfterVerificationFailure(action: ComputerUseAction, result: unknown): boolean {

@@ -656,6 +656,14 @@ const AGENT_PROMPT_CONTEXT_KINDS = new Set<AgentKind>([
   "scheduler",
   "research",
   "code",
+  "language-reviewer",
+  "security-reviewer",
+  "build-fix",
+  "test-runner",
+  "doc-updater",
+  "explorer",
+  "perf-analyzer",
+  "refactor",
   "verifier",
   "workspace",
   "vision",
@@ -1816,6 +1824,7 @@ export function createJavisRuntime({
           toolName: action.tool,
           paramsJson: JSON.stringify(action.params),
           sessionWide: sessionWide ?? false,
+          riskLevel: action.riskLevel ?? null,
         });
         return { approvalId, taskId, sessionWide: sessionWide ?? false };
       },
@@ -2313,7 +2322,7 @@ export function createJavisRuntime({
           "You are creating a Javis workspace definition. Output valid JSON matching this schema:",
           WORKSPACE_SCAFFOLD_SCHEMA_JSON,
           "",
-          "Available agent kinds: commander, file, shell, browser, computer, scheduler, research, code, verifier",
+          `Available agent kinds: ${demoAgents.map((agent) => agent.kind).join(", ")}`,
           "Available built-in view types: chat, automated, skills, apps, documents, gallery, computer",
           "Sidebar groups: primary (top), knowledge (local data), custom (below)",
           "",
@@ -2513,7 +2522,10 @@ export function createJavisRuntime({
         const parsed = parseJsonObject(result.text) as Record<string, unknown>;
         const rawStatus = parsed.status as string;
         const status: AgentReActDecision["status"] =
-          rawStatus === "continue" || rawStatus === "completed" || rawStatus === "failed"
+          rawStatus === "continue" ||
+          rawStatus === "completed" ||
+          rawStatus === "failed" ||
+          rawStatus === "request_input"
             ? rawStatus
             : "failed";
         return {
@@ -2522,6 +2534,12 @@ export function createJavisRuntime({
           input: isRecord(parsed.input) ? { ...parsed.input } : undefined,
           reason: (parsed.reason as string) ?? "No reason provided.",
           output: parsed.output,
+          requestedContextKeys: Array.isArray(parsed.requestedContextKeys)
+            ? parsed.requestedContextKeys.filter((item): item is string => typeof item === "string")
+            : undefined,
+          requestedAgentKind: typeof parsed.requestedAgentKind === "string"
+            ? parsed.requestedAgentKind as AgentReActDecision["requestedAgentKind"]
+            : undefined,
         };
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);

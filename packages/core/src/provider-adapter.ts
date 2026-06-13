@@ -27,6 +27,7 @@ export interface AdapterCompletionInput {
   temperature?: number;
   stopSequences?: string[];
   locale?: string;
+  timeoutMs?: number;
 }
 
 export interface AdapterRequestPayload {
@@ -42,6 +43,7 @@ export interface AdapterRequestPayload {
   stopSequences?: string[];
   locale?: string;
   protocol: ProviderProtocol;
+  timeoutMs?: number;
 }
 
 export interface AdapterCompletionResponse {

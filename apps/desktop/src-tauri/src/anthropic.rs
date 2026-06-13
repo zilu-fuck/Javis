@@ -202,8 +202,13 @@ pub(crate) fn run_anthropic_completion_request(
     let body = build_anthropic_completion_body(&model, request)?;
     let body_text = serde_json::to_string(&body).map_err(|error| error.to_string())?;
 
+    let effective_timeout = request
+        .timeout_ms
+        .filter(|&ms| ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(ANTHROPIC_TIMEOUT);
     let client = reqwest::blocking::Client::builder()
-        .timeout(ANTHROPIC_TIMEOUT)
+        .timeout(effective_timeout)
         .build()
         .map_err(|error| error.to_string())?;
 

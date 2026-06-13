@@ -172,10 +172,60 @@ export interface ShellCommandOutput {
   exitCode: number | null;
   stdout: string;
   stderr: string;
+  sandbox?: SandboxReport;
 }
 
 export interface ShellTool {
   runReadOnlyCommand(request: ShellCommandRequest): Promise<ShellCommandOutput>;
+}
+
+export type SandboxMode = "read_only" | "workspace_write" | "full_access_manual";
+
+export type SandboxBackend =
+  | "policy_only"
+  | "windows_restricted_token"
+  | "linux_bubblewrap"
+  | "mac_seatbelt"
+  | "unavailable";
+
+export type SandboxBoundaryStrategy =
+  | "windows_app_container"
+  | "windows_dedicated_identity_acl"
+  | "windows_firewall_rule"
+  | "not_implemented";
+
+export interface SandboxBoundaryStatus {
+  strategy: SandboxBoundaryStrategy;
+  available: boolean;
+  mutatesHostState: boolean;
+  reason: string;
+}
+
+export interface SandboxBackendStatus {
+  backend: SandboxBackend;
+  available: boolean;
+  canSpawn: boolean;
+  canControlProcessTree: boolean;
+  canCreateRestrictedToken: boolean;
+  canLaunchRestrictedProcess: boolean;
+  canEvaluateFilesystemPolicy: boolean;
+  canEvaluateNetworkPolicy: boolean;
+  canRestrictFilesystem: boolean;
+  canDenyNetwork: boolean;
+  filesystemBoundary: SandboxBoundaryStatus;
+  networkBoundary: SandboxBoundaryStatus;
+  reason: string;
+}
+
+export interface SandboxReport {
+  backend: SandboxBackend;
+  backendStatus: SandboxBackendStatus;
+  enforced: boolean;
+  mode: SandboxMode;
+  networkAccess: boolean;
+  writableRoots: string[];
+  protectedPathCount: number;
+  denialReason: string | null;
 }
 
 export interface WebSourceRequest {
@@ -1216,9 +1266,12 @@ export interface ComputerSetUiValueResult {
   matchedAutomationId: string;
 }
 
+export type ComputerUseActionRiskLevel = "navigate" | "compose" | "commit";
+
 export interface ComputerUseApprovalRequest {
   tool: string;
   params: Record<string, unknown>;
+  riskLevel?: ComputerUseActionRiskLevel;
 }
 
 export interface ComputerUseApprovalResult {

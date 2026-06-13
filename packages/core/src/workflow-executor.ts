@@ -85,6 +85,7 @@ import type { ComputerUseStep, ComputerUseStepTrace } from "./computer-use-types
 interface RuntimeExecutionConfig {
   contextStrategy?: "auto" | "short" | "long";
   agentMaxIterations?: number;
+  maxStepRetries?: number;
   taskTimeoutMs?: number;
   failureRecoveryEnabled?: boolean;
   userWaitTimeoutMs?: number;
@@ -95,7 +96,7 @@ const COMMANDER_TOOL_TIMEOUT_MS = 90_000;
 const COMMANDER_USER_WAIT_TIMEOUT_MS = 5 * 60_000;
 const COMMANDER_REPLAN_TIMEOUT_MS = 60_000;
 const MCP_LIST_TOOLS_TIMEOUT_MS = 5_000;
-const DEFAULT_AGENT_MAX_ITERATIONS = 4;
+const DEFAULT_AGENT_MAX_ITERATIONS = 6;
 const MAX_REACT_MCP_SUBTOOLS = 40;
 const MAX_REACT_MCP_SUBTOOLS_PER_SERVER = 8;
 
@@ -143,6 +144,7 @@ function resolveCommanderTimeouts(config?: RuntimeExecutionConfig): {
   replanTimeoutMs: number;
   userWaitTimeoutMs: number;
   agentMaxIterations: number;
+  maxStepRetries: number;
 } {
   const taskTimeoutMs = clampRuntimeNumber(config?.taskTimeoutMs, 30_000, 900_000, COMMANDER_MODEL_TIMEOUT_MS);
   return {
@@ -165,6 +167,12 @@ function resolveCommanderTimeouts(config?: RuntimeExecutionConfig): {
       1,
       24,
       DEFAULT_AGENT_MAX_ITERATIONS,
+    ),
+    maxStepRetries: clampRuntimeNumber(
+      config?.maxStepRetries,
+      0,
+      3,
+      1,
     ),
   };
 }
@@ -2175,9 +2183,12 @@ async function dispatchToolByName(
     }
     case "code.proposeEdit": {
       if (!tools.codeTool?.proposeEdit) throw new Error("code.proposeEdit tool not available");
-      return tools.codeTool.proposeEdit(input as {
-        userGoal: string;
-        preview: import("@javis/tools").CodeReviewPreview;
+      return tools.codeTool.proposeEdit({
+        ...(input as {
+          userGoal: string;
+          preview: import("@javis/tools").CodeReviewPreview;
+        }),
+        userGoal: buildCodeProposalGoal(input),
       });
     }
     // 鈹€鈹€ Shell tools 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -2515,6 +2526,34 @@ function mergeStepInput(
     ...(isPlainRecord(step.toolInput) ? step.toolInput : {}),
     ...(extraInput ?? {}),
   };
+}
+
+function buildCodeProposalGoal(input: Record<string, unknown>): string {
+  const baseGoal = String(input.userGoal ?? input.goal ?? input.query ?? "").trim();
+  const handoffEntries = [
+    ["uiEvidence", input.uiEvidence],
+    ["computerEvidence", input.computerEvidence],
+    ["computerScreenshot", input.computerScreenshot],
+    ["computerResult", input.computerResult],
+  ]
+    .filter((entry): entry is [string, unknown] => entry[1] !== undefined)
+    .map(([key, value]) => `${key}: ${summarizePromptValue(value)}`);
+
+  if (handoffEntries.length === 0) {
+    return baseGoal;
+  }
+  return [
+    baseGoal || "Prepare a minimal code change.",
+    "",
+    "Upstream Computer Agent handoff evidence:",
+    ...handoffEntries,
+  ].join("\n");
+}
+
+function summarizePromptValue(value: unknown): string {
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  if (!text) return "";
+  return text.length > 1600 ? `${text.slice(0, 1600)}...` : text;
 }
 
 function resolveStepExecutionMode(
@@ -4121,6 +4160,30 @@ function computerUseWriteRiskLevel(toolName: string): ToolDescriptor["writeRiskL
   return initialToolDescriptors.find((descriptor) => descriptor.name === toolName)?.writeRiskLevel;
 }
 
+function computerUseActionRiskLevel(
+  action: { tool: string; params: Record<string, unknown> },
+): "navigate" | "compose" | "commit" {
+  if (action.tool === "computer.type") return "compose";
+  if (action.tool === "computer.setUiValue") return "compose";
+  if (action.tool === "computer.keyCombo") {
+    const keys = Array.isArray(action.params.keys) ? action.params.keys : [];
+    const lower = keys.map((k) => String(k).toLowerCase());
+    const hasEnter = lower.some((k) => k === "enter" || k === "return");
+    const hasCtrl = lower.some((k) => k === "ctrl" || k === "control");
+    if (hasEnter) return "commit";
+    if (hasCtrl && lower.some((k) => k === "s" || k === "w" || k === "q")) return "commit";
+    return "compose";
+  }
+  if (action.tool === "computer.invokeUi") {
+    if (selectorLooksSensitive(action.params.selector)) return "commit";
+    return "navigate";
+  }
+  if (action.tool === "computer.click") {
+    return "navigate";
+  }
+  return "navigate";
+}
+
 async function requestComputerUseApproval(options: {
   action: { tool: string; params: Record<string, unknown> };
   requiresFreshApproval?: boolean;
@@ -4161,7 +4224,7 @@ async function requestComputerUseApproval(options: {
 
   const actionSummary = summarizeComputerUseAction(action);
   const trustedWindowTitle = normalizeComputerTrustTitle(options.trustedWindowTitle);
-  const canUseTaskApproval = !requiresFreshApproval && !requiresFreshComputerUseApproval(action);
+  const canUseTaskApproval = !requiresFreshApproval && !requiresFreshComputerUseApproval(action) && computerUseActionRiskLevel(action) !== "commit";
   const writeRiskLevel = computerUseWriteRiskLevel(action.tool);
   const permissionRequest = createPendingPermissionRequest({
     id: `${taskId}-${stepId}-${action.tool.replace(/[^a-z0-9]+/gi, "-")}-approval-${Date.now()}`,
@@ -4239,7 +4302,7 @@ async function requestComputerUseApproval(options: {
 
         const sessionWide = canUseTaskApproval && decision === "approved_always";
         const approval = await computerTool.approveAction!(
-          action,
+          { ...action, riskLevel: computerUseActionRiskLevel(action) },
           permissionRequest.id,
           taskId,
           sessionWide,
@@ -4463,15 +4526,33 @@ function updateAskUserConversation(
   messages: TaskSnapshot["conversationMessages"] | undefined,
   question: NonNullable<TaskSnapshot["askUserQuestion"]>,
 ): TaskSnapshot["conversationMessages"] | undefined {
-  return messages?.map((message) =>
-    message.kind === "ask_user_question" && message.id === question.id
-      ? {
-          ...message,
-          askUserQuestion: question,
-          content: question.question,
-        }
-      : message,
-  );
+  const currentMessages = messages ?? [];
+  let updatedExisting = false;
+  const nextMessages = currentMessages.map((message) => {
+    if (message.kind !== "ask_user_question" || message.id !== question.id) {
+      return message;
+    }
+    updatedExisting = true;
+    return {
+      ...message,
+      askUserQuestion: question,
+      content: question.question,
+    };
+  });
+  if (updatedExisting) {
+    return nextMessages;
+  }
+  return [
+    ...nextMessages,
+    {
+      id: question.id,
+      kind: "ask_user_question",
+      role: "assistant",
+      content: question.question,
+      createdAt: question.createdAt,
+      askUserQuestion: question,
+    },
+  ];
 }
 
 const COMMANDER_DAG_WORKFLOW_ID = "commander-dag";
@@ -4905,6 +4986,8 @@ export async function runCommanderDagTask({
       dependsOn: (step as CommanderDagStep).dependsOn ?? [],
       canRunInParallel: true,
       requiredCapabilities: step.requiredCapabilities as AgentCapabilityTag[] | undefined,
+      inputContextKeys: step.inputContextKeys,
+      outputContextKey: step.outputContextKey,
     }));
 
     const syntheticWorkflow: WorkbenchWorkflow = {
@@ -5505,6 +5588,18 @@ export async function runCommanderDagTask({
         }
 
         // ReAct failed — throw to trigger replan
+        if (reactResult.status === "request_input") {
+          const requestedKeys = reactResult.requestedContextKeys?.length
+            ? ` Requested context key(s): ${reactResult.requestedContextKeys.join(", ")}.`
+            : "";
+          const requestedAgent = reactResult.requestedAgentKind
+            ? ` Suggested agent: ${reactResult.requestedAgentKind}.`
+            : "";
+          throw new Error(
+            `ReAct request_input for step ${dagStep.id}: ${reactResult.reason}.${requestedKeys}${requestedAgent}`,
+          );
+        }
+
         throw new Error(
           `ReAct loop failed for step ${dagStep.id}: ${reactResult.reason}`,
         );
@@ -5822,6 +5917,8 @@ export async function runCommanderDagTask({
           dependsOn: (s.dependsOn ?? []).filter((depId) => depId !== failedId),
           canRunInParallel: true,
           requiredCapabilities: s.requiredCapabilities as AgentCapabilityTag[] | undefined,
+          inputContextKeys: s.inputContextKeys,
+          outputContextKey: s.outputContextKey,
         }));
 
         // Add recovery steps to the dagPlan for tracking
@@ -5879,6 +5976,7 @@ export async function runCommanderDagTask({
       context,
       signal,
       stepTimeoutMs: runtimeTimeouts.toolTimeoutMs,
+      maxStepRetries: runtimeTimeouts.maxStepRetries,
       executeStep: executeStepWithReAct,
       onStepStarted: (step) => {
         emitSnapshot({
@@ -5946,6 +6044,19 @@ export async function runCommanderDagTask({
               error: `Step ${step.id} timed out after ${timeoutMs}ms.`,
             }),
           ],
+        });
+      },
+      onStepRetry: (step, error, attempt) => {
+        emitSnapshot({
+          ...getSnapshot(),
+          status: "retrying",
+          commanderMessage: `Retrying ${step.id} after a transient failure (${attempt}/${runtimeTimeouts.maxStepRetries}).`,
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "tool.planned",
+            taskId,
+            toolName: `${step.agentKind}.${step.id}`,
+            detail: `Retry ${attempt}/${runtimeTimeouts.maxStepRetries} after transient failure: ${error}`,
+          })),
         });
       },
       onStepFailureReplan: handleStepFailureReplan,

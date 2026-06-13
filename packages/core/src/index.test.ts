@@ -60,6 +60,14 @@ describe("createFileScanTaskRuntime", () => {
       "agent-file",
       "agent-shell",
       "agent-code",
+      "agent-language-reviewer",
+      "agent-security-reviewer",
+      "agent-build-fix",
+      "agent-test-runner",
+      "agent-doc-updater",
+      "agent-explorer",
+      "agent-perf-analyzer",
+      "agent-refactor",
       "agent-research",
       "agent-computer",
       "agent-scheduler",
@@ -528,10 +536,10 @@ describe("createFileScanTaskRuntime", () => {
       permissionLevel: "confirmed_write",
     }));
     expect(getWorkbenchWorkflow("browser-research")?.safetyNotes).toContain(
-      "Click/type/evaluate/upload/runTest operations are disabled until browser approvals are implemented.",
+      "Click/type/evaluate/runTest operations require confirmed-write approval; upload remains disabled until upload approvals are implemented.",
     );
     expect(getWorkbenchWorkflow("browser-test")?.safetyNotes).toContain(
-      "Browser test execution is disabled until browser approvals are implemented.",
+      "Browser test execution requires confirmed-write approval.",
     );
     expect(getWorkbenchWorkflow("computer-use")?.currentSupport).toBe("partial");
     expect(getWorkbenchWorkflow("computer-use")?.steps).toContainEqual(expect.objectContaining({
@@ -752,7 +760,7 @@ describe("createFileScanTaskRuntime", () => {
 
     expect(computerUseLoopRunner).toHaveBeenCalledOnce();
     expect(approveAction).toHaveBeenCalledWith(
-      { tool: "computer.click", params: { x: 120, y: 240, button: "left" } },
+      { tool: "computer.click", params: { x: 120, y: 240, button: "left" }, riskLevel: "navigate" },
       permissionSnapshot.permissionRequest?.id,
       finalSnapshot.id,
       false,

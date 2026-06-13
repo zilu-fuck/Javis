@@ -591,9 +591,43 @@ fn validate_computer_task_lease_for_action(
     if requires_per_action_computer_approval(tool_name, params) {
         return Err("This Computer Use action requires a fresh per-action approval.".to_string());
     }
+    if is_commit_action(tool_name, params) {
+        return Err("Commit actions (Enter, send, submit) require fresh per-action approval and cannot use task leases.".to_string());
+    }
     validate_computer_lease_scope(lease, tool_name, params).map_err(|e| e.to_string())?;
     lease.remaining_actions = lease.remaining_actions.saturating_sub(1);
     Ok(())
+}
+
+fn is_commit_action(tool_name: &str, params: &serde_json::Value) -> bool {
+    match tool_name {
+        "computer.keyCombo" => {
+            if let Some(keys) = params.get("keys").and_then(|v| v.as_array()) {
+                let key_strs: Vec<String> = keys
+                    .iter()
+                    .filter_map(|k| k.as_str().map(|s| s.to_lowercase()))
+                    .collect();
+                let has_enter = key_strs.iter().any(|k| k == "enter" || k == "return");
+                let has_ctrl = key_strs.iter().any(|k| k == "ctrl" || k == "control");
+                let has_shift = key_strs.iter().any(|k| k == "shift");
+                if has_enter && (has_ctrl || has_shift) {
+                    return true;
+                }
+                if has_enter && key_strs.len() == 1 {
+                    return true;
+                }
+            }
+            false
+        }
+        "computer.invokeUi" => {
+            let selector = params
+                .get("selector")
+                .or_else(|| params.get("Selector"))
+                .unwrap_or(&serde_json::Value::Null);
+            selector_name_contains_sensitive_text(selector)
+        }
+        _ => false,
+    }
 }
 
 fn remove_matching_computer_lease(
@@ -3987,6 +4021,7 @@ pub(crate) fn computer_approve_action(
     tool_name: String,
     params_json: String,
     #[allow(unused_variables)] session_wide: Option<bool>,
+    risk_level: Option<String>,
 ) -> Result<(), String> {
     computer_approve_action_inner(
         state.inner(),
@@ -3995,6 +4030,7 @@ pub(crate) fn computer_approve_action(
         tool_name,
         params_json,
         session_wide,
+        risk_level,
     )
 }
 
@@ -4030,6 +4066,7 @@ fn computer_approve_action_inner(
     tool_name: String,
     params_json: String,
     session_wide: Option<bool>,
+    risk_level: Option<String>,
 ) -> Result<(), String> {
     validate_approval_id(&approval_id).map_err(|e| e.to_string())?;
     validate_task_id(&task_id).map_err(|e| e.to_string())?;
@@ -4048,6 +4085,18 @@ fn computer_approve_action_inner(
         if requires_per_action_computer_approval(&tool_name, &normalized) {
             return Err(
                 "This Computer Use action requires per-action approval because it can enter free text, press keys, or handle sensitive controls/values."
+                    .to_string(),
+            );
+        }
+        if risk_level.as_deref() == Some("commit") {
+            return Err(
+                "Commit-level actions (send, submit, Enter) require per-action approval and cannot create task leases."
+                    .to_string(),
+            );
+        }
+        if is_commit_action(&tool_name, &normalized) {
+            return Err(
+                "Commit-level actions (Enter, send, submit) require per-action approval and cannot create task leases."
                     .to_string(),
             );
         }
@@ -6061,6 +6110,7 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
             })
             .to_string(),
             Some(true),
+            None,
         );
 
         assert!(result.is_ok());
@@ -6540,6 +6590,7 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
             "computer.type".to_string(),
             serde_json::json!({ "text": "hello" }).to_string(),
             Some(true),
+            None,
         );
 
         assert!(result.is_err());
@@ -6565,6 +6616,7 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
             })
             .to_string(),
             Some(true),
+            None,
         )
         .unwrap();
 
@@ -6575,6 +6627,7 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
             "computer.type".to_string(),
             serde_json::json!({ "text": "hello" }).to_string(),
             Some(false),
+            None,
         )
         .unwrap();
 
@@ -6599,6 +6652,7 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
             })
             .to_string(),
             Some(true),
+            None,
         )
         .unwrap();
 
@@ -6615,6 +6669,7 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
             })
             .to_string(),
             Some(false),
+            None,
         )
         .unwrap();
 
@@ -6635,6 +6690,7 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
                 serde_json::json!({ "x": 100, "y": 200, "button": "left", "clickCount": 1 })
                     .to_string(),
                 Some(false),
+                None,
             )
             .unwrap();
         }
@@ -6655,6 +6711,7 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
             serde_json::json!({ "x": 100, "y": 200, "button": "left", "clickCount": 1 })
                 .to_string(),
             Some(false),
+            None,
         )
         .unwrap();
         computer_approve_action_inner(
@@ -6665,6 +6722,7 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
             serde_json::json!({ "x": 120, "y": 220, "button": "left", "clickCount": 1 })
                 .to_string(),
             Some(false),
+            None,
         )
         .unwrap();
 

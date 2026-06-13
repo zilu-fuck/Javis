@@ -2890,7 +2890,7 @@ describe("executeCapabilityStep permissions", () => {
     expect(permissionSnapshot?.permissionRequest?.writeRiskLevel).toBe("dangerous");
     expect(permissionSnapshot?.permissionRequest?.screenshotDataUrl).toBe("data:image/png;base64,PREVIEW==");
     expect(approveAction).toHaveBeenCalledWith(
-      { tool: "computer.click", params: { x: 10, y: 20 } },
+      { tool: "computer.click", params: { x: 10, y: 20 }, riskLevel: "navigate" },
       permissionSnapshot?.permissionRequest?.id,
       "task-computer-fresh-only",
       false,
@@ -3063,6 +3063,7 @@ describe("executeCapabilityStep permissions", () => {
           selector: { windowHandle: 42, automationId: "firstName", name: "First name" },
           value: "Alice",
         },
+        riskLevel: "compose",
       },
       permissionSnapshot?.permissionRequest?.id,
       "task-computer-set-value-lease",
@@ -3154,6 +3155,7 @@ describe("executeCapabilityStep permissions", () => {
           selector: { windowHandle: 42, automationId: "notes", name: "Notes" },
           value: "sk-demo-secret",
         },
+        riskLevel: "compose",
       },
       permissionSnapshot?.permissionRequest?.id,
       "task-computer-set-value-sensitive",
