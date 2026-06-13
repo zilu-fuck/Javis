@@ -116,7 +116,7 @@ Commander reads live agents from `registry.list()` (not hardcoded `demoAgents`),
 ## Domain Vocabulary
 
 - **Commander**: Main planning agent, coordinates all sub-agents.
-- **Agent kinds**: `commander | file | shell | browser | computer | scheduler | research | code | verifier | vision | workspace`
+- **Agent kinds**: `commander | file | shell | code | research | computer | scheduler | verifier | vision | workspace | browser | language-reviewer | security-reviewer | build-fix | test-runner | doc-updater | explorer | perf-analyzer | refactor`
 - **Permission levels**: `read | preview | confirmed_write | dangerous`
 - **Task statuses**: `created → planning → running → waiting_permission → running → verifying → completed`
 - **Tool names**: `{category}.{action}` pattern (e.g., `code.inspectRepository`, `file.scanMarkdownDocuments`)
