@@ -395,7 +395,7 @@ import {
 import { extractAgentMemoryFactsFromSummary } from "./agent-memory-pipeline";
 import { createAgentSessionSummaryFromTask } from "./agent-session-summary";
 import { getBuiltinSidebarNavItems, mergeSidebarNavItems } from "@javis/ui";
-import appIconUrl from "./assets/app-icon.png";
+import { TitleBar } from "./TitleBar";
 import "./App.css";
 
 export const DEFAULT_DRAFT_GOAL = "";
@@ -4532,7 +4532,10 @@ function App() {
 
   return (
     <div className="javis-desktop-frame">
-      <TitleBar />
+      <TitleBar
+        currentWindow={currentWindow}
+        onDragError={(error) => logNonFatalError("Window drag failed", error)}
+      />
       <ErrorBoundary>
       {aiConfigPrompt ? (
         <div className="javis-ai-config-modal-backdrop" role="presentation">
@@ -5343,70 +5346,6 @@ function App() {
       />
       </ErrorBoundary>
     </div>
-  );
-}
-
-function TitleBar() {
-  const isDesktop = currentWindow !== null;
-
-  function handleDragStart() {
-    currentWindow?.startDragging().catch((error) => logNonFatalError("Window drag failed", error));
-  }
-
-  async function handleMinimize() {
-    await currentWindow?.minimize();
-  }
-
-  async function handleToggleMaximize() {
-    await currentWindow?.toggleMaximize();
-  }
-
-  async function handleClose() {
-    await currentWindow?.close();
-  }
-
-  function handleNotifications() {
-    // Placeholder for future message and notification prompts.
-  }
-
-  return (
-    <header
-      className="javis-titlebar"
-      data-tauri-drag-region={isDesktop ? true : undefined}
-      onDoubleClick={handleToggleMaximize}
-      onPointerDown={(event) => {
-        if (event.button === 0 && event.detail === 1) {
-          handleDragStart();
-        }
-      }}
-    >
-      <div className="javis-titlebar-brand" data-tauri-drag-region={isDesktop ? true : undefined}>
-        <img className="javis-titlebar-icon" src={appIconUrl} alt="" aria-hidden="true" />
-        <span data-tauri-drag-region={isDesktop ? true : undefined}>Javis</span>
-      </div>
-      {isDesktop ? (
-        <div className="javis-titlebar-controls">
-          <button
-            aria-label="消息提示"
-            className="notifications"
-            onClick={handleNotifications}
-            title="消息提示"
-            type="button"
-          >
-            <span aria-hidden="true" />
-          </button>
-          <button aria-label="Minimize" className="minimize" onClick={handleMinimize} type="button">
-            <span aria-hidden="true" />
-          </button>
-          <button aria-label="Maximize" className="maximize" onClick={handleToggleMaximize} type="button">
-            <span aria-hidden="true" />
-          </button>
-          <button aria-label="Close" className="close" onClick={handleClose} type="button">
-            <span aria-hidden="true" />
-          </button>
-        </div>
-      ) : null}
-    </header>
   );
 }
 
