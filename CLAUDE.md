@@ -112,7 +112,24 @@ echo "self-contained prompt" | bash ~/.claude/scripts/mimo-agent.sh
 - opencode/Code Agent: proposal only, never writes files directly
 - PDF operations: Downloads-scoped, move-only, one-time approval
 
-## Current State (2026-06-05)
+## Current State (2026-06-14)
+
+- Desktop workbench: implemented and packaged (Windows MSI/NSIS), custom titlebar with drag regions.
+- File scan, project inspection, research, PDF organization, AI file classification, RAG-lite document references, VisionBridge, and commander.askUser are implemented.
+- Streaming output: end-to-end complete across Rust SSE backend, Tauri events, model-provider AsyncGenerator, eventBus/delta reducer, ThreadView streaming UI, cancellation, and non-streaming fallback.
+- Persistence: SQLite-backed task history, approval records, scheduled tasks, user preferences, JSONL logs, model settings, model profiles, and workspace sandbox settings.
+- Multi-agent workflow executor: implemented DAG execution with parallel step support, typed SharedTaskContext handoff reports, schema validation, request_input replan signaling, and dynamic agent registry visibility.
+- Agent capability/model routing: capability tags per agent kind, ModelRequirements, configurable model profile slots, ProviderAdapter protocol, adapter registry, and provider definitions remain active.
+- Browser Agent: Playwright sidecar integration with Rust backend, routing/workflows/tests, SSRF hardening, crash auto-recovery, stale browser detection, and write approval contract coverage.
+- Native safety boundary: write-capable paths require UI approval, native approval binding, path/scope guard, preview hash validation, and one-shot approval consumption.
+- Sandbox state: read-only shell routing goes through the sandbox broker; code patch apply, git mutations, and interactive terminal writes fail closed until an OS-enforced workspace-write/PTY backend is available.
+- Temporary workspace sandbox: native copy/diff/apply/finalize flow exists under ignored `.codex-tmp/javis-sandboxes`, with approval-bound apply and binary-change rejection.
+- Workspace sandbox UI support: backend status and settings persistence are implemented; saved settings still need wiring into native policy construction.
+- Large files needing decomposition: `packages/core/src/workflow-executor.ts` is ~6,821 lines; `apps/desktop/src/App.tsx` is ~5,685 lines.
+- Latest verification: segmented gate passed on 2026-06-14: `pnpm typecheck`, core Vitest (448), desktop Vitest (695), ui Vitest (183), `pnpm rust:check`, and Rust tests (462). Combined total: 1,788 tests.
+- Full `pnpm check` should remain the CI gate, but the local 2026-06-14 run timed out after 124 seconds before producing output; the same component checks passed when run separately.
+
+## Historical State (2026-06-05)
 
 - Desktop workbench: implemented and packaged (Windows MSI/NSIS), custom titlebar with drag regions
 - File scan, project inspection, research, PDF organization: implemented
