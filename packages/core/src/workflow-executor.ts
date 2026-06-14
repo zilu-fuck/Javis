@@ -75,6 +75,13 @@ import {
   type WorkbenchWorkflowId,
   type WorkbenchWorkflowStep,
 } from "./workflows";
+import {
+  formatAgentDisplayName,
+  markCurrentStepFailed,
+  runProjectReadOnlyCommands,
+  safeInspectRepository,
+  workflowStepToTaskStep,
+} from "./workflow-step-helpers";
 import { extractUrls, isComputerUseGoal } from "./routing";
 import type { CommanderDagStep, CommanderDagPlan } from "./commander-plan-schema";
 import type { AgentCapabilityTag } from "./agent-capability";
@@ -7000,47 +7007,3 @@ async function safeVerifyWorkflow(
   }
 }
 
-function workflowStepToTaskStep(step: NonNullable<ReturnType<typeof getWorkbenchWorkflow>>["steps"][number]): TaskStep {
-  return {
-    id: step.id,
-    title: step.title,
-    assignedAgentKind: step.agentKind,
-    agentId: `agent-${step.agentKind}`,
-    status: "pending",
-    successCriteria: step.output,
-  };
-}
-
-function runProjectReadOnlyCommands(shellTool: ShellTool): Promise<ShellCommandOutput[]> {
-  return Promise.all([
-    shellTool.runReadOnlyCommand({ program: "node", args: ["--version"], workspacePath: null }),
-    shellTool.runReadOnlyCommand({ program: "pnpm", args: ["--version"], workspacePath: null }),
-    shellTool.runReadOnlyCommand({ program: "git", args: ["status", "--short"], workspacePath: null }),
-  ]);
-}
-
-function formatAgentDisplayName(agentKind: AgentKind): string {
-  return demoAgents.find((agent) => agent.kind === agentKind)?.displayName ?? `${agentKind} Agent`;
-}
-
-async function safeInspectRepository(codeTool: CodeTool) {
-  try {
-    return await codeTool.inspectRepository();
-  } catch {
-    return undefined;
-  }
-}
-
-function markCurrentStepFailed(plan: TaskStep[]): TaskStep[] {
-  let marked = false;
-  return plan.map((step) => {
-    if (!marked && step.status === "running") {
-      marked = true;
-      return { ...step, status: "failed" };
-    }
-    if (step.status === "pending") {
-      return { ...step, status: "skipped" };
-    }
-    return step;
-  });
-}
