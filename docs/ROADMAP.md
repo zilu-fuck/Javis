@@ -4,6 +4,12 @@ This roadmap now targets a complete usable Javis desktop product. The verified
 MVP is Milestone 0: a baseline that proves the workbench, tool boundaries,
 verification loop, and PDF permission model.
 
+Current status snapshot: as of 2026-06-14, Javis has moved beyond the MVP
+baseline into sandbox, Git approval, browser, persistence, model profile,
+workspace, memory, and multi-agent orchestration hardening. `pnpm check` remains
+the CI gate; the latest local segmented verification passed 1,788 tests (1,326
+Vitest + 462 Rust).
+
 ## Milestone 0: Verified MVP Baseline
 
 Status: complete for the 2026-05-23 QA pass.
@@ -87,7 +93,7 @@ Status: complete for the 2026-05-23 QA pass.
 
 ## Milestone 3: Persistence And Workspace Management
 
-Status: substantially complete (2026-05-31).
+Status: substantially complete (updated 2026-06-14).
 
 - Store task history locally. Initial completed/failed/cancelled snapshot
   persistence is implemented in the desktop app.
@@ -106,11 +112,13 @@ Status: substantially complete (2026-05-31).
 - Add a clear history deletion path. Initial sidebar deletion is implemented.
 - Add workspace selection and remembered recent workspaces. Implemented: desktop sidebar accepts manual paths and native directory picker, restores recent workspaces after restart.
 - Avoid storing secrets, tokens, raw cookies, or private keys.
-- SQLite migration: all 9 migration sets deployed, model-settings migrated; task history/approval/workspaces migration verification in progress.
+- SQLite migration: task history, approval records, scheduled tasks, user
+  preferences, JSONL logs, model settings, model profiles, workspace settings,
+  and memory/vector-index storage are covered by startup migrations and tests.
 
 ## Milestone 4: Generalized Permission System
 
-Status: partially complete (2026-05-31).
+Status: substantially complete (updated 2026-06-14).
 
 - Move approval-state enforcement from the PDF-specific path into a reusable
   confirmed-write mechanism.
@@ -130,12 +138,22 @@ Status: partially complete (2026-05-31).
   native approval binding abstraction. Durable approval restore also recomputes
   the dry-run binding hash and checks Code Patch proposal files against the
   approved dry-run. Task binding and broader write-command migration remain.
-- File Write tool (`file.planWriteText` / `file.writeText` / `file_write.rs`) has source-level confirmed-write wiring with native approval binding, preview hash validation, task/tool binding, workspace path guards, and one-shot execution. Git push has a first source-level confirmed-write backend through `git_plan_push` / `git_approve_push` / `git_execute_push` plus a Review-panel quick action, including remote summary, GitHub CLI PR list, push preview, protected-branch and behind-upstream guards, preview hash validation, task/tool binding, one-shot execution against a fixed refspec, initial plan/execute/failure tool-call audit records, and source-level durable restore coverage. Git commit has source-level confirmed-write wiring through `git_plan_commit` / `git_approve_commit` / `git_execute_commit`, Review-panel quick action for current-all-changes commits, preview hash validation, task/tool binding, one-shot execution, plan/execute/failure audit records, source-level durable restore coverage, explicit `paths` support for selected-path commits, and Commander DAG dispatch through `git.createCommit` with confirmed-write approval. Git stage selected files has source-level confirmed-write wiring through `git_plan_stage_files` / `git_approve_stage_files` / `git_execute_stage_files`, preview hash validation, task/tool binding, path guards, one-shot execution, Review-panel quick action, audit records, source-level durable restore coverage, and Commander DAG stage dispatch through `git.stageFiles` with explicit path input and confirmed-write approval. GitHub CLI draft PR creation has a source-level native confirmed-write path through `git_plan_create_pull_request` / `git_approve_create_pull_request` / `git_execute_create_pull_request`, with preview hash validation, task/tool binding, one-shot execution, Commander DAG / desktop runtime dispatch through `git.createPullRequest`, Review-panel quick action, initial plan/execute/failure audit records, and source-level durable restore coverage. GitHub CLI PR comment has source-level confirmed-write wiring through `git_plan_comment_pull_request` / `git_approve_comment_pull_request` / `git_execute_comment_pull_request`, preview hash validation, task/tool binding, one-shot execution, Commander DAG / desktop runtime dispatch through `git.commentPullRequest`, Review-panel quick action, audit records, and source-level durable restore coverage; product QA remains. Product QA evidence and broader write-command migration remain.
+- File Write, Code Patch apply, PDF organization, Git stage/commit/push, draft
+  PR creation, and PR comment flows have source-level confirmed-write wiring
+  through native plan/approve/execute paths, preview hash validation,
+  task/tool binding, path guards, one-shot execution, audit records, durable
+  restore coverage, and Commander/desktop dispatch where applicable. Product
+  QA evidence for every packaged workflow is still being expanded.
+- Sandbox broker integration now routes read-only shell commands through policy
+  reports and fails closed for workspace-write Git/code/terminal execution when
+  an OS-enforced backend is unavailable. Temporary workspace sandbox copy/diff/
+  approval-bound apply/finalize exists as a review mechanism, not as a
+  substitute for OS enforcement.
 - Keep dangerous actions rejected by default.
 
 ## Milestone 5: Product Hardening
 
-Status: partially complete (2026-05-31).
+Status: partially complete (updated 2026-06-14).
 
 - Improve empty states, loading states, and recovery paths.
 - Keep browser local storage free of model API keys. New saves now persist only
@@ -146,7 +164,9 @@ Status: partially complete (2026-05-31).
 - Add telemetry-free diagnostics export for local debugging.
 - Add signed builds, version strategy, artifact checksums, release notes, and
   rollback notes. (not yet done)
-- Expand manual QA from MVP scenarios to complete-product workflows. QA evidence at docs/qa/2026-05-30/. 740 total tests (564 Vitest + 176 Rust).
+- Expand manual QA from MVP scenarios to complete-product workflows. QA
+  evidence now spans dated folders under `docs/qa/`; the latest local segmented
+  verification passed 1,788 tests (1,326 Vitest + 462 Rust).
 
 ## Explicit Non-Goals Until Product-Ready Core Is Complete
 

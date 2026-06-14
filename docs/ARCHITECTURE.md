@@ -28,9 +28,9 @@ User goal
   -> Final UI snapshot
 ```
 
-Core currently emits snapshot-style state updates. A structured event stream is
-planned, but the UI already presents the important phases: planning, running,
-waiting for permission, verifying, completed, and failed.
+Core emits both snapshot-style state updates and structured runtime events. The
+UI presents planning, running, waiting for permission, verifying, completed,
+failed, timeout, cancellation, and tool/audit phases.
 
 ## Layers
 
@@ -55,10 +55,15 @@ verification summaries. The package currently supports:
 - Project inspection and allowlisted command checks.
 - URL-based source collection and source-backed report generation.
 - PDF organization dry-run, confirmation, execution, and verification.
+- Commander DAG execution with typed shared context, handoff reports, schema
+  validation, request_input replanning, and dynamic agent registry visibility.
+- Browser, Code, Computer, Scheduler, trend, Git, MCP, and workspace tool
+  contracts through runtime-injected implementations.
 
 Core is being split into focused modules. The runtime is still centered in
-`packages/core/src/index.ts`; helper modules already exist for agents, plans,
-research reporting, and route detection.
+`packages/core/src/workflow-executor.ts`; helper modules already exist for
+agents, plans, research reporting, route detection, DAG execution, ReAct loops,
+runtime timeouts/logging, and workflow step helpers.
 
 ### Tools Package
 
@@ -210,12 +215,16 @@ Adoption rules:
 - Search-backed research is wired through `github-cli` and Agent Chrome
   fallback. Fixture QA and live smoke evidence exist; IntelliSearch evidence
   remains blocked on Code Agent / OpenCode integration.
-- Completed, failed, and cancelled task history has an initial local snapshot
-  store in the desktop app with recent workspace restore. Broader storage
-  migration hardening is still needed.
-- Permission decisions are per-task and not persisted.
-- The runtime is not fully modular yet.
+- Persistence is SQLite-backed for task history, approval records, scheduled
+  tasks, user preferences, JSONL logs, model settings, model profiles, workspace
+  settings, and memory/vector-index storage.
+- Permission decisions are scoped per task/tool/workspace/preview hash and are
+  persisted as durable approval records for restore and audit, not as broad
+  reusable grants.
+- The runtime is being modularized incrementally; `workflow-executor.ts` and
+  `App.tsx` remain large and should be split through small behavior-preserving
+  extractions.
 
-These tradeoffs are acceptable for the verified MVP baseline, but they are not
-acceptable for complete product readiness. See `PRODUCT_READINESS.md` for the
-active target.
+These tradeoffs are acceptable only while the product-ready core continues to
+harden. See `PRODUCT_READINESS.md`, `SECURITY_MODEL.md`, and
+`docs/adr/0001-native-write-boundary.md` for the active targets.

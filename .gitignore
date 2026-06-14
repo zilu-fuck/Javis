@@ -12,3 +12,7 @@ study/
 *apikey*.txt
 .codex-tmp/
 yolo26n.pt
+.mimocode/
+.tmp/
+__pycache__/
+*.pyc
