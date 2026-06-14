@@ -434,6 +434,7 @@ describe("task history persistence", () => {
         generatedAt: "2026-06-11T00:00:00.000Z",
         status: "needs_attention",
         missingInputContextKeys: [],
+        invalidInputContextKeys: [],
         unconsumedOutputContextKeys: ["reviewFindings"],
         steps: [{
           stepId: "review-evidence",
@@ -443,6 +444,7 @@ describe("task history persistence", () => {
           inputContextKeys: ["repoEvidence"],
           outputContextKey: "reviewFindings",
           missingInputContextKeys: [],
+          invalidInputContextKeys: [],
           successCriteria: "Review findings name the handoff artifact.",
         }],
         handoffs: [{
@@ -481,6 +483,7 @@ describe("task history persistence", () => {
         steps: [],
         handoffs: [],
         missingInputContextKeys: [],
+        invalidInputContextKeys: [],
         unconsumedOutputContextKeys: [],
       },
     });

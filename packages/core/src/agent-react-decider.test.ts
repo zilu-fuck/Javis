@@ -84,6 +84,14 @@ describe("buildReActDecisionPrompt", () => {
     expect(prompt).toContain("skipped broader checks");
   });
 
+  it("documents request_input decisions for missing agent handoffs", () => {
+    const prompt = buildReActDecisionPrompt(baseRequest);
+
+    expect(prompt).toContain('"request_input"');
+    expect(prompt).toContain("requestedContextKeys");
+    expect(prompt).toContain("needs another agent to produce or repair context");
+  });
+
   it("keeps verification rule localized for Chinese code steps", () => {
     const prompt = buildReActDecisionPrompt({
       ...baseRequest,

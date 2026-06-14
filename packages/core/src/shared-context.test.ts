@@ -5,6 +5,9 @@ import {
   createHandoffReportArtifacts,
   createSharedTaskContext,
   formatHandoffReportMarkdown,
+  formatStepInputValidationError,
+  validateContextValue,
+  validateStepInputContext,
 } from "./shared-context";
 
 describe("createSharedTaskContext", () => {
@@ -34,6 +37,26 @@ describe("createSharedTaskContext", () => {
 
     expect(key).toBe("用户目标");
     expect(context.get<{ intent: string }>(key)?.intent).toBe("技术解释");
+  });
+
+  it("validates known context key schemas while allowing unknown keys", () => {
+    const context = createSharedTaskContext({
+      diffPreview: { diff: "diff --git", changedFiles: ["src/app.ts"] },
+      dynamicKey: {},
+    });
+
+    expect(validateContextValue("diffPreview", context.get("diffPreview")).valid).toBe(true);
+    expect(validateContextValue("dynamicKey", context.get("dynamicKey")).valid).toBe(true);
+
+    context.set("diffPreview", { diff: "missing changedFiles" });
+    const result = validateStepInputContext({ id: "review", inputContextKeys: ["diffPreview", "missing"] }, context);
+
+    expect(result.valid).toBe(false);
+    expect(result.missingInputContextKeys).toEqual(["missing"]);
+    expect(result.invalidInputContextKeys).toMatchObject([
+      { key: "diffPreview", expectedType: "object { diff: string, changedFiles: string[] }" },
+    ]);
+    expect(formatStepInputValidationError(result)).toContain("Input context validation failed for step review");
   });
 });
 
@@ -180,5 +203,34 @@ describe("buildHandoffReport", () => {
     expect(markdown).toContain("- Unconsumed outputs: reviewFindings");
     expect(markdown).toContain("| repoEvidence | collect | review | available | object: 1 key(s) |");
     expect(markdown).toContain("| reviewFindings | review | none | unconsumed | string: ok\\|needs follow-up |");
+  });
+
+  it("marks handoffs with invalid known schemas as needing attention", () => {
+    const report = buildHandoffReport([
+      {
+        id: "inspect",
+        title: "Inspect diff",
+        assignedAgentKind: "code",
+        outputContextKey: "diffPreview",
+      },
+      {
+        id: "verify",
+        title: "Verify diff",
+        assignedAgentKind: "verifier",
+        inputContextKeys: ["diffPreview"],
+      },
+    ], {
+      diffPreview: { diff: "diff --git" },
+    }, {
+      generatedAt: "2026-06-11T00:00:00.000Z",
+    });
+
+    expect(report.status).toBe("needs_attention");
+    expect(report.invalidInputContextKeys).toEqual(["diffPreview"]);
+    expect(report.handoffs[0]).toMatchObject({
+      contextKey: "diffPreview",
+      status: "invalid_schema",
+      schemaError: "expected object { diff: string, changedFiles: string[] }",
+    });
   });
 });

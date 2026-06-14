@@ -61,6 +61,43 @@ describe("runAgentReActLoop", () => {
     expect(forbiddenTool).not.toHaveBeenCalled();
   });
 
+  it("fails before the first iteration when declared input context is missing", async () => {
+    const decideNext = vi.fn();
+    const result = await runAgentReActLoop({
+      agent: mustAgent("code"),
+      step: {
+        ...step("code"),
+        inputContextKeys: ["diffPreview"],
+      },
+      context: createSharedTaskContext(),
+      tools: [{ name: "code.inspectRepository", execute: async () => ({}) }],
+      decideNext,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.reason).toContain("missing input context key(s): diffPreview");
+    expect(decideNext).not.toHaveBeenCalled();
+  });
+
+  it("returns request_input when an agent asks another agent to repair context", async () => {
+    const result = await runAgentReActLoop({
+      agent: mustAgent("code"),
+      step: step("code"),
+      context: createSharedTaskContext(),
+      tools: [{ name: "code.inspectRepository", execute: async () => ({}) }],
+      decideNext: () => ({
+        status: "request_input",
+        reason: "Need UI facts before editing.",
+        requestedContextKeys: ["uiEvidence"],
+        requestedAgentKind: "computer",
+      }),
+    });
+
+    expect(result.status).toBe("request_input");
+    expect(result.requestedContextKeys).toEqual(["uiEvidence"]);
+    expect(result.requestedAgentKind).toBe("computer");
+  });
+
   it("passes decision input to the selected tool", async () => {
     const tool = vi.fn(async ({ input }) => input);
 
@@ -103,6 +140,24 @@ describe("runAgentReActLoop", () => {
 
     expect(result.status).toBe("failed");
     expect(result.observations).toHaveLength(2);
+    expect(result.reason).toContain("iteration limit");
+  });
+
+  it("defaults to six iterations for multi-step reasoning", async () => {
+    const result = await runAgentReActLoop({
+      agent: mustAgent("file"),
+      step: step("file"),
+      context: createSharedTaskContext(),
+      tools: [{ name: "file.scanMarkdownDocuments", execute: async () => [] }],
+      decideNext: () => ({
+        status: "continue",
+        toolName: "file.scanMarkdownDocuments",
+        reason: "need more",
+      }),
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.observations).toHaveLength(6);
     expect(result.reason).toContain("iteration limit");
   });
 

@@ -14,7 +14,15 @@ export interface BuildAgentSystemPromptOptions {
   agent?: Agent;
   customStyle?: string | AgentStyleRecord;
   runtimeContext?: string;
+  workspaceProfile?: WorkspacePromptProfile;
   includeUiDesignRules?: boolean;
+}
+
+export interface WorkspacePromptProfile {
+  workspacePath?: string;
+  type: string;
+  signals: string[];
+  guidance?: string;
 }
 
 export function buildAgentSystemPrompt(options: BuildAgentSystemPromptOptions): string {
@@ -36,6 +44,7 @@ export function buildAgentSystemPrompt(options: BuildAgentSystemPromptOptions): 
     collaboration: getCollaborationRules(locale),
     ui_design_rules: options.includeUiDesignRules ? getUiGenerationDesignRules(locale) : "",
     agent_definition: [`## ${sectionTitle(locale, "Agent Definition", "Agent 定义")}`, getAgentSystemPrompt(agent, locale)].join("\n"),
+    workspace_profile: formatWorkspaceProfile(options.workspaceProfile, locale),
     custom_style: wrapCustomStyle(customStyle, locale),
     runtime_context: options.runtimeContext ? `## ${sectionTitle(locale, "Runtime Context", "运行时上下文")}\n${options.runtimeContext}` : "",
   };
@@ -60,6 +69,23 @@ function getIdentityRules(locale: AgentPromptLocale): string {
     "- You are Javis acting through the requested workbench agent role.",
     "- Never claim to be the underlying model/provider/vendor/training team; if asked, answer as Javis or the current Javis agent.",
   ].join("\n");
+}
+
+function formatWorkspaceProfile(
+  profile: WorkspacePromptProfile | undefined,
+  locale: AgentPromptLocale,
+): string {
+  if (!profile || (!profile.type.trim() && profile.signals.length === 0)) {
+    return "";
+  }
+  const lines = [
+    `## ${sectionTitle(locale, "Workspace Profile", "Workspace Profile")}`,
+    `- Workspace path: ${profile.workspacePath?.trim() || "(unknown)"}`,
+    `- Workspace type: ${profile.type || "unknown"}`,
+    `- Signals: ${profile.signals.join(", ") || "none"}`,
+    profile.guidance ? `- Guidance: ${profile.guidance}` : "",
+  ];
+  return lines.filter(Boolean).join("\n");
 }
 
 function sectionTitle(locale: AgentPromptLocale, en: string, zhCN: string): string {

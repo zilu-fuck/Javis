@@ -421,6 +421,22 @@ export function ThreadView({
         disabled={hasActivePrompt}
         draftGoal={draftGoal}
         labels={labels}
+        permissionControls={
+          task.permissionRequest
+            ? {
+                canRequestApproval: false,
+                pendingRequest:
+                  task.permissionRequest.status === "pending"
+                    ? {
+                        allowAlways: task.permissionRequest.allowAlways,
+                        onApprove: () => onPermissionDecision?.("approved"),
+                        onAllowTask: () => onPermissionDecision?.("approved_always"),
+                        onDeny: () => onPermissionDecision?.("denied"),
+                      }
+                    : undefined,
+              }
+            : undefined
+        }
         onBrowseWorkspacePath={onBrowseWorkspacePath}
         onDeleteRecentWorkspacePath={onDeleteRecentWorkspacePath}
         onDraftGoalChange={onDraftGoalChange}

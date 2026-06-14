@@ -60,6 +60,8 @@ import type {
   WorkbenchRuntimePreferences,
   WorkbenchAppearanceTheme,
   WorkbenchDryRunAction,
+  WorkbenchSubmitGoalIntent,
+  WorkbenchSubmitGoalOptions,
   WorkbenchTerminalSession,
   WorkbenchBrowserWriteApprovalPreview,
   WorkbenchWorkspaceToolRequest,
@@ -241,6 +243,7 @@ import {
   createWorkspaceSessionRepository,
   type WorkspaceSessionRepository,
 } from "./workspace-session";
+import { WORKSPACE_SETTINGS_MIGRATIONS } from "./workspace-settings-persistence";
 import { RECENT_WORKSPACES_SCHEMA_MIGRATIONS } from "./recent-workspaces";
 import {
   createModelSettingsRepository,
@@ -650,8 +653,73 @@ function getConversationMessages(task: TaskSnapshot): ChatMessage[] {
   ];
 }
 
+function inferSubmitGoalIntent(input: {
+  goalId?: string;
+  scheduledTaskId?: string;
+  forceStart?: boolean;
+  activeHistoryEntryId?: string;
+  task: TaskSnapshot;
+}): WorkbenchSubmitGoalIntent {
+  if (input.goalId) return "goal";
+  if (input.scheduledTaskId) return "scheduled";
+  if (input.forceStart) return "queued_continuation";
+  if (input.activeHistoryEntryId || isArchivableTask(input.task)) {
+    return "continue_history";
+  }
+  return "new_chat";
+}
+
+function shouldRouteAsDirectChat(
+  rawGoal: string,
+  composeMode: "chat" | "project",
+  submitIntent: WorkbenchSubmitGoalIntent,
+  imageDataUrls?: string[],
+): boolean {
+  return (
+    composeMode === "project" &&
+    (submitIntent === "new_chat" || submitIntent === "continue_history") &&
+    !imageDataUrls?.length &&
+    isLightweightChatGoal(rawGoal)
+  );
+}
+
+function isLightweightChatGoal(goal: string): boolean {
+  const normalized = goal.trim().replace(/[。！？!?~～\s]+$/g, "").toLowerCase();
+  if (!normalized) return false;
+  const exactGreetings = new Set([
+    "你好",
+    "您好",
+    "嗨",
+    "哈喽",
+    "在吗",
+    "你是谁",
+    "谢谢",
+    "多谢",
+    "hello",
+    "hi",
+    "hey",
+    "thanks",
+    "thank you",
+  ]);
+  if (exactGreetings.has(normalized)) {
+    return true;
+  }
+  return /^帮我解释一下.{0,80}$/.test(normalized) && !hasExecutionIntent(normalized);
+}
+
+function hasExecutionIntent(value: string): boolean {
+  return /修改|修复|创建|新建|删除|移动|运行|执行|测试|部署|提交|commit|push|pr|打开|点击|浏览器|文件|代码|项目|规划|计划|实现/.test(value);
+}
+
 function logNonFatalError(context: string, error: unknown) {
   console.warn(context, error);
+}
+
+function logTaskContext(action: string, context: Record<string, unknown>) {
+  if (typeof console === "undefined" || typeof console.debug !== "function") {
+    return;
+  }
+  console.debug("[task-context]", { action, ...context });
 }
 
 async function mapWithConcurrency<T, R>(
@@ -1034,6 +1102,7 @@ type SubmitGoalHandler = (
   queuedRawGoal?: string,
   forcedMode?: "chat" | "project",
   goalId?: string,
+  submitIntent?: WorkbenchSubmitGoalIntent,
 ) => void;
 
 interface PendingGoalSubmission {
@@ -1046,6 +1115,7 @@ interface PendingGoalSubmission {
   composeMode: "chat" | "project";
   forcedMode?: "chat" | "project";
   goalId?: string;
+  submitIntent?: WorkbenchSubmitGoalIntent;
   clearDraftOnQueue: boolean;
 }
 
@@ -1231,6 +1301,7 @@ function App() {
   const browserWriteApprovalResolversRef = useRef(
     new Map<string, (decision: BrowserWriteApprovalDecision) => void>(),
   );
+  const recentToolCallAuditRecordsRef = useRef<ToolCallAuditRecord[]>([]);
 
   function requestBrowserWriteApproval(
     request: BrowserWriteApprovalRequest,
@@ -1441,7 +1512,6 @@ function App() {
   const didCheckRestoredApproval = useRef(false);
   const didInitDatabaseRef = useRef(false);
   const auditRecordIdsRef = useRef(new Set<string>());
-  const recentToolCallAuditRecordsRef = useRef<ToolCallAuditRecord[]>([]);
   const savedAgentSessionSummaryIdsRef = useRef(new Set<string>());
   const [draftGoal, setDraftGoal] = useState(DEFAULT_DRAFT_GOAL);
   const [composeMode, setComposeMode] = useState<"chat" | "project">(
@@ -2467,6 +2537,7 @@ function App() {
       // Run all schema migrations
       await runDesktopDatabaseMigrations(database, TASK_HISTORY_SCHEMA_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, RECENT_WORKSPACES_SCHEMA_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, WORKSPACE_SETTINGS_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, MODEL_SETTINGS_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, MODEL_PROFILES_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, APPROVAL_RECORDS_MIGRATIONS);
@@ -2863,6 +2934,7 @@ function App() {
         next.rawGoal,
         next.forcedMode,
         next.goalId,
+        next.submitIntent,
       );
       queuedSubmissionModeRef.current = null;
       queuedContinuationTaskRef.current = null;
@@ -2948,6 +3020,7 @@ function App() {
       undefined,
       "project",
       goal.id,
+      "goal",
     );
   }
 
@@ -3164,6 +3237,7 @@ function App() {
     queuedRawGoal?: string,
     forcedMode?: "chat" | "project",
     goalId?: string,
+    submitIntent?: WorkbenchSubmitGoalIntent,
   ) {
     const rawGoal = (queuedRawGoal ?? goalOverride ?? draftGoal).trim();
     if (!rawGoal) {
@@ -3201,6 +3275,13 @@ function App() {
       return;
     }
 
+    const requestedSubmitIntent = submitIntent ?? inferSubmitGoalIntent({
+      goalId,
+      scheduledTaskId,
+      forceStart,
+      activeHistoryEntryId,
+      task,
+    });
     const requestedComposeMode = forcedMode ?? queuedSubmissionModeRef.current ?? composeMode;
     if (!ensureAiConfigured(requestedComposeMode === "project" ? "Agent 模式" : "Chat 模式")) {
       return;
@@ -3221,6 +3302,7 @@ function App() {
           composeMode: requestedComposeMode,
           forcedMode,
           goalId,
+          submitIntent: requestedSubmitIntent,
           clearDraftOnQueue: !goalOverride,
         });
         return;
@@ -3241,17 +3323,23 @@ function App() {
         rawGoal,
         forcedMode,
         goalId,
+        requestedSubmitIntent,
       );
       return;
     }
-    const effectiveComposeMode = requestedComposeMode;
+    const effectiveComposeMode = shouldRouteAsDirectChat(rawGoal, requestedComposeMode, requestedSubmitIntent, imageDataUrls)
+      ? "chat"
+      : requestedComposeMode;
+    const canContinueHistory =
+      requestedSubmitIntent === "continue_history" ||
+      requestedSubmitIntent === "queued_continuation";
     const queuedContinuationTask =
-      forceStart && !goalOverride && !workspacePathOverride && !scheduledTaskId
+      canContinueHistory && forceStart && !goalOverride && !workspacePathOverride && !scheduledTaskId
         ? queuedContinuationTaskRef.current
         : null;
     const continuationTask =
       queuedContinuationTask ??
-      (!goalOverride && !workspacePathOverride && !scheduledTaskId
+      (canContinueHistory && !goalOverride && !workspacePathOverride && !scheduledTaskId
         ? activeHistoryEntryId
           ? historyCurrentRef.current.find((entry) => entry.id === activeHistoryEntryId)
           : isArchivableTask(task)
@@ -3280,6 +3368,14 @@ function App() {
     } else {
       setActiveHistoryEntryId(undefined);
     }
+    logTaskContext("submitGoal", {
+      submitIntent: requestedSubmitIntent,
+      rawGoal,
+      requestedComposeMode,
+      effectiveComposeMode,
+      continuationTaskId: continuationTask?.id,
+      hasPriorMessages: Boolean(startOptions?.priorMessages.length),
+    });
     if (workspacePathOverride) {
       workspaceRef.current = workspacePathOverride;
       useWorkspacePath(workspacePathOverride);
@@ -3405,6 +3501,28 @@ function App() {
     isTaskActiveRef.current = false;
   }
   emergencyStopTaskRef.current = handleEmergencyStopTask;
+
+  function handleWorkbenchSubmitGoal(
+    goalOverride?: string,
+    workspacePathOverride?: string,
+    scheduledTaskId?: string,
+    attachments?: File[],
+    imageDataUrls?: string[],
+    options?: WorkbenchSubmitGoalOptions,
+  ) {
+    submitGoal(
+      goalOverride,
+      workspacePathOverride,
+      scheduledTaskId,
+      attachments,
+      imageDataUrls,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      options?.intent,
+    );
+  }
 
   function retryCurrentTask() {
     const goal = task.userGoal.trim();
@@ -4548,7 +4666,7 @@ function App() {
         onStopTask={handleStopTask}
         onEmergencyStopTask={handleEmergencyStopTask}
         onSelectHistoryEntry={selectHistoryEntry}
-        onSubmitGoal={submitGoal}
+        onSubmitGoal={handleWorkbenchSubmitGoal}
         onToggleScheduledTask={toggleScheduledTask}
         onUseWorkspacePath={useWorkspacePath}
         onWorkspacePathChange={useWorkspacePath}

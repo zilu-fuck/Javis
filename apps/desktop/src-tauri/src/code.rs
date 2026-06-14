@@ -1,16 +1,22 @@
 use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
-    io::Write,
     path::{Path, PathBuf},
-    process::{Child, Command, Output, Stdio},
     sync::Mutex,
+};
+#[cfg(test)]
+use std::{
+    process::{Child, Output},
     thread,
     time::{Duration, SystemTime},
 };
 use tauri::AppHandle;
 
 use crate::error::JavisError;
+use crate::sandbox::{
+    read_only_policy, require_workspace_write_command_launch_backend, run_sandboxed_command,
+    run_sandboxed_network_command, workspace_write_policy, SandboxCommandRequest,
+};
 use crate::{
     capture_current_git_head, create_approval_id, create_file_content_hashes, create_fnv1a_hash,
     create_native_approval_binding, create_provider_response_diagnostic,
@@ -276,31 +282,38 @@ pub(crate) fn run_opencode_proposal_command(
         create_opencode_proposal_invocation(workspace, prompt, request).map_err(|error| {
             JavisError::Internal(format!("opencode proposal configuration error: {error}"))
         })?;
-    let output = Command::new(&opencode)
-        .args(&invocation.args)
-        .current_dir(workspace)
-        .env("OPENCODE_CONFIG_CONTENT", invocation.config_content)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .and_then(|child| wait_with_timeout(child, OPENCODE_PROPOSAL_TIMEOUT))
-        .map_err(|error| {
-            JavisError::Io(format!(
-                "opencode is unavailable at {}: {error}",
-                opencode.display()
-            ))
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut policy = read_only_policy(workspace);
+    policy.network_access = true;
+    let output = run_sandboxed_network_command(SandboxCommandRequest {
+        program: opencode.to_string_lossy().to_string(),
+        args: invocation.args,
+        cwd: workspace.to_path_buf(),
+        policy,
+        env: vec![(
+            "OPENCODE_CONFIG_CONTENT".to_string(),
+            invocation.config_content,
+        )],
+        stdin: None,
+        timeout_ms: Some(OPENCODE_PROPOSAL_TIMEOUT.as_millis() as u64),
+    })
+    .map_err(|error| {
+        JavisError::Io(format!(
+            "opencode is unavailable at {}: {error}",
+            opencode.display()
+        ))
+    })?;
+    if output.exit_code.unwrap_or(1) != 0 {
+        let stderr = output.stderr.trim().to_string();
         return Err(if stderr.is_empty() {
             JavisError::Internal("opencode proposal command failed without stderr.".into())
         } else {
             JavisError::Internal(stderr)
         });
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok(output.stdout)
 }
 
+#[cfg(test)]
 pub(crate) fn wait_with_timeout(mut child: Child, timeout: Duration) -> std::io::Result<Output> {
     let started = SystemTime::now();
     loop {
@@ -317,7 +330,7 @@ pub(crate) fn wait_with_timeout(mut child: Child, timeout: Duration) -> std::io:
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 format!(
-                    "opencode proposal command timed out after {} seconds",
+                    "child process timed out after {} seconds",
                     timeout.as_secs()
                 ),
             ));
@@ -991,9 +1004,8 @@ pub(crate) fn apply_code_patch_in_workspace(
         ));
     }
     if let Some(approval_state) = approval_state {
-        take_approved_code_patch(approval_state, &request, &canonical_workspace)?;
+        require_approved_code_patch(approval_state, &request, &canonical_workspace)?;
     }
-
     let approved_files = request
         .changed_files
         .iter()
@@ -1012,45 +1024,44 @@ pub(crate) fn apply_code_patch_in_workspace(
     // Best-effort dry-run check — non-fatal by design.
     // git apply --check can produce false negatives on some platforms (CRLF,
     // new file creation). The actual git apply below is the authoritative guard.
-    let git = crate::git::resolve_git_executable_for_workspace(&canonical_workspace)
-        .map_err(|error| JavisError::Io(format!("Could not locate git executable: {error}")))?;
-
-    if let Ok(mut child) = Command::new(&git)
-        .args(["apply", "--check", "--whitespace=nowarn", "-"])
-        .current_dir(&canonical_workspace)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        if let Some(stdin) = child.stdin.as_mut() {
-            let _ = stdin.write_all(patch.as_bytes());
-        }
-        // Proceed regardless — the real git apply below validates correctness
-        let _ = child.wait_with_output();
+    require_code_patch_workspace_write_backend(&canonical_workspace)?;
+    if let Some(approval_state) = approval_state {
+        take_approved_code_patch(approval_state, &request, &canonical_workspace)?;
     }
 
-    let mut child = Command::new(&git)
-        .args(["apply", "--whitespace=nowarn", "-"])
-        .current_dir(&canonical_workspace)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| JavisError::Io(format!("Could not start git apply: {error}")))?;
+    // Best-effort dry-run check — non-fatal by design.
+    let _ = run_sandboxed_command(SandboxCommandRequest {
+        program: "git".to_string(),
+        args: vec![
+            "apply".to_string(),
+            "--check".to_string(),
+            "--whitespace=nowarn".to_string(),
+            "-".to_string(),
+        ],
+        cwd: canonical_workspace.clone(),
+        policy: workspace_write_policy(&canonical_workspace, vec![canonical_workspace.clone()]),
+        env: Vec::new(),
+        stdin: Some(patch.as_bytes().to_vec()),
+        timeout_ms: None,
+    });
 
-    child
-        .stdin
-        .as_mut()
-        .ok_or_else(|| JavisError::Io("Could not open git apply stdin.".into()))?
-        .write_all(request.patch.as_bytes())
-        .map_err(|error| JavisError::Io(format!("Could not write patch to git apply: {error}")))?;
+    let output = run_sandboxed_command(SandboxCommandRequest {
+        program: "git".to_string(),
+        args: vec![
+            "apply".to_string(),
+            "--whitespace=nowarn".to_string(),
+            "-".to_string(),
+        ],
+        cwd: canonical_workspace.clone(),
+        policy: workspace_write_policy(&canonical_workspace, vec![canonical_workspace.clone()]),
+        env: Vec::new(),
+        stdin: Some(request.patch.as_bytes().to_vec()),
+        timeout_ms: None,
+    })
+    .map_err(|error| JavisError::Io(format!("git apply failed: {error}")))?;
 
-    let output = child
-        .wait_with_output()
-        .map_err(|error| JavisError::Io(format!("Could not finish git apply: {error}")))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if output.exit_code.unwrap_or(1) != 0 {
+        let stderr = output.stderr.trim().to_string();
         return Err(if stderr.is_empty() {
             JavisError::Internal("git apply failed without stderr.".into())
         } else {
@@ -1070,6 +1081,21 @@ pub(crate) fn apply_code_patch_in_workspace(
             approved_files.len()
         ),
     })
+}
+
+fn require_code_patch_workspace_write_backend(
+    canonical_workspace: &Path,
+) -> Result<(), JavisError> {
+    require_workspace_write_command_launch_backend(
+        "git".to_string(),
+        vec![
+            "apply".to_string(),
+            "--whitespace=nowarn".to_string(),
+            "-".to_string(),
+        ],
+        canonical_workspace,
+        workspace_write_policy(canonical_workspace, vec![canonical_workspace.to_path_buf()]),
+    )
 }
 
 pub(crate) fn extract_unified_diff_paths(patch: &str) -> Result<Vec<PathBuf>, JavisError> {
@@ -1308,6 +1334,32 @@ pub(crate) fn take_approved_code_patch(
             "No approved Code Patch proposal is pending.".into(),
         ));
     };
+    validate_approved_code_patch_pending(pending, request, canonical_workspace)?;
+    state.pending = None;
+    Ok(())
+}
+
+pub(crate) fn require_approved_code_patch(
+    approval_state: &Mutex<CodePatchApprovalState>,
+    request: &CodePatchApplyRequest,
+    canonical_workspace: &Path,
+) -> Result<(), JavisError> {
+    let state = approval_state.lock().map_err(|_| {
+        JavisError::Internal("Code patch approval state could not be locked.".into())
+    })?;
+    let Some(pending) = state.pending.as_ref() else {
+        return Err(JavisError::Permission(
+            "No approved Code Patch proposal is pending.".into(),
+        ));
+    };
+    validate_approved_code_patch_pending(pending, request, canonical_workspace)
+}
+
+fn validate_approved_code_patch_pending(
+    pending: &PendingCodePatchApproval,
+    request: &CodePatchApplyRequest,
+    canonical_workspace: &Path,
+) -> Result<(), JavisError> {
     require_native_approval_binding(
         &pending.binding,
         &request.approval_id,
@@ -1361,7 +1413,6 @@ pub(crate) fn take_approved_code_patch(
         require_current_git_head_matches(canonical_workspace, base_git_head)
             .map_err(JavisError::from)?;
     }
-    state.pending = None;
     Ok(())
 }
 

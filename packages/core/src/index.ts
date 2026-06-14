@@ -122,6 +122,7 @@ export type {
   AgentStyleRecord,
   AgentStyleSource,
   BuildAgentSystemPromptOptions,
+  WorkspacePromptProfile,
 } from "./agents/prompt";
 export type {
   AgentCapabilityTag,
@@ -230,14 +231,20 @@ export { createDeltaReducer } from "./delta-reducer";
 export type { DeltaReducer } from "./delta-reducer";
 export {
   buildHandoffReport,
+  DEFAULT_CONTEXT_KEY_SCHEMAS,
   createHandoffReportArtifacts,
   createSharedTaskContext,
   CONTEXT_KEYS,
+  formatStepInputValidationError,
   formatHandoffReportMarkdown,
   contextKeyForLocale,
+  validateContextValue,
+  validateStepInputContext,
 } from "./shared-context";
 export type {
   ContextKey,
+  ContextKeySchema,
+  ContextValueValidation,
   HandoffReport,
   HandoffReportArtifact,
   HandoffReportRecord,
@@ -245,6 +252,7 @@ export type {
   HandoffReportStepRecord,
   HandoffReportValueSummary,
   SharedTaskContext,
+  StepInputValidationResult,
 } from "./shared-context";
 export {
   buildRecoveryReport,
@@ -427,6 +435,14 @@ export type AgentKind =
   | "scheduler"
   | "research"
   | "code"
+  | "language-reviewer"
+  | "security-reviewer"
+  | "build-fix"
+  | "test-runner"
+  | "doc-updater"
+  | "explorer"
+  | "perf-analyzer"
+  | "refactor"
   | "verifier"
   | "workspace"
   | "vision";
@@ -778,6 +794,7 @@ export interface TaskRuntime {
 export interface RuntimeExecutionConfig {
   contextStrategy?: "auto" | "short" | "long";
   agentMaxIterations?: number;
+  maxStepRetries?: number;
   taskTimeoutMs?: number;
   failureRecoveryEnabled?: boolean;
   userWaitTimeoutMs?: number;
@@ -1969,6 +1986,7 @@ export function createFileScanTaskRuntime({
       const resolvedId = requestId ?? (askUserHandlers.size > 0
         ? [...askUserHandlers.entries()][askUserHandlers.size - 1][0]
         : undefined);
+      const askUserSnapshotBeforeAnswer = runtimeState.getSnapshot();
 
       if (requestId) {
         const handler = askUserHandlers.get(requestId);
@@ -1989,19 +2007,59 @@ export function createFileScanTaskRuntime({
       // Preserve the user's answer in the conversation timeline so it
       // remains visible and scrollable after submission (P0-#3 fix).
       const current = runtimeState.getSnapshot();
-      if (current.askUserQuestion && (!resolvedId || current.askUserQuestion.id === resolvedId)) {
-        const currentMessages = current.conversationMessages ?? [];
+      const questionToResolve =
+        current.askUserQuestion && (!resolvedId || current.askUserQuestion.id === resolvedId)
+          ? current.askUserQuestion
+          : askUserSnapshotBeforeAnswer.askUserQuestion &&
+              (!resolvedId || askUserSnapshotBeforeAnswer.askUserQuestion.id === resolvedId)
+            ? askUserSnapshotBeforeAnswer.askUserQuestion
+            : undefined;
+      if (questionToResolve) {
+        const currentMessages = current.conversationMessages?.length
+          ? current.conversationMessages
+          : askUserSnapshotBeforeAnswer.conversationMessages ?? [];
+        const resolvedQuestion = {
+          ...questionToResolve,
+          status: "answered",
+          answer,
+          resolvedAt: new Date().toISOString(),
+        } as typeof questionToResolve;
+        let hasQuestionMessage = false;
+        const updatedMessages = currentMessages.map((message) => {
+          if (message.kind !== "ask_user_question" || message.id !== resolvedQuestion.id) {
+            return message;
+          }
+          hasQuestionMessage = true;
+          return {
+            ...message,
+            content: resolvedQuestion.question,
+            askUserQuestion: resolvedQuestion,
+          };
+        });
+        if (!hasQuestionMessage) {
+          updatedMessages.push({
+            id: resolvedQuestion.id,
+            kind: "ask_user_question",
+            role: "assistant",
+            content: resolvedQuestion.question,
+            createdAt: resolvedQuestion.createdAt,
+            askUserQuestion: resolvedQuestion,
+          });
+        }
+        const answeredTimeline: ConversationMessage[] = [
+          ...updatedMessages,
+          { role: "user", content: answer },
+        ];
+        if (activeConversation?.taskId === current.id) {
+          activeConversation = {
+            ...activeConversation,
+            startedMessages: answeredTimeline,
+          };
+        }
         runtimeState.emit({
           ...current,
-          askUserQuestion: {
-            ...current.askUserQuestion,
-            status: "answered",
-            answer,
-          } as typeof current.askUserQuestion,
-          conversationMessages: [
-            ...currentMessages,
-            { role: "user", content: answer },
-          ],
+          askUserQuestion: resolvedQuestion,
+          conversationMessages: answeredTimeline,
         });
       }
     },

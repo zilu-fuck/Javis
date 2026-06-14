@@ -1777,7 +1777,7 @@ fn is_supported_text_file(path: &Path) -> bool {
     )
 }
 
-fn is_sensitive_read_path(path: &Path) -> bool {
+pub(crate) fn is_sensitive_read_path(path: &Path) -> bool {
     let sensitive_components = [
         ".aws",
         ".azure",

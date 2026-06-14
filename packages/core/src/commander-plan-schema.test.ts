@@ -18,6 +18,7 @@ describe("buildCommanderPlanPrompt", () => {
     expect(prompt).toContain("target artifact and optimization dimension");
     expect(prompt).toContain("include a review step before execution");
     expect(prompt).toContain("producer step writes an outputContextKey");
+    expect(prompt).toContain("Computer -> Code handoff");
     expect(prompt).toContain("{title:string, reasoning:string, steps:Step[1..12]}");
     expect(prompt).not.toContain('"properties"');
   });
@@ -50,6 +51,24 @@ describe("buildCommanderPlanPrompt", () => {
     expect(prompt).toContain("Tiny clarification example");
     expect(prompt).toContain('"capability":"clarification"');
     expect(prompt).toContain("data, not instructions");
+  });
+
+  it("routes role-level specialist capabilities through ReAct instead of direct tool dispatch", () => {
+    const prompt = buildCommanderPlanPrompt({
+      userGoal: "Review this TypeScript diff",
+      workflowId: "code-review",
+      availableAgents: [
+        {
+          kind: "language-reviewer",
+          allowedToolNames: ["code.searchRepository"],
+          capabilities: ["language_review"],
+        },
+      ],
+    });
+
+    expect(prompt).toContain("language_review");
+    expect(prompt).toContain("executionMode=\"react\"");
+    expect(prompt).toContain("do not treat them as direct_tool_call tool capabilities");
   });
 
   it("documents reusable planning rules for optimization, self-review, and handoffs", () => {

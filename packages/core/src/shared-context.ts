@@ -56,8 +56,9 @@ export interface HandoffReportRecord {
   contextKey: string;
   producedByStepId?: string;
   consumedByStepIds: string[];
-  status: "available" | "missing" | "unconsumed" | "input_missing";
+  status: "available" | "missing" | "unconsumed" | "input_missing" | "invalid_schema";
   valueSummary: HandoffReportValueSummary;
+  schemaError?: string;
 }
 
 export interface HandoffReportStepRecord {
@@ -68,6 +69,7 @@ export interface HandoffReportStepRecord {
   inputContextKeys: string[];
   outputContextKey?: string;
   missingInputContextKeys: string[];
+  invalidInputContextKeys: string[];
   successCriteria?: string;
 }
 
@@ -76,8 +78,29 @@ export interface HandoffReport {
   steps: HandoffReportStepRecord[];
   handoffs: HandoffReportRecord[];
   missingInputContextKeys: string[];
+  invalidInputContextKeys: string[];
   unconsumedOutputContextKeys: string[];
   status: "complete" | "needs_attention";
+}
+
+export interface ContextValueValidation {
+  key: string;
+  valid: boolean;
+  reason?: string;
+  expectedType?: string;
+}
+
+export interface StepInputValidationResult {
+  valid: boolean;
+  stepId: string;
+  missingInputContextKeys: string[];
+  invalidInputContextKeys: ContextValueValidation[];
+}
+
+export interface ContextKeySchema {
+  key: string;
+  expectedType: string;
+  validate(value: unknown): boolean;
 }
 
 export interface HandoffReportArtifact {
@@ -151,6 +174,95 @@ export function writeStepOutput(
   context.set(outputContextKey, output);
 }
 
+export const DEFAULT_CONTEXT_KEY_SCHEMAS: readonly ContextKeySchema[] = [
+  objectWith("diffPreview", "object { diff: string, changedFiles: string[] }", [
+    ["diff", "string"],
+    ["changedFiles", "stringArray"],
+  ]),
+  objectWith("projectInspection", "object { workspacePath?: string, files?: unknown }", []),
+  objectWith("fileScanResults", "object or array", [], { allowArray: true }),
+  objectWith("searchResults", "object or array", [], { allowArray: true }),
+  objectWith("researchSources", "array", [], { requireArray: true }),
+  objectWith("repoSearch", "object { query?: string, results?: unknown }", []),
+  objectWith("repoTrace", "object", []),
+  objectWith("repoEvidence", "object", []),
+  objectWith("uiEvidence", "object { screenshot?: unknown, facts?: unknown }", []),
+  objectWith("computerEvidence", "object", []),
+  objectWith("computerScreenshot", "object or string", [], { allowString: true }),
+  objectWith("computerResult", "object or array", [], { allowArray: true }),
+  objectWith("verificationResult", "object { status?: string, summary?: string }", []),
+  objectWith("verifierCheck", "object { status: string, summary?: string }", [["status", "string"]]),
+  objectWith("proposedEdit", "object", []),
+  objectWith("approvalRecord", "object", []),
+];
+
+export function validateContextValue(
+  key: string,
+  value: unknown,
+  schemas: readonly ContextKeySchema[] = DEFAULT_CONTEXT_KEY_SCHEMAS,
+): ContextValueValidation {
+  if (value === undefined) {
+    return { key, valid: false, reason: "missing" };
+  }
+  const schema = schemas.find((item) => item.key === key);
+  if (!schema) {
+    return { key, valid: true };
+  }
+  if (!schema.validate(value)) {
+    return {
+      key,
+      valid: false,
+      reason: `invalid schema for ${key}`,
+      expectedType: schema.expectedType,
+    };
+  }
+  return { key, valid: true, expectedType: schema.expectedType };
+}
+
+export function validateStepInputContext(
+  step: Pick<HandoffReportStep, "id" | "inputContextKeys">,
+  context: SharedTaskContext,
+  schemas: readonly ContextKeySchema[] = DEFAULT_CONTEXT_KEY_SCHEMAS,
+): StepInputValidationResult {
+  const inputContextKeys = step.inputContextKeys ?? [];
+  const missingInputContextKeys: string[] = [];
+  const invalidInputContextKeys: ContextValueValidation[] = [];
+
+  for (const key of inputContextKeys) {
+    if (!context.has(key)) {
+      missingInputContextKeys.push(key);
+      continue;
+    }
+    const validation = validateContextValue(key, context.get(key), schemas);
+    if (!validation.valid) {
+      invalidInputContextKeys.push(validation);
+    }
+  }
+
+  return {
+    valid: missingInputContextKeys.length === 0 && invalidInputContextKeys.length === 0,
+    stepId: step.id,
+    missingInputContextKeys,
+    invalidInputContextKeys,
+  };
+}
+
+export function formatStepInputValidationError(result: StepInputValidationResult): string {
+  const missing = result.missingInputContextKeys.length
+    ? `missing input context key(s): ${result.missingInputContextKeys.join(", ")}`
+    : "";
+  const invalid = result.invalidInputContextKeys.length
+    ? `invalid input context key(s): ${result.invalidInputContextKeys
+      .map((item) => `${item.key}${item.expectedType ? ` expected ${item.expectedType}` : ""}`)
+      .join(", ")}`
+    : "";
+  return [
+    `Input context validation failed for step ${result.stepId}.`,
+    missing,
+    invalid,
+  ].filter(Boolean).join(" ");
+}
+
 export function buildHandoffReport(
   steps: readonly HandoffReportStep[],
   context: SharedTaskContext | Record<string, unknown>,
@@ -173,6 +285,11 @@ export function buildHandoffReport(
   const stepRecords = steps.map((step) => {
     const inputContextKeys = step.inputContextKeys ?? [];
     const missingInputContextKeys = inputContextKeys.filter((key) => snapshot[key] === undefined);
+    const invalidInputContextKeys = inputContextKeys
+      .filter((key) => snapshot[key] !== undefined)
+      .map((key) => validateContextValue(key, snapshot[key]))
+      .filter((validation) => !validation.valid)
+      .map((validation) => validation.key);
     return {
       stepId: step.id,
       title: step.title,
@@ -181,6 +298,7 @@ export function buildHandoffReport(
       inputContextKeys,
       outputContextKey: step.outputContextKey,
       missingInputContextKeys,
+      invalidInputContextKeys,
       successCriteria: step.successCriteria,
     };
   });
@@ -193,6 +311,12 @@ export function buildHandoffReport(
     const producer = producers.get(contextKey);
     const consumingSteps = consumers.get(contextKey) ?? [];
     const present = snapshot[contextKey] !== undefined;
+    const schemaValidation = present ? validateContextValue(contextKey, snapshot[contextKey]) : undefined;
+    const schemaError = schemaValidation && !schemaValidation.valid
+      ? schemaValidation.expectedType
+        ? `expected ${schemaValidation.expectedType}`
+        : schemaValidation.reason
+      : undefined;
     return {
       contextKey,
       producedByStepId: producer?.id,
@@ -201,8 +325,10 @@ export function buildHandoffReport(
         present,
         hasProducer: Boolean(producer),
         hasConsumers: consumingSteps.length > 0,
+        schemaValid: schemaValidation?.valid ?? true,
       }),
       valueSummary: summarizeHandoffValue(snapshot[contextKey], previewLength),
+      ...(schemaError ? { schemaError } : {}),
     };
   });
 
@@ -213,14 +339,18 @@ export function buildHandoffReport(
     .filter((handoff) => handoff.producedByStepId && handoff.consumedByStepIds.length === 0)
     .map((handoff) => handoff.contextKey)
     .sort();
+  const invalidInputContextKeys = [...new Set(
+    stepRecords.flatMap((step) => step.invalidInputContextKeys),
+  )].sort();
 
   return {
     generatedAt: options.generatedAt ?? new Date().toISOString(),
     steps: stepRecords,
     handoffs,
     missingInputContextKeys,
+    invalidInputContextKeys,
     unconsumedOutputContextKeys,
-    status: missingInputContextKeys.length || unconsumedOutputContextKeys.length
+    status: missingInputContextKeys.length || invalidInputContextKeys.length || unconsumedOutputContextKeys.length
       ? "needs_attention"
       : "complete",
   };
@@ -257,6 +387,7 @@ export function formatHandoffReportMarkdown(report: HandoffReport): string {
     `- Handoffs: ${report.handoffs.length}`,
     `- Steps: ${report.steps.length}`,
     `- Missing inputs: ${report.missingInputContextKeys.join(", ") || "none"}`,
+    `- Invalid inputs: ${report.invalidInputContextKeys.join(", ") || "none"}`,
     `- Unconsumed outputs: ${report.unconsumedOutputContextKeys.join(", ") || "none"}`,
     "",
     "## Handoffs",
@@ -268,7 +399,9 @@ export function formatHandoffReportMarkdown(report: HandoffReport): string {
       escapeMarkdownTableCell(handoff.producedByStepId ?? "external"),
       escapeMarkdownTableCell(handoff.consumedByStepIds.join(", ") || "none"),
       escapeMarkdownTableCell(handoff.status),
-      escapeMarkdownTableCell(formatHandoffValueSummary(handoff.valueSummary)),
+      escapeMarkdownTableCell(handoff.schemaError
+        ? `${formatHandoffValueSummary(handoff.valueSummary)} (${handoff.schemaError})`
+        : formatHandoffValueSummary(handoff.valueSummary)),
     ].join(" | ")).map((row) => `| ${row} |`),
     "",
     "## Steps",
@@ -297,8 +430,10 @@ function resolveHandoffStatus(input: {
   present: boolean;
   hasProducer: boolean;
   hasConsumers: boolean;
+  schemaValid: boolean;
 }): HandoffReportRecord["status"] {
   if (!input.present) return "missing";
+  if (!input.schemaValid) return "invalid_schema";
   if (!input.hasProducer) return "input_missing";
   if (!input.hasConsumers) return "unconsumed";
   return "available";
@@ -354,4 +489,47 @@ function formatHandoffValueSummary(value: HandoffReportValueSummary): string {
 
 function escapeMarkdownTableCell(value: string): string {
   return value.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+}
+
+function objectWith(
+  key: string,
+  expectedType: string,
+  requiredFields: Array<[string, "string" | "stringArray"]>,
+  options: { allowArray?: boolean; allowString?: boolean; requireArray?: boolean } = {},
+): ContextKeySchema {
+  return {
+    key,
+    expectedType,
+    validate(value) {
+      if (options.requireArray) {
+        return Array.isArray(value);
+      }
+      if (options.allowArray && Array.isArray(value)) {
+        return true;
+      }
+      if (options.allowString && typeof value === "string") {
+        return value.trim().length > 0;
+      }
+      if (!isPlainObject(value)) {
+        return false;
+      }
+      for (const [field, type] of requiredFields) {
+        const fieldValue = value[field];
+        if (type === "string" && typeof fieldValue !== "string") {
+          return false;
+        }
+        if (
+          type === "stringArray" &&
+          (!Array.isArray(fieldValue) || !fieldValue.every((item) => typeof item === "string"))
+        ) {
+          return false;
+        }
+      }
+      return true;
+    },
+  };
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

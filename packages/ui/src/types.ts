@@ -97,6 +97,7 @@ export interface WorkbenchAskUserQuestion {
   choices?: Array<string | WorkbenchAskUserChoice>;
   status: string;
   answer?: string;
+  resolvedAt?: string;
 }
 
 export interface WorkbenchAskUserChoice {
@@ -199,6 +200,14 @@ export type WorkbenchStreamingAgentKind =
   | "scheduler"
   | "research"
   | "code"
+  | "language-reviewer"
+  | "security-reviewer"
+  | "build-fix"
+  | "test-runner"
+  | "doc-updater"
+  | "explorer"
+  | "perf-analyzer"
+  | "refactor"
   | "verifier"
   | "workspace"
   | "vision";
@@ -408,6 +417,17 @@ export interface WorkbenchHistoryEntry {
   scheduledTaskId?: string;
 }
 
+export type WorkbenchSubmitGoalIntent =
+  | "new_chat"
+  | "continue_history"
+  | "queued_continuation"
+  | "scheduled"
+  | "goal";
+
+export interface WorkbenchSubmitGoalOptions {
+  intent?: WorkbenchSubmitGoalIntent;
+}
+
 export type WorkbenchConversationMessageKind =
   | "user_text"
   | "assistant_text"
@@ -469,6 +489,7 @@ export interface WorkbenchHandoffReport {
   steps: WorkbenchHandoffReportStep[];
   handoffs: WorkbenchHandoffRecord[];
   missingInputContextKeys: string[];
+  invalidInputContextKeys: string[];
   unconsumedOutputContextKeys: string[];
   status: "complete" | "needs_attention";
 }
@@ -481,6 +502,7 @@ export interface WorkbenchHandoffReportStep {
   inputContextKeys: string[];
   outputContextKey?: string;
   missingInputContextKeys: string[];
+  invalidInputContextKeys: string[];
   successCriteria?: string;
 }
 
@@ -488,8 +510,9 @@ export interface WorkbenchHandoffRecord {
   contextKey: string;
   producedByStepId?: string;
   consumedByStepIds: string[];
-  status: "available" | "missing" | "unconsumed" | "input_missing";
+  status: "available" | "missing" | "unconsumed" | "input_missing" | "invalid_schema";
   valueSummary: WorkbenchHandoffValueSummary;
+  schemaError?: string;
 }
 
 export interface WorkbenchHandoffValueSummary {
@@ -1401,7 +1424,14 @@ export interface JavisWorkbenchProps {
   onConversationMessagesChange?: (taskId: string | undefined, messages: WorkbenchChatMessage[]) => void;
   /** When user clicks an agent summary card in the chat, selected agent ID + open right sidebar. */
   onSelectAgent?: (agentId: string) => void;
-  onSubmitGoal: (goal?: string, workspacePath?: string, scheduledTaskId?: string, attachments?: File[], imageDataUrls?: string[]) => void;
+  onSubmitGoal: (
+    goal?: string,
+    workspacePath?: string,
+    scheduledTaskId?: string,
+    attachments?: File[],
+    imageDataUrls?: string[],
+    options?: WorkbenchSubmitGoalOptions,
+  ) => void;
   onTranslateSkillsToChinese?: () => void;
   onSearchSkillMarket?: (
     query: string,
@@ -1529,8 +1559,14 @@ export interface WorkbenchLocale {
     agentStates: string;
     collapseInspector: string;
     approve: string;
+    approveOnce: string;
+    allowTask: string;
     alwaysAllow: string;
     allLevels: string;
+    denyPermission: string;
+    fullAccess: string;
+    requestApproval: string;
+    approvalRequested: string;
     commandResults: string;
     commander: string;
     codeReview: string;

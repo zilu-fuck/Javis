@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CompletionResult, ModelProvider } from "./model-provider";
 import appRuntimeSource from "./app-runtime.ts?raw";
 
+const normalizedAppRuntimeSource = appRuntimeSource.replace(/\r\n/g, "\n");
+
 const modelMocks = vi.hoisted(() => ({
   provider: undefined as ModelProvider | undefined,
 }));
@@ -63,9 +65,9 @@ describe("createJavisRuntime", () => {
     expect(appRuntimeSource).toContain("function notifyWorkspaceToolActivity(");
     expect(appRuntimeSource).toContain("toolName: `workspace.${tool}.sync`");
     expect(appRuntimeSource).toContain("notifyWorkspaceToolActivity(\"browser\", \"browser.navigate\"");
-    expect(appRuntimeSource).toContain("notifyWorkspaceToolActivity(\n          \"review\",\n          \"git.stageFiles\"");
-    expect(appRuntimeSource).toContain("notifyWorkspaceToolActivity(\n          \"terminal\",\n          \"shell.runReadOnlyCommand\"");
-    expect(appRuntimeSource).toContain("notifyWorkspaceToolActivity(\n          \"files\",\n          \"file.scanMarkdownDocuments\"");
+    expect(normalizedAppRuntimeSource).toContain("notifyWorkspaceToolActivity(\n          \"review\",\n          \"git.stageFiles\"");
+    expect(normalizedAppRuntimeSource).toContain("notifyWorkspaceToolActivity(\n          \"terminal\",\n          \"shell.runReadOnlyCommand\"");
+    expect(normalizedAppRuntimeSource).toContain("notifyWorkspaceToolActivity(\n          \"files\",\n          \"file.scanMarkdownDocuments\"");
   });
 
   it("parses structured Goal verifier results and prevents low-confidence completion", async () => {
@@ -265,8 +267,8 @@ describe("createJavisRuntime", () => {
     expect(commanderPlanPrompts[0]).toContain("\"file.writeText\"");
     expect(commanderPlanPrompts[0]).toContain("\"permissionLevel\":\"confirmed_write\"");
     expect(commanderPlanPrompts[0]).toContain("\"ownerAgentKinds\"");
-    expect(commanderPlanPrompts[0]).not.toContain("\"browser.click\"");
-    expect(commanderPlanPrompts[0]).not.toContain("\"browser.runTest\"");
+    expect(commanderPlanPrompts[0]).toContain("\"browser.click\"");
+    expect(commanderPlanPrompts[0]).toContain("\"browser.runTest\"");
     expect(commanderPlanPrompts[0]).not.toContain("\"browser.upload\"");
     expect(commanderPlanPrompts[0]).toContain("\"intent\":\"检查当前项目\"");
 

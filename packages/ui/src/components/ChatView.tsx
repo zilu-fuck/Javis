@@ -10,6 +10,7 @@ import type {
   WorkbenchGoalEvaluation,
   WorkbenchGoalEvent,
   WorkbenchGoalState,
+  WorkbenchSubmitGoalOptions,
   WorkbenchTask,
   WorkbenchWorkspaceToolAction,
 } from "../types";
@@ -50,7 +51,14 @@ interface ChatViewProps {
   onSelectAgent?: (agentId: string) => void;
   onSelectComposeMode?: (mode: "chat" | "project") => void;
   selectedAgentId?: string;
-  onSubmitGoal: (goal?: string, workspacePath?: string, scheduledTaskId?: string, attachments?: File[], imageDataUrls?: string[]) => void;
+  onSubmitGoal: (
+    goal?: string,
+    workspacePath?: string,
+    scheduledTaskId?: string,
+    attachments?: File[],
+    imageDataUrls?: string[],
+    options?: WorkbenchSubmitGoalOptions,
+  ) => void;
 }
 
 export function ChatView({
@@ -111,7 +119,14 @@ export function ChatView({
     event.preventDefault();
     const files = pendingAttachmentsRef.current;
     pendingAttachmentsRef.current = [];
-    onSubmitGoal(undefined, undefined, undefined, files.length > 0 ? files : undefined);
+    onSubmitGoal(
+      undefined,
+      undefined,
+      undefined,
+      files.length > 0 ? files : undefined,
+      undefined,
+      { intent: isNewChat ? "new_chat" : "continue_history" },
+    );
   }
 
   async function handleSubmitWithAttachments(goal: string, files: File[]) {
@@ -122,7 +137,14 @@ export function ChatView({
     pendingAttachmentsRef.current = [];
     // Don't pass goalOverride — let submitGoal read from draftGoal so
     // conversation continuation works (continuation checks !goalOverride).
-    onSubmitGoal(goal, undefined, undefined, undefined, dataUrls.length > 0 ? dataUrls : undefined);
+    onSubmitGoal(
+      goal,
+      undefined,
+      undefined,
+      undefined,
+      dataUrls.length > 0 ? dataUrls : undefined,
+      { intent: isNewChat ? "new_chat" : "continue_history" },
+    );
     // Clear input after submit reads draftGoal.
   }
 

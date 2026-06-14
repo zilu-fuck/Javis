@@ -734,4 +734,143 @@ describe("ChatComposer", () => {
     expect(container.querySelector(".javis-composer-attachment-notice")?.textContent)
       .toContain("最多 5 张");
   });
+
+  it("renders nothing when permissionControls is undefined", () => {
+    const { container } = render(
+      <ChatComposer
+        actionsClassName="actions"
+        className="composer"
+        currentWorkspacePath="/tmp"
+        draftGoal=""
+        labels={defaultWorkbenchLocale.labels}
+        recentWorkspacePaths={[]}
+        onDraftGoalChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(container.querySelector(".javis-permission-controls")).toBeNull();
+  });
+
+  it("renders Request Approval when canRequestApproval is true", () => {
+    const { container } = render(
+      <ChatComposer
+        actionsClassName="actions"
+        className="composer"
+        currentWorkspacePath="/tmp"
+        draftGoal=""
+        labels={defaultWorkbenchLocale.labels}
+        permissionControls={{ canRequestApproval: true }}
+        recentWorkspacePaths={[]}
+        onDraftGoalChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(container.querySelector(".javis-permission-request")?.textContent)
+      .toBe("Request approval");
+  });
+
+  it("renders approve/deny buttons when pendingRequest is set", () => {
+    const onApprove = vi.fn();
+    const onAllowTask = vi.fn();
+    const onDeny = vi.fn();
+    const { container } = render(
+      <ChatComposer
+        actionsClassName="actions"
+        className="composer"
+        currentWorkspacePath="/tmp"
+        draftGoal=""
+        labels={defaultWorkbenchLocale.labels}
+        permissionControls={{
+          canRequestApproval: false,
+          pendingRequest: { allowAlways: true, onApprove, onAllowTask, onDeny },
+        }}
+        recentWorkspacePaths={[]}
+        onDraftGoalChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(container.querySelector(".javis-permission-approve")?.textContent)
+      .toBe("Approve");
+    expect(container.querySelector(".javis-permission-allow-task")?.textContent)
+      .toBe("Allow this task");
+    expect(container.querySelector(".javis-permission-deny")?.textContent)
+      .toBe("Deny");
+    expect(container.querySelector(".javis-permission-request")).toBeNull();
+  });
+
+  it("hides Allow Task when allowAlways is false", () => {
+    const { container } = render(
+      <ChatComposer
+        actionsClassName="actions"
+        className="composer"
+        currentWorkspacePath="/tmp"
+        draftGoal=""
+        labels={defaultWorkbenchLocale.labels}
+        permissionControls={{
+          canRequestApproval: false,
+          pendingRequest: {
+            allowAlways: false,
+            onApprove: vi.fn(),
+            onAllowTask: vi.fn(),
+            onDeny: vi.fn(),
+          },
+        }}
+        recentWorkspacePaths={[]}
+        onDraftGoalChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(container.querySelector(".javis-permission-allow-task")).toBeNull();
+  });
+
+  it("full access button is always disabled", () => {
+    const { container } = render(
+      <ChatComposer
+        actionsClassName="actions"
+        className="composer"
+        currentWorkspacePath="/tmp"
+        draftGoal=""
+        labels={defaultWorkbenchLocale.labels}
+        permissionControls={{ canRequestApproval: false, showFullAccess: true }}
+        recentWorkspacePaths={[]}
+        onDraftGoalChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+    const btn = container.querySelector(".javis-permission-full-access") as HTMLButtonElement;
+    expect(btn).not.toBeNull();
+    expect(btn.disabled).toBe(true);
+  });
+
+  it("uses Chinese labels when zhCN locale is provided", () => {
+    const { container } = render(
+      <ChatComposer
+        actionsClassName="actions"
+        className="composer"
+        currentWorkspacePath="/tmp"
+        draftGoal=""
+        labels={zhCNWorkbenchLocale.labels}
+        permissionControls={{
+          canRequestApproval: true,
+          pendingRequest: {
+            allowAlways: true,
+            onApprove: vi.fn(),
+            onAllowTask: vi.fn(),
+            onDeny: vi.fn(),
+          },
+        }}
+        recentWorkspacePaths={[]}
+        onDraftGoalChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+    // With pendingRequest set, Request Approval should be hidden;
+    // check that Chinese labels appear on action buttons
+    expect(container.querySelector(".javis-permission-approve")?.textContent)
+      .toBe("批准本次");
+    expect(container.querySelector(".javis-permission-allow-task")?.textContent)
+      .toBe("允许本任务");
+    expect(container.querySelector(".javis-permission-deny")?.textContent)
+      .toBe("拒绝");
+  });
 });

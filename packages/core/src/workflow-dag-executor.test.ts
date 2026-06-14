@@ -145,6 +145,7 @@ describe("executeWorkflow", () => {
 
     const result = await executeWorkflow({
       workflow,
+      maxStepRetries: 0,
       onStepStarted: (workflowStep) => started.push(workflowStep.id),
       executeStep: async (workflowStep) => {
         if (workflowStep.id === "scan-files") {
@@ -166,6 +167,109 @@ describe("executeWorkflow", () => {
       error: "scan timed out",
     });
     expect(replanned).toEqual(["scan-files"]);
+  });
+
+  it("retries transient step failures once before marking the step completed", async () => {
+    let attempts = 0;
+    const retries: string[] = [];
+    const workflow = createWorkflow([
+      step("fetch-source", [], false),
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      executeStep: async (workflowStep) => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new Error("network timeout");
+        }
+        return { output: workflowStep.id };
+      },
+      onStepRetry: (workflowStep, error, attempt) => {
+        retries.push(`${workflowStep.id}:${attempt}:${error}`);
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(attempts).toBe(2);
+    expect(retries).toEqual(["fetch-source:1:network timeout"]);
+    expect(result.completedStepIds).toEqual(["fetch-source"]);
+  });
+
+  it("does not retry non-transient permission failures", async () => {
+    let attempts = 0;
+    const workflow = createWorkflow([
+      step("write-file", [], false),
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      executeStep: async () => {
+        attempts += 1;
+        throw new Error("permission denied");
+      },
+    });
+
+    expect(result.status).toBe("failed");
+    expect(attempts).toBe(1);
+    expect(result.error).toBe("permission denied");
+  });
+
+  it("fails before executing a step with missing input context", async () => {
+    let executed = false;
+    const workflow = createWorkflow([
+      {
+        ...step("verify", [], false),
+        inputContextKeys: ["diffPreview"],
+      },
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      executeStep: async () => {
+        executed = true;
+        return { output: "should not run" };
+      },
+    });
+
+    expect(result.status).toBe("failed");
+    expect(executed).toBe(false);
+    expect(result.failedStepId).toBe("verify");
+    expect(result.error).toContain("missing input context key(s): diffPreview");
+  });
+
+  it("triggers replan immediately when a completed handoff has invalid schema", async () => {
+    const replanned: string[] = [];
+    const workflow = createWorkflow([
+      {
+        ...step("inspect", [], false),
+        outputContextKey: "diffPreview",
+      },
+      {
+        ...step("verify", ["inspect"], false),
+        inputContextKeys: ["diffPreview"],
+      },
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      executeStep: async (workflowStep) => {
+        if (workflowStep.id === "inspect") {
+          return { output: { diff: "diff --git" } };
+        }
+        return { output: workflowStep.id };
+      },
+      onStepFailureReplan: ({ step: failedStep, error }) => {
+        replanned.push(`${failedStep.id}:${error}`);
+        return { abandonFailedStep: true };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.completedStepIds).toEqual(["inspect"]);
+    expect(result.abandonedStepIds).toEqual(["verify"]);
+    expect(replanned[0]).toContain("verify:Handoff validation failed after step inspect");
+    expect(replanned[0]).toContain("expected object { diff: string, changedFiles: string[] }");
   });
 
   it("can append a recovery step after a failed step", async () => {

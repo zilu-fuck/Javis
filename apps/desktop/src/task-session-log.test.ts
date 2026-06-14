@@ -86,6 +86,7 @@ describe("task session JSONL", () => {
         generatedAt: "2026-06-11T00:00:00.000Z",
         status: "complete",
         missingInputContextKeys: [],
+        invalidInputContextKeys: [],
         unconsumedOutputContextKeys: [],
         steps: [{
           stepId: "collect-evidence",
@@ -94,6 +95,7 @@ describe("task session JSONL", () => {
           inputContextKeys: [],
           outputContextKey: "repoEvidence",
           missingInputContextKeys: [],
+          invalidInputContextKeys: [],
         }],
         handoffs: [{
           contextKey: "repoEvidence",

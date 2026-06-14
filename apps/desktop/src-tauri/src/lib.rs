@@ -4547,6 +4547,9 @@ pub fn run() {
         .manage(files::FileWatchState::default())
         .manage(terminal::TerminalState::new())
         .manage(Mutex::new(computer::ComputerApprovalState::default()))
+        .manage(Mutex::new(
+            sandbox::TemporaryWorkspaceApplyApprovalState::default(),
+        ))
         .invoke_handler(tauri::generate_handler![
             pdf::scan_markdown_documents,
             shell::run_read_only_command,
@@ -4682,7 +4685,14 @@ pub fn run() {
             computer::computer_scroll,
             computer::computer_invoke_ui,
             computer::computer_set_ui_value,
-            global_hotkey::computer_set_emergency_hotkey_enabled
+            global_hotkey::computer_set_emergency_hotkey_enabled,
+            sandbox::sandbox_backend_status,
+            sandbox::temp_workspace_sandbox_create,
+            sandbox::temp_workspace_sandbox_diff,
+            sandbox::temp_workspace_sandbox_diff_and_plan,
+            sandbox::temp_workspace_sandbox_approve_apply,
+            sandbox::temp_workspace_sandbox_apply,
+            sandbox::temp_workspace_sandbox_finalize,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

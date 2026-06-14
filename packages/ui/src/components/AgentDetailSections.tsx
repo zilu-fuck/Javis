@@ -401,6 +401,11 @@ function HandoffReportSection({
             {translateWorkbenchText("Missing input", locale)}: {report.missingInputContextKeys.join(", ")}
           </p>
         ) : null}
+        {report.invalidInputContextKeys.length > 0 ? (
+          <p>
+            {translateWorkbenchText("Invalid input", locale)}: {report.invalidInputContextKeys.join(", ")}
+          </p>
+        ) : null}
         {report.unconsumedOutputContextKeys.length > 0 ? (
           <p>
             {translateWorkbenchText("Unconsumed output", locale)}: {report.unconsumedOutputContextKeys.join(", ")}
@@ -416,7 +421,10 @@ function HandoffReportSection({
           <p>
             {handoff.producedByStepId ?? "external"} -&gt; {handoff.consumedByStepIds.join(", ") || "none"}
           </p>
-          <span>{formatHandoffValueSummary(handoff.valueSummary)}</span>
+          <span>
+            {formatHandoffValueSummary(handoff.valueSummary)}
+            {handoff.schemaError ? ` (${handoff.schemaError})` : ""}
+          </span>
         </article>
       ))}
     </section>

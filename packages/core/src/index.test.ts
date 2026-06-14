@@ -3311,17 +3311,37 @@ describe("createFileScanTaskRuntime", () => {
     // Answer the question to trigger the recursive re-plan
     const askSnapshot = snapshots.find((s) => s.askUserQuestion?.id);
     expect(askSnapshot).toBeDefined();
+    const askQuestionId = askSnapshot!.askUserQuestion!.id;
     expect(askSnapshot?.conversationMessages?.some((message) =>
       message.kind === "ask_user_question" &&
-      message.askUserQuestion?.id === askSnapshot.askUserQuestion?.id
+      message.askUserQuestion?.id === askQuestionId
     )).toBe(true);
-    runtime.respondToAskUser("E:/test", askSnapshot!.askUserQuestion!.id);
+    runtime.respondToAskUser("E:/test", askQuestionId);
 
     const finalSnapshot = await waitForStatus(snapshots, "completed");
+    const finalMessages = finalSnapshot.conversationMessages ?? [];
+    const answeredQuestionMessage = finalMessages.find((message) =>
+      message.kind === "ask_user_question" &&
+      message.askUserQuestion?.id === askQuestionId
+    );
 
     expect(planCallCount).toBe(2);
     expect(finalSnapshot.title).toBe("Scan after clarification");
     expect(finalSnapshot.status).toBe("completed");
+    expect(answeredQuestionMessage?.askUserQuestion?.status).toBe("answered");
+    expect(answeredQuestionMessage?.askUserQuestion?.answer).toBe("E:/test");
+    expect(answeredQuestionMessage?.askUserQuestion?.resolvedAt).toBeDefined();
+    expect(finalMessages.some((message) =>
+      message.role === "user" &&
+      message.content === "E:/test"
+    )).toBe(true);
+    expect(finalMessages[finalMessages.length - 1]).toMatchObject({
+      role: "assistant",
+    });
+    expect(finalMessages[finalMessages.length - 2]).toMatchObject({
+      role: "user",
+      content: "E:/test",
+    });
     const logs = snapshots.flatMap((snapshot) => snapshot.logs);
     expect(logs.some((log) => log.title === "waiting_model" && log.detail.includes("commander.plan"))).toBe(true);
     expect(logs.some((log) => log.title === "waiting_user" && log.detail.includes("askUser"))).toBe(true);

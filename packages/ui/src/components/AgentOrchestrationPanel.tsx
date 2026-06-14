@@ -17,6 +17,7 @@ export function AgentOrchestrationPanel({
 }: AgentOrchestrationPanelProps) {
   const steps = task.plan ?? [];
   const shouldShow = steps.length > 0 && task.status !== "created";
+  const visibleAgents = getVisibleAgentsForSteps(task);
   const [isCollapsed, setIsCollapsed] = useState(task.status === "completed");
   const completedCount = steps.filter((step) => step.status === "completed").length;
   const stepProgress = steps.length > 0 ? Math.round((completedCount / steps.length) * 100) : 0;
@@ -67,43 +68,45 @@ export function AgentOrchestrationPanel({
               </li>
             ))}
           </ol>
-          <div className="javis-agent-run-stage">
-            <DispatchConnectorSvg agentCount={task.agents.length} />
-            <div className="javis-agent-run-grid">
-              {task.agents.map((agent) => {
-                const agentProgress = getAgentProgress(agent.status, progress);
-                const selected = selectedAgentId === agent.id;
-                return (
-                  <button
-                    aria-pressed={selected}
-                    className={`javis-agent-run-card status-${agent.status}${selected ? " active" : ""}`}
-                    key={agent.id}
-                    onClick={() => onSelectAgent?.(agent.id)}
-                    type="button"
-                  >
-                    <header>
-                      <span className="javis-agent-run-title">
-                        <span className="javis-agent-run-icon" aria-hidden="true">
-                          {getAgentIcon(agent.id)}
+          {visibleAgents.length > 0 ? (
+            <div className="javis-agent-run-stage">
+              <DispatchConnectorSvg agentCount={visibleAgents.length} />
+              <div className="javis-agent-run-grid">
+                {visibleAgents.map((agent) => {
+                  const agentProgress = getAgentProgress(agent.status, progress);
+                  const selected = selectedAgentId === agent.id;
+                  return (
+                    <button
+                      aria-pressed={selected}
+                      className={`javis-agent-run-card status-${agent.status}${selected ? " active" : ""}`}
+                      key={agent.id}
+                      onClick={() => onSelectAgent?.(agent.id)}
+                      type="button"
+                    >
+                      <header>
+                        <span className="javis-agent-run-title">
+                          <span className="javis-agent-run-icon" aria-hidden="true">
+                            {getAgentIcon(agent.id)}
+                          </span>
+                          <strong>{translateWorkbenchText(agent.name, locale)}</strong>
                         </span>
-                        <strong>{translateWorkbenchText(agent.name, locale)}</strong>
-                      </span>
-                      <span className={`javis-agent-run-badge status-${agent.status}`}>
-                        {getTaskStatusLabel(agent.status, locale)}
-                      </span>
-                    </header>
-                    <p>{translateWorkbenchText(agent.task || agent.role, locale)}</p>
-                    <div className="javis-agent-run-progress">
-                      <span className="javis-agent-run-track">
-                        <span style={{ width: `${agentProgress}%` }} />
-                      </span>
-                      <small>{agentProgress}%</small>
-                    </div>
-                  </button>
-                );
-              })}
+                        <span className={`javis-agent-run-badge status-${agent.status}`}>
+                          {getTaskStatusLabel(agent.status, locale)}
+                        </span>
+                      </header>
+                      <p>{translateWorkbenchText(agent.task || agent.role, locale)}</p>
+                      <div className="javis-agent-run-progress">
+                        <span className="javis-agent-run-track">
+                          <span style={{ width: `${agentProgress}%` }} />
+                        </span>
+                        <small>{agentProgress}%</small>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-          </div>
+          ) : null}
           <ol className="javis-task-step-list">
             {steps.map((step) => (
               <li className={`javis-task-step status-${step.status}`} key={step.id}>
@@ -132,6 +135,36 @@ export function AgentOrchestrationPanel({
       ) : null}
     </section>
   );
+}
+
+function getVisibleAgentsForSteps(task: WorkbenchTask) {
+  const steps = task.plan ?? [];
+  if (steps.length === 0) {
+    return [];
+  }
+  const stepAgentKinds = new Set(
+    steps
+      .map((step) => step.agentKind?.trim())
+      .filter((kind): kind is string => Boolean(kind)),
+  );
+  const stepAgentIds = new Set(
+    steps
+      .map((step) => step.agentId?.trim())
+      .filter((id): id is string => Boolean(id)),
+  );
+  if (stepAgentKinds.size === 0 && stepAgentIds.size === 0) {
+    return task.agents;
+  }
+  return task.agents.filter((agent) => {
+    if (stepAgentIds.has(agent.id)) {
+      return true;
+    }
+    const normalizedAgentId = agent.id.replace(/^agent-/, "");
+    if (stepAgentKinds.has(normalizedAgentId)) {
+      return true;
+    }
+    return agent.status !== "queued";
+  });
 }
 
 function DispatchConnectorSvg({ agentCount }: { agentCount: number }) {

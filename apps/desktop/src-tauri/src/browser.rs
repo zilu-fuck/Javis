@@ -750,7 +750,7 @@ fn ensure_browser_write_permission(
     match permission_mode {
         Some("confirmed_write") | Some("full_access") | Some("read_only") => {
             Err(JavisError::Validation(
-                "Browser write operation requires a native approval binding and is disabled until browser approvals are implemented.".to_string(),
+                "Browser write operation requires a native approval binding.".to_string(),
             ))
         }
         Some(other) => Err(JavisError::Validation(format!(

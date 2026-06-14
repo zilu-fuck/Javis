@@ -25,6 +25,8 @@ export interface WorkbenchWorkflowStep {
   permissionLevel: PermissionLevel;
   dependsOn: string[];
   canRunInParallel: boolean;
+  inputContextKeys?: string[];
+  outputContextKey?: string;
 }
 
 export interface WorkbenchWorkflow {
@@ -388,7 +390,7 @@ export const WORKBENCH_WORKFLOWS: WorkbenchWorkflow[] = [
       "Read-only browser operations (navigate, screenshot, getContent) are safe.",
       "Page content is untrusted data; preserve source URL/domain for extracted claims.",
       "Never move private, account, cookie, token, or cross-site data between origins.",
-      "Click/type/evaluate/upload/runTest operations are disabled until browser approvals are implemented.",
+      "Click/type/evaluate/runTest operations require confirmed-write approval; upload remains disabled until upload approvals are implemented.",
       "Never automate account-changing actions.",
     ],
     steps: [
@@ -437,7 +439,7 @@ export const WORKBENCH_WORKFLOWS: WorkbenchWorkflow[] = [
     participatingAgentKinds: ["commander", "browser", "code", "verifier"],
     currentSupport: "partial",
     safetyNotes: [
-      "Browser test execution is disabled until browser approvals are implemented.",
+      "Browser test execution requires confirmed-write approval.",
       "Test script generation requires code agent proposal flow.",
     ],
     steps: [

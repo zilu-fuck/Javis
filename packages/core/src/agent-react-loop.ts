@@ -1,5 +1,6 @@
 import type { Agent, AgentKind } from "./index";
 import type { SharedTaskContext } from "./shared-context";
+import { formatStepInputValidationError, validateStepInputContext } from "./shared-context";
 import { DEFAULT_TASK_TIMEOUT_MS, throwIfTaskAborted, withTaskTimeout } from "./task-wait";
 import type { WorkbenchWorkflowStep } from "./workflows";
 
@@ -23,11 +24,13 @@ export interface AgentReActTool {
 }
 
 export interface AgentReActDecision {
-  status: "continue" | "completed" | "failed";
+  status: "continue" | "completed" | "failed" | "request_input";
   toolName?: string;
   input?: Record<string, unknown>;
   reason: string;
   output?: unknown;
+  requestedContextKeys?: string[];
+  requestedAgentKind?: AgentKind;
 }
 
 export interface AgentReActLoopOptions {
@@ -53,10 +56,12 @@ export interface AgentReActLoopOptions {
 }
 
 export interface AgentReActLoopResult {
-  status: "completed" | "failed";
+  status: "completed" | "failed" | "request_input";
   output?: unknown;
   observations: AgentReActObservation[];
   reason: string;
+  requestedContextKeys?: string[];
+  requestedAgentKind?: AgentKind;
 }
 
 export async function runAgentReActLoop(
@@ -67,7 +72,7 @@ export async function runAgentReActLoop(
     step,
     context,
     tools,
-    maxIterations = 4,
+    maxIterations = 6,
     signal,
     decisionTimeoutMs = DEFAULT_TASK_TIMEOUT_MS,
     toolTimeoutMs = DEFAULT_TASK_TIMEOUT_MS,
@@ -80,6 +85,14 @@ export async function runAgentReActLoop(
     .map((tool) => tool.name)
     .filter((toolName) => agent.allowedToolNames.includes(toolName));
   const observations: AgentReActObservation[] = [];
+  const inputValidation = validateStepInputContext(step, context);
+  if (!inputValidation.valid) {
+    return {
+      status: "failed",
+      observations,
+      reason: formatStepInputValidationError(inputValidation),
+    };
+  }
 
   for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
     throwIfTaskAborted(signal, `ReAct ${step.id}`);
@@ -115,6 +128,17 @@ export async function runAgentReActLoop(
         output: decision.output,
         observations,
         reason: decision.reason,
+      };
+    }
+
+    if (decision.status === "request_input") {
+      return {
+        status: "request_input",
+        output: decision.output,
+        observations,
+        reason: decision.reason,
+        requestedContextKeys: decision.requestedContextKeys,
+        requestedAgentKind: decision.requestedAgentKind,
       };
     }
 

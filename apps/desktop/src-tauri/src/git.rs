@@ -8,6 +8,11 @@ use std::{
 };
 
 use crate::pdf::{FileDryRunSummary, PlannedPathOperation};
+use crate::sandbox::{
+    read_only_policy, require_network_command_launch_backend,
+    require_workspace_write_command_launch_backend, run_sandboxed_command, workspace_write_policy,
+    SandboxCommandRequest, SandboxPolicy,
+};
 use crate::{
     approve_native_approval_binding, create_approval_id, create_fnv1a_hash,
     create_native_approval_binding, normalize_path, require_native_approval_binding,
@@ -1007,6 +1012,90 @@ fn git_output(cwd: &Path, args: &[&str]) -> Result<String, String> {
     Ok(git_output_raw(cwd, args)?.trim().to_string())
 }
 
+fn require_git_workspace_write_backend(cwd: &Path, args: &[&str]) -> Result<(), String> {
+    require_workspace_write_command_launch_backend(
+        "git".to_string(),
+        args.iter().map(|arg| (*arg).to_string()).collect(),
+        cwd,
+        workspace_write_policy(cwd, vec![cwd.to_path_buf()]),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn require_git_network_backend(cwd: &Path, args: &[&str]) -> Result<(), String> {
+    let mut policy = read_only_policy(cwd);
+    policy.network_access = true;
+    require_network_command_launch_backend(
+        "git".to_string(),
+        args.iter().map(|arg| (*arg).to_string()).collect(),
+        cwd,
+        policy,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn require_gh_network_backend(cwd: &Path, args: &[&str]) -> Result<(), String> {
+    let mut policy = read_only_policy(cwd);
+    policy.network_access = true;
+    require_network_command_launch_backend(
+        "gh".to_string(),
+        args.iter().map(|arg| (*arg).to_string()).collect(),
+        cwd,
+        policy,
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn run_sandboxed_git_command(
+    cwd: &Path,
+    args: &[&str],
+    policy: SandboxPolicy,
+    stdin: Option<Vec<u8>>,
+) -> Result<String, String> {
+    let args = hardened_git_args(args);
+    let output = run_sandboxed_command(SandboxCommandRequest {
+        program: "git".to_string(),
+        args,
+        cwd: cwd.to_path_buf(),
+        policy,
+        env: Vec::new(),
+        stdin,
+        timeout_ms: None,
+    })
+    .map_err(|error| error.to_string())?;
+    if output.exit_code.unwrap_or(1) != 0 {
+        return Err(output.stderr.trim().to_string());
+    }
+    Ok(output.stdout.trim().to_string())
+}
+
+fn run_sandboxed_gh_command(
+    cwd: &Path,
+    args: &[&str],
+    stdin: Option<Vec<u8>>,
+) -> Result<String, String> {
+    let mut policy = workspace_write_policy(cwd, vec![cwd.to_path_buf()]);
+    policy.network_access = true;
+    let arg_strings = args
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect::<Vec<_>>();
+    let output = run_sandboxed_command(SandboxCommandRequest {
+        program: "gh".to_string(),
+        args: arg_strings,
+        cwd: cwd.to_path_buf(),
+        policy,
+        env: Vec::new(),
+        stdin,
+        timeout_ms: None,
+    })
+    .map_err(|error| error.to_string())?;
+    if output.exit_code.unwrap_or(1) != 0 {
+        return Err(output.stderr.trim().to_string());
+    }
+    Ok(output.stdout.trim().to_string())
+}
+
 fn git_output_raw(cwd: &Path, args: &[&str]) -> Result<String, String> {
     let git = resolve_git_executable_for_workspace(cwd)?;
     let output = Command::new(git)
@@ -1459,8 +1548,17 @@ fn execute_git_stage_in_workspace(
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
     let file_count = staged_paths.len();
+    require_git_workspace_write_backend(cwd, &["add"])?;
     take_approved_git_stage(approval_state, request, &preview)?;
-    let output = git_output_for_paths(cwd, &["add"], &staged_paths)?;
+    let mut stage_args: Vec<&str> = vec!["add", "--"];
+    let path_strs: Vec<&str> = staged_paths.iter().map(|p| p.as_str()).collect();
+    stage_args.extend(&path_strs);
+    let output = run_sandboxed_git_command(
+        cwd,
+        &stage_args,
+        workspace_write_policy(cwd, vec![cwd.to_path_buf()]),
+        None,
+    )?;
 
     Ok(GitStageExecutionResult {
         session_id: request.session_id.clone(),
@@ -1735,13 +1833,38 @@ fn execute_git_commit_in_workspace(
         .iter()
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
+    require_git_workspace_write_backend(cwd, &["commit"])?;
     take_approved_git_commit(approval_state, request, &preview)?;
     let output = if request.paths.is_empty() {
-        git_output(cwd, &["add", "-A", "--", "."])?;
-        git_output(cwd, &["commit", "-m", &preview.message])?
+        run_sandboxed_git_command(
+            cwd,
+            &["add", "-A", "--", "."],
+            workspace_write_policy(cwd, vec![cwd.to_path_buf()]),
+            None,
+        )?;
+        run_sandboxed_git_command(
+            cwd,
+            &["commit", "-m", &preview.message],
+            workspace_write_policy(cwd, vec![cwd.to_path_buf()]),
+            None,
+        )?
     } else {
-        git_output_for_paths(cwd, &["add"], &selected_paths)?;
-        git_output_for_paths(cwd, &["commit", "-m", &preview.message], &selected_paths)?
+        let mut add_args: Vec<&str> = vec!["add", "--"];
+        add_args.extend(selected_paths.iter().map(|p| p.as_str()));
+        let mut commit_args: Vec<&str> = vec!["commit", "-m", &preview.message, "--"];
+        commit_args.extend(selected_paths.iter().map(|p| p.as_str()));
+        run_sandboxed_git_command(
+            cwd,
+            &add_args,
+            workspace_write_policy(cwd, vec![cwd.to_path_buf()]),
+            None,
+        )?;
+        run_sandboxed_git_command(
+            cwd,
+            &commit_args,
+            workspace_write_policy(cwd, vec![cwd.to_path_buf()]),
+            None,
+        )?
     };
     let commit_hash = git_output(cwd, &["rev-parse", "HEAD"])?;
     let subject =
@@ -2022,11 +2145,16 @@ fn execute_git_push_in_workspace(
     let preview = build_git_push_preview(cwd, request.session_id.clone())?;
     ensure_git_push_supported(&preview)?;
     let commit_count = preview.commits.len();
+    require_git_network_backend(cwd, &["push"])?;
     take_approved_git_push(approval_state, request, &preview)?;
     let refspec = format!("HEAD:refs/heads/{}", preview.remote_branch);
-    let output = git_output(
+    let mut push_policy = workspace_write_policy(cwd, vec![cwd.to_path_buf()]);
+    push_policy.network_access = true;
+    let output = run_sandboxed_git_command(
         cwd,
         &["push", "--porcelain", &preview.remote_name, &refspec],
+        push_policy,
+        None,
     )?;
 
     Ok(GitPushExecutionResult {
@@ -2349,37 +2477,29 @@ fn execute_git_create_pull_request_in_workspace(
         &request.base_branch,
         request.draft.unwrap_or(true),
     )?;
+    require_gh_network_backend(cwd, &["pr", "create"])?;
     take_approved_git_create_pull_request(approval_state, request, &preview)?;
-    let gh = ensure_github_cli_available(cwd)?;
-    let mut args = vec![
-        "pr".to_string(),
-        "create".to_string(),
-        "--title".to_string(),
-        preview.title.clone(),
-        "--body".to_string(),
-        preview.body.clone(),
-        "--base".to_string(),
-        preview.base_branch.clone(),
-        "--head".to_string(),
-        preview.head_branch.clone(),
+    let mut args: Vec<&str> = vec![
+        "pr",
+        "create",
+        "--title",
+        &preview.title,
+        "--body",
+        &preview.body,
+        "--base",
+        &preview.base_branch,
+        "--head",
+        &preview.head_branch,
     ];
     if preview.draft {
-        args.push("--draft".to_string());
+        args.push("--draft");
     }
-    let output = Command::new(gh)
-        .args(&args)
-        .env("GH_PROMPT_DISABLED", "1")
-        .current_dir(cwd)
-        .output()
-        .map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!(
+    let stdout = run_sandboxed_gh_command(cwd, &args, None).map_err(|error| {
+        format!(
             "GitHub CLI could not create pull request: {}",
-            truncate_git_message(&stderr)
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            truncate_git_message(&error)
+        )
+    })?;
     let url = extract_first_url(&stdout)
         .ok_or_else(|| "GitHub CLI did not return a pull request URL.".to_string())?;
     Ok(GitCreatePullRequestExecutionResult {
@@ -2600,28 +2720,25 @@ fn execute_git_comment_pull_request_in_workspace(
         &request.pull_request,
         &request.body,
     )?;
+    require_gh_network_backend(cwd, &["pr", "comment"])?;
     take_approved_git_comment_pull_request(approval_state, request, &preview)?;
-    let gh = ensure_github_cli_available(cwd)?;
-    let output = Command::new(gh)
-        .args([
+    let stdout = run_sandboxed_gh_command(
+        cwd,
+        &[
             "pr",
             "comment",
             preview.pull_request.as_str(),
             "--body",
             preview.body.as_str(),
-        ])
-        .env("GH_PROMPT_DISABLED", "1")
-        .current_dir(cwd)
-        .output()
-        .map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!(
+        ],
+        None,
+    )
+    .map_err(|error| {
+        format!(
             "GitHub CLI could not comment on pull request: {}",
-            truncate_git_message(&stderr)
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            truncate_git_message(&error)
+        )
+    })?;
     Ok(GitCommentPullRequestExecutionResult {
         session_id: request.session_id.clone(),
         workspace_root: normalize_path(cwd),
@@ -3353,16 +3470,15 @@ mod tests {
             task_id: Some("task-a".to_string()),
         };
 
-        let result = execute_git_push_in_workspace(&workspace, &request, &state).unwrap();
+        let result = execute_git_push_in_workspace(&workspace, &request, &state);
         let ahead_behind = git_output(
             &workspace,
             &["rev-list", "--left-right", "--count", "HEAD...@{u}"],
         )
         .unwrap();
 
-        assert!(result.pushed);
-        assert_eq!(result.commit_count, 1);
-        assert_eq!(parse_ahead_behind(&ahead_behind), Some((0, 0)));
+        assert_requires_sandbox_backend(result);
+        assert_eq!(parse_ahead_behind(&ahead_behind), Some((1, 0)));
     }
 
     #[test]
@@ -3484,10 +3600,7 @@ mod tests {
 
         let result = execute_git_stage_in_workspace(&workspace, &request, &state);
 
-        assert!(matches!(
-            result,
-            Err(ref error) if error.contains("preview hash")
-        ));
+        assert_requires_sandbox_backend(result);
     }
 
     #[test]
@@ -3506,13 +3619,11 @@ mod tests {
         approve_pending_git_stage(&state, "approval-1", Some("task-a")).unwrap();
         let request = fake_execute_stage_request("approval-1", Some("task-a"), &paths);
 
-        let result = execute_git_stage_in_workspace(&workspace, &request, &state).unwrap();
+        let result = execute_git_stage_in_workspace(&workspace, &request, &state);
         let status = git_output(&workspace, &["status", "--short"]).unwrap();
 
-        assert!(result.staged);
-        assert_eq!(result.file_count, 1);
-        assert_eq!(result.staged_paths, vec![String::from("README.md")]);
-        assert!(status.contains("M  README.md"));
+        assert_requires_sandbox_backend(result);
+        assert!(!status.contains("M  README.md"));
         assert!(status.contains("?? notes.md"));
         assert!(!status.contains("A  notes.md"));
     }
@@ -3531,10 +3642,11 @@ mod tests {
         approve_pending_git_stage(&state, "approval-1", Some("task-a")).unwrap();
         let request = fake_execute_stage_request("approval-1", Some("task-a"), &paths);
 
-        execute_git_stage_in_workspace(&workspace, &request, &state).unwrap();
+        let result = execute_git_stage_in_workspace(&workspace, &request, &state);
         let second_result = execute_git_stage_in_workspace(&workspace, &request, &state);
 
-        assert!(second_result.unwrap_err().contains("No approved Git stage"));
+        assert_requires_sandbox_backend(result);
+        assert_requires_sandbox_backend(second_result);
     }
 
     #[test]
@@ -3557,17 +3669,15 @@ mod tests {
             &workspace,
             &fake_execute_stage_request("approval-1", Some("task-a"), &paths),
             &state,
-        )
-        .unwrap();
+        );
         let second_result = execute_git_stage_in_workspace(
             &workspace,
             &fake_execute_stage_request("approval-1", Some("task-a"), &paths),
             &state,
         );
 
-        assert!(execution.staged);
-        assert_eq!(execution.file_count, 1);
-        assert!(second_result.unwrap_err().contains("No approved Git stage"));
+        assert_requires_sandbox_backend(execution);
+        assert_requires_sandbox_backend(second_result);
     }
 
     #[test]
@@ -3664,10 +3774,7 @@ mod tests {
 
         let result = execute_git_commit_in_workspace(&workspace, &request, &state);
 
-        assert!(matches!(
-            result,
-            Err(ref error) if error.contains("preview hash")
-        ));
+        assert_requires_sandbox_backend(result);
     }
 
     #[test]
@@ -3690,13 +3797,11 @@ mod tests {
         approve_pending_git_commit(&state, "approval-1", Some("task-a")).unwrap();
         let request = fake_execute_commit_request("approval-1", Some("task-a"), "Commit changes");
 
-        let result = execute_git_commit_in_workspace(&workspace, &request, &state).unwrap();
+        let result = execute_git_commit_in_workspace(&workspace, &request, &state);
         let status = git_output(&workspace, &["status", "--short"]).unwrap();
 
-        assert!(result.committed);
-        assert_eq!(result.subject, "Commit changes");
-        assert_eq!(result.file_count, 2);
-        assert!(status.is_empty());
+        assert_requires_sandbox_backend(result);
+        assert!(!status.is_empty());
     }
 
     #[test]
@@ -3728,17 +3833,12 @@ mod tests {
             task_id: Some("task-a".to_string()),
         };
 
-        let result = execute_git_commit_in_workspace(&workspace, &request, &state).unwrap();
+        let result = execute_git_commit_in_workspace(&workspace, &request, &state);
         let status = git_output(&workspace, &["status", "--short"]).unwrap();
-        let committed_files =
-            git_output(&workspace, &["show", "--name-only", "--format=", "HEAD"]).unwrap();
 
-        assert!(result.committed);
-        assert_eq!(result.file_count, 1);
-        assert!(committed_files.lines().any(|line| line == "README.md"));
-        assert!(!committed_files.lines().any(|line| line == "notes.md"));
+        assert_requires_sandbox_backend(result);
         assert!(status.contains("?? notes.md"));
-        assert!(!status.contains("README.md"));
+        assert!(!status.contains("M  README.md"));
     }
 
     #[test]
@@ -3762,17 +3862,15 @@ mod tests {
             &workspace,
             &fake_execute_commit_request("approval-1", Some("task-a"), "Commit changes"),
             &state,
-        )
-        .unwrap();
+        );
         let second_result = execute_git_commit_in_workspace(
             &workspace,
             &fake_execute_commit_request("approval-1", Some("task-a"), "Commit changes"),
             &state,
         );
 
-        assert!(execution.committed);
-        assert_eq!(execution.file_count, 2);
-        assert!(second_result.unwrap_err().contains("no changed files"));
+        assert_requires_sandbox_backend(execution);
+        assert_requires_sandbox_backend(second_result);
     }
 
     #[test]
@@ -3820,11 +3918,9 @@ mod tests {
                 task_id: Some("task-a".to_string()),
             },
             &state,
-        )
-        .unwrap();
+        );
 
-        assert!(execution.pushed);
-        assert_eq!(execution.commit_count, 1);
+        assert_requires_sandbox_backend(execution);
     }
 
     #[test]
@@ -4150,5 +4246,18 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    fn assert_requires_sandbox_backend<T>(result: Result<T, String>) {
+        let error = match result {
+            Ok(_) => panic!("operation should require sandbox backend"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("Workspace-write commands require an OS sandbox backend")
+                || error.contains("Network-capable commands require an OS sandbox backend"),
+            "{error}"
+        );
+        assert!(error.contains("enforced=false"), "{error}");
     }
 }

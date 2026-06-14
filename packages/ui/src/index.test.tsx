@@ -771,6 +771,62 @@ describe("JavisWorkbench permission cards", () => {
     expect(container.querySelector(".javis-composer-status-hint")).not.toBeNull();
   });
 
+  it("submits new-chat and history-thread intents explicitly", () => {
+    const onSubmitGoal = vi.fn();
+    const newChat = render(
+      <JavisWorkbench
+        draftGoal="你好"
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={onSubmitGoal}
+        task={createIdleTask()}
+      />,
+    );
+
+    fireEvent.submit(newChat.container.querySelector(".javis-new-chat-composer")!);
+
+    expect(onSubmitGoal).toHaveBeenCalledWith(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { intent: "new_chat" },
+    );
+
+    cleanup();
+    onSubmitGoal.mockClear();
+    const historyThread = render(
+      <JavisWorkbench
+        draftGoal="继续"
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={onSubmitGoal}
+        task={{
+          ...createIdleTask(),
+          id: "task-history-1",
+          status: "completed",
+          title: "历史任务",
+          userGoal: "你好",
+          commanderMessage: "您好！我是 Javis。",
+          conversationMessages: [
+            { role: "user", content: "你好" },
+            { role: "assistant", content: "您好！我是 Javis。" },
+          ],
+        }}
+      />,
+    );
+
+    fireEvent.submit(historyThread.container.querySelector(".javis-composer")!);
+
+    expect(onSubmitGoal).toHaveBeenCalledWith(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { intent: "continue_history" },
+    );
+  });
+
   it("keeps waiting-info plan mode focused on the question card", () => {
     const { container } = render(
       <JavisWorkbench
@@ -853,6 +909,29 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).toContain("Shell Agent");
     expect(html).toContain("Checking scripts");
     expect(html).toContain("1.2s");
+  });
+
+  it("hides queued agents that are not assigned to current plan steps", () => {
+    const html = renderWorkbench({
+      id: "task-focused-agents",
+      title: "Clarify project",
+      userGoal: "Build a player",
+      status: "running",
+      commanderMessage: "Running",
+      plan: [
+        { id: "ask", title: "Clarify requirements", status: "running", agentKind: "commander" },
+      ],
+      agents: [
+        { id: "agent-commander", name: "Commander", role: "Plans", status: "running", task: "Clarifying" },
+        { id: "agent-file", name: "File Agent", role: "Reads files", status: "queued", task: "Waiting" },
+        { id: "agent-security-reviewer", name: "Security Reviewer", role: "Reviews security", status: "queued", task: "Waiting" },
+      ],
+      logs: [],
+    });
+
+    expect(html).toContain("Commander");
+    expect(html).not.toContain("File Agent");
+    expect(html).not.toContain("Security Reviewer");
   });
 
   it("opens inspector details when a central orchestration agent card is selected", async () => {
@@ -1743,6 +1822,7 @@ describe("JavisWorkbench permission cards", () => {
         generatedAt: "2026-06-11T00:00:00.000Z",
         status: "needs_attention",
         missingInputContextKeys: ["sourceEvidence"],
+        invalidInputContextKeys: [],
         unconsumedOutputContextKeys: ["draftText"],
         steps: [],
         handoffs: [{
@@ -1786,6 +1866,7 @@ describe("JavisWorkbench permission cards", () => {
       generatedAt: "2026-06-11T00:00:00.000Z",
       status: "complete",
       missingInputContextKeys: [],
+      invalidInputContextKeys: [],
       unconsumedOutputContextKeys: [],
       steps: [{
         stepId: "collect",
@@ -1795,6 +1876,7 @@ describe("JavisWorkbench permission cards", () => {
         inputContextKeys: [],
         outputContextKey: "evidence",
         missingInputContextKeys: [],
+        invalidInputContextKeys: [],
         successCriteria: "Evidence is ready.",
       }],
       handoffs: [{
@@ -1832,6 +1914,7 @@ describe("JavisWorkbench permission cards", () => {
           generatedAt: "2026-06-11T00:00:00.000Z",
           status: "complete",
           missingInputContextKeys: [],
+          invalidInputContextKeys: [],
           unconsumedOutputContextKeys: [],
           steps: [],
           handoffs: [{

@@ -31,6 +31,14 @@ export type AgentCapabilityTag =
   | "code_trace"
   | "code_propose"
   | "code_apply"
+  | "language_review"
+  | "security_review"
+  | "build_fix"
+  | "test_run"
+  | "doc_update"
+  | "code_explore"
+  | "performance_analysis"
+  | "refactor"
   | "web_search"
   | "web_fetch"
   | "trend_fetch"
@@ -62,6 +70,7 @@ export type AgentCapabilityTag =
 export const ALL_CAPABILITY_TAGS: ReadonlyArray<AgentCapabilityTag> = [
   "planning", "synthesis", "file_scan", "file_execute", "document_classify",
   "shell_readonly", "git_inspect", "git_stage", "git_commit", "git_pr_create", "git_pr_comment", "code_search", "code_trace", "code_propose", "code_apply",
+  "language_review", "security_review", "build_fix", "test_run", "doc_update", "code_explore", "performance_analysis", "refactor",
   "web_search", "web_fetch", "trend_fetch", "memory_search", "local_search", "image_scan", "directory_list",
   "schedule_create", "evidence_check",
   "browser_navigate", "browser_interact", "browser_test",
@@ -410,8 +419,8 @@ const DEFAULT_MODEL_REQUIREMENTS: ModelRequirements = {
  * Tags are resolved from ToolDescriptor.capabilityTags — the single source
  * of truth is `initialToolDescriptors` in @javis/tools.
  *
- * Agent-kind-based tags are only used for cross-cutting capabilities
- * (Research's synthesis tag).
+ * Agent-kind-based tags are used for role-level capabilities whose execution
+ * is a policy/prompt specialization over existing tools.
  */
 let _toolCapabilityIndex: Map<string, string[]> | undefined;
 
@@ -598,6 +607,30 @@ function inferCapabilityTags(agent: Agent): AgentCapabilityTag[] {
   // Research additionally gets synthesis capability
   if (agent.kind === "research") {
     tags.add("synthesis");
+  }
+  if (agent.kind === "language-reviewer") {
+    tags.add("language_review");
+  }
+  if (agent.kind === "security-reviewer") {
+    tags.add("security_review");
+  }
+  if (agent.kind === "build-fix") {
+    tags.add("build_fix");
+  }
+  if (agent.kind === "test-runner") {
+    tags.add("test_run");
+  }
+  if (agent.kind === "doc-updater") {
+    tags.add("doc_update");
+  }
+  if (agent.kind === "explorer") {
+    tags.add("code_explore");
+  }
+  if (agent.kind === "perf-analyzer") {
+    tags.add("performance_analysis");
+  }
+  if (agent.kind === "refactor") {
+    tags.add("refactor");
   }
 
   return [...tags];

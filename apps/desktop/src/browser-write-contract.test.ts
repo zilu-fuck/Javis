@@ -43,10 +43,11 @@ describe("Browser write command contract", () => {
     expect(appRuntimeTs).not.toContain(`${BROWSER_WRITE_COMMANDS[0].tool} operation requires native approval and is disabled`);
   });
 
-  it("keeps browser writes behind disabled agent exposure until packaged approval QA lands", () => {
+  it("exposes approved browser writes while keeping unimplemented upload disabled", () => {
     for (const entry of BROWSER_WRITE_COMMANDS) {
-      expect(isDisabledBrowserWriteToolName(entry.tool)).toBe(true);
+      expect(isDisabledBrowserWriteToolName(entry.tool)).toBe(false);
     }
+    expect(isDisabledBrowserWriteToolName("browser.upload")).toBe(true);
 
     expect(appRuntimeTs).toContain("requestBrowserWriteApproval");
     expect(appRuntimeTs).toContain("requires visible approval");

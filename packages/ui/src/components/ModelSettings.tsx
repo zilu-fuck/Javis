@@ -2210,6 +2210,10 @@ function getProviderConnectionSettings(
   };
 }
 
+function normalizeUrl(value: string): string {
+  return value.trim().replace(/\/+$/, "");
+}
+
 function getProviderBaseUrl(
   provider: string,
   profiles: WorkbenchModelProfile[],
@@ -2225,7 +2229,17 @@ function getProviderBaseUrl(
   )?.baseUrl;
   if (profileBaseUrl) return profileBaseUrl;
   if (modelSettings.provider === provider && modelSettings.baseUrl) {
-    return modelSettings.baseUrl;
+    // Don't leak a base URL that belongs to a different provider's default.
+    const normalizedLegacyUrl = normalizeUrl(modelSettings.baseUrl);
+    const legacyOwner = (() => {
+      for (const [id, entry] of byId) {
+        if (normalizeUrl(entry.defaultBaseUrl) === normalizedLegacyUrl) return id;
+      }
+      return undefined;
+    })();
+    if (!legacyOwner || legacyOwner === provider) {
+      return modelSettings.baseUrl;
+    }
   }
   return getProviderDefaultBaseUrl(provider, byId);
 }

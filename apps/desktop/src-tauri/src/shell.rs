@@ -2,10 +2,17 @@ use serde::{Deserialize, Serialize};
 use std::{
     env,
     path::{Path, PathBuf},
-    process::Command,
 };
+use tauri::AppHandle;
 
-use crate::{normalize_path, resolve_command_program, resolve_workspace_path};
+use crate::{
+    audit::{append_jsonl_line_to_path, task_audit_jsonl_path},
+    resolve_command_program, resolve_workspace_path,
+    sandbox::{
+        read_only_policy, run_sandboxed_command, sandbox_audit_jsonl_line_for_output,
+        SandboxCommandRequest, SandboxReport,
+    },
+};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,53 +30,58 @@ pub(crate) struct ShellCommandOutput {
     exit_code: Option<i32>,
     stdout: String,
     stderr: String,
+    sandbox: SandboxReport,
 }
 
 #[tauri::command]
 pub(crate) fn run_read_only_command(
+    app: AppHandle,
     request: ShellCommandRequest,
+) -> Result<ShellCommandOutput, String> {
+    let audit_path = task_audit_jsonl_path(&app)?;
+    run_read_only_command_with_audit_path(request, Some(&audit_path))
+}
+
+pub(crate) fn run_read_only_command_with_audit_path(
+    request: ShellCommandRequest,
+    audit_path: Option<&Path>,
 ) -> Result<ShellCommandOutput, String> {
     if !is_allowed_read_only_command(&request.program, &request.args) {
         return Err("Command is not in the first-version read-only allowlist.".to_string());
     }
 
     let cwd = resolve_workspace_path(request.workspace_path)?;
-    let output = run_read_only_command_output(&request.program, &request.args, &cwd)?;
+    let output = run_sandboxed_command(SandboxCommandRequest {
+        program: request.program,
+        args: request.args,
+        cwd: cwd.clone(),
+        policy: read_only_policy(&cwd),
+        env: Vec::new(),
+        stdin: None,
+        timeout_ms: None,
+    })
+    .map_err(|error| error.to_string())?;
+    if let Some(audit_path) = audit_path {
+        let line = sandbox_audit_jsonl_line_for_output(&output, None)
+            .map_err(|error| error.to_string())?;
+        append_jsonl_line_to_path(audit_path, &line, "Sandbox audit")
+            .map_err(|error| error.to_string())?;
+    }
 
     Ok(ShellCommandOutput {
-        command: format!("{} {}", request.program, request.args.join(" "))
-            .trim()
-            .to_string(),
-        cwd: normalize_path(&cwd),
-        exit_code: output.status.code(),
-        stdout: String::from_utf8_lossy(&output.stdout).trim().to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        command: output.command,
+        cwd: output.cwd,
+        exit_code: output.exit_code,
+        stdout: output.stdout.trim().to_string(),
+        stderr: output.stderr.trim().to_string(),
+        sandbox: output.sandbox,
     })
 }
 
-pub(crate) fn run_read_only_command_output(
+pub(crate) fn resolve_trusted_read_only_executable(
     program: &str,
-    args: &[String],
     cwd: &Path,
-) -> Result<std::process::Output, String> {
-    let executable = resolve_trusted_read_only_executable(program, cwd)?;
-    let safe_args = read_only_command_args(program, args);
-    let mut output = Command::new(&executable)
-        .args(&safe_args)
-        .current_dir(cwd)
-        .output()
-        .map_err(|error| error.to_string())?;
-    if is_retryable_windows_process_initialization_exit(output.status.code()) {
-        output = Command::new(&executable)
-            .args(&safe_args)
-            .current_dir(cwd)
-            .output()
-            .map_err(|error| error.to_string())?;
-    }
-    Ok(output)
-}
-
-fn resolve_trusted_read_only_executable(program: &str, cwd: &Path) -> Result<PathBuf, String> {
+) -> Result<PathBuf, String> {
     let program = resolve_command_program(program);
     let cwd = cwd
         .canonicalize()
@@ -136,7 +148,7 @@ fn executable_extensions() -> Vec<String> {
     }
 }
 
-fn read_only_command_args(program: &str, args: &[String]) -> Vec<String> {
+pub(crate) fn read_only_command_args(program: &str, args: &[String]) -> Vec<String> {
     if program.eq_ignore_ascii_case("git") {
         let mut safe_args = vec![
             "-c".to_string(),
@@ -191,7 +203,7 @@ pub(crate) fn is_allowed_read_only_command(program: &str, args: &[String]) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
+    use std::{fs, process::Command};
 
     #[test]
     fn allows_git_status() {
@@ -288,5 +300,38 @@ mod tests {
         let result = trusted_candidate(workspace.path().join(executable_name), workspace.path());
 
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_only_command_returns_policy_only_sandbox_report() {
+        let workspace = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(workspace.path())
+            .output()
+            .expect("git init");
+
+        let audit_path = workspace.path().join("task-audit.jsonl");
+        let output = run_read_only_command_with_audit_path(
+            ShellCommandRequest {
+                program: "git".to_string(),
+                args: vec!["status".to_string(), "--short".to_string()],
+                workspace_path: Some(workspace.path().to_string_lossy().to_string()),
+            },
+            Some(&audit_path),
+        )
+        .expect("read-only command");
+
+        assert_eq!(output.command, "git status --short");
+        assert!(!output.sandbox.enforced);
+        assert_eq!(
+            output.sandbox.backend,
+            crate::sandbox::SandboxBackend::PolicyOnly
+        );
+        assert_eq!(output.sandbox.mode, crate::sandbox::SandboxMode::ReadOnly);
+        let audit = fs::read_to_string(audit_path).expect("read sandbox audit");
+        assert!(audit.contains("\"kind\":\"sandbox_process\""));
+        assert!(audit.contains("\"backend\":\"policy_only\""));
+        assert!(audit.contains("\"enforced\":false"));
     }
 }

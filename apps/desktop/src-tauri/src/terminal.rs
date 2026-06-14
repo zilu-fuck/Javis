@@ -8,12 +8,12 @@ use std::{
 };
 use tauri::{AppHandle, Emitter};
 
+use crate::sandbox::{require_interactive_session_backend, workspace_write_policy};
 use crate::{
     approve_native_approval_binding, create_approval_id, create_fnv1a_hash,
     create_native_approval_binding, normalize_path, require_native_approval_binding,
     resolve_workspace_path, NativeApprovalBinding,
 };
-use crate::sandbox::{require_interactive_session_backend, workspace_write_policy};
 
 pub(crate) struct TerminalState {
     sessions: Mutex<HashMap<String, TerminalSession>>,
@@ -33,6 +33,9 @@ struct TerminalSession {
     master: Box<dyn MasterPty + Send>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     child: Box<dyn portable_pty::Child + Send>,
+    #[cfg(target_os = "windows")]
+    #[allow(dead_code)]
+    job: Option<crate::sandbox::WindowsHandle>,
 }
 
 struct PendingTerminalApproval {
@@ -277,11 +280,12 @@ pub(crate) fn terminal_create(
         "create",
         &payload,
     )?;
-    require_interactive_session_backend(workspace_write_policy(
-        &cwd,
-        vec![cwd.clone()],
-    ))
-    .map_err(|error| format!("Terminal sandbox check failed: {error}"))?;
+    require_interactive_session_backend(workspace_write_policy(&cwd, vec![cwd.clone()]))
+        .map_err(|error| format!("Terminal sandbox check failed: {error}"))?;
+
+    #[cfg(target_os = "windows")]
+    let terminal_job = crate::sandbox::create_windows_terminal_job();
+
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -298,6 +302,13 @@ pub(crate) fn terminal_create(
         .slave
         .spawn_command(command)
         .map_err(|error| error.to_string())?;
+
+    #[cfg(target_os = "windows")]
+    if let Some(ref job) = terminal_job {
+        if let Some(pid) = child.process_id() {
+            crate::sandbox::assign_process_to_terminal_job(job, pid);
+        }
+    }
     let mut reader = pair
         .master
         .try_clone_reader()
@@ -353,6 +364,8 @@ pub(crate) fn terminal_create(
             master: pair.master,
             writer,
             child,
+            #[cfg(target_os = "windows")]
+            job: terminal_job,
         },
     );
 

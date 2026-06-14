@@ -13,6 +13,18 @@ import {
 import type { WorkbenchFileEntry, WorkbenchLocale } from "../types";
 import { WorkspaceContext } from "./WorkspaceContext";
 
+interface ChatComposerPermissionControls {
+  canRequestApproval: boolean;
+  onRequestApproval?: () => void;
+  pendingRequest?: {
+    allowAlways?: boolean;
+    onApprove: () => void;
+    onAllowTask: () => void;
+    onDeny: () => void;
+  };
+  showFullAccess?: boolean;
+}
+
 interface ChatComposerProps {
   actionsClassName: string;
   className: string;
@@ -22,6 +34,7 @@ interface ChatComposerProps {
   draftGoal: string;
   isStreaming?: boolean;
   labels: WorkbenchLocale["labels"];
+  permissionControls?: ChatComposerPermissionControls;
   recentWorkspacePaths: string[];
   sendButtonClassName?: string;
   taskInputPlaceholder?: string;
@@ -113,6 +126,7 @@ export function ChatComposer({
   draftGoal,
   isStreaming = false,
   labels,
+  permissionControls,
   recentWorkspacePaths,
   sendButtonClassName = "javis-send-button",
   taskInputPlaceholder,
@@ -719,6 +733,57 @@ export function ChatComposer({
           ref={fileInputRef}
           type="file"
         />
+        {permissionControls ? (
+          <div className="javis-permission-controls">
+            {permissionControls.canRequestApproval && !permissionControls.pendingRequest ? (
+              <button
+                className="javis-permission-button javis-permission-request"
+                disabled={disabled}
+                onClick={() => permissionControls.onRequestApproval?.()}
+                type="button"
+              >
+                {labels.requestApproval}
+              </button>
+            ) : null}
+            {permissionControls.pendingRequest ? (
+              <>
+                <button
+                  className="javis-permission-button javis-permission-approve"
+                  onClick={() => permissionControls.pendingRequest?.onApprove()}
+                  type="button"
+                >
+                  {labels.approveOnce}
+                </button>
+                {permissionControls.pendingRequest.allowAlways ? (
+                  <button
+                    className="javis-permission-button javis-permission-allow-task"
+                    onClick={() => permissionControls.pendingRequest?.onAllowTask()}
+                    type="button"
+                  >
+                    {labels.allowTask}
+                  </button>
+                ) : null}
+                <button
+                  className="javis-permission-button javis-permission-deny"
+                  onClick={() => permissionControls.pendingRequest?.onDeny()}
+                  type="button"
+                >
+                  {labels.denyPermission}
+                </button>
+              </>
+            ) : null}
+            {permissionControls.showFullAccess ? (
+              <button
+                className="javis-permission-button javis-permission-full-access"
+                disabled
+                type="button"
+                title={labels.fullAccess}
+              >
+                {labels.fullAccess}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         {showWorkspaceContext ? (
           <WorkspaceContext
             currentWorkspacePath={currentWorkspacePath}

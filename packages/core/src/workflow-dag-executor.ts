@@ -1,5 +1,10 @@
 import type { SharedTaskContext } from "./shared-context";
-import { createSharedTaskContext } from "./shared-context";
+import {
+  createSharedTaskContext,
+  formatStepInputValidationError,
+  validateContextValue,
+  validateStepInputContext,
+} from "./shared-context";
 import { DEFAULT_TASK_TIMEOUT_MS, throwIfTaskAborted, withTaskTimeout } from "./task-wait";
 import type { WorkbenchWorkflow, WorkbenchWorkflowStep } from "./workflows";
 
@@ -33,6 +38,13 @@ export interface WorkflowExecutorOptions {
   context?: SharedTaskContext;
   signal?: AbortSignal;
   stepTimeoutMs?: number;
+  maxStepRetries?: number;
+  shouldRetryStep?(request: {
+    step: WorkbenchWorkflowStep;
+    error: string;
+    attempt: number;
+    context: SharedTaskContext;
+  }): boolean;
   executeStep(
     step: WorkbenchWorkflowStep,
     context: SharedTaskContext,
@@ -63,6 +75,12 @@ export interface WorkflowExecutorOptions {
   ): void;
   onStepHeartbeat?(step: WorkbenchWorkflowStep, elapsedMs: number, context: SharedTaskContext): void;
   onStepTimeout?(step: WorkbenchWorkflowStep, timeoutMs: number, context: SharedTaskContext): void;
+  onStepRetry?(
+    step: WorkbenchWorkflowStep,
+    error: string,
+    attempt: number,
+    context: SharedTaskContext,
+  ): void;
 }
 
 export async function executeWorkflow({
@@ -70,6 +88,8 @@ export async function executeWorkflow({
   context = createSharedTaskContext(),
   signal,
   stepTimeoutMs = DEFAULT_TASK_TIMEOUT_MS,
+  maxStepRetries = 1,
+  shouldRetryStep = defaultShouldRetryStep,
   executeStep,
   onStepStarted,
   onStepCompleted,
@@ -78,6 +98,7 @@ export async function executeWorkflow({
   onStepReplanned,
   onStepHeartbeat,
   onStepTimeout,
+  onStepRetry,
 }: WorkflowExecutorOptions): Promise<WorkflowExecutionResult> {
   const activeWorkflow: WorkbenchWorkflow = {
     ...workflow,
@@ -126,6 +147,8 @@ export async function executeWorkflow({
         executeStep,
         signal,
         stepTimeoutMs,
+        maxStepRetries,
+        shouldRetryStep,
         onStepStarted,
         onStepCompleted,
         onStepFailed,
@@ -133,6 +156,7 @@ export async function executeWorkflow({
         onStepReplanned,
         onStepHeartbeat,
         onStepTimeout,
+        onStepRetry,
       );
       if (parallelResult) {
         return parallelResult;
@@ -152,6 +176,8 @@ export async function executeWorkflow({
         executeStep,
         signal,
         stepTimeoutMs,
+        maxStepRetries,
+        shouldRetryStep,
         onStepStarted,
         onStepCompleted,
         onStepFailed,
@@ -159,6 +185,7 @@ export async function executeWorkflow({
         onStepReplanned,
         onStepHeartbeat,
         onStepTimeout,
+        onStepRetry,
       );
       if (serialResult) {
         return serialResult;
@@ -199,6 +226,8 @@ async function executeReadySteps(
   executeStep: WorkflowExecutorOptions["executeStep"],
   signal: AbortSignal | undefined,
   stepTimeoutMs: number,
+  maxStepRetries: number,
+  shouldRetryStep: NonNullable<WorkflowExecutorOptions["shouldRetryStep"]>,
   onStepStarted: WorkflowExecutorOptions["onStepStarted"],
   onStepCompleted: WorkflowExecutorOptions["onStepCompleted"],
   onStepFailed: WorkflowExecutorOptions["onStepFailed"],
@@ -206,6 +235,7 @@ async function executeReadySteps(
   onStepReplanned: WorkflowExecutorOptions["onStepReplanned"],
   onStepHeartbeat: WorkflowExecutorOptions["onStepHeartbeat"],
   onStepTimeout: WorkflowExecutorOptions["onStepTimeout"],
+  onStepRetry: WorkflowExecutorOptions["onStepRetry"],
 ): Promise<WorkflowExecutionResult | undefined> {
   const stepExecutions = steps.map((step) =>
     executeTrackedStep(
@@ -215,9 +245,12 @@ async function executeReadySteps(
       executeStep,
       signal,
       stepTimeoutMs,
+      maxStepRetries,
+      shouldRetryStep,
       onStepStarted,
       onStepHeartbeat,
       onStepTimeout,
+      onStepRetry,
     ),
   );
 
@@ -236,6 +269,24 @@ async function executeReadySteps(
     const { step, result } = item;
     results.set(step.id, result.output);
     context.set(`step:${step.id}`, result.output);
+    if (step.outputContextKey && !context.has(step.outputContextKey)) {
+      context.set(step.outputContextKey, result.output);
+    }
+    const handoffFailure = validateCompletedStepHandoffs({
+      step,
+      workflow: activeWorkflow,
+      context,
+      completed,
+      abandoned,
+    });
+    if (handoffFailure) {
+      if (handoffFailure.step.id !== step.id) {
+        completed.add(step.id);
+        onStepCompleted?.(step, result.output, context);
+      }
+      failures.push(handoffFailure);
+      continue;
+    }
     completed.add(step.id);
     onStepCompleted?.(step, result.output, context);
   }
@@ -328,27 +379,32 @@ function executeTrackedStep(
   executeStep: WorkflowExecutorOptions["executeStep"],
   signal: AbortSignal | undefined,
   stepTimeoutMs: number,
+  maxStepRetries: number,
+  shouldRetryStep: NonNullable<WorkflowExecutorOptions["shouldRetryStep"]>,
   onStepStarted: WorkflowExecutorOptions["onStepStarted"],
   onStepHeartbeat: WorkflowExecutorOptions["onStepHeartbeat"],
   onStepTimeout: WorkflowExecutorOptions["onStepTimeout"],
+  onStepRetry: WorkflowExecutorOptions["onStepRetry"],
 ): TrackedStepExecution {
   runningOrFinished.add(step.id);
   const startedAt = Date.now();
-  onStepStarted?.(step, context);
   const heartbeat = setInterval(() => {
     onStepHeartbeat?.(step, Date.now() - startedAt, context);
   }, Math.max(Math.min(stepTimeoutMs / 3, 15_000), 1_000));
 
   let execution: TrackedStepExecution;
-  execution = withTaskTimeout(
-    () => executeStep(step, context),
-    {
-      label: `workflow step ${step.id}`,
-      timeoutMs: stepTimeoutMs,
-      signal,
-      onTimeout: () => onStepTimeout?.(step, stepTimeoutMs, context),
-    },
-  ).then(
+  execution = executeStepWithRetry({
+    step,
+    context,
+    executeStep,
+    signal,
+    stepTimeoutMs,
+    maxStepRetries,
+    shouldRetryStep,
+    onStepStarted,
+    onStepTimeout,
+    onStepRetry,
+  }).then(
     (result) => ({
       execution,
       status: "fulfilled" as const,
@@ -366,6 +422,123 @@ function executeTrackedStep(
   }) as TrackedStepExecution;
 
   return execution;
+}
+
+async function executeStepWithRetry({
+  step,
+  context,
+  executeStep,
+  signal,
+  stepTimeoutMs,
+  maxStepRetries,
+  shouldRetryStep,
+  onStepStarted,
+  onStepTimeout,
+  onStepRetry,
+}: {
+  step: WorkbenchWorkflowStep;
+  context: SharedTaskContext;
+  executeStep: WorkflowExecutorOptions["executeStep"];
+  signal: AbortSignal | undefined;
+  stepTimeoutMs: number;
+  maxStepRetries: number;
+  shouldRetryStep: NonNullable<WorkflowExecutorOptions["shouldRetryStep"]>;
+  onStepStarted: WorkflowExecutorOptions["onStepStarted"];
+  onStepTimeout: WorkflowExecutorOptions["onStepTimeout"];
+  onStepRetry: WorkflowExecutorOptions["onStepRetry"];
+}): Promise<WorkflowStepExecutionResult> {
+  const retries = Math.max(0, Math.trunc(maxStepRetries));
+  for (let attempt = 0; ; attempt += 1) {
+    onStepStarted?.(step, context);
+    try {
+      const inputValidation = validateStepInputContext(step, context);
+      if (!inputValidation.valid) {
+        throw new Error(formatStepInputValidationError(inputValidation));
+      }
+      return await withTaskTimeout(
+        () => executeStep(step, context),
+        {
+          label: attempt === 0 ? `workflow step ${step.id}` : `workflow step ${step.id} retry ${attempt}`,
+          timeoutMs: stepTimeoutMs,
+          signal,
+          onTimeout: () => onStepTimeout?.(step, stepTimeoutMs, context),
+        },
+      );
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (
+        attempt >= retries ||
+        !shouldRetryStep({ step, error: errorMessage, attempt, context })
+      ) {
+        throw error;
+      }
+      onStepRetry?.(step, errorMessage, attempt + 1, context);
+    }
+  }
+}
+
+function validateCompletedStepHandoffs({
+  step,
+  workflow,
+  context,
+  completed,
+  abandoned,
+}: {
+  step: WorkbenchWorkflowStep;
+  workflow: WorkbenchWorkflow;
+  context: SharedTaskContext;
+  completed: Set<string>;
+  abandoned: Set<string>;
+}): { step: WorkbenchWorkflowStep; error: string } | undefined {
+  const completedWithStep = new Set([...completed, step.id]);
+  const readyConsumers = workflow.steps.filter((candidate) =>
+    candidate.id !== step.id &&
+    (candidate.inputContextKeys?.length ?? 0) > 0 &&
+    candidate.dependsOn.every((dependency) => completedWithStep.has(dependency) || abandoned.has(dependency)) &&
+    (step.outputContextKey
+      ? candidate.inputContextKeys?.includes(step.outputContextKey)
+      : candidate.dependsOn.includes(step.id))
+  );
+
+  for (const consumer of readyConsumers) {
+    const inputValidation = validateStepInputContext(consumer, context);
+    if (!inputValidation.valid) {
+      return {
+        step: consumer,
+        error: `Handoff validation failed after step ${step.id}: ${formatStepInputValidationError(inputValidation)}`,
+      };
+    }
+  }
+
+  if (step.outputContextKey) {
+    const outputValidation = validateContextValue(step.outputContextKey, context.get(step.outputContextKey));
+    if (!outputValidation.valid) {
+      return {
+        step,
+        error: `Handoff validation failed after step ${step.id}: output context key ${step.outputContextKey}` +
+          `${outputValidation.expectedType ? ` expected ${outputValidation.expectedType}` : ""}.`,
+      };
+    }
+  }
+  return undefined;
+}
+
+function defaultShouldRetryStep(request: {
+  error: string;
+}): boolean {
+  return isTransientWorkflowStepError(request.error);
+}
+
+function isTransientWorkflowStepError(error: string): boolean {
+  const normalized = error.toLowerCase();
+  if (
+    /permission|approval|denied|forbidden|unauthorized|disabled|not available|missing|verification failed|invalid schema|outside .*allowed/i
+      .test(normalized)
+  ) {
+    return false;
+  }
+  return /timed out|timeout|temporar|network|econnreset|etimedout|eai_again|rate limit|429|502|503|504|service unavailable|provider unavailable|model unavailable|fetch failed/i
+    .test(normalized);
 }
 
 function appendReplannedSteps(

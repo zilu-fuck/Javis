@@ -58,18 +58,25 @@ The embedded Chrome fallback must:
 
 ## Shell Rules
 
-Only allowlisted commands can run through the current shell bridge. The
-allowlist is deliberately small:
+Only allowlisted commands can run through the current shell bridge. The command
+now enters the native sandbox broker first and returns a sandbox report to the
+caller. Until an OS backend is active, these commands run under
+`SandboxBackend::PolicyOnly` with `enforced=false`; the report must not be read
+as OS-level isolation. Each successful brokered read-only shell command appends
+a `sandbox_process` record to the task audit JSONL.
+
+The allowlist is deliberately small:
 
 - version checks
 - selected read-only git inspection commands such as `git status --short`,
-  `git diff`, and `git log`
+  `git diff --stat`, `git diff --unified=1`, and `git diff --check`
 
 Project-defined scripts such as `pnpm test`, `pnpm typecheck`, `npm test`, and
 `yarn test` are not read-only because the workspace controls their command
 bodies. Commands that install dependencies, publish, delete, reset git state,
 force push, run arbitrary scripts, or open an interactive terminal are outside
-the current v1 boundary unless they go through a future native approval broker.
+the current v1 boundary unless they go through a future native approval path and
+an enforcing sandbox backend.
 
 ## Local Read Rules
 
@@ -113,11 +120,68 @@ PDF organization rules:
 Code Agent patch rules:
 
 - opencode or provider calls may only produce preview proposals.
+- Local opencode proposal CLI execution requires a network/process sandbox
+  launch backend. Until that backend exists, Javis fails closed instead of
+  spawning the provider CLI directly.
 - Patch application runs through Javis's native `apply_code_patch` command.
 - The patch may touch only the approved changed-file list.
 - Parent directory traversal and workspace escape are rejected.
-- A product-ready implementation still needs durable approval records, patch
-  dry-run validation, base file hashes, and shared native guard helpers.
+- Native approval, patch hash, changed-file list, base file hashes, and optional
+  base git head are checked before any external apply process can run.
+- After approval and path validation, patch application requires a
+  `workspace_write` sandbox launch backend for `git apply`. Until that OS
+  backend can enforce filesystem and network boundaries, Javis fails closed and
+  does not write the patch to the real workspace.
+- A product-ready implementation still needs durable approval records and the
+  actual enforcing `git apply` sandbox launcher.
+
+Git and GitHub command rules:
+
+- Git stage, commit, push, pull request creation, and pull request commenting
+  keep their existing native approval previews and preview hashes.
+- After preview validation and before approval consumption, each mutating git or
+  GitHub CLI operation requires the relevant sandbox backend. Local repository
+  mutations require `workspace_write`; push and `gh` operations require a
+  network-capable backend.
+- Until those enforcing launchers exist, these operations fail closed and do not
+  run raw `git` or `gh` commands.
+
+## Temporary Workspace Sandbox
+
+The first internal Temporary Workspace Sandbox primitives are implemented for
+exploratory write tasks. Javis can create a plain copied workspace under the
+ignored `.codex-tmp/javis-sandboxes/<task-id>` directory after sanitizing the
+task id and canonicalizing the real workspace root. The copy skips `.codex-tmp`
+to avoid recursively copying previous sandboxes, and skips symlinks in this
+first version instead of following links that may point outside the workspace.
+Existing sandbox task directories are rejected instead of overwritten.
+
+Javis can also compute a conservative diff between the temporary copy and the
+real workspace. It reports added, modified, deleted, and binary-changed files.
+For UTF-8 text files it emits a simple unified diff preview; binary or non-UTF-8
+changes are reported by status without invented text hunks. The diff walker also
+skips `.codex-tmp`.
+
+Javis can build an internal apply plan from that diff. The plan records the
+affected file list, unified diff, real workspace root, sandbox root, and a
+preview hash derived from the file list and diff. Applying the plan requires the
+approved changed-file list and preview hash to match exactly. Before copying any
+changes back, Javis re-diffs the temporary workspace and rejects the apply if
+the preview changed after approval. Added and modified text files are copied
+back to the real workspace, deleted files are removed, and binary changes are
+rejected for now instead of being applied silently.
+
+After review, Javis can internally finalize a temporary workspace sandbox by
+either deleting the copied directory or archiving it with an
+`<task-id>-archived-<timestamp>` name under the same ignored sandboxes root.
+Finalization refuses paths outside `.codex-tmp/javis-sandboxes` and never
+overwrites an existing archive path.
+
+These primitives are not yet wired to model execution, approval UI, confirmed
+apply UI, native approval records, or user-facing cleanup/archive controls. They
+are not a substitute for OS sandboxing: commands run inside the copied directory
+can still attempt to access paths outside it until a platform backend enforces
+filesystem boundaries.
 
 ## Model Credentials
 

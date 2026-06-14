@@ -16,6 +16,7 @@ export const AGENT_SYSTEM_PROMPT_SECTION_ORDER = [
   "collaboration",
   "ui_design_rules",
   "agent_definition",
+  "workspace_profile",
   "custom_style",
   "runtime_context",
 ] as const;
@@ -28,6 +29,7 @@ export const PROMPT_SECTION_REGISTRY: readonly PromptSectionDefinition[] = [
   { key: "collaboration", scope: "global" },
   { key: "ui_design_rules", scope: "opt_in" },
   { key: "agent_definition", scope: "agent_only" },
+  { key: "workspace_profile", scope: "opt_in" },
   { key: "custom_style", scope: "opt_in" },
   { key: "runtime_context", scope: "opt_in" },
   { key: "research_evidence_schema", scope: "agent_only", agentKinds: ["research"] },

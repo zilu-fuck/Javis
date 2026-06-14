@@ -426,7 +426,7 @@ export function sanitizeTaskSnapshot(value: unknown): TaskSnapshot | null {
     snapshot.tokenUsage = value.tokenUsage;
   }
   if (isHandoffReport(value.handoffReport)) {
-    snapshot.handoffReport = value.handoffReport;
+    snapshot.handoffReport = normalizeHandoffReport(value.handoffReport);
   }
   if (isRecoveryReport(value.recoveryReport)) {
     snapshot.recoveryReport = value.recoveryReport;
@@ -626,7 +626,17 @@ function isAgentKind(value: unknown): boolean {
     value === "scheduler" ||
     value === "research" ||
     value === "code" ||
-    value === "verifier"
+    value === "language-reviewer" ||
+    value === "security-reviewer" ||
+    value === "build-fix" ||
+    value === "test-runner" ||
+    value === "doc-updater" ||
+    value === "explorer" ||
+    value === "perf-analyzer" ||
+    value === "refactor" ||
+    value === "verifier" ||
+    value === "workspace" ||
+    value === "vision"
   );
 }
 
@@ -1076,8 +1086,22 @@ function isHandoffReport(value: unknown): value is NonNullable<TaskSnapshot["han
     isHandoffReportStepArray(value.steps) &&
     isHandoffRecordArray(value.handoffs) &&
     isStringArray(value.missingInputContextKeys) &&
+    (!("invalidInputContextKeys" in value) || isStringArray(value.invalidInputContextKeys)) &&
     isStringArray(value.unconsumedOutputContextKeys)
   );
+}
+
+function normalizeHandoffReport(
+  report: NonNullable<TaskSnapshot["handoffReport"]>,
+): NonNullable<TaskSnapshot["handoffReport"]> {
+  return {
+    ...report,
+    invalidInputContextKeys: report.invalidInputContextKeys ?? [],
+    steps: report.steps.map((step) => ({
+      ...step,
+      invalidInputContextKeys: step.invalidInputContextKeys ?? [],
+    })),
+  };
 }
 
 function isHandoffReportStepArray(
@@ -1092,6 +1116,7 @@ function isHandoffReportStepArray(
       isStringArray(step.dependsOn) &&
       isStringArray(step.inputContextKeys) &&
       isStringArray(step.missingInputContextKeys) &&
+      (!("invalidInputContextKeys" in step) || isStringArray(step.invalidInputContextKeys)) &&
       (!("title" in step) || isString(step.title)) &&
       (!("outputContextKey" in step) || isString(step.outputContextKey)) &&
       (!("successCriteria" in step) || isString(step.successCriteria)),
@@ -1110,6 +1135,7 @@ function isHandoffRecordArray(
       isHandoffStatus(handoff.status) &&
       isStringArray(handoff.consumedByStepIds) &&
       isHandoffValueSummary(handoff.valueSummary) &&
+      (!("schemaError" in handoff) || isString(handoff.schemaError)) &&
       (!("producedByStepId" in handoff) || isString(handoff.producedByStepId)),
     )
   );
@@ -1122,7 +1148,8 @@ function isHandoffStatus(
     value === "available" ||
     value === "missing" ||
     value === "unconsumed" ||
-    value === "input_missing"
+    value === "input_missing" ||
+    value === "invalid_schema"
   );
 }
 

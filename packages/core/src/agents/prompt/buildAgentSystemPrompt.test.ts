@@ -65,6 +65,24 @@ describe("buildAgentSystemPrompt", () => {
     expect(uiPrompt).toContain("## UI Generation Design Rules");
   });
 
+  it("injects workspace type signals when provided", () => {
+    const prompt = buildAgentSystemPrompt({
+      kind: "code",
+      locale: "en",
+      workspaceProfile: {
+        workspacePath: "E:/Javis",
+        type: "Tauri desktop + React + Rust",
+        signals: ["package.json", "src-tauri/Cargo.toml", "react", "tauri"],
+        guidance: "Prefer matching project conventions.",
+      },
+    });
+
+    expect(prompt).toContain("## Workspace Profile");
+    expect(prompt).toContain("Workspace type: Tauri desktop + React + Rust");
+    expect(prompt).toContain("src-tauri/Cargo.toml");
+    expect(prompt).toContain("Prefer matching project conventions.");
+  });
+
   it("uses localized section titles for Chinese prompts", () => {
     const prompt = buildAgentSystemPrompt({
       kind: "code",

@@ -36,6 +36,7 @@ const ALLOWED_TABLES: &[&str] = &[
     "memory_injection_logs",
     "vector_index_items",
     "vector_index_buckets",
+    "workspace_settings",
 ];
 
 #[derive(Clone, Copy)]
@@ -797,6 +798,8 @@ fn require_known_select_shape(tokens: &[String], sql_text: &str) -> Result<(), S
             | "select record_json from tool_call_audit where task_id order by coalesce started_at ended_at id asc"
             | "select key value updated_at from user_preferences order by key asc"
             | "select value from user_preferences where key"
+            | "select workspace_id key value updated_at from workspace_settings where workspace_id order by key asc"
+            | "select value from workspace_settings where workspace_id and key"
             | "select goal_json from current_goal where id limit 1"
             | "select event_json from goal_events where goal_id order by created_at desc id desc limit"
             | "select evaluation_json from goal_evaluations where goal_id order by created_at desc id desc limit"
@@ -862,6 +865,12 @@ fn has_required_select_operator_shape(signature: &str, sql_text: &str) -> bool {
             sql_text.contains("where task_id = ?")
         }
         "select value from user_preferences where key" => sql_text.contains("where key = ?"),
+        "select workspace_id key value updated_at from workspace_settings where workspace_id order by key asc" => {
+            sql_text.contains("where workspace_id = ? order by key asc")
+        }
+        "select value from workspace_settings where workspace_id and key" => {
+            sql_text.contains("where workspace_id = ? and key = ?")
+        }
         "select goal_json from current_goal where id limit 1" => {
             sql_text.contains("where id = ? limit 1")
         }
@@ -979,6 +988,9 @@ fn require_known_execute_shape(tokens: &[String], sql_text: &str) -> Result<(), 
                 | "insert into scheduled_tasks id name goal workspace_path schedule_type schedule_value enabled last_run_at last_run_started_at next_run_at created_at source updated_at values"
                 | "insert or replace into user_preferences key value updated_at values"
                 | "insert into user_preferences key value updated_at values"
+                | "insert or replace into workspace_settings workspace_id key value updated_at values"
+                | "insert into workspace_settings workspace_id key value updated_at values"
+                | "delete from workspace_settings where workspace_id and key"
                 | "insert into current_goal id goal_json updated_at values on conflict id do update set goal_json excluded goal_json updated_at excluded updated_at"
                 | "insert into goal_events id goal_id run_id task_id type created_at event_json values on conflict id do update set goal_id excluded goal_id run_id excluded run_id task_id excluded task_id type excluded type created_at excluded created_at event_json excluded event_json"
                 | "insert into goal_evaluations id goal_id task_id decision created_at evaluation_json values on conflict id do update set goal_id excluded goal_id task_id excluded task_id decision excluded decision created_at excluded created_at evaluation_json excluded evaluation_json"
@@ -1322,6 +1334,7 @@ fn is_known_create_shape(tokens: &[String]) -> bool {
             "updated_at",
         ],
         "vector_index_buckets" => &["namespace", "bucket_key", "item_id"],
+        "workspace_settings" => &["workspace_id", "key", "value", "updated_at"],
         _ => return false,
     };
     required_columns
