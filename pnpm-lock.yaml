@@ -95,12 +95,18 @@ importers:
       typescript:
         specifier: ~5.8.3
         version: 5.8.3
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
 
   packages/tools:
     devDependencies:
       typescript:
         specifier: ~5.8.3
         version: 5.8.3
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
 
   packages/ui:
     dependencies:
@@ -1450,6 +1456,9 @@ packages:
   yallist@3.1.1:
     resolution: {integrity: sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g==}
 
+  zod@4.4.3:
+    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
+
 snapshots:
 
   '@adobe/css-tools@4.5.0': {}
@@ -2536,3 +2545,5 @@ snapshots:
   xmlchars@2.2.0: {}
 
   yallist@3.1.1: {}
+
+  zod@4.4.3: {}

@@ -1,0 +1,22 @@
+{
+  "title": "Test: Cyclic Dependency",
+  "reasoning": "Regression fixture for cycle detection.",
+  "steps": [
+    {
+      "id": "step-a",
+      "title": "Step A",
+      "assignedAgentKind": "code",
+      "requiredCapabilities": ["code_search"],
+      "dependsOn": ["step-b"],
+      "successCriteria": "Done."
+    },
+    {
+      "id": "step-b",
+      "title": "Step B",
+      "assignedAgentKind": "code",
+      "requiredCapabilities": ["code_search"],
+      "dependsOn": ["step-a"],
+      "successCriteria": "Done."
+    }
+  ]
+}

@@ -5,6 +5,10 @@ export interface SharedTaskContext {
   snapshot(): Record<string, unknown>;
   clear(): void;
   resolveKey(key: ContextKey, locale?: string): string;
+  setEnvelope<T>(key: string, envelope: import("./artifact-envelope").ArtifactEnvelope<T>): void;
+  getEnvelope(key: string): import("./artifact-envelope").ArtifactEnvelope | undefined;
+  hasEnvelope(key: string): boolean;
+  envelopeSnapshot(): Record<string, import("./artifact-envelope").ArtifactEnvelope>;
 }
 
 export const CONTEXT_KEYS = {
@@ -59,6 +63,14 @@ export interface HandoffReportRecord {
   status: "available" | "missing" | "unconsumed" | "input_missing" | "invalid_schema";
   valueSummary: HandoffReportValueSummary;
   schemaError?: string;
+  artifact?: {
+    artifactId: string;
+    type: string;
+    schemaVersion: number;
+    contentHash: string;
+    sensitivity: string;
+    producer: { stepId: string; agentKind?: string; toolName?: string };
+  };
 }
 
 export interface HandoffReportStepRecord {
@@ -117,6 +129,7 @@ export function createSharedTaskContext(
   initialValues: Record<string, unknown> = {},
 ): SharedTaskContext {
   const store = new Map<string, unknown>(Object.entries(initialValues));
+  const envelopeStore = new Map<string, import("./artifact-envelope").ArtifactEnvelope>();
 
   return {
     set(key, value) {
@@ -133,9 +146,23 @@ export function createSharedTaskContext(
     },
     clear() {
       store.clear();
+      envelopeStore.clear();
     },
     resolveKey(key, locale) {
       return contextKeyForLocale(key, locale);
+    },
+    setEnvelope(key, envelope) {
+      store.set(key, (envelope as { payload: unknown }).payload);
+      envelopeStore.set(key, envelope);
+    },
+    getEnvelope(key) {
+      return envelopeStore.get(key);
+    },
+    hasEnvelope(key) {
+      return envelopeStore.has(key);
+    },
+    envelopeSnapshot() {
+      return Object.fromEntries(envelopeStore);
     },
   };
 }
@@ -195,6 +222,27 @@ export const DEFAULT_CONTEXT_KEY_SCHEMAS: readonly ContextKeySchema[] = [
   objectWith("proposedEdit", "object", []),
   objectWith("approvalRecord", "object", []),
 ];
+
+/**
+ * SharedContext keys that are preloaded by the runtime before any DAG
+ * step runs. The plan compiler treats these as legitimate consumers
+ * without requiring a producer step.
+ *
+ * Built from the documented `CONTEXT_KEYS` plus every key declared in
+ * `DEFAULT_CONTEXT_KEY_SCHEMAS`, so the allowlist tracks the runtime's
+ * own preloaded set. Keep both sources in sync when adding new
+ * preloaded keys.
+ */
+export const DEFAULT_PRELOADED_CONTEXT_KEYS: readonly string[] = (() => {
+  const keys = new Set<string>();
+  for (const value of Object.values(CONTEXT_KEYS)) {
+    keys.add(value.en);
+  }
+  for (const schema of DEFAULT_CONTEXT_KEY_SCHEMAS) {
+    keys.add(schema.key);
+  }
+  return [...keys].sort();
+})();
 
 export function validateContextValue(
   key: string,
@@ -307,6 +355,7 @@ export function buildHandoffReport(
     ...producers.keys(),
     ...consumers.keys(),
   ]);
+  const envelopeSource = isSharedTaskContext(context) ? context : undefined;
   const handoffs = [...allContextKeys].sort().map((contextKey) => {
     const producer = producers.get(contextKey);
     const consumingSteps = consumers.get(contextKey) ?? [];
@@ -317,6 +366,19 @@ export function buildHandoffReport(
         ? `expected ${schemaValidation.expectedType}`
         : schemaValidation.reason
       : undefined;
+    const envelope = envelopeSource?.getEnvelope(contextKey);
+    const artifact = envelope ? {
+      artifactId: envelope.artifactId,
+      type: envelope.type,
+      schemaVersion: envelope.schemaVersion,
+      contentHash: envelope.contentHash,
+      sensitivity: envelope.sensitivity ?? "public",
+      producer: {
+        stepId: envelope.producer.stepId,
+        agentKind: envelope.producer.agentKind,
+        toolName: envelope.producer.toolName,
+      },
+    } : undefined;
     return {
       contextKey,
       producedByStepId: producer?.id,
@@ -329,6 +391,7 @@ export function buildHandoffReport(
       }),
       valueSummary: summarizeHandoffValue(snapshot[contextKey], previewLength),
       ...(schemaError ? { schemaError } : {}),
+      ...(artifact ? { artifact } : {}),
     };
   });
 

@@ -37,6 +37,8 @@ const ALLOWED_TABLES: &[&str] = &[
     "vector_index_items",
     "vector_index_buckets",
     "workspace_settings",
+    "runtime_events",
+    "workflow_checkpoints",
 ];
 
 #[derive(Clone, Copy)]
@@ -828,6 +830,14 @@ fn require_known_select_shape(tokens: &[String], sql_text: &str) -> Result<(), S
             | "select id namespace owner_id dimensions metric vector_json vector_norm metadata_json from vector_index_items where id limit 1"
             | "select id namespace owner_id dimensions metric vector_json vector_norm metadata_json from vector_index_items where namespace limit"
             | "select id namespace owner_id dimensions metric vector_json vector_norm metadata_json from vector_index_items where namespace and scope_type and scope_id limit"
+            | "select envelope_json from runtime_events where run_id order by sequence asc limit"
+            | "select envelope_json from runtime_events where task_id order by recorded_at asc sequence asc limit"
+            | "select envelope_json from runtime_events where run_id order by sequence desc limit 1"
+            | "select count as count from runtime_events where run_id"
+            | "select checkpoint_json from workflow_checkpoints where run_id order by event_sequence desc limit 1"
+            | "select checkpoint_json from workflow_checkpoints where task_id order by created_at desc limit 1"
+            | "select checkpoint_json from workflow_checkpoints where task_id order by event_sequence desc limit"
+            | "select checkpoint_id from workflow_checkpoints where task_id order by event_sequence desc"
     ) && has_required_select_operator_shape(&signature, sql_text)
     {
         Ok(())
@@ -963,6 +973,18 @@ fn has_required_select_operator_shape(signature: &str, sql_text: &str) -> bool {
             sql_text.contains("where namespace = ? and scope_type = ? and scope_id = ?")
                 && sql_text.contains("limit ?")
         }
+        "select envelope_json from runtime_events where run_id order by sequence asc limit" => {
+            sql_text.contains("where run_id = ?") && sql_text.contains("order by sequence asc") && sql_text.contains("limit ?")
+        }
+        "select envelope_json from runtime_events where task_id order by recorded_at asc sequence asc limit" => {
+            sql_text.contains("where task_id = ?") && sql_text.contains("order by recorded_at asc") && sql_text.contains("limit ?")
+        }
+        "select envelope_json from runtime_events where run_id order by sequence desc limit 1" => {
+            sql_text.contains("where run_id = ?") && sql_text.contains("order by sequence desc") && sql_text.contains("limit 1")
+        }
+        "select count as count from runtime_events where run_id" => {
+            sql_text.contains("where run_id = ?")
+        }
         _ => true,
     }
 }
@@ -1000,6 +1022,8 @@ fn require_known_execute_shape(tokens: &[String], sql_text: &str) -> Result<(), 
                 | "insert into memory_injection_logs id session_id message_id workspace_id injection_type memory_fact_ids query_hash query_terms query_length scope_type scope_id prompt_section score_summary created_at values"
                 | "insert into vector_index_items id namespace owner_type owner_id scope_type scope_id content_hash dimensions metric vector_json vector_norm metadata_json created_at updated_at values on conflict id do update set namespace excluded namespace owner_type excluded owner_type owner_id excluded owner_id scope_type excluded scope_type scope_id excluded scope_id content_hash excluded content_hash dimensions excluded dimensions metric excluded metric vector_json excluded vector_json vector_norm excluded vector_norm metadata_json excluded metadata_json updated_at excluded updated_at"
                 | "insert or ignore into vector_index_buckets namespace bucket_key item_id values"
+                | "insert into runtime_events event_id task_id run_id sequence event_version event_kind workflow_id step_id agent_id occurred_at recorded_at envelope_json values"
+                | "insert into workflow_checkpoints checkpoint_id task_id run_id workflow_id workflow_version plan_hash event_sequence created_at workflow_json checkpoint_json values on conflict checkpoint_id do update set task_id excluded task_id run_id excluded run_id workflow_id excluded workflow_id workflow_version excluded workflow_version plan_hash excluded plan_hash event_sequence excluded event_sequence created_at excluded created_at workflow_json excluded workflow_json checkpoint_json excluded checkpoint_json"
                 | "update agent_memory_facts set last_accessed_at case when last_accessed_at is null or last_accessed_at then else last_accessed_at end access_count coalesce access_count 0 1 where id and status"
                 | "delete from file_scan_cache where scanned_at"
                 | "delete from file_scan_cache"
@@ -1028,6 +1052,8 @@ fn require_known_execute_shape(tokens: &[String], sql_text: &str) -> Result<(), 
                 | "delete from memory_injection_logs where scope_type and scope_id"
                 | "delete from vector_index_buckets where item_id"
                 | "delete from vector_index_items where id"
+                | "delete from runtime_events where task_id"
+                | "delete from runtime_events where task_id and event_kind in"
         ) && has_required_execute_operator_shape(&signature, sql_text)
     {
         Ok(())
@@ -1084,6 +1110,10 @@ fn has_required_execute_operator_shape(signature: &str, sql_text: &str) -> bool 
         }
         "delete from vector_index_buckets where item_id" => sql_text.contains("where item_id = ?"),
         "delete from vector_index_items where id" => sql_text.contains("where id = ?"),
+        "delete from runtime_events where task_id" => sql_text.contains("where task_id = ?"),
+        "delete from runtime_events where task_id and event_kind in" => {
+            sql_text.contains("where task_id = ?") && sql_text.contains("event_kind in")
+        }
         _ => true,
     }
 }
@@ -1335,6 +1365,32 @@ fn is_known_create_shape(tokens: &[String]) -> bool {
         ],
         "vector_index_buckets" => &["namespace", "bucket_key", "item_id"],
         "workspace_settings" => &["workspace_id", "key", "value", "updated_at"],
+        "runtime_events" => &[
+            "event_id",
+            "task_id",
+            "run_id",
+            "sequence",
+            "event_version",
+            "event_kind",
+            "workflow_id",
+            "step_id",
+            "agent_id",
+            "occurred_at",
+            "recorded_at",
+            "envelope_json",
+        ],
+        "workflow_checkpoints" => &[
+            "checkpoint_id",
+            "task_id",
+            "run_id",
+            "workflow_id",
+            "workflow_version",
+            "plan_hash",
+            "event_sequence",
+            "created_at",
+            "workflow_json",
+            "checkpoint_json",
+        ],
         _ => return false,
     };
     required_columns
@@ -1372,6 +1428,12 @@ fn is_known_index(index_name: &str, table_name: &str) -> bool {
             )
             | ("idx_vector_index_owner", "vector_index_items")
             | ("idx_vector_index_scope", "vector_index_items")
+            | ("idx_runtime_events_task_recorded", "runtime_events")
+            | ("idx_runtime_events_run_sequence", "runtime_events")
+            | ("idx_runtime_events_workflow_recorded", "runtime_events")
+            | ("idx_runtime_events_kind_recorded", "runtime_events")
+            | ("idx_workflow_checkpoints_task_created", "workflow_checkpoints")
+            | ("idx_workflow_checkpoints_run_sequence", "workflow_checkpoints")
     )
 }
 

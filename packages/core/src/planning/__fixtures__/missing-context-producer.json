@@ -1,0 +1,15 @@
+{
+  "title": "Test: Missing Context Producer",
+  "reasoning": "Regression fixture for missing context producer detection.",
+  "steps": [
+    {
+      "id": "consumer",
+      "title": "Read evidence",
+      "assignedAgentKind": "verifier",
+      "requiredCapabilities": ["evidence_check"],
+      "dependsOn": [],
+      "inputContextKeys": ["uiEvidence"],
+      "successCriteria": "Evidence checked."
+    }
+  ]
+}

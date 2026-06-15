@@ -111,6 +111,16 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
           pushLog(taskEventToLogEntry(event));
           break;
         }
+        case "step.failed": {
+          current = {
+            ...current,
+            plan: current.plan.map((step) =>
+              step.id === event.stepId ? { ...step, status: "failed" as const } : step,
+            ),
+          };
+          pushLog(taskEventToLogEntry(event));
+          break;
+        }
         case "task.completed":
         case "task.failed": {
           current = { ...current, isStreaming: false };

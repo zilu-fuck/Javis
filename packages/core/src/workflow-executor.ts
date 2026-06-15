@@ -33,6 +33,30 @@ import {
   demoAgents,
 } from "./agents";
 import { createAgentStateTracker } from "./agent-state-tracker";
+import {
+  createRuntimeEventEnvelope,
+  currentEnvelopeSequence,
+  resetEnvelopeSequence,
+  type RuntimeEventEnvelope,
+} from "./runtime-event-envelope";
+import {
+  buildCheckpointFromDagState,
+  type WorkflowCheckpoint,
+} from "./workflow-checkpoint";
+import { compileCommanderPlan, formatDiagnosticSummary } from "./planning/commander-plan-compiler";
+import {
+  appendStepsToCompiledPlan,
+  type CompiledCommanderPlan,
+} from "./planning/commander-plan-diagnostics";
+import { attemptPlanRepair } from "./planning/commander-plan-repair";
+import {
+  buildPlanGenerationTrace,
+  classifyCompileStatus,
+  type PlanGenerationStageRecord,
+  type PlanRecoveryCompileRecord,
+} from "./planning/plan-generation-trace";
+import { COMMANDER_PLAN_PROMPT_VERSION } from "./planning/schema";
+import { DEFAULT_PRELOADED_CONTEXT_KEYS } from "./shared-context";
 import type { FlowController } from "./flow-controller";
 import type { ChatMessage, ID, TaskSnapshot, TaskStep, AgentKind, Agent, StepTrace } from "./index";
 import { markStep } from "./plans";
@@ -792,20 +816,44 @@ export async function runGenericWorkbenchWorkflow({
 
 export function getAvailableAgentsForPlanning(
   availableToolDescriptors?: readonly ToolDescriptor[],
-): Array<{ kind: string; allowedToolNames: string[] }> {
+): Array<{ kind: string; allowedToolNames: string[]; capabilities: string[] }> {
   const normalizedToolDescriptors = availableToolDescriptors
     ? normalizeAvailableToolDescriptors(availableToolDescriptors)
     : undefined;
   const availableToolNames = normalizedToolDescriptors
     ? new Set(normalizedToolDescriptors.map((descriptor) => descriptor.name))
     : undefined;
-  return createDefaultAgentRegistry().list().map((reg) => ({
-    kind: reg.agent.kind,
-    allowedToolNames: normalizedToolDescriptors
+  const tools = normalizedToolDescriptors ?? [];
+  return createDefaultAgentRegistry().list().map((reg) => {
+    const allowedToolNames = normalizedToolDescriptors
       ? getAllowedToolNamesForAgent(reg.agent.kind, normalizedToolDescriptors)
           .filter((toolName) => availableToolNames?.has(toolName))
-      : reg.agent.allowedToolNames,
-  }));
+      : reg.agent.allowedToolNames;
+    const capabilities = deriveAgentCapabilities(reg.agent.kind, tools, allowedToolNames);
+    return {
+      kind: reg.agent.kind,
+      allowedToolNames,
+      capabilities,
+    };
+  });
+}
+
+function deriveAgentCapabilities(
+  agentKind: string,
+  toolDescriptors: readonly ToolDescriptor[],
+  allowedToolNames: string[],
+): string[] {
+  const capabilitySet = new Set<string>();
+  const allowedSet = new Set(allowedToolNames);
+  for (const descriptor of toolDescriptors) {
+    if (!allowedSet.has(descriptor.name)) continue;
+    if (descriptor.ownerAgentKinds.includes(agentKind)) {
+      for (const tag of descriptor.capabilityTags) {
+        capabilitySet.add(tag);
+      }
+    }
+  }
+  return [...capabilitySet];
 }
 
 function getAllowedToolNamesForAgent(
@@ -2452,6 +2500,47 @@ const GIT_COMMIT_TOOL_NAME = "git.createCommit";
 const GIT_CREATE_PR_TOOL_NAME = "git.createPullRequest";
 const GIT_COMMENT_PR_TOOL_NAME = "git.commentPullRequest";
 
+/**
+ * Closed allowlist of approval-gated tools that may enter the Commander DAG
+ * compilation gate. Each entry has an explicit preflight + approval handler
+ * in this file (or a sibling capability dispatch) — not generic capability
+ * dispatch.
+ *
+ * The compiler rejects any other `confirmed_write` / `dangerous` tool via
+ * `UNSUPPORTED_APPROVAL_GATED_TOOL`. Adding a new entry here MUST be paired
+ * with a step-level runner that:
+ * 1. Builds a preview/plan and emits a `permission.requested` event.
+ * 2. Waits for the approval binding (approvalId + taskId) before execute.
+ * 3. Calls into the corresponding Rust command with the binding.
+ *
+ * If a tool lacks that wiring, do NOT add it here — the executor will throw
+ * at dispatch time and the plan will fail.
+ */
+/**
+ * Computer-use loop tools that have explicit preflight + per-action approval
+ * inside `runComputerUseLoop` (see `isComputerUseDagStep` /
+ * `computerUseLoopRunner`). Each call inside the loop is approved via
+ * `requestComputerUseApproval` before the tool actually runs.
+ */
+const COMPUTER_USE_APPROVAL_GATED_TOOLS = [
+  "computer.focusWindow",
+  "computer.moveMouse",
+  "computer.click",
+  "computer.type",
+  "computer.keyCombo",
+  "computer.scroll",
+  "computer.invokeUi",
+  "computer.setUiValue",
+] as const;
+
+export const SUPPORTED_APPROVAL_GATED_TOOLS = [
+  GIT_STAGE_TOOL_NAME,
+  GIT_COMMIT_TOOL_NAME,
+  GIT_CREATE_PR_TOOL_NAME,
+  GIT_COMMENT_PR_TOOL_NAME,
+  ...COMPUTER_USE_APPROVAL_GATED_TOOLS,
+] as const;
+
 function isGitStageDagStep(step: CommanderDagStep, capability: string | undefined): boolean {
   return step.toolName === GIT_STAGE_TOOL_NAME ||
     capability === "git_stage" ||
@@ -4008,11 +4097,11 @@ function normalizeCommanderDagPlan(plan: CommanderPlanResult): CommanderDagPlan 
     reasoning: plan.reasoning,
     steps: plan.steps.map((step) => ({
       ...step,
-      capability: (step as CommanderDagStep).capability,
+      capability: step.capability,
       requiredCapabilities: step.requiredCapabilities ?? [],
       dependsOn: step.dependsOn ?? [],
-      toolInput: isPlainRecord((step as CommanderDagStep).toolInput)
-        ? (step as CommanderDagStep).toolInput
+      toolInput: isPlainRecord(step.toolInput)
+        ? step.toolInput
         : undefined,
     })),
   };
@@ -4476,6 +4565,14 @@ interface CommanderDagTaskOptions {
   initialLogs?: TaskSnapshot["logs"];
   availableToolDescriptors?: ToolDescriptor[];
   signal?: AbortSignal;
+  /** Optional durable runtime event sink. If provided, every emitted TaskRuntimeEvent is wrapped in a RuntimeEventEnvelope and forwarded. */
+  runtimeEventSink?: {
+    append: (envelope: RuntimeEventEnvelope) => void | Promise<void>;
+  };
+  /** Optional durable checkpoint sink. If provided, the executor calls save() with WorkflowCheckpoint snapshots at lifecycle transitions. */
+  checkpointSink?: {
+    save: (checkpoint: WorkflowCheckpoint) => void | Promise<void>;
+  };
   /** LLM-based ReAct decision maker. Called each iteration of the ReAct loop. */
   reactDecideNext?: (
     request: ReActDecisionRequest,
@@ -4540,12 +4637,16 @@ export async function runCommanderDagTask({
   initialLogs = [],
   availableToolDescriptors,
   signal,
+  runtimeEventSink,
+  checkpointSink,
   reactDecideNext,
   replanDag,
   computerUseLoopRunner,
 }: CommanderDagTaskOptions) {
   const { emit, getSnapshot, wait } = controller;
   const runtimeTimeouts = resolveCommanderTimeouts(runtimeConfig);
+  const runId = `run-${taskId}-${Date.now()}`;
+  resetEnvelopeSequence(runId);
   const availableTools = filterAvailableToolDescriptorsForRuntime(
     normalizeAvailableToolDescriptors(availableToolDescriptors),
     { codeTool, trendTool },
@@ -4571,8 +4672,78 @@ export async function runCommanderDagTask({
 
   let snapshot = getSnapshot();
   function emitSnapshot(next: TaskSnapshot) { emit(next); snapshot = getSnapshot(); }
+
+  let syntheticWorkflow: WorkbenchWorkflow | undefined;
+  const abandonedStepIds = new Set<string>();
+  function buildCheckpointFromSnapshot(
+    waitingReason?: WorkflowCheckpoint["waitingReason"],
+  ): WorkflowCheckpoint {
+    const plan = getSnapshot().plan;
+    const completedStepIds = plan
+      .filter((step) => step.status === "completed")
+      .map((step) => step.id);
+    const runningStepIds = plan
+      .filter((step) => step.status === "running")
+      .map((step) => step.id);
+    const permissionRequest = getSnapshot().permissionRequest;
+    return buildCheckpointFromDagState({
+      taskId,
+      runId,
+      workflow: syntheticWorkflow!,
+      completedStepIds,
+      abandonedStepIds: [...abandonedStepIds],
+      runningStepIds,
+      contextSnapshot: context.envelopeSnapshot(),
+      approvalRequestIds: permissionRequest?.id ? [permissionRequest.id] : [],
+      waitingReason,
+      eventSequence: currentEnvelopeSequence(runId),
+    });
+  }
+  function saveCheckpoint(waitingReason?: WorkflowCheckpoint["waitingReason"]) {
+    if (!checkpointSink || !syntheticWorkflow) return;
+    const checkpoint = buildCheckpointFromSnapshot(waitingReason);
+    void Promise.resolve(checkpointSink.save(checkpoint)).catch((error) => {
+      // Durable checkpoint persistence must not crash the live task.
+      console.error("[checkpoint-sink] save failed:", error);
+    });
+  }
+
   function emitEvent(event: TaskRuntimeEvent) {
     taskEventBus.emit(event);
+    if (runtimeEventSink) {
+      const envelope = createRuntimeEventEnvelope(event, {
+        taskId,
+        runId,
+        workflowId: COMMANDER_DAG_WORKFLOW_ID,
+      });
+      void Promise.resolve(runtimeEventSink.append(envelope)).catch((error) => {
+        // Durable event persistence must not crash the live task.
+        console.error("[runtime-event-sink] append failed:", error);
+      });
+    }
+    if (checkpointSink) {
+      switch (event.kind) {
+        case "step.started":
+        case "step.completed":
+        case "step.failed":
+          saveCheckpoint();
+          break;
+        case "permission.requested":
+          saveCheckpoint("human_approval");
+          break;
+        case "ask_user.requested":
+          saveCheckpoint("user_input");
+          break;
+        case "task.replan_started":
+        case "task.replan_failed":
+        case "task.waiting":
+        case "task.completed":
+        case "task.failed":
+        case "task.cancelled":
+          saveCheckpoint();
+          break;
+      }
+    }
     return eventLogs[eventLogs.length - 1] as TaskSnapshot["logs"][number];
   }
 
@@ -4607,12 +4778,26 @@ export async function runCommanderDagTask({
   throwIfTaskAborted(signal, `Commander DAG task ${taskId}`);
 
   const recoveryAttempts: RecoveryAttemptRecord[] = [];
+  const planStages: PlanGenerationStageRecord[] = [];
+  const planRecoveryCompiles: PlanRecoveryCompileRecord[] = [];
+  // Captured once after the initial plan call returns and survives the
+  // try/catch boundary, so the catch handler can still attach it to
+  // the PlanGenerationTrace even when the failure happened later in
+  // the workflow.
+  let initialExtractedJson: string | undefined;
+  let initialNormalizedPlan: CommanderDagPlan | undefined;
 
   try {
     // Phase 1: Commander generates DAG plan
     const availableAgents = getAvailableAgentsForPlanning(availableTools);
     const plannerAvailableTools = toolDescriptorsForPlanner(availableTools);
-    let dagPlan: CommanderDagPlan;
+    // `uncompiledPlan` is the raw post-normalize plan. After the compile
+    // gate below, the validated `dagPlan: CompiledCommanderPlan` is the
+    // only one used downstream. Keeping the uncompiled form as a
+    // separate binding makes the brand boundary visible at the type
+    // level — every code path that mutates or reads `dagPlan` from then
+    // on knows the plan cleared the compile gate.
+    let uncompiledPlan: CommanderDagPlan;
     try {
       emitWaitingLog({
         taskId,
@@ -4624,7 +4809,7 @@ export async function runCommanderDagTask({
         emitSnapshot,
         emitEvent,
       });
-      dagPlan = normalizeCommanderDagPlan(await withTaskTimeout(
+      uncompiledPlan = normalizeCommanderDagPlan(await withTaskTimeout(
         () => planCommanderDagWithContextRecovery({
           commanderTool,
           contextSummaryTool,
@@ -4673,10 +4858,10 @@ export async function runCommanderDagTask({
         throw planError;
       }
       const detail = planError instanceof Error ? planError.message : String(planError);
-      dagPlan = createFallbackComputerUseDagPlan(userGoal, detail);
+      uncompiledPlan = createFallbackComputerUseDagPlan(userGoal, detail);
       emitSnapshot({
         ...getSnapshot(),
-        commanderMessage: dagPlan.reasoning,
+        commanderMessage: uncompiledPlan.reasoning,
         logs: appendLog(getSnapshot(), emitEvent({
           kind: "tool.completed",
           taskId,
@@ -4686,25 +4871,147 @@ export async function runCommanderDagTask({
       });
     }
 
-    if (!dagPlan.steps || dagPlan.steps.length === 0) {
+    if (!uncompiledPlan.steps || uncompiledPlan.steps.length === 0) {
       throw new Error("Commander plan returned no steps.");
     }
 
-    // Only proceed with capability dispatch if at least one step has
-    // a capability tag, requiredCapabilities, or is assigned to a
-    // non-Commander agent (who executes tools with implicit capabilities).
-    const hasCapabilitySteps = dagPlan.steps.some(
-      (s) => (s as CommanderDagStep).capability ||
-           (s.requiredCapabilities?.length ?? 0) > 0 ||
-           s.toolName === "commander.askUser" ||
-           (s as CommanderDagStep).executionMode === "direct_response" ||
-           s.assignedAgentKind !== "commander",
-    );
-    if (!hasCapabilitySteps) {
+    // Capture the post-normalize model output for the PlanGenerationTrace.
+    // This is the JSON form of the plan that actually entered compile
+    // (post-defaulting, post-Zod-check), so a future reviewer can see
+    // exactly what the model produced before semantic rules fired.
+    // Stringified up front so it survives any later mutation of
+    // `dagPlan` (e.g. recovery step pushes).
+    initialExtractedJson = JSON.stringify(uncompiledPlan);
+    initialNormalizedPlan = JSON.parse(initialExtractedJson);
+
+    // ── Plan Compilation Gate ───────────────────────────────────────────────
+    // Compile the normalized plan through semantic validation before execution.
+    // supportedApprovalGatedTools is a small closed allowlist of tools that
+    // already have explicit preflight + approval handling in
+    // runCommanderDagTask() (Git stage/commit/PR, plus the computer-use and
+    // browser write families). Any other approval-gated tool must be
+    // dispatched through a dedicated tool-specific runner — the generic
+    // capability dispatch path refuses to execute it (see
+    // assertToolCanDispatchWithoutApproval).
+    const supportedApprovalGatedTools: string[] = [...SUPPORTED_APPROVAL_GATED_TOOLS];
+    const preloadedContextKeys = [...DEFAULT_PRELOADED_CONTEXT_KEYS];
+    let compilationResult = compileCommanderPlan({
+      plan: uncompiledPlan,
+      availableAgents,
+      availableTools,
+      supportedApprovalGatedTools,
+      preloadedContextKeys,
+    });
+
+    // PlanGenerationTrace collection. The arrays are declared at the
+    // function scope so the catch handler can also build a partial
+    // trace when the executor fails before reaching the success
+    // snapshot. We populate per-stage records here (initial, repair,
+    // recovery) and assemble the final trace on task completion.
+    planStages.push({
+      stage: "initial",
+      attempt: 1,
+      status: classifyCompileStatus(
+        compilationResult.ok,
+        compilationResult.ok ? false : compilationResult.repairable,
+        compilationResult.ok ? compilationResult.warnings : [],
+      ),
+      diagnostics: compilationResult.ok
+        ? compilationResult.warnings
+        : compilationResult.diagnostics,
+      stepIds: uncompiledPlan.steps.map((s) => s.id),
+    });
+
+    // --- Plan Repair Loop (Phase 3) --------------------------------------
+    // When the first compilation fails, ask the model to repair the plan.
+    // Bounded by maxAttempts; only runs when diagnostics are repairable.
+    if (!compilationResult.ok && compilationResult.repairable && commanderTool) {
+      emitSnapshot({
+        ...getSnapshot(),
+        logs: appendLog(getSnapshot(), emitEvent({
+          kind: "tool.completed",
+          taskId,
+          toolName: "commander.plan.repair.start",
+          detail: `Plan failed compilation; attempting repair. ${formatDiagnosticSummary(compilationResult.diagnostics)}`,
+        })),
+      });
+      const repair = await attemptPlanRepair({
+        commanderPlan: (request) => commanderTool.plan(request),
+        originalUserGoal: userGoal,
+        invalidPlan: uncompiledPlan,
+        diagnostics: compilationResult.diagnostics,
+        availableAgents,
+        availableTools,
+        supportedApprovalGatedTools,
+        preloadedContextKeys,
+        workflowId: COMMANDER_DAG_WORKFLOW_ID,
+        locale: /[\u3400-\u9fff]/u.test(userGoal) ? "zh-CN" : "en",
+        maxAttempts: 2,
+      });
+
+      for (const attempt of repair.attempts) {
+        const detail = attempt.status === "compiled"
+          ? `Repair attempt ${attempt.attempt} compiled with ${attempt.diagnostics.length} warning(s).`
+          : `Repair attempt ${attempt.attempt} failed: ${formatDiagnosticSummary(attempt.diagnostics)}`;
+        emitSnapshot({
+          ...getSnapshot(),
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "tool.completed",
+            taskId,
+            toolName: attempt.status === "compiled"
+              ? `commander.plan.repair.ok.${attempt.attempt}`
+              : `commander.plan.repair.fail.${attempt.attempt}`,
+            detail,
+          })),
+        });
+        planStages.push({
+          stage: "repair",
+          attempt: attempt.attempt,
+          status: attempt.status === "compiled"
+            ? classifyCompileStatus(true, false, attempt.diagnostics)
+            : classifyCompileStatus(false, true, attempt.diagnostics),
+          diagnostics: attempt.diagnostics,
+          stepIds: attempt.repairedPlan?.steps.map((s) => s.id) ?? [],
+          detail,
+        });
+      }
+
+      if (repair.ok) {
+        uncompiledPlan = repair.plan;
+        compilationResult = { ok: true, plan: repair.plan, warnings: repair.attempts[repair.attempts.length - 1]?.diagnostics ?? [] };
+      } else {
+        compilationResult = {
+          ok: false,
+          diagnostics: repair.finalDiagnostics,
+          repairable: repair.repairable,
+        };
+      }
+    }
+
+    if (!compilationResult.ok) {
+      const summary = formatDiagnosticSummary(compilationResult.diagnostics);
       throw new Error(
-        "Commander plan has no capability-tagged steps. " +
-        "The plan must include at least one step with a capability or requiredCapabilities field.",
+        `Commander plan compilation failed:\n${summary}`,
       );
+    }
+
+    // The plan cleared the compile gate. From this point on `dagPlan`
+    // is typed `CompiledCommanderPlan` so any downstream code reading
+    // or mutating it is statically guaranteed to operate on a
+    // semantically-validated plan.
+    let dagPlan: CompiledCommanderPlan = compilationResult.plan;
+
+    if (compilationResult.warnings.length > 0) {
+      const warningSummary = formatDiagnosticSummary(compilationResult.warnings);
+      emitSnapshot({
+        ...getSnapshot(),
+        logs: appendLog(getSnapshot(), emitEvent({
+          kind: "tool.completed",
+          taskId,
+          toolName: "commander.plan.compile",
+          detail: `Plan compiled with warnings:\n${warningSummary}`,
+        })),
+      });
     }
 
     const plan: TaskStep[] = dagPlan.steps.map((step) => ({
@@ -4786,8 +5093,8 @@ export async function runCommanderDagTask({
     const askUserStep = dagPlan.steps.find(
       (s) =>
         (s.toolName === "commander.askUser" ||
-         (s as CommanderDagStep).capability === "clarification") &&
-        ((s as CommanderDagStep).dependsOn ?? []).length === 0,
+         s.capability === "clarification") &&
+        ((s.dependsOn ?? []).length === 0),
     );
     if (askUserStep && controller.setPendingAskUserHandler) {
       const askResult = await waitForAskUserAnswer({
@@ -4838,7 +5145,7 @@ export async function runCommanderDagTask({
       }
 
       // If there are more steps after askUser, store answer and continue
-      context.set((askUserStep as CommanderDagStep).outputContextKey ?? "clarification", askResult);
+      context.set(askUserStep.outputContextKey ?? "clarification", askResult);
       await wait();
       throwIfTaskAborted(signal, `askUser ${askUserStep.id}`);
     }
@@ -4860,15 +5167,15 @@ export async function runCommanderDagTask({
       agentKind: step.assignedAgentKind as WorkbenchWorkflowStep["agentKind"],
       input: step.title,
       output: step.successCriteria,
-      permissionLevel: getDagStepPermissionLevel(step as CommanderDagStep, availableTools),
-      dependsOn: (step as CommanderDagStep).dependsOn ?? [],
+      permissionLevel: getDagStepPermissionLevel(step, availableTools),
+      dependsOn: step.dependsOn ?? [],
       canRunInParallel: true,
       requiredCapabilities: step.requiredCapabilities as AgentCapabilityTag[] | undefined,
       inputContextKeys: step.inputContextKeys,
       outputContextKey: step.outputContextKey,
     }));
 
-    const syntheticWorkflow: WorkbenchWorkflow = {
+    syntheticWorkflow = {
       id: COMMANDER_DAG_WORKFLOW_ID as WorkbenchWorkflowId,
       title: dagPlan.title || "Commander DAG task",
       triggerExamples: [],
@@ -4893,12 +5200,13 @@ export async function runCommanderDagTask({
       if (!dagStep) {
         throw new Error(`Step ${wfStep.id} not found in Commander plan.`);
       }
+      const agentId = `agent-${dagStep.assignedAgentKind}`;
 
       // Handle askUser steps — either already resolved in Phase 1.5
       // (answer in context) or needs inline handling when it has dependencies.
       if (
         dagStep.toolName === "commander.askUser" ||
-        (dagStep as CommanderDagStep).capability === "clarification"
+        dagStep.capability === "clarification"
       ) {
         const existingAnswer = context.get(`askUserAnswer:${dagStep.id}`) as string | undefined;
         if (existingAnswer !== undefined) {
@@ -4934,7 +5242,7 @@ export async function runCommanderDagTask({
             timeoutMs: runtimeTimeouts.userWaitTimeoutMs,
           });
           completedSteps.add(dagStep.id);
-          context.set((dagStep as CommanderDagStep).outputContextKey ?? "clarification", answer);
+          context.set(dagStep.outputContextKey ?? "clarification", answer);
           emitSnapshot({
             ...getSnapshot(),
             plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
@@ -4955,14 +5263,13 @@ export async function runCommanderDagTask({
           plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
           agents: agentTracker.getSnapshots(),
         });
-        return { output: context.get((dagStep as CommanderDagStep).outputContextKey ?? "clarification") };
+        return { output: context.get(dagStep.outputContextKey ?? "clarification") };
       }
 
-      const capability = (dagStep as CommanderDagStep).capability
-        ?? (dagStep.requiredCapabilities?.length ? dagStep.requiredCapabilities[0] : undefined);
-      const agentId = `agent-${dagStep.assignedAgentKind}`;
-
-      if (isGitStageDagStep(dagStep as CommanderDagStep, capability)) {
+      const capability = dagStep.capability
+        ?? dagStep.requiredCapabilities?.[0]
+        ?? "synthesis";
+      if (isGitStageDagStep(dagStep, capability)) {
         const descriptor = findToolDescriptorByNameIn(availableTools, GIT_STAGE_TOOL_NAME);
         if (!descriptor) {
           throw new Error("git.stageFiles tool is not available.");
@@ -4972,7 +5279,7 @@ export async function runCommanderDagTask({
         }
         try {
           const output = await executeGitStageDagStep({
-            dagStep: dagStep as CommanderDagStep,
+            dagStep,
             agentId,
             taskId,
             context,
@@ -4988,7 +5295,7 @@ export async function runCommanderDagTask({
           });
           completedSteps.add(dagStep.id);
           writeStepOutput(
-            (dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`,
+            (dagStep.outputContextKey ?? `step:${dagStep.id}`),
             output,
             context,
           );
@@ -5017,7 +5324,7 @@ export async function runCommanderDagTask({
         }
       }
 
-      if (isGitCommitDagStep(dagStep as CommanderDagStep, capability)) {
+      if (isGitCommitDagStep(dagStep, capability)) {
         const descriptor = findToolDescriptorByNameIn(availableTools, GIT_COMMIT_TOOL_NAME);
         if (!descriptor) {
           throw new Error("git.createCommit tool is not available.");
@@ -5027,7 +5334,7 @@ export async function runCommanderDagTask({
         }
         try {
           const output = await executeGitCommitDagStep({
-            dagStep: dagStep as CommanderDagStep,
+            dagStep,
             agentId,
             taskId,
             context,
@@ -5043,7 +5350,7 @@ export async function runCommanderDagTask({
           });
           completedSteps.add(dagStep.id);
           writeStepOutput(
-            (dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`,
+            (dagStep.outputContextKey ?? `step:${dagStep.id}`),
             output,
             context,
           );
@@ -5072,7 +5379,7 @@ export async function runCommanderDagTask({
         }
       }
 
-      if (isGitCreatePullRequestDagStep(dagStep as CommanderDagStep, capability)) {
+      if (isGitCreatePullRequestDagStep(dagStep, capability)) {
         const descriptor = findToolDescriptorByNameIn(availableTools, GIT_CREATE_PR_TOOL_NAME);
         if (!descriptor) {
           throw new Error("git.createPullRequest tool is not available.");
@@ -5082,7 +5389,7 @@ export async function runCommanderDagTask({
         }
         try {
           const output = await executeGitCreatePullRequestDagStep({
-            dagStep: dagStep as CommanderDagStep,
+            dagStep,
             agentId,
             taskId,
             context,
@@ -5098,7 +5405,7 @@ export async function runCommanderDagTask({
           });
           completedSteps.add(dagStep.id);
           writeStepOutput(
-            (dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`,
+            (dagStep.outputContextKey ?? `step:${dagStep.id}`),
             output,
             context,
           );
@@ -5127,7 +5434,7 @@ export async function runCommanderDagTask({
         }
       }
 
-      if (isGitCommentPullRequestDagStep(dagStep as CommanderDagStep, capability)) {
+      if (isGitCommentPullRequestDagStep(dagStep, capability)) {
         const descriptor = findToolDescriptorByNameIn(availableTools, GIT_COMMENT_PR_TOOL_NAME);
         if (!descriptor) {
           throw new Error("git.commentPullRequest tool is not available.");
@@ -5137,7 +5444,7 @@ export async function runCommanderDagTask({
         }
         try {
           const output = await executeGitCommentPullRequestDagStep({
-            dagStep: dagStep as CommanderDagStep,
+            dagStep,
             agentId,
             taskId,
             context,
@@ -5153,7 +5460,7 @@ export async function runCommanderDagTask({
           });
           completedSteps.add(dagStep.id);
           writeStepOutput(
-            (dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`,
+            (dagStep.outputContextKey ?? `step:${dagStep.id}`),
             output,
             context,
           );
@@ -5183,7 +5490,7 @@ export async function runCommanderDagTask({
       }
 
       if (isComputerUseDagStep(dagStep) || isComputerUseCapability(capability)) {
-        const descriptor = findToolDescriptorForDagStep(dagStep as CommanderDagStep, availableTools);
+        const descriptor = findToolDescriptorForDagStep(dagStep, availableTools);
         if (!descriptor) {
           throw new Error(`No available Computer Use tool is registered for step ${dagStep.id}.`);
         }
@@ -5243,7 +5550,7 @@ export async function runCommanderDagTask({
           onStep: (step) => {
             const computerStep = step as ComputerUseStep;
             context.set(
-              (dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`,
+              (dagStep.outputContextKey ?? `step:${dagStep.id}`),
               sanitizeComputerUseStepForContext(computerStep),
             );
             const stepSummary = summarizeComputerUseStep(computerStep);
@@ -5306,7 +5613,7 @@ export async function runCommanderDagTask({
 
         completedSteps.add(dagStep.id);
         context.set(
-          (dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`,
+           (dagStep.outputContextKey ?? `step:${dagStep.id}`),
           steps.map((step) => sanitizeComputerUseStepForContext(step as ComputerUseStep)),
         );
         if (agentTracker.getState(agentId)) {
@@ -5352,10 +5659,10 @@ export async function runCommanderDagTask({
 
       await wait();
 
-      const executionMode = resolveStepExecutionMode(dagStep as CommanderDagStep);
+      const executionMode = resolveStepExecutionMode(dagStep);
       const allowedToolNames = getAllowedToolNamesForAgent(dagStep.assignedAgentKind, availableTools);
       const stepToolDescriptors = filterToolDescriptorsForStep(
-        dagStep as CommanderDagStep,
+        dagStep,
         allowedToolNames,
         availableTools,
       );
@@ -5365,7 +5672,7 @@ export async function runCommanderDagTask({
         .map((td) => ({
           name: td.name,
           execute: async ({ input: reactInput }) => {
-            const stepInput = mergeStepInput(dagStep as CommanderDagStep, context, reactInput);
+            const stepInput = mergeStepInput(dagStep, context, reactInput);
             const output = await withTaskTimeout(
               () => dispatchToolByName(td.name, stepInput, tools, availableTools),
               {
@@ -5375,7 +5682,7 @@ export async function runCommanderDagTask({
               },
             );
             writeStepOutput(
-              (dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`,
+              (dagStep.outputContextKey ?? `step:${dagStep.id}`),
               output,
               context,
             );
@@ -5401,7 +5708,7 @@ export async function runCommanderDagTask({
               stepTitle: req.step.title,
               userGoal,
               successCriteria: dagStep.successCriteria,
-              capability: (dagStep as CommanderDagStep).capability,
+              capability: dagStep.capability,
               observations: req.observations,
               availableTools: reactTools.map((t) => {
                 const td = stepToolDescriptors.find((d) => d.name === t.name);
@@ -5532,7 +5839,7 @@ export async function runCommanderDagTask({
         );
         const output = synthesis?.message ?? dagStep.title;
         writeStepOutput(
-          (dagStep as CommanderDagStep).outputContextKey ?? `step:${dagStep.id}`,
+           (dagStep.outputContextKey ?? `step:${dagStep.id}`),
           output,
           context,
         );
@@ -5575,7 +5882,7 @@ export async function runCommanderDagTask({
         });
         const result = await withTaskTimeout(
           () => executeCapabilityStep(
-            dagStep as CommanderDagStep,
+        dagStep,
             context,
             tools,
             {
@@ -5781,13 +6088,92 @@ export async function runCommanderDagTask({
           return undefined;
         }
 
+        // --- Recovery Plan Compile Gate ----------------------------------
+        // The initial DAG plan goes through compileCommanderPlan before any
+        // step runs. The replanned (recovery) plan must clear the same gate
+        // — otherwise a malformed recovery plan could silently inject steps
+        // that bypass capability / approval / context checks and only fail
+        // mid-execution. Per project policy, a failed recovery compile
+        // aborts recovery and surfaces diagnostics; the loop will not
+        // re-enter replanDag.
+        //
+        // Normalize first so the same defaults the initial plan gets
+        // (dependsOn / requiredCapabilities / toolInput) also apply here.
+        // existingSteps = every step already in the workflow DAG at the
+        // time of the failed step, including the failed step itself. The
+        // failed step is kept so recovery steps can resolve dependsOn
+        // references to it (the runtime strips those edges in the
+        // dependsOn filter a few lines below). Reading the failed step's
+        // context key at runtime will resolve to undefined since the
+        // executor marks it abandoned; the compile gate does not gate on
+        // that semantic.
+        const failedId = request.step.id;
+        const recoveryPlanNormalized = normalizeCommanderDagPlan(
+          recoveryPlan as Parameters<typeof normalizeCommanderDagPlan>[0],
+        );
+        const recoveryExistingSteps = dagPlan.steps.map((s) => ({
+          id: s.id,
+          dependsOn: s.dependsOn ?? [],
+          outputContextKey: s.outputContextKey,
+        }));
+        const recoveryCompile = compileCommanderPlan({
+          plan: recoveryPlanNormalized,
+          availableAgents,
+          availableTools,
+          supportedApprovalGatedTools: [...SUPPORTED_APPROVAL_GATED_TOOLS],
+          preloadedContextKeys: [...DEFAULT_PRELOADED_CONTEXT_KEYS],
+          existingSteps: recoveryExistingSteps,
+        });
+
+        if (!recoveryCompile.ok) {
+          const summary = formatDiagnosticSummary(recoveryCompile.diagnostics);
+          planRecoveryCompiles.push({
+            stage: "recovery",
+            attempt: 1,
+            failedStepId: request.step.id,
+            status: classifyCompileStatus(false, recoveryCompile.repairable, []),
+            diagnostics: recoveryCompile.diagnostics,
+            stepIds: recoveryPlanNormalized.steps.map((s) => s.id),
+            detail: `Recovery plan failed compile gate; abandoning recovery. ${summary}`,
+          });
+          recoveryAttempts.push(createRecoveryAttempt({
+            step: request.step,
+            error: request.error,
+            completedStepIds: request.completedStepIds,
+            replanAttempted: true,
+            replanStatus: "failed",
+            detail:
+              `Commander recovery plan failed compile gate; abandoning recovery. ${summary}`,
+          }));
+          emitSnapshot({
+            ...getSnapshot(),
+            logs: appendLog(getSnapshot(), emitEvent({
+              kind: "task.replan_failed",
+              taskId,
+              failedStepId: request.step.id,
+              error: `Recovery plan failed compile gate. ${summary}`,
+            })),
+          });
+          return undefined;
+        }
+
+        // Recovery compiled — record the success on the trace.
+        planRecoveryCompiles.push({
+          stage: "recovery",
+          attempt: 1,
+          failedStepId: request.step.id,
+          status: "compiled",
+          diagnostics: [],
+          stepIds: recoveryPlanNormalized.steps.map((s) => s.id),
+        });
+
         // Convert recovery steps to workflow steps.
         // Use the Commander's declared dependsOn, filtering out the failed step
         // (which is abandoned, so depending on it would deadlock).
-        const failedId = request.step.id;
+        // failedId is already declared by the recovery compile gate above.
         const existingWorkflowStepIds = new Set(request.workflow.steps.map((step) => step.id));
-        const uniqueRecoveryDagSteps = recoveryPlan.steps.filter((step) => !existingWorkflowStepIds.has(step.id));
-        const skippedDuplicateStepIds = recoveryPlan.steps
+        const uniqueRecoveryDagSteps = recoveryPlanNormalized.steps.filter((step) => !existingWorkflowStepIds.has(step.id));
+        const skippedDuplicateStepIds = recoveryPlanNormalized.steps
           .filter((step) => existingWorkflowStepIds.has(step.id))
           .map((step) => step.id);
         const recoverySteps: WorkbenchWorkflowStep[] = uniqueRecoveryDagSteps.map((s) => ({
@@ -5796,7 +6182,7 @@ export async function runCommanderDagTask({
           agentKind: s.assignedAgentKind as WorkbenchWorkflowStep["agentKind"],
           input: s.title,
           output: s.successCriteria,
-          permissionLevel: getDagStepPermissionLevel(s as CommanderDagStep, availableTools),
+          permissionLevel: getDagStepPermissionLevel(s, availableTools),
           dependsOn: (s.dependsOn ?? []).filter((depId) => depId !== failedId),
           canRunInParallel: true,
           requiredCapabilities: s.requiredCapabilities as AgentCapabilityTag[] | undefined,
@@ -5804,9 +6190,15 @@ export async function runCommanderDagTask({
           outputContextKey: s.outputContextKey,
         }));
 
-        // Add recovery steps to the dagPlan for tracking
-        for (const rs of uniqueRecoveryDagSteps) {
-          dagPlan.steps.push(rs as CommanderDagStep);
+        // Add recovery steps to the dagPlan for tracking. We rebuild
+        // the compiled plan rather than mutating `dagPlan.steps` so
+        // the brand survives the merge — see appendStepsToCompiledPlan
+        // and trustAsCompiled for the escape-hatch policy.
+        if (uniqueRecoveryDagSteps.length > 0) {
+          dagPlan = appendStepsToCompiledPlan(
+            dagPlan,
+            uniqueRecoveryDagSteps as CompiledCommanderPlan["steps"],
+          );
         }
         recoveryAttempts.push(createRecoveryAttempt({
           step: request.step,
@@ -5836,6 +6228,7 @@ export async function runCommanderDagTask({
           })),
         });
 
+        abandonedStepIds.add(request.step.id);
         return { abandonFailedStep: true, steps: recoverySteps };
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
@@ -6047,6 +6440,15 @@ export async function runCommanderDagTask({
           replannedStepIds: execution.replannedStepIds,
         })
       : undefined;
+    const planGenerationTrace = buildPlanGenerationTrace({
+      userGoal,
+      stages: planStages,
+      recoveryCompiles: planRecoveryCompiles,
+      generatedAt: new Date(now).toISOString(),
+      extractedJson: initialExtractedJson,
+      normalizedPlan: initialNormalizedPlan,
+      promptVersion: COMMANDER_PLAN_PROMPT_VERSION,
+    });
     emitSnapshot({
       ...getSnapshot(),
       title: dagPlan.title || "Task completed",
@@ -6066,6 +6468,7 @@ export async function runCommanderDagTask({
           : `warn: ${execution.completedStepIds.length}/${execution.completedStepIds.length + (execution.abandonedStepIds?.length ?? 0)} steps completed.`,
       handoffReport,
       ...(recoveryReport ? { recoveryReport } : {}),
+      planGenerationTrace,
       executionTrace: trace ? {
         ...trace,
         completedAt: new Date(now).toISOString(),
@@ -6102,6 +6505,19 @@ export async function runCommanderDagTask({
           generatedAt: new Date().toISOString(),
         })
       : undefined;
+    const planGenerationTrace = buildPlanGenerationTrace({
+      userGoal,
+      stages: planStages,
+      recoveryCompiles: planRecoveryCompiles,
+      // `extractedJson` and `normalizedPlan` are unavailable in the
+      // catch handler when the failure happened before/during the
+      // initial plan call (e.g. context overflow, parse failure).
+      // The trace fields are optional and the absence is itself
+      // signal to the reviewer.
+      ...(initialExtractedJson ? { extractedJson: initialExtractedJson } : {}),
+      ...(initialNormalizedPlan ? { normalizedPlan: initialNormalizedPlan } : {}),
+      promptVersion: COMMANDER_PLAN_PROMPT_VERSION,
+    });
 
     emitSnapshot({
       ...getSnapshot(),
@@ -6119,6 +6535,7 @@ export async function runCommanderDagTask({
       })),
       agents: agentTracker.getSnapshots(),
       ...(recoveryReport ? { recoveryReport } : {}),
+      planGenerationTrace,
       logs: appendLog(snapshot, emitEvent(completionEvent)),
     });
   }

@@ -98,7 +98,8 @@ export interface PlanDiagnostic {
     | "MISSING_CONTEXT_PRODUCER"
     | "CONTEXT_PRODUCER_NOT_DEPENDED_ON"
     | "DUPLICATE_OUTPUT_CONTEXT_KEY"
-    | "INVALID_EXECUTION_MODE";
+    | "INVALID_EXECUTION_MODE"
+    | "INVALID_PLAN_SHAPE";
   severity: "error" | "warning";
   path?: string;
   stepId?: string;
@@ -143,15 +144,10 @@ export function compileCommanderPlan(input: {
   }>;
   supportedApprovalGatedTools?: string[];
   preloadedContextKeys?: string[];
-  requiredToolInputs?: Record<string, Array<{
-    name: string;
-    type: "string" | "string[]";
-    nonEmpty?: boolean;
-  }>>;
 }): CompileCommanderPlanResult;
 ```
 
-The first patch can hardcode `requiredToolInputs` inside the compiler for known built-in tools. A later schema-source phase should move these requirements into tool descriptors or generated tool schemas so planner prompts, compile-time checks, and dispatch guards share the same rule.
+The current implementation reads required tool inputs from `ToolDescriptor.requiredInputs`. The planner prompt includes them via the compiled prompt, the compiler validates them against the descriptor, and the dispatch guards in the executor provide defense in depth. A later schema-source phase should consolidate the structural schema so PlannerPrompt, compile-time checks, and dispatch guards share the same rule definition from a single Zod source. The compiler API should stay small until that source of truth exists; callers should not pass ad hoc input schemas.
 
 `availableTools` must be the runtime tool descriptor set after feature flags, disabled tools, and MCP availability have been applied. It should not be the stripped `plannerAvailableTools` list used only for prompt construction. The compiler needs the same effective tool set that execution will use.
 
@@ -164,6 +160,8 @@ The first patch can hardcode `requiredToolInputs` inside the compiler for known 
 ## Phase 1: Minimal Compiler Gate
 
 Add a semantic validator after `normalizeCommanderDagPlan()` and before converting DAG steps into UI/execution steps.
+
+Status: implemented for initial Commander plans and runtime failure recovery plans.
 
 Initial validation rules:
 
@@ -198,7 +196,15 @@ runCommanderDagTask()
   -> render/execute only if ok
 ```
 
-For failure recovery plans, compile the effective appended DAG, not just the recovery JSON in isolation. A recovery step may legitimately depend on an existing completed step. The compiler should receive either the merged active DAG or `existingSteps` with enough dependency and context metadata to validate the appended steps.
+For failure recovery plans, compile the recovery plan before appending it to the running DAG. The current implementation normalizes the recovery plan, passes the active `dagPlan.steps` as `existingSteps`, and rejects the recovery if compilation fails. A recovery step may legitimately depend on an existing completed step, so `existingSteps` includes id, dependencies, and output context metadata for the active DAG.
+
+Recovery compile failure behavior:
+
+- Do not append recovery steps.
+- Record a failed `RecoveryAttemptRecord`.
+- Include `formatDiagnosticSummary()` output in the recovery detail.
+- Emit `task.replan_failed`.
+- Return `undefined` from the replan handler so the executor does not retry the replan loop.
 
 Normalization remains allowed to fill structural defaults such as `dependsOn: []` and `requiredCapabilities: []`. The compiler should validate the normalized plan, not treat those defaulted arrays as errors. Semantic errors are about invalid references, unavailable capabilities/tools, unsafe execution modes, missing required tool inputs, or impossible context flow.
 
@@ -223,6 +229,8 @@ Acceptance:
 
 Add static handoff checks before execution.
 
+Status: implemented for initial plans and recovery plans, including producer lookup and dependency-ancestor walks across `existingSteps`.
+
 Rules:
 
 - Every `inputContextKeys` entry should have a producer, unless it is a known preloaded context key such as `userGoal` or `taskId`.
@@ -243,6 +251,8 @@ Acceptance:
 
 Plan repair should be separate from runtime failure recovery.
 
+Status: implemented for initial plan compilation failures. Runtime failure recovery does not run the repair loop; it only compiles the returned recovery plan and abandons recovery on compile failure.
+
 Runtime failure recovery handles actual execution failures:
 
 - tool timeout
@@ -257,6 +267,7 @@ Plan repair handles invalid AST/planning output:
 - missing required tool input
 - invalid tool/agent binding
 - missing context producer
+- invalid repaired plan shape
 
 Repair flow:
 
@@ -282,10 +293,13 @@ Acceptance:
 - A repairable missing `dependsOn` or duplicate id gets one repair attempt.
 - An unsafe or repeatedly invalid plan fails with diagnostics.
 - Runtime replan is not invoked for compile failures.
+- Malformed repaired model output is captured as `INVALID_PLAN_SHAPE` instead of throwing out of the repair loop.
 
 ## Phase 4: Single Schema Source
 
 Once the semantic compiler is stable, collapse the structural contract into a single source of truth.
+
+Status: partially implemented. The canonical `CommanderDagPlanShape` Zod schema in `packages/core/src/planning/schema.ts` derives TS types, JSON Schema (`zodToPlanJsonSchema`), prompt text (`planShapeToPromptText`), and runtime validation (`buildToolInputShape`). However, `packages/tools/src/plan-schema.ts` mirrors the same types independently (see `CommanderPlanResultShape`), creating a dual-schema problem. A mirror test (`llm-raw-shape.test.ts`) catches field-level drift between the two, but it does not prevent structural divergence.
 
 Options:
 
@@ -317,8 +331,11 @@ Add focused compiler tests:
 - Tool not allowed for agent is rejected.
 - Unsupported approval-gated tool is rejected.
 - Missing path for `computer.listDirectory` and `computer.openPath` is rejected.
+- Wrong input types for required tool inputs are rejected.
+- `direct_response` with a non-synthesis `toolName` is rejected.
 - Missing context producer is rejected.
 - Context producer not in dependency ancestors is rejected.
+- Recovery plans can read existing step outputs only when they depend on the producer.
 - Duplicate `outputContextKey` is rejected.
 
 Add regression fixtures:
@@ -338,26 +355,29 @@ Add contract tests:
 - Normalized model fixtures compile or fail with expected diagnostics.
 - Existing Commander DAG runtime tests still pass for valid plans.
 - Invalid plans fail before `executeWorkflow()` or tool dispatch is called.
+- Failure recovery plans fail before appended recovery execution if they do not compile.
 
 ## Observability
 
 Eventually, compilation diagnostics should be visible from task logs and final snapshots. In Phase 1, store diagnostics in task logs and recovery metadata only. Adding a first-class snapshot field should be a separate UI/API change.
 
-Future trace shape:
+Status: implemented. Diagnostics are surfaced through task logs, repair attempt logs, and recovery reports. A first-class `PlanGenerationTrace` struct with schema versioning (`PLAN_GENERATION_TRACE_SCHEMA_VERSION`) is available on `TaskSnapshot.planGenerationTrace` (Zod shape in `schema.ts`). Future work includes UI surfacing of the trace and optional persistence of raw model output for post-mortem analytics.
+
+Current trace shape (canonical source in `plan-generation-trace.ts`):
 
 ```ts
 interface PlanGenerationTrace {
-  extractedJson?: unknown;
-  normalizedPlan?: unknown;
-  compiledPlan?: CompiledCommanderPlan;
-  diagnostics: PlanDiagnostic[];
-  repairAttempts: Array<{
-    diagnostics: PlanDiagnostic[];
-    repairedPlan?: unknown;
-    status: "compiled" | "failed";
-  }>;
-  schemaVersion: number;
-  promptVersion: string;
+  schemaVersion: string;         // PLAN_GENERATION_TRACE_SCHEMA_VERSION
+  planSchemaVersion: string;     // COMMANDER_PLAN_SCHEMA_VERSION
+  generatedAt: string;
+  userGoal: string;
+  initialCompiled: boolean;
+  repairAttemptCount: number;
+  stages: PlanGenerationStageRecord[];  // "initial" | "repair"
+  recoveryCompiles: PlanRecoveryCompileRecord[];  // stage="recovery"
+  extractedJson?: string;        // raw model output
+  normalizedPlan?: CommanderDagPlan;
+  promptVersion?: string;        // COMMANDER_PLAN_PROMPT_VERSION from schema.ts
 }
 ```
 
@@ -365,15 +385,17 @@ Raw model output can be too large or sensitive, so it should be stored only wher
 
 ## Migration Plan
 
-1. Add compiler and diagnostics types.
-2. Wire compiler into `runCommanderDagTask()` after `normalizeCommanderDagPlan()`.
-3. Pass the same runtime `availableTools` used for execution into the compiler, not the prompt-only `plannerAvailableTools`.
-4. Keep current dispatch-layer tool-input guards as defense in depth, and duplicate only the minimum required checks in the compiler.
-5. Add Phase 1 tests and fixtures.
-6. Add context flow checks.
-7. Add plan repair loop.
-8. Consolidate schema source.
-9. Brand `CompiledCommanderPlan` and narrow executor APIs after call sites have been migrated.
+1. Done: Add compiler and diagnostics types.
+2. Done: Wire compiler into `runCommanderDagTask()` after `normalizeCommanderDagPlan()`.
+3. Done: Pass the same runtime `availableTools` used for execution into the compiler, not the prompt-only `plannerAvailableTools`.
+4. Done: Keep current dispatch-layer tool-input guards as defense in depth, and duplicate only the minimum required checks in the compiler.
+5. Done: Add Phase 1 tests and fixtures.
+6. Done: Add context flow checks, including recovery-plan `existingSteps`.
+7. Done: Add plan repair loop for initial compile failures.
+8. Done: Compile runtime failure recovery plans and abandon invalid recovery without repair recursion.
+9. Partially done: Core schema unified under Zod in `packages/core/src/planning/schema.ts` (TS types, JSON Schema, prompt text, `buildToolInputShape` all derived). The `@javis/tools/src/plan-schema.ts` mirror remains, with a contract test (`llm-raw-shape.test.ts`) catching field-level drift but not structural divergence. Next step: eliminate the mirror by re-exporting from core.
+10. Remaining: Brand `CompiledCommanderPlan` and narrow executor APIs after call sites have been migrated. The executor currently assigns `dagPlan` as `CompiledCommanderPlan` locally, but many internal helpers still accept raw `CommanderDagPlan`.
+11. Done: `PlanGenerationTrace` struct with schema versioning (`PLAN_GENERATION_TRACE_SCHEMA_VERSION`) is available on `TaskSnapshot.planGenerationTrace`. UI surfacing and raw-model-output persistence remain as optional follow-ups.
 
 ## Risks
 
@@ -412,3 +434,11 @@ The first implementation patch should be intentionally small:
 - Add regression tests for the Wallpaper Engine missing-path failure.
 
 This closes the immediate reliability gap without forcing a full schema-library migration in the same change.
+
+Current implementation status: this first patch has been completed, then extended with initial plan repair, recovery plan compile gating, stricter required tool input type checks, and recovery context-flow validation across `existingSteps`. Required tool inputs have been moved into `ToolDescriptor.requiredInputs` and are read by the compiler, planner prompt, and `buildToolInputShape`. `PlanGenerationTrace` is available on `TaskSnapshot.planGenerationTrace` with Zod schema versioning.
+
+Remaining follow-up patches should focus on:
+
+- Consolidating the structural schema source (the `tools/plan-schema.ts` mirror vs core single source still needs elimination).
+- Narrowing executor APIs to accept only compiled plans where practical.
+- UI surfacing of `PlanGenerationTrace` and optional raw-model-output persistence.

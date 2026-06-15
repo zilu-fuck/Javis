@@ -1,0 +1,14 @@
+{
+  "title": "Test: Missing Dependency",
+  "reasoning": "Regression fixture for missing dependency detection.",
+  "steps": [
+    {
+      "id": "analyze",
+      "title": "Analyze code",
+      "assignedAgentKind": "code",
+      "requiredCapabilities": ["code_search"],
+      "dependsOn": ["nonexistent-step"],
+      "successCriteria": "Code analyzed."
+    }
+  ]
+}

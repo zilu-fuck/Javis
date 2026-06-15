@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { encodeMcpToolServerName, initialToolDescriptors, type BrowserTool, type CodeTool, type CommanderTool, type ComputerTool, type FileTool, type GitTool, type McpTool, type MemoryTool, type ProjectTool, type SchedulerTool, type ShellTool, type ToolDescriptor, type TrendTool, type VerifierTool, type WorkspaceTool } from "@javis/tools";
 import { createInitialTaskSnapshot, type TaskSnapshot } from "./index";
 import { createSharedTaskContext } from "./shared-context";
-import { executeCapabilityStep, runCommanderDagTask, runGenericWorkbenchWorkflow, runReadCurrentProjectWorkflow } from "./workflow-executor";
+import { executeCapabilityStep, runCommanderDagTask, runGenericWorkbenchWorkflow, runReadCurrentProjectWorkflow, SUPPORTED_APPROVAL_GATED_TOOLS } from "./workflow-executor";
 import type { ReActDecisionRequest } from "./agent-react-decider";
 
 function createTestController(options: { withPermissionHandler?: boolean } = {}) {
@@ -106,6 +106,58 @@ describe("runCommanderDagTask observability", () => {
     );
     expect(dispatchSnapshot).toBeDefined();
     expect(dispatchSnapshot?.agents.find((agent) => agent.id === "agent-file")?.status).toBe("queued");
+  });
+
+  it("forwards runtime events and checkpoints to durable sinks", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "Scan files",
+        reasoning: "Commander will delegate file scanning.",
+        steps: [{
+          id: "scan-files",
+          title: "Scan project documents",
+          assignedAgentKind: "file",
+          capability: "file_scan",
+          requiredCapabilities: ["file_scan"],
+          dependsOn: [],
+          successCriteria: "Documents are scanned.",
+        }],
+      })),
+    };
+    const fileTool: FileTool = {
+      scanMarkdownDocuments: vi.fn(async () => []),
+    };
+    const { controller } = createTestController();
+    const appendedEnvelopes: Array<import("./runtime-event-envelope").RuntimeEventEnvelope> = [];
+    const savedCheckpoints: Array<import("./workflow-checkpoint").WorkflowCheckpoint> = [];
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      fileTool,
+      taskId: "task-durable-sinks",
+      userGoal: "scan the project documents",
+      runtimeEventSink: {
+        append: async (envelope) => {
+          appendedEnvelopes.push(envelope);
+        },
+      },
+      checkpointSink: {
+        save: async (checkpoint) => {
+          savedCheckpoints.push(checkpoint);
+        },
+      },
+    });
+
+    expect(appendedEnvelopes.length).toBeGreaterThan(0);
+    expect(appendedEnvelopes[0].taskId).toBe("task-durable-sinks");
+    expect(appendedEnvelopes[0].payload).toMatchObject({ kind: "task.created" });
+    expect(appendedEnvelopes.some((e) => (e.payload as { kind?: string }).kind === "step.completed")).toBe(true);
+
+    expect(savedCheckpoints.length).toBeGreaterThan(0);
+    const finalCheckpoint = savedCheckpoints[savedCheckpoints.length - 1];
+    expect(finalCheckpoint.taskId).toBe("task-durable-sinks");
+    expect(finalCheckpoint.workflowSnapshot.steps.some((s) => s.id === "scan-files")).toBe(true);
   });
 
   it("filters code.searchRepository out of Commander planning when the code tool omits it", async () => {
@@ -515,6 +567,234 @@ describe("runCommanderDagTask observability", () => {
       })],
     });
   });
+
+  it("abandons recovery when Commander replan fails the compile gate", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn<CommanderTool["plan"]>(async () => ({
+        title: "Initial plan",
+        reasoning: "Will trigger a recovery.",
+        steps: [{
+          id: "collect-evidence",
+          title: "Collect evidence",
+          assignedAgentKind: "code",
+          toolName: "code.searchRepository",
+          toolInput: { goal: "find launch code" },
+          requiredCapabilities: ["code_search"],
+          dependsOn: [],
+          outputContextKey: "repoEvidence",
+          successCriteria: "Repository evidence is collected.",
+        }],
+      })),
+    };
+    const codeTool: CodeTool = {
+      inspectRepository: vi.fn(async () => ({
+        workspacePath: "E:/Javis",
+        changedFiles: [],
+        diffStat: "0 files changed",
+        diff: "",
+      })),
+      searchRepository: vi.fn(async () => {
+        throw new Error("HTTP 503 from repository search provider");
+      }),
+    };
+    // Recovery plan: references an agent kind that doesn't exist in
+    // availableTools, so compileCommanderPlan must reject it.
+    const replanDag = vi.fn(async () => ({
+      title: "Broken recovery plan",
+      reasoning: "Recovery step references an unknown agent kind.",
+      steps: [{
+        id: "recover-broken",
+        title: "Broken recovery",
+        assignedAgentKind: "totally-unknown-agent",
+        requiredCapabilities: [],
+        dependsOn: ["collect-evidence"],
+        successCriteria: "Will not be reached.",
+      }],
+    }));
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      codeTool,
+      taskId: "task-recovery-gate-fail",
+      userGoal: "summarize launch code",
+      replanDag,
+    });
+
+    const finalSnapshot = emitted[emitted.length - 1];
+    expect(replanDag).toHaveBeenCalledOnce();
+    // The recovery plan was rejected by the compile gate, so the task
+    // ends as failed (not recovered, not completed).
+    expect(finalSnapshot?.status).toBe("failed");
+    const report = finalSnapshot?.recoveryReport;
+    expect(report).toBeDefined();
+    expect(report).toMatchObject({
+      failureCount: 1,
+      recoveredCount: 0,
+      unrecoveredCount: 1,
+    });
+    expect(report?.attempts[0]).toMatchObject({
+      failedStepId: "collect-evidence",
+      replanAttempted: true,
+      replanStatus: "failed",
+    });
+    // Diagnostic must include the compile-gate marker AND the offending
+    // diagnostic code surfaced by compileCommanderPlan.
+    expect(report?.attempts[0].detail).toContain("recovery plan failed compile gate");
+    expect(report?.attempts[0].detail).toContain("UNKNOWN_AGENT");
+  });
+
+  it("attaches a PlanGenerationTrace with initial + recovery compile records", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn<CommanderTool["plan"]>(async () => ({
+        title: "Initial plan",
+        reasoning: "Will trigger a recovery and capture the trace.",
+        steps: [{
+          id: "collect-evidence",
+          title: "Collect evidence",
+          assignedAgentKind: "code",
+          toolName: "code.searchRepository",
+          toolInput: { goal: "find launch code" },
+          requiredCapabilities: ["code_search"],
+          dependsOn: [],
+          outputContextKey: "repoEvidence",
+          successCriteria: "Repository evidence is collected.",
+        }],
+      })),
+    };
+    const codeTool: CodeTool = {
+      inspectRepository: vi.fn(async () => ({
+        workspacePath: "E:/Javis",
+        changedFiles: [],
+        diffStat: "0 files changed",
+        diff: "",
+      })),
+      searchRepository: vi.fn(async () => {
+        throw new Error("HTTP 503 from repository search provider");
+      }),
+    };
+    const replanDag = vi.fn(async () => ({
+      title: "Recovery plan",
+      reasoning: "Use a direct synthesis step.",
+      steps: [{
+        id: "recover-with-partial-evidence",
+        title: "Recover with partial evidence",
+        assignedAgentKind: "commander",
+        executionMode: "direct_response" as const,
+        requiredCapabilities: ["synthesis"],
+        dependsOn: ["collect-evidence"],
+        outputContextKey: "recoverySummary",
+        successCriteria: "Recovery summary written.",
+      }],
+    }));
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      codeTool,
+      taskId: "task-plan-trace",
+      userGoal: "summarize launch code",
+      replanDag,
+    });
+
+    const finalSnapshot = emitted[emitted.length - 1];
+    const trace = finalSnapshot?.planGenerationTrace;
+    expect(trace).toBeDefined();
+    expect(trace?.userGoal).toBe("summarize launch code");
+    expect(trace?.initialCompiled).toBe(true);
+    expect(trace?.repairAttemptCount).toBe(0);
+    expect(trace?.stages).toHaveLength(1);
+    expect(trace?.stages[0]).toMatchObject({
+      stage: "initial",
+      status: "compiled",
+      stepIds: ["collect-evidence"],
+    });
+    // Recovery: compile gate accepted the recovery plan.
+    expect(trace?.recoveryCompiles).toHaveLength(1);
+    expect(trace?.recoveryCompiles[0]).toMatchObject({
+      stage: "recovery",
+      failedStepId: "collect-evidence",
+      status: "compiled",
+      stepIds: ["recover-with-partial-evidence"],
+    });
+    // Schema-versioning + raw captured artifacts.
+    expect(trace?.schemaVersion).toBe("1.0.0");
+    expect(trace?.planSchemaVersion).toBe("1.0.0");
+    expect(trace?.promptVersion).toBeDefined();
+    expect(trace?.extractedJson).toBeDefined();
+    expect(trace?.normalizedPlan).toBeDefined();
+    const parsedNormalized = trace?.normalizedPlan as { steps: Array<{ id: string }> } | undefined;
+    expect(parsedNormalized?.steps.map((s) => s.id)).toEqual(["collect-evidence"]);
+  });
+
+  it("records the recovery compile failure on PlanGenerationTrace when recovery plan fails the gate", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn<CommanderTool["plan"]>(async () => ({
+        title: "Initial plan",
+        reasoning: "Triggers a recovery that will fail compile.",
+        steps: [{
+          id: "collect-evidence",
+          title: "Collect evidence",
+          assignedAgentKind: "code",
+          toolName: "code.searchRepository",
+          toolInput: { goal: "find launch code" },
+          requiredCapabilities: ["code_search"],
+          dependsOn: [],
+          outputContextKey: "repoEvidence",
+          successCriteria: "Repository evidence is collected.",
+        }],
+      })),
+    };
+    const codeTool: CodeTool = {
+      inspectRepository: vi.fn(async () => ({
+        workspacePath: "E:/Javis",
+        changedFiles: [],
+        diffStat: "0 files changed",
+        diff: "",
+      })),
+      searchRepository: vi.fn(async () => {
+        throw new Error("HTTP 503 from repository search provider");
+      }),
+    };
+    const replanDag = vi.fn(async () => ({
+      title: "Broken recovery plan",
+      reasoning: "References an unknown agent.",
+      steps: [{
+        id: "recover-broken",
+        title: "Broken recovery",
+        assignedAgentKind: "totally-unknown-agent",
+        requiredCapabilities: [],
+        dependsOn: ["collect-evidence"],
+        successCriteria: "Will not be reached.",
+      }],
+    }));
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      codeTool,
+      taskId: "task-trace-gate-fail",
+      userGoal: "summarize launch code",
+      replanDag,
+    });
+
+    const finalSnapshot = emitted[emitted.length - 1];
+    const trace = finalSnapshot?.planGenerationTrace;
+    expect(trace).toBeDefined();
+    expect(trace?.recoveryCompiles).toHaveLength(1);
+    expect(trace?.recoveryCompiles[0]).toMatchObject({
+      stage: "recovery",
+      failedStepId: "collect-evidence",
+      // UNKNOWN_AGENT is non-repairable, so the status must reflect that.
+      status: "failed_non_repairable",
+    });
+    expect(trace?.recoveryCompiles[0].diagnostics.some(
+      (d) => d.code === "UNKNOWN_AGENT",
+    )).toBe(true);
+  });
 });
 
 describe("executeCapabilityStep repository search dispatch", () => {
@@ -777,6 +1057,136 @@ describe("executeCapabilityStep trend dispatch", () => {
     });
 
     expect(commanderTool.plan).toHaveBeenCalled();
+  });
+});
+
+describe("runCommanderDagTask plan repair loop", () => {
+  it("invokes the Commander again with repairContext when the first plan is repairable-but-invalid", async () => {
+    const planCalls: Array<{ repairContext?: unknown; tag: string }> = [];
+    const invalidPlan = {
+      title: "Broken",
+      reasoning: "Missing dependency on a step that does not exist.",
+      steps: [{
+        id: "analyze",
+        title: "Analyze",
+        assignedAgentKind: "code",
+        toolName: "code.inspectRepository",
+        toolInput: { workspacePath: "E:/Javis" },
+        requiredCapabilities: [],
+        dependsOn: ["ghost-step"],
+        successCriteria: "Done.",
+      }],
+    };
+    const repairedPlan = {
+      title: "Repaired",
+      reasoning: "Removed the ghost dependency.",
+      steps: [{
+        id: "analyze",
+        title: "Analyze",
+        assignedAgentKind: "code",
+        toolName: "code.inspectRepository",
+        toolInput: { workspacePath: "E:/Javis" },
+        requiredCapabilities: [],
+        dependsOn: [],
+        successCriteria: "Done.",
+      }],
+    };
+    const commanderTool: CommanderTool = {
+      plan: vi.fn<CommanderTool["plan"]>(async (request) => {
+        const tag = request.repairContext
+          ? `repair#${request.repairContext.attempt}`
+          : "initial";
+        planCalls.push({ repairContext: request.repairContext, tag });
+        if (request.repairContext) {
+          return repairedPlan;
+        }
+        return invalidPlan;
+      }),
+    };
+    const codeTool: CodeTool = {
+      inspectRepository: vi.fn(async () => ({
+        workspacePath: "E:/Javis",
+        changedFiles: [],
+        diffStat: "0",
+        diff: "",
+      })),
+    };
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      codeTool,
+      taskId: "task-repair-1",
+      userGoal: "Analyze the repository",
+    });
+
+    // First call is the normal plan, second call is the repair attempt.
+    expect(planCalls).toHaveLength(2);
+    expect(planCalls[0].tag).toBe("initial");
+    expect(planCalls[1].tag).toBe("repair#1");
+    expect(planCalls[0].repairContext).toBeUndefined();
+    expect(planCalls[1].repairContext).toBeDefined();
+    expect((planCalls[1].repairContext as { attempt: number }).attempt).toBe(1);
+
+    const allLogs = emitted.flatMap((s) => s.logs);
+    const repairStartLog = allLogs.find((log) =>
+      (log.detail ?? "").includes("attempting repair"),
+    );
+    expect(repairStartLog).toBeDefined();
+
+    const repairOkLog = allLogs.find((log) =>
+      (log.detail ?? "").includes("Repair attempt 1 compiled"),
+    );
+    expect(repairOkLog).toBeDefined();
+  });
+
+  it("does not call repair when the first plan is non-repairable and surfaces the failure", async () => {
+    const planCalls: Array<{ repairContext?: unknown }> = [];
+    const commanderTool: CommanderTool = {
+      plan: vi.fn<CommanderTool["plan"]>(async (request) => {
+        planCalls.push({ repairContext: request.repairContext });
+        return {
+          title: "Bad",
+          reasoning: "References a tool the runtime does not have.",
+          steps: [{
+            id: "x",
+            title: "X",
+            assignedAgentKind: "code",
+            toolName: "does.not.exist",
+            requiredCapabilities: ["code_search"],
+            dependsOn: [],
+            successCriteria: "Done.",
+          }],
+        };
+      }),
+    };
+    const codeTool: CodeTool = {
+      inspectRepository: vi.fn(async () => ({
+        workspacePath: "E:/Javis",
+        changedFiles: [],
+        diffStat: "0",
+        diff: "",
+      })),
+    };
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      codeTool,
+      taskId: "task-repair-2",
+      userGoal: "List a directory",
+    });
+
+    // Only the initial plan call should have happened; UNKNOWN_TOOL is non-repairable.
+    expect(planCalls).toHaveLength(1);
+    expect(planCalls[0].repairContext).toBeUndefined();
+
+    const failureLog = emitted.flatMap((s) => s.logs).find((log) =>
+      (log.detail ?? "").includes("Commander plan compilation failed"),
+    );
+    expect(failureLog).toBeDefined();
   });
 });
 
@@ -2404,7 +2814,8 @@ describe("executeCapabilityStep permissions", () => {
 
     expect(search).not.toHaveBeenCalled();
     expect(emitted[emitted.length - 1]?.status).toBe("failed");
-    expect(JSON.stringify(emitted)).toContain("Tool memory.search is not available");
+    const failedLog = emitted[emitted.length - 1]?.logs.find((log) => log.title === "task.failed");
+    expect(failedLog?.detail).toContain('Unknown tool "memory.search"');
   });
 
   it("does not let read-current-project bypass a disabled file scan descriptor", async () => {
@@ -3284,5 +3695,41 @@ describe("executeCapabilityStep permissions", () => {
     expect(serialized).not.toContain("data:image");
     expect(serialized).not.toContain("THROWN_SHOULD_NOT_SURVIVE");
     expect(serialized).toContain("[redacted:image data URL:");
+  });
+});
+
+describe("SUPPORTED_APPROVAL_GATED_TOOLS allowlist", () => {
+  it("contains the four Git tools with explicit preflight handlers", () => {
+    const allowed = new Set<string>(SUPPORTED_APPROVAL_GATED_TOOLS);
+    for (const name of [
+      "git.stageFiles",
+      "git.createCommit",
+      "git.createPullRequest",
+      "git.commentPullRequest",
+    ]) {
+      expect(allowed.has(name)).toBe(true);
+    }
+    // The set MUST be closed — every member is either a Git tool with a
+    // dedicated plan/preview handler, or a computer-use tool routed through
+    // computerUseLoopRunner. No generic confirmed_write tools allowed.
+    expect(SUPPORTED_APPROVAL_GATED_TOOLS).toHaveLength(4 + 8);
+  });
+
+  it("does not list generic confirmed_write tools that lack explicit preflight", () => {
+    // file.writeText has a dispatch path but no plan/preview step in
+    // runCommanderDagTask(). It must NOT appear in the allowlist.
+    expect(SUPPORTED_APPROVAL_GATED_TOOLS).not.toContain("file.writeText");
+    // Browser write tools are not part of the commander DAG — they have
+    // their own approval flow separate from this allowlist.
+    expect(SUPPORTED_APPROVAL_GATED_TOOLS).not.toContain("browser.click");
+  });
+
+  it("includes computer-use tools that go through computerUseLoopRunner", () => {
+    // The computer use action loop has explicit preflight + per-action
+    // approval, so the corresponding tool names are in the allowlist.
+    expect(SUPPORTED_APPROVAL_GATED_TOOLS).toContain("computer.click");
+    expect(SUPPORTED_APPROVAL_GATED_TOOLS).toContain("computer.type");
+    expect(SUPPORTED_APPROVAL_GATED_TOOLS).toContain("computer.invokeUi");
+    expect(SUPPORTED_APPROVAL_GATED_TOOLS).toContain("computer.setUiValue");
   });
 });
