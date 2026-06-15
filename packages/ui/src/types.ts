@@ -419,6 +419,7 @@ export interface WorkbenchHistoryEntry {
 
 export type WorkbenchSubmitGoalIntent =
   | "new_chat"
+  | "new_task"
   | "continue_history"
   | "queued_continuation"
   | "scheduled"
@@ -1422,6 +1423,11 @@ export interface JavisWorkbenchProps {
   onStopTask?: () => void;
   onEmergencyStopTask?: () => void;
   onConversationMessagesChange?: (taskId: string | undefined, messages: WorkbenchChatMessage[]) => void;
+  onConversationMessageResubmit?: (
+    taskId: string | undefined,
+    messages: WorkbenchChatMessage[],
+    goal: string,
+  ) => void;
   /** When user clicks an agent summary card in the chat, selected agent ID + open right sidebar. */
   onSelectAgent?: (agentId: string) => void;
   onSubmitGoal: (

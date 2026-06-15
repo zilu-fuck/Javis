@@ -321,8 +321,8 @@ async function executeReadySteps(
         });
         if (replanAction.steps?.length) {
           try {
-            appendReplannedSteps(activeWorkflow, replanAction.steps);
-            replannedStepIds.push(...replanAction.steps.map((step) => step.id));
+            const appendedStepIds = appendReplannedSteps(activeWorkflow, replanAction.steps);
+            replannedStepIds.push(...appendedStepIds);
           } catch (error) {
             return failedResult({
               completed,
@@ -544,16 +544,19 @@ function isTransientWorkflowStepError(error: string): boolean {
 function appendReplannedSteps(
   workflow: WorkbenchWorkflow,
   replannedSteps: WorkbenchWorkflowStep[],
-): void {
+): string[] {
   const ids = new Set(workflow.steps.map((step) => step.id));
+  const appendedStepIds: string[] = [];
   for (const step of replannedSteps) {
     if (ids.has(step.id)) {
-      throw new Error(`Replanned workflow step duplicates existing step ${step.id}.`);
+      continue;
     }
     workflow.steps.push({ ...step, dependsOn: [...step.dependsOn] });
     ids.add(step.id);
+    appendedStepIds.push(step.id);
   }
   validateWorkflowDag(workflow);
+  return appendedStepIds;
 }
 
 function failedResult({

@@ -2064,6 +2064,69 @@ describe("executeCapabilityStep permissions", () => {
     expect(context.get("uiTree")).toEqual(result.output);
   });
 
+  it("rejects computer path tools before dispatch when toolInput.path is missing", async () => {
+    const listDirectory = vi.fn<ComputerTool["listDirectory"]>(async () => []);
+    const openPath = vi.fn<ComputerTool["openPath"]>(async () => ({ opened: true }));
+    const computerTool: ComputerTool = {
+      searchLocalDocuments: vi.fn(async () => []),
+      listDirectory,
+      screenshot: vi.fn(async () => ({
+        dataUrl: "data:image/png;base64,AA==",
+        width: 1,
+        height: 1,
+        capturedAt: "2026-06-08T00:00:00.000Z",
+      })),
+      listWindows: vi.fn(async () => ({ windows: [] })),
+      inspectUi: vi.fn(async () => ({ tree: "", nodeCount: 0 })),
+      focusWindow: vi.fn(),
+      moveMouse: vi.fn(),
+      click: vi.fn(),
+      type: vi.fn(),
+      keyCombo: vi.fn(),
+      scroll: vi.fn(),
+      invokeUi: vi.fn(),
+      setUiValue: vi.fn(),
+      wait: vi.fn(async () => ({ waited: 1 })),
+      openPath,
+    };
+
+    await expect(
+      executeCapabilityStep(
+        {
+          id: "list-wallpaper-dir",
+          title: "List Wallpaper Engine directory",
+          assignedAgentKind: "computer",
+          toolName: "computer.listDirectory",
+          requiredCapabilities: ["directory_list"],
+          dependsOn: [],
+          successCriteria: "Directory listed.",
+        },
+        createSharedTaskContext({}),
+        { computerTool },
+      ),
+    ).rejects.toThrow("Path clarification needed");
+
+    await expect(
+      executeCapabilityStep(
+        {
+          id: "open-wallpaper-dir",
+          title: "Open Wallpaper Engine directory",
+          assignedAgentKind: "computer",
+          toolName: "computer.openPath",
+          requiredCapabilities: ["local_search"],
+          dependsOn: [],
+          toolInput: { path: "  " },
+          successCriteria: "Directory opened.",
+        },
+        createSharedTaskContext({}),
+        { computerTool },
+      ),
+    ).rejects.toThrow("computer.openPath requires explicit toolInput.path");
+
+    expect(listDirectory).not.toHaveBeenCalled();
+    expect(openPath).not.toHaveBeenCalled();
+  });
+
   it("does not dispatch explicit confirmed-write tools without Core approval", async () => {
     const writeText = vi.fn();
     const context = createSharedTaskContext({

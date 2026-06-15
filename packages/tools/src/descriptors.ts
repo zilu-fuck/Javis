@@ -271,14 +271,14 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "computer.listDirectory",
     permissionLevel: "read",
-    summary: "List direct children of a directory for file explorer browsing.",
+    summary: "List direct children of a directory for file explorer browsing. Requires toolInput.path as a non-empty string.",
     capabilityTags: ["directory_list"],
     ownerAgentKinds: ["computer"],
   },
   {
     name: "computer.openPath",
     permissionLevel: "read",
-    summary: "Open a file or directory path in the native OS shell.",
+    summary: "Open a file or directory path in the native OS shell. Requires toolInput.path as a non-empty string.",
     capabilityTags: ["local_search"],
     ownerAgentKinds: ["computer"],
   },

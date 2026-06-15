@@ -1356,6 +1356,9 @@ fn is_known_index(index_name: &str, table_name: &str) -> bool {
             | ("idx_file_scan_cache_ext", "file_scan_cache")
             | ("idx_file_classifications_cat", "file_classifications")
             | ("idx_app_classifications_cat", "app_classifications")
+            | ("goal_events_goal_created_idx", "goal_events")
+            | ("goal_evaluations_goal_created_idx", "goal_evaluations")
+            | ("goal_evaluations_goal_task_idx", "goal_evaluations")
             | ("idx_resource_cache_kind_root", "resource_file_cache")
             | ("idx_agent_memory_facts_scope", "agent_memory_facts")
             | (
@@ -1653,6 +1656,9 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS task_history (id TEXT PRIMARY KEY, title TEXT NOT NULL, user_goal TEXT NOT NULL, status TEXT NOT NULL, updated_at TEXT NOT NULL, snapshot_json TEXT NOT NULL)",
             "CREATE INDEX IF NOT EXISTS idx_resource_cache_kind_root ON resource_file_cache (kind, source_root_id)",
             "CREATE INDEX IF NOT EXISTS idx_app_classifications_cat ON app_classifications (category)",
+            "CREATE INDEX IF NOT EXISTS goal_events_goal_created_idx ON goal_events(goal_id, created_at, id)",
+            "CREATE INDEX IF NOT EXISTS goal_evaluations_goal_created_idx ON goal_evaluations(goal_id, created_at, id)",
+            "CREATE INDEX IF NOT EXISTS goal_evaluations_goal_task_idx ON goal_evaluations(goal_id, task_id, created_at)",
             r#"CREATE TABLE IF NOT EXISTS vector_index_items (
                  id TEXT PRIMARY KEY,
                  namespace TEXT NOT NULL,

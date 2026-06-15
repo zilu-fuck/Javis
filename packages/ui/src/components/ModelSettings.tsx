@@ -878,20 +878,21 @@ export function ModelSettings({
                         value={effectiveComputerUseSettings.deniedWindowPatterns.join("\n")}
                       />
                     </label>
-                    <div className="javis-settings-field-wide" aria-label={labels.trustedComputerApps}>
+                    <div className="javis-settings-field-wide javis-settings-trusted-apps" aria-label={labels.trustedComputerApps}>
                       <div className="javis-document-row">
                         <strong>{labels.trustedComputerApps}</strong>
                         <span>{trustedComputerApps.length}</span>
                       </div>
                       {trustedComputerApps.length > 0 ? (
-                        <div className="javis-computer-list">
+                        <div className="javis-settings-trusted-app-list">
                           {trustedComputerApps.map((app) => (
-                            <div className="javis-computer-row" key={app.title}>
+                            <div className="javis-settings-trusted-app-row" key={app.title}>
                               <span className="javis-computer-icon file small" aria-hidden="true">APP</span>
-                              <span className="javis-computer-name">{app.title}</span>
-                              <span className="javis-computer-date">{app.trustedAt.slice(0, 10)}</span>
+                              <span className="javis-settings-trusted-app-name">{app.title}</span>
+                              <span className="javis-settings-trusted-app-date">{app.trustedAt.slice(0, 10)}</span>
                               {onRemoveTrustedComputerApp ? (
                                 <button
+                                  className="javis-settings-trusted-app-remove"
                                   onClick={() => onRemoveTrustedComputerApp(app.title)}
                                   type="button"
                                 >

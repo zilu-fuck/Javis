@@ -25,6 +25,7 @@ import { ContextRing } from "./ContextRing";
 import { ContextStats } from "./ContextStats";
 import { Markdown } from "./Markdown";
 import { StreamingMessage } from "./StreamingMessage";
+import { TaskProgressRing } from "./TaskProgressRing";
 import { TaskSections } from "./TaskSections";
 
 interface ThreadViewProps {
@@ -46,6 +47,7 @@ interface ThreadViewProps {
   onRetryTask?: () => void;
   onStopTask?: () => void;
   onConversationMessagesChange?: (messages: WorkbenchChatMessage[]) => void;
+  onResubmitConversationMessage?: (messageContent: string, messages: WorkbenchChatMessage[]) => void;
   onOpenDetail?: (detail: WorkbenchDetailItem) => void;
   onOpenFile?: (path: string) => void;
   onOpenWorkspaceTool?: (action: WorkbenchWorkspaceToolAction) => void;
@@ -77,6 +79,7 @@ export function ThreadView({
   onRetryTask,
   onStopTask,
   onConversationMessagesChange,
+  onResubmitConversationMessage,
   onOpenDetail,
   onOpenFile,
   onOpenWorkspaceTool,
@@ -115,6 +118,7 @@ export function ThreadView({
     : task.status === "waiting_permission"
       ? translateWorkbenchText("Review the permission card above to continue.", locale)
       : undefined;
+  const isActiveTask = !["completed", "failed", "cancelled"].includes(task.status);
 
   useEffect(() => {
     setLocalConversationMessages(null);
@@ -138,7 +142,11 @@ export function ThreadView({
   }
 
   function handleWithdrawMessage(messageIndex: number) {
-    commitConversationMessages(conversationMessages.filter((_, index) => index !== messageIndex));
+    const message = conversationMessages[messageIndex];
+    if (message?.role !== "user" || isActiveTask) {
+      return;
+    }
+    commitConversationMessages(conversationMessages.slice(0, messageIndex));
   }
 
   function handleQuoteMessage(message: WorkbenchChatMessage, displayContent: string) {
@@ -159,12 +167,22 @@ export function ThreadView({
     if (!editingContent.trim()) {
       return;
     }
-    const nextMessages = conversationMessages.map((message, index) =>
+    const message = conversationMessages[messageIndex];
+    if (message?.role !== "user" || isActiveTask) {
+      return;
+    }
+    const nextContent = editingContent.trim();
+    const nextMessages = conversationMessages.slice(0, messageIndex + 1).map((item, index) =>
       index === messageIndex
-        ? { ...message, content: editingContent }
-        : message,
+        ? { ...item, content: nextContent }
+        : item,
     );
-    commitConversationMessages(nextMessages);
+    if (onResubmitConversationMessage) {
+      onResubmitConversationMessage(nextContent, nextMessages);
+    } else {
+      commitConversationMessages(nextMessages);
+      onDraftGoalChange(nextContent);
+    }
     handleCancelEdit();
   }
 
@@ -177,7 +195,7 @@ export function ThreadView({
   }
 
   return (
-    <>
+    <div className="javis-thread-view">
       <header className="javis-thread-header">
         <div className="javis-thread-title-group">
           <h1 className="javis-title">{translateWorkbenchText(task.title, locale)}</h1>
@@ -232,6 +250,7 @@ export function ThreadView({
               : getSafeAssistantContent(message.content, task, locale);
             const translatedDisplayContent = translateWorkbenchText(displayContent, locale);
             const messageKey = getConversationMessageKey(message, index);
+            const canMutateMessage = message.role === "user" && !isActiveTask;
             return (
             <article
               className={`javis-message ${message.role === "user" ? "user" : ""}`}
@@ -285,16 +304,18 @@ export function ThreadView({
                     {copiedMessageKey === messageKey ? actionLabels.copied : actionLabels.copy}
                   </span>
                 </button>
-                <button
-                  aria-label={actionLabels.withdraw}
-                  className="javis-message-action action-withdraw"
-                  onClick={() => handleWithdrawMessage(index)}
-                  title={actionLabels.withdraw}
-                  type="button"
-                >
-                  <span aria-hidden="true" className="javis-message-action-icon" />
-                  <span className="javis-message-action-label">{actionLabels.withdraw}</span>
-                </button>
+                {canMutateMessage ? (
+                  <button
+                    aria-label={actionLabels.withdraw}
+                    className="javis-message-action action-withdraw"
+                    onClick={() => handleWithdrawMessage(index)}
+                    title={actionLabels.withdraw}
+                    type="button"
+                  >
+                    <span aria-hidden="true" className="javis-message-action-icon" />
+                    <span className="javis-message-action-label">{actionLabels.withdraw}</span>
+                  </button>
+                ) : null}
                 <button
                   aria-label={actionLabels.quote}
                   className="javis-message-action action-quote"
@@ -305,16 +326,18 @@ export function ThreadView({
                   <span aria-hidden="true" className="javis-message-action-icon" />
                   <span className="javis-message-action-label">{actionLabels.quote}</span>
                 </button>
-                <button
-                  aria-label={actionLabels.edit}
-                  className="javis-message-action action-edit"
-                  onClick={() => handleStartEdit(messageKey, translatedDisplayContent)}
-                  title={actionLabels.edit}
-                  type="button"
-                >
-                  <span aria-hidden="true" className="javis-message-action-icon" />
-                  <span className="javis-message-action-label">{actionLabels.edit}</span>
-                </button>
+                {canMutateMessage ? (
+                  <button
+                    aria-label={actionLabels.edit}
+                    className="javis-message-action action-edit"
+                    onClick={() => handleStartEdit(messageKey, translatedDisplayContent)}
+                    title={actionLabels.edit}
+                    type="button"
+                  >
+                    <span aria-hidden="true" className="javis-message-action-icon" />
+                    <span className="javis-message-action-label">{actionLabels.edit}</span>
+                  </button>
+                ) : null}
               </div>
               {message.role === "assistant" && index === conversationMessages.length - 1 ? (
                 <ArtifactCards
@@ -409,12 +432,16 @@ export function ThreadView({
         className="javis-composer"
         composeMode={composeMode}
         contextControl={
-          <ContextRing
-            labels={labels}
-            locale={locale}
-            task={task}
-            modelConfiguration={modelConfiguration}
-          />
+          isActiveTask ? (
+            <TaskProgressRing task={task} locale={locale} />
+          ) : (
+            <ContextRing
+              labels={labels}
+              locale={locale}
+              task={task}
+              modelConfiguration={modelConfiguration}
+            />
+          )
         }
         currentWorkspacePath={currentWorkspacePath}
         isStreaming={showStreaming}
@@ -451,7 +478,7 @@ export function ThreadView({
         showWorkspaceContext={showWorkspaceContext}
         userDocuments={userDocuments}
       />
-    </>
+    </div>
   );
 }
 

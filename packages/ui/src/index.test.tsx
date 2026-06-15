@@ -771,7 +771,7 @@ describe("JavisWorkbench permission cards", () => {
     expect(container.querySelector(".javis-composer-status-hint")).not.toBeNull();
   });
 
-  it("submits new-chat and history-thread intents explicitly", () => {
+  it("submits new-chat, completed-history, and active-thread intents explicitly", () => {
     const onSubmitGoal = vi.fn();
     const newChat = render(
       <JavisWorkbench
@@ -816,6 +816,39 @@ describe("JavisWorkbench permission cards", () => {
     );
 
     fireEvent.submit(historyThread.container.querySelector(".javis-composer")!);
+
+    expect(onSubmitGoal).toHaveBeenCalledWith(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { intent: "new_task" },
+    );
+
+    cleanup();
+    onSubmitGoal.mockClear();
+    const activeThread = render(
+      <JavisWorkbench
+        draftGoal="后续修改"
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={onSubmitGoal}
+        task={{
+          ...createIdleTask(),
+          id: "task-running-1",
+          status: "running",
+          title: "正在回答",
+          userGoal: "你好",
+          commanderMessage: "正在处理",
+          conversationMessages: [
+            { role: "user", content: "你好" },
+            { role: "assistant", content: "正在处理" },
+          ],
+        }}
+      />,
+    );
+
+    fireEvent.submit(activeThread.container.querySelector(".javis-composer")!);
 
     expect(onSubmitGoal).toHaveBeenCalledWith(
       undefined,
@@ -2619,6 +2652,47 @@ describe("JavisWorkbench permission cards", () => {
     expect(unusedHtml).toContain("aria-label=\"Context window: 0 / 128k (0%)\"");
   });
 
+  it("renders task progress in the running composer instead of a zero context ring", () => {
+    const html = renderWorkbench({
+      title: "Answering",
+      userGoal: "Hello",
+      status: "running",
+      commanderMessage: "Selecting route.",
+      plan: [
+        {
+          id: "plan",
+          title: "Plan",
+          agentKind: "commander",
+          agentId: "agent-commander",
+          status: "running",
+          successCriteria: "Route selected",
+        },
+        {
+          id: "answer",
+          title: "Answer",
+          agentKind: "commander",
+          agentId: "agent-commander",
+          status: "pending",
+          successCriteria: "Answer returned",
+        },
+      ],
+      agents: [],
+      logs: [],
+      tokenUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        modelCalls: 0,
+        byAgentKind: [],
+      },
+    });
+
+    expect(html).toContain("javis-thread-view");
+    expect(html).toContain("javis-task-progress-ring");
+    expect(html).toContain("aria-label=\"Running: 50%\"");
+    expect(html).not.toContain("aria-label=\"Context window: 0 / 128k (0%)\"");
+  });
+
   it("infers MiMo primary model context as 1M instead of the default 128k", () => {
     const html = renderWorkbench({
       title: "MiMo context",
@@ -4181,18 +4255,23 @@ describe("JavisWorkbench permission cards", () => {
     fireEvent.click(getMessageActionButton(view.container, "Quote", 0));
     expect(onDraftGoalChange).toHaveBeenCalledWith("> Quote User: Hello Javis\n");
 
+    expect(
+      Array.from(view.container.querySelectorAll<HTMLButtonElement>(".javis-message-actions button"))
+        .filter((button) => button.textContent === "Withdraw"),
+    ).toHaveLength(1);
+
     fireEvent.click(getMessageActionButton(view.container, "Withdraw", 0));
-    expect(onConversationMessagesChange).toHaveBeenCalledWith("chat-actions", [
-      { id: "message-assistant", role: "assistant", content: "Hello back" },
-    ]);
+    expect(onConversationMessagesChange).toHaveBeenCalledWith("chat-actions", []);
   });
 
-  it("edits a conversation message from its action button", () => {
+  it("edits a user conversation message and requests a resubmit", () => {
     const onConversationMessagesChange = vi.fn();
+    const onConversationMessageResubmit = vi.fn();
     const view = render(
       <JavisWorkbench
         draftGoal=""
         onConversationMessagesChange={onConversationMessagesChange}
+        onConversationMessageResubmit={onConversationMessageResubmit}
         onDraftGoalChange={vi.fn()}
         onSubmitGoal={vi.fn()}
         task={{
@@ -4212,16 +4291,21 @@ describe("JavisWorkbench permission cards", () => {
       />,
     );
 
-    fireEvent.click(getMessageActionButton(view.container, "Edit", 1));
+    expect(
+      Array.from(view.container.querySelectorAll<HTMLButtonElement>(".javis-message-actions button"))
+        .filter((button) => button.textContent === "Edit"),
+    ).toHaveLength(1);
+
+    fireEvent.click(getMessageActionButton(view.container, "Edit", 0));
     fireEvent.change(view.getByLabelText("Edit message content"), {
-      target: { value: "Updated answer" },
+      target: { value: "Updated question" },
     });
     fireEvent.click(view.getByText("Save"));
 
-    expect(onConversationMessagesChange).toHaveBeenCalledWith("chat-edit", [
-      { id: "message-user", role: "user", content: "Original question" },
-      { id: "message-assistant", role: "assistant", content: "Updated answer" },
-    ]);
+    expect(onConversationMessagesChange).not.toHaveBeenCalled();
+    expect(onConversationMessageResubmit).toHaveBeenCalledWith("chat-edit", [
+      { id: "message-user", role: "user", content: "Updated question" },
+    ], "Updated question");
   });
 
   it("filters classified apps, shows details on click, and opens them only on double click", () => {

@@ -3331,10 +3331,10 @@ describe("createFileScanTaskRuntime", () => {
     expect(answeredQuestionMessage?.askUserQuestion?.status).toBe("answered");
     expect(answeredQuestionMessage?.askUserQuestion?.answer).toBe("E:/test");
     expect(answeredQuestionMessage?.askUserQuestion?.resolvedAt).toBeDefined();
-    expect(finalMessages.some((message) =>
+    expect(finalMessages.filter((message) =>
       message.role === "user" &&
       message.content === "E:/test"
-    )).toBe(true);
+    )).toHaveLength(1);
     expect(finalMessages[finalMessages.length - 1]).toMatchObject({
       role: "assistant",
     });
@@ -3411,9 +3411,14 @@ describe("createFileScanTaskRuntime", () => {
     runtime.respondToAskUser("a.md", askSnapshot!.askUserQuestion!.id);
 
     const finalSnapshot = await waitForStatus(snapshots, "completed");
+    const finalMessages = finalSnapshot.conversationMessages ?? [];
 
     expect(finalSnapshot.status).toBe("completed");
     expect(finalSnapshot.plan.every((s) => s.status === "completed")).toBe(true);
+    expect(finalMessages.filter((message) =>
+      message.role === "user" &&
+      message.content === "a.md"
+    )).toHaveLength(1);
 
     unsubscribe();
     runtime.dispose();

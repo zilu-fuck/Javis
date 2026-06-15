@@ -385,15 +385,17 @@ describe("executeWorkflow", () => {
     expect(result.abandonedStepIds).toEqual(["hung"]);
   });
 
-  it("returns failed result when replanned steps are invalid", async () => {
+  it("skips duplicate replanned steps and continues existing downstream work", async () => {
     const workflow = createWorkflow([
       step("scan-files", [], false),
-      step("fallback-scan", [], false),
+      step("fallback-scan", ["scan-files"], false),
     ]);
 
+    const executed: string[] = [];
     const result = await executeWorkflow({
       workflow,
       executeStep: async (workflowStep) => {
+        executed.push(workflowStep.id);
         if (workflowStep.id === "scan-files") {
           throw new Error("scan failed");
         }
@@ -405,10 +407,11 @@ describe("executeWorkflow", () => {
       }),
     });
 
-    expect(result.status).toBe("failed");
-    expect(result.failedStepId).toBe("scan-files");
-    expect(result.error).toContain("duplicates existing step fallback-scan");
+    expect(result.status).toBe("completed");
+    expect(executed).toEqual(["scan-files", "fallback-scan"]);
+    expect(result.completedStepIds).toEqual(["fallback-scan"]);
     expect(result.abandonedStepIds).toEqual(["scan-files"]);
+    expect(result.replannedStepIds).toBeUndefined();
   });
 });
 

@@ -24,6 +24,33 @@ describe("desktop database migrations", () => {
     expect(database.bindValues[0]).toEqual(["next", expect.any(String)]);
   });
 
+  it("uses the module invoke when Tauri internals are not ready", async () => {
+    delete (window as any).__TAURI_INTERNALS__;
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "db_select") {
+        return [{ id: "existing" }];
+      }
+      return undefined;
+    });
+    const database = invokeDesktopDatabase(invoke);
+
+    const rows = await database.select("SELECT id FROM schema_migrations");
+    await database.execute(
+      "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
+      ["next", "2026-06-14T00:00:00.000Z"],
+    );
+
+    expect(rows).toEqual([{ id: "existing" }]);
+    expect(invoke).toHaveBeenNthCalledWith(1, "db_select", {
+      sql: "SELECT id FROM schema_migrations",
+      bindValues: [],
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "db_execute", {
+      sql: "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
+      bindValues: ["next", "2026-06-14T00:00:00.000Z"],
+    });
+  });
+
   it("routes approval record writes through dedicated native commands", async () => {
     const invoke = vi.fn(async () => undefined);
     (window as any).__TAURI_INTERNALS__ = { invoke };

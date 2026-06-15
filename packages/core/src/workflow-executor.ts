@@ -2067,12 +2067,14 @@ async function dispatchToolByName(
     }
     case "computer.listDirectory": {
       if (!tools.computerTool) throw new Error("computer.listDirectory tool not available");
+      assertRequiredComputerPathInput("computer.listDirectory", input);
       return tools.computerTool.listDirectory({
-        path: input.path as string | undefined,
+        path: input.path,
       });
     }
     case "computer.openPath": {
       if (!tools.computerTool) throw new Error("computer.openPath tool not available");
+      assertRequiredComputerPathInput("computer.openPath", input);
       return tools.computerTool.openPath(input);
     }
     case "computer.screenshot": {
@@ -2383,6 +2385,21 @@ function mergeStepInput(
     ...(isPlainRecord(step.toolInput) ? step.toolInput : {}),
     ...(extraInput ?? {}),
   };
+}
+
+function assertRequiredComputerPathInput(
+  toolName: "computer.listDirectory" | "computer.openPath",
+  input: Record<string, unknown>,
+): asserts input is Record<string, unknown> & { path: string } {
+  if (typeof input.path === "string" && input.path.trim()) {
+    input.path = input.path.trim();
+    return;
+  }
+  throw new Error(
+    `${toolName} requires explicit toolInput.path: non-empty string. ` +
+    "Path clarification needed: ask the user for the target directory/file path, " +
+    "or first locate it with an available search/read-only discovery tool before calling this tool.",
+  );
 }
 
 function buildCodeProposalGoal(input: Record<string, unknown>): string {
@@ -5768,7 +5785,12 @@ export async function runCommanderDagTask({
         // Use the Commander's declared dependsOn, filtering out the failed step
         // (which is abandoned, so depending on it would deadlock).
         const failedId = request.step.id;
-        const recoverySteps: WorkbenchWorkflowStep[] = recoveryPlan.steps.map((s) => ({
+        const existingWorkflowStepIds = new Set(request.workflow.steps.map((step) => step.id));
+        const uniqueRecoveryDagSteps = recoveryPlan.steps.filter((step) => !existingWorkflowStepIds.has(step.id));
+        const skippedDuplicateStepIds = recoveryPlan.steps
+          .filter((step) => existingWorkflowStepIds.has(step.id))
+          .map((step) => step.id);
+        const recoverySteps: WorkbenchWorkflowStep[] = uniqueRecoveryDagSteps.map((s) => ({
           id: s.id,
           title: s.title,
           agentKind: s.assignedAgentKind as WorkbenchWorkflowStep["agentKind"],
@@ -5783,7 +5805,7 @@ export async function runCommanderDagTask({
         }));
 
         // Add recovery steps to the dagPlan for tracking
-        for (const rs of recoveryPlan.steps) {
+        for (const rs of uniqueRecoveryDagSteps) {
           dagPlan.steps.push(rs as CommanderDagStep);
         }
         recoveryAttempts.push(createRecoveryAttempt({
@@ -5794,17 +5816,23 @@ export async function runCommanderDagTask({
           replanStatus: "planned",
           abandonedFailedStep: true,
           recoveryStepIds: recoverySteps.map((step) => step.id),
-          detail: `Commander produced ${recoverySteps.length} recovery step(s).`,
+          detail: skippedDuplicateStepIds.length > 0
+            ? `Commander produced ${recoverySteps.length} new recovery step(s); skipped duplicate existing step(s): ${skippedDuplicateStepIds.join(", ")}.`
+            : `Commander produced ${recoverySteps.length} recovery step(s).`,
         }));
 
         emitSnapshot({
           ...getSnapshot(),
-          commanderMessage: `Step ${request.step.id} failed. Commander re-planned ${recoverySteps.length} recovery step(s): ${recoverySteps.map((s) => s.id).join(", ")}`,
+          commanderMessage: skippedDuplicateStepIds.length > 0
+            ? `Step ${request.step.id} failed. Commander re-plan reused existing step(s): ${skippedDuplicateStepIds.join(", ")}. Continuing with the existing DAG.`
+            : `Step ${request.step.id} failed. Commander re-planned ${recoverySteps.length} recovery step(s): ${recoverySteps.map((s) => s.id).join(", ")}`,
           logs: appendLog(getSnapshot(), emitEvent({
             kind: "tool.planned",
             taskId,
             toolName: "commander.plan",
-            detail: `Re-plan: ${recoverySteps.length} recovery step(s) for failed step ${request.step.id}.`,
+            detail: skippedDuplicateStepIds.length > 0
+              ? `Re-plan: ${recoverySteps.length} new recovery step(s), skipped duplicate existing step(s): ${skippedDuplicateStepIds.join(", ")}.`
+              : `Re-plan: ${recoverySteps.length} recovery step(s) for failed step ${request.step.id}.`,
           })),
         });
 

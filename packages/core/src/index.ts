@@ -778,7 +778,9 @@ export interface TaskRuntime {
       taskId?: ID;
       priorMessages?: ChatMessage[];
       mode?: "auto" | "chat" | "project";
+      originMode?: "chat" | "project";
       workspacePath?: string;
+      appendUserMessage?: boolean;
       /** User-facing text (without <vision-context>). Defaults to userGoal. */
       displayGoal?: string;
       /** Image data URLs for display in the user's message bubble. */
@@ -1490,6 +1492,24 @@ export function createFileScanTaskRuntime({
     return next;
   }
 
+  function appendAskUserAnswerMessageOnce(
+    messages: ConversationMessage[],
+    answer: string,
+  ): ConversationMessage[] {
+    const lastMessage = messages[messages.length - 1];
+    if (lastMessage?.role === "user" && lastMessage.content === answer) {
+      return messages;
+    }
+    return [...messages, { role: "user", content: answer }];
+  }
+
+  function withoutTrailingUserMessage(messages: ChatMessage[]): ChatMessage[] {
+    if (messages[messages.length - 1]?.role !== "user") {
+      return messages;
+    }
+    return messages.slice(0, -1);
+  }
+
   function isSafeConversationAttachmentUrl(value: string): boolean {
     const trimmed = value.trim();
     if (!trimmed || /^data:image\//i.test(trimmed)) {
@@ -1518,25 +1538,30 @@ export function createFileScanTaskRuntime({
       const taskId = options.taskId ?? `task-${Date.now()}`;
       const controller = createTaskScopedController(taskId);
       const effectiveRuntimeConfig = getRuntimeConfig?.() ?? runtimeConfig;
+      const appendUserMessage = options.appendUserMessage !== false;
+      const priorMessages = options.priorMessages ?? [];
+      const modelPriorMessages = appendUserMessage
+        ? priorMessages
+        : withoutTrailingUserMessage(priorMessages);
       const modelContext = selectModelContextMessages(
-        options.priorMessages ?? [],
+        modelPriorMessages,
         effectiveRuntimeConfig?.contextStrategy,
       );
+      const displayUserMessage: ChatMessage = {
+        role: "user",
+        content: options.displayGoal ?? userGoal,
+        ...(options.displayAttachments ? { attachments: options.displayAttachments } : {}),
+      };
       activeTaskMetadata = {
         taskId,
-        originMode: startMode === "chat" || startMode === "project" ? startMode : undefined,
+        originMode: options.originMode ?? (startMode === "chat" || startMode === "project" ? startMode : undefined),
         workspacePath: options.workspacePath?.trim() || undefined,
       };
       activeConversation = {
         taskId,
-        startedMessages: [
-          ...(options.priorMessages ?? []),
-          {
-            role: "user",
-            content: options.displayGoal ?? userGoal,
-            ...(options.displayAttachments ? { attachments: options.displayAttachments } : {}),
-          },
-        ],
+        startedMessages: appendUserMessage
+          ? [...priorMessages, displayUserMessage]
+          : [...priorMessages],
       };
       onTaskStarted?.(taskId);
       emitImmediateFeedback(taskId, userGoal);
@@ -1574,7 +1599,7 @@ export function createFileScanTaskRuntime({
             taskId,
             userGoal,
             chatTool,
-            options.priorMessages ?? [],
+            priorMessages,
             modelContext.messages,
             modelContext.omittedCount,
             options.displayGoal,
@@ -1583,6 +1608,7 @@ export function createFileScanTaskRuntime({
             routeLog,
             effectiveRuntimeConfig,
             signal,
+            appendUserMessage,
           );
           return;
         }
@@ -1599,7 +1625,7 @@ export function createFileScanTaskRuntime({
           taskId,
           userGoal,
           chatTool,
-          options.priorMessages ?? [],
+          priorMessages,
           modelContext.messages,
           modelContext.omittedCount,
           options.displayGoal,
@@ -1608,6 +1634,7 @@ export function createFileScanTaskRuntime({
           routeLog,
           effectiveRuntimeConfig,
           signal,
+          appendUserMessage,
         );
         return;
       }
@@ -1741,7 +1768,7 @@ export function createFileScanTaskRuntime({
             taskId,
             userGoal,
             chatTool,
-            options.priorMessages ?? [],
+            priorMessages,
             modelContext.messages,
             modelContext.omittedCount,
             options.displayGoal,
@@ -1750,6 +1777,7 @@ export function createFileScanTaskRuntime({
             routeLog,
             effectiveRuntimeConfig,
             signal,
+            appendUserMessage,
           );
           return;
         }
@@ -1777,7 +1805,7 @@ export function createFileScanTaskRuntime({
           userGoal,
           priorMessages: modelContext.messages,
           omittedPriorMessageCount: modelContext.omittedCount,
-          fullPriorMessages: options.priorMessages ?? [],
+          fullPriorMessages: modelPriorMessages,
           contextSummaryTool: chatTool,
           initialLogs: [routeLogToTaskLog(routeLog)],
           runtimeConfig: effectiveRuntimeConfig,
@@ -1946,7 +1974,7 @@ export function createFileScanTaskRuntime({
           taskId,
           userGoal,
           chatTool,
-          options.priorMessages ?? [],
+          priorMessages,
           modelContext.messages,
           modelContext.omittedCount,
           options.displayGoal,
@@ -1955,6 +1983,7 @@ export function createFileScanTaskRuntime({
           routeLog,
           effectiveRuntimeConfig,
           signal,
+          appendUserMessage,
         );
         return;
       }
@@ -2046,10 +2075,7 @@ export function createFileScanTaskRuntime({
             askUserQuestion: resolvedQuestion,
           });
         }
-        const answeredTimeline: ConversationMessage[] = [
-          ...updatedMessages,
-          { role: "user", content: answer },
-        ];
+        const answeredTimeline = appendAskUserAnswerMessageOnce(updatedMessages, answer);
         if (activeConversation?.taskId === current.id) {
           activeConversation = {
             ...activeConversation,
@@ -2086,17 +2112,18 @@ export function createFileScanTaskRuntime({
     routeLog: RouteLog = createRouteLog(taskId, userGoal, routeDecision),
     runtimeConfig?: RuntimeExecutionConfig,
     signal?: AbortSignal,
+    appendUserMessage = true,
   ) {
     const isChinese = /[\u3400-\u9fff]/u.test(userGoal);
     const displayContent = displayGoal ?? userGoal;
-    const startedMessages: ChatMessage[] = [
-      ...priorMessages,
-      {
-        role: "user",
-        content: displayContent,
-        ...(displayAttachments ? { attachments: displayAttachments } : {}),
-      },
-    ];
+    const displayUserMessage: ChatMessage = {
+      role: "user",
+      content: displayContent,
+      ...(displayAttachments ? { attachments: displayAttachments } : {}),
+    };
+    const startedMessages: ChatMessage[] = appendUserMessage
+      ? [...priorMessages, displayUserMessage]
+      : [...priorMessages];
     emitForActiveTask(taskId, {
       id: taskId,
       title: isChinese ? "\u6b63\u5728\u56de\u7b54" : "Answering",
@@ -2240,6 +2267,7 @@ export function createFileScanTaskRuntime({
     routeLog: RouteLog = createRouteLog(taskId, userGoal, routeDecision),
     runtimeConfig?: RuntimeExecutionConfig,
     signal?: AbortSignal,
+    appendUserMessage = true,
   ) {
     return runChatTask(
       taskId,
@@ -2254,6 +2282,7 @@ export function createFileScanTaskRuntime({
       routeLog,
       runtimeConfig,
       signal,
+      appendUserMessage,
     );
   }
 

@@ -812,6 +812,7 @@ type SubmitGoalHandler = (
   forcedMode?: "chat" | "project",
   goalId?: string,
   submitIntent?: WorkbenchSubmitGoalIntent,
+  appendUserMessage?: boolean,
 ) => void;
 
 interface PendingGoalSubmission {
@@ -2950,6 +2951,7 @@ function App() {
     forcedMode?: "chat" | "project",
     goalId?: string,
     submitIntent?: WorkbenchSubmitGoalIntent,
+    appendUserMessage = true,
   ) {
     const rawGoal = (queuedRawGoal ?? goalOverride ?? draftGoal).trim();
     if (!rawGoal) {
@@ -3036,12 +3038,14 @@ function App() {
         forcedMode,
         goalId,
         requestedSubmitIntent,
+        appendUserMessage,
       );
       return;
     }
     const effectiveComposeMode = shouldRouteAsDirectChat(rawGoal, requestedComposeMode, requestedSubmitIntent, imageDataUrls)
       ? "chat"
       : requestedComposeMode;
+    const historyComposeMode = requestedComposeMode;
     const canContinueHistory =
       requestedSubmitIntent === "continue_history" ||
       requestedSubmitIntent === "queued_continuation";
@@ -3070,7 +3074,7 @@ function App() {
         ? effectiveComposeMode
         : undefined);
     const taskWorkspacePath =
-      startMode === "project" || workspacePathOverride || scheduledTaskId
+      historyComposeMode === "project" || workspacePathOverride || scheduledTaskId
         ? workspacePathOverride ?? workspaceRef.current
         : undefined;
     clearQueuedTaskSnapshots();
@@ -3085,6 +3089,7 @@ function App() {
       rawGoal,
       requestedComposeMode,
       effectiveComposeMode,
+      historyComposeMode,
       continuationTaskId: continuationTask?.id,
       hasPriorMessages: Boolean(startOptions?.priorMessages.length),
     });
@@ -3161,6 +3166,8 @@ function App() {
         runtime.start(finalGoal, {
           ...startOptions,
           mode: bridgeUsed ? "chat" : startMode,
+          originMode: historyComposeMode,
+          appendUserMessage,
           displayGoal: hasImages ? rawGoal : undefined,
           displayAttachments: hasImages ? imageDataUrls : undefined,
           workspacePath: taskWorkspacePath,
@@ -3180,6 +3187,8 @@ function App() {
       runtime.start(finalGoal, {
         ...startOptions,
         mode: bridgeUsed ? "chat" : startMode,
+        originMode: historyComposeMode,
+        appendUserMessage,
         displayGoal: hasImages ? rawGoal : undefined,
         displayAttachments: hasImages ? imageDataUrls : undefined,
         workspacePath: taskWorkspacePath,
@@ -3637,33 +3646,66 @@ function App() {
     taskId: string | undefined,
     messages: WorkbenchChatMessage[],
   ) {
+    updateConversationMessagesForTask(taskId, messages);
+  }
+
+  function updateConversationMessagesForTask(
+    taskId: string | undefined,
+    messages: WorkbenchChatMessage[],
+  ): TaskSnapshot | undefined {
     const nextMessages = messages.map((message) => ({ ...message })) as ChatMessage[];
     const updatedAt = new Date().toISOString();
-    setTask((current) =>
-      !taskId || current.id === taskId
-        ? { ...current, conversationMessages: nextMessages, updatedAt }
-        : current,
+    const targetId = taskId ?? activeHistoryEntryId ?? task.id;
+    const targetTask = historyCurrentRef.current.find((entry) => entry.id === targetId)
+      ?? (task.id === targetId ? task : undefined);
+    if (!targetTask) {
+      return undefined;
+    }
+    const updatedTask: TaskSnapshot = {
+      ...targetTask,
+      conversationMessages: nextMessages,
+      updatedAt,
+    };
+    if (!taskId || task.id === taskId) {
+      clearQueuedTaskSnapshots();
+      setTask(updatedTask);
+    }
+    const updatedHistory = upsertTaskHistory(historyCurrentRef.current, updatedTask);
+    historyCurrentRef.current = updatedHistory;
+    setHistory(updatedHistory);
+    const repository = taskHistoryRepoRef.current;
+    if (repository) {
+      void repository.upsert(updatedTask);
+    }
+    return updatedTask;
+  }
+
+  function handleConversationMessageResubmit(
+    taskId: string | undefined,
+    messages: WorkbenchChatMessage[],
+    goal: string,
+  ) {
+    const updatedTask = updateConversationMessagesForTask(taskId, messages);
+    const nextGoal = goal.trim();
+    if (!updatedTask || !nextGoal) {
+      return;
+    }
+    queuedContinuationTaskRef.current = updatedTask;
+    setActiveHistoryEntryId(updatedTask.id);
+    setDraftGoal(nextGoal);
+    submitGoal(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      nextGoal,
+      undefined,
+      undefined,
+      "continue_history",
+      false,
     );
-    setHistory((current) => {
-      const targetId = taskId ?? activeHistoryEntryId;
-      const targetTask = targetId
-        ? current.find((entry) => entry.id === targetId)
-        : undefined;
-      if (!targetTask) {
-        return current;
-      }
-      const updatedTask: TaskSnapshot = {
-        ...targetTask,
-        conversationMessages: nextMessages,
-        updatedAt,
-      };
-      const updated = upsertTaskHistory(current, updatedTask);
-      const repository = taskHistoryRepoRef.current;
-      if (repository) {
-        void repository.upsert(updatedTask);
-      }
-      return updated;
-    });
   }
 
   function handleRemoveTrustedComputerApp(title: string) {
@@ -4372,6 +4414,7 @@ function App() {
         }
         onAskUserAnswer={handleAskUserAnswer}
         onConversationMessagesChange={handleConversationMessagesChange}
+        onConversationMessageResubmit={handleConversationMessageResubmit}
         onRefreshApps={handleRefreshApps}
         onUpdateAppCategory={handleUpdateAppCategory}
         onUpdateFileCategory={handleUpdateFileCategory}

@@ -151,6 +151,7 @@ export function JavisWorkbench({
   onStopTask,
   onEmergencyStopTask,
   onConversationMessagesChange,
+  onConversationMessageResubmit,
   onSubmitGoal,
   onTranslateSkillsToChinese,
   onSearchSkillMarket,
@@ -651,6 +652,8 @@ export function JavisWorkbench({
         onRetryTask={onRetryTask}
         onStopTask={onStopTask}
         onConversationMessagesChange={(messages) => onConversationMessagesChange?.(task.id, messages)}
+        onConversationMessageResubmit={(messages, goal) =>
+          onConversationMessageResubmit?.(task.id, messages, goal)}
         onOpenDetail={handleOpenDetail}
         onOpenFile={onOpenFile}
         onOpenWorkspaceTool={handleWorkspaceToolAction}
@@ -669,7 +672,7 @@ export function JavisWorkbench({
       onAskUserAnswer, onBrowseWorkspacePath, onDeleteRecentWorkspacePath, onDraftGoalChange,
       onPauseGoal, onResumeGoal, onCompleteGoal, onClearGoal,
       onPermissionDecision, modelConfiguration, onRetryTask, onStopTask,
-      onConversationMessagesChange,
+      onConversationMessageResubmit, onConversationMessagesChange,
       handleOpenDetail, handleWorkspaceToolAction, onOpenFile,
       onSelectComposeMode, onSubmitGoal, onUseWorkspacePath, onWorkspacePathChange,
       recentWorkspacePaths, task, userDocuments, selectedAgentId, newChatRecommendations,

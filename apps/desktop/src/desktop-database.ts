@@ -20,23 +20,28 @@ interface TauriInternals {
 function directInvoke(
   command: string,
   args?: Record<string, unknown>,
+  moduleInvoke?: (command: string, args?: Record<string, unknown>) => Promise<unknown>,
 ): Promise<unknown> {
   const internals = window as unknown as { __TAURI_INTERNALS__?: TauriInternals };
-  if (!internals.__TAURI_INTERNALS__?.invoke) {
-    throw new Error("Tauri IPC not ready - __TAURI_INTERNALS__ missing");
+  if (internals.__TAURI_INTERNALS__?.invoke) {
+    return internals.__TAURI_INTERNALS__.invoke(command, args ?? {});
   }
-  return internals.__TAURI_INTERNALS__.invoke(command, args ?? {});
+  if (moduleInvoke) {
+    return moduleInvoke(command, args);
+  }
+  throw new Error("Tauri IPC not ready - __TAURI_INTERNALS__ missing");
 }
 
 async function retryInvoke(
   command: string,
   args?: Record<string, unknown>,
+  moduleInvoke?: (command: string, args?: Record<string, unknown>) => Promise<unknown>,
   maxRetries = 150,
   delayMs = 100,
 ): Promise<unknown> {
   for (let i = 0; i < maxRetries; i++) {
     try {
-      return await directInvoke(command, args);
+      return await directInvoke(command, args, moduleInvoke);
     } catch (error) {
       if (i === maxRetries - 1) throw error;
       await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -46,29 +51,29 @@ async function retryInvoke(
 }
 
 export function invokeDesktopDatabase(
-  _moduleInvoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>,
+  moduleInvoke: (command: string, args?: Record<string, unknown>) => Promise<unknown>,
 ): DesktopDatabase {
   return {
     async execute(sql, bindValues = []) {
       const approvalRecordCommand = approvalRecordWriteCommand(sql, bindValues);
       if (approvalRecordCommand) {
-        await retryInvoke(approvalRecordCommand.command, approvalRecordCommand.args);
+        await retryInvoke(approvalRecordCommand.command, approvalRecordCommand.args, moduleInvoke);
         return;
       }
       const resourceScanRootCommand = resourceScanRootWriteCommand(sql, bindValues);
       if (resourceScanRootCommand) {
-        await retryInvoke(resourceScanRootCommand.command, resourceScanRootCommand.args);
+        await retryInvoke(resourceScanRootCommand.command, resourceScanRootCommand.args, moduleInvoke);
         return;
       }
-      await retryInvoke("db_execute", { sql, bindValues });
+      await retryInvoke("db_execute", { sql, bindValues }, moduleInvoke);
     },
     async select<T extends Record<string, unknown>>(sql: string, bindValues: DatabaseValue[] = []) {
       const resourceScanRootCommand = resourceScanRootSelectCommand(sql, bindValues);
       if (resourceScanRootCommand) {
-        const rows = await retryInvoke(resourceScanRootCommand.command, resourceScanRootCommand.args);
+        const rows = await retryInvoke(resourceScanRootCommand.command, resourceScanRootCommand.args, moduleInvoke);
         return (rows as T[]) ?? [];
       }
-      const rows = await retryInvoke("db_select", { sql, bindValues });
+      const rows = await retryInvoke("db_select", { sql, bindValues }, moduleInvoke);
       return (rows as T[]) ?? [];
     },
   };

@@ -45,6 +45,7 @@ interface ChatViewProps {
   onRetryTask?: () => void;
   onStopTask?: () => void;
   onConversationMessagesChange?: (messages: WorkbenchChatMessage[]) => void;
+  onConversationMessageResubmit?: (messages: WorkbenchChatMessage[], goal: string) => void;
   onOpenDetail?: (detail: WorkbenchDetailItem) => void;
   onOpenFile?: (path: string) => void;
   onOpenWorkspaceTool?: (action: WorkbenchWorkspaceToolAction) => void;
@@ -88,6 +89,7 @@ export function ChatView({
   onRetryTask,
   onStopTask,
   onConversationMessagesChange,
+  onConversationMessageResubmit,
   onOpenDetail,
   onOpenFile,
   onOpenWorkspaceTool,
@@ -99,6 +101,8 @@ export function ChatView({
   const labels = locale.labels;
   const isChinese = isChineseLocale(locale);
   const isNewChat = task.id === "task-idle";
+  const shouldContinueCurrentTask = !isNewChat && !["completed", "failed", "cancelled"].includes(task.status);
+  const submitIntent = isNewChat ? "new_chat" : shouldContinueCurrentTask ? "continue_history" : "new_task";
   const showWorkspaceContext =
     activeComposeMode === "project" || Boolean(task.project || task.codeReviewPreview || task.codeProposedEdit || task.codeApplyResult);
   const pendingAttachmentsRef = useRef<File[]>([]);
@@ -125,7 +129,7 @@ export function ChatView({
       undefined,
       files.length > 0 ? files : undefined,
       undefined,
-      { intent: isNewChat ? "new_chat" : "continue_history" },
+      { intent: submitIntent },
     );
   }
 
@@ -143,7 +147,7 @@ export function ChatView({
       undefined,
       undefined,
       dataUrls.length > 0 ? dataUrls : undefined,
-      { intent: isNewChat ? "new_chat" : "continue_history" },
+      { intent: submitIntent },
     );
     // Clear input after submit reads draftGoal.
   }
@@ -193,6 +197,8 @@ export function ChatView({
         onRetryTask={onRetryTask}
         onStopTask={onStopTask}
         onConversationMessagesChange={onConversationMessagesChange}
+        onResubmitConversationMessage={(goal, messages) =>
+          onConversationMessageResubmit?.(messages, goal)}
         onOpenDetail={onOpenDetail}
         onOpenFile={onOpenFile}
         onOpenWorkspaceTool={onOpenWorkspaceTool}

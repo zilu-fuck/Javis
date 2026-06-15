@@ -1690,6 +1690,63 @@ textarea:focus-visible {
   line-height: 18px;
 }
 
+.javis-settings-trusted-apps {
+  display: grid;
+  gap: 8px;
+}
+
+.javis-settings-trusted-app-list {
+  display: grid;
+  gap: 6px;
+}
+
+.javis-settings-trusted-app-row {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  border: 1px solid rgba(220, 226, 220, 0.86);
+  border-radius: var(--radius-md);
+  padding: 7px 8px 7px 10px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.javis-settings-trusted-app-name,
+.javis-settings-trusted-app-date {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-settings-trusted-app-name {
+  color: var(--color-ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.javis-settings-trusted-app-date {
+  color: var(--color-subtle);
+  font-size: 12px;
+}
+
+.javis-settings-trusted-app-remove {
+  min-height: 28px;
+  border: 1px solid rgba(45, 111, 103, 0.18);
+  border-radius: var(--radius-sm);
+  padding: 0 10px;
+  color: var(--color-accent-strong);
+  background: rgba(248, 252, 250, 0.92);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.javis-settings-trusted-app-remove:hover {
+  border-color: rgba(45, 111, 103, 0.32);
+  background: rgba(226, 242, 238, 0.84);
+}
+
 .javis-settings-section input:hover,
 .javis-settings-section select:hover,
 .javis-settings-section textarea:hover {
@@ -3134,6 +3191,17 @@ textarea:focus-visible {
   grid-template-rows: max-content minmax(0, 1fr);
 }
 
+.javis-thread-view {
+  grid-row: 1 / -1;
+  display: grid;
+  min-height: 0;
+  grid-template-rows: max-content minmax(0, 1fr) max-content;
+}
+
+.javis-goal-panel + .javis-thread-view {
+  grid-row: 2 / -1;
+}
+
 .javis-goal-panel {
   display: grid;
   grid-template-columns: minmax(0, 1.25fr) minmax(260px, 1fr) minmax(190px, 0.75fr) auto;
@@ -3855,6 +3923,7 @@ textarea:focus-visible {
   display: grid;
   align-content: start;
   gap: 14px;
+  min-height: 0;
   overflow: auto;
   padding: 28px 24px 18px;
   scrollbar-color: #c9c6be transparent;
@@ -5207,6 +5276,111 @@ textarea:focus-visible {
 .javis-composer.streaming .javis-composer-actions > button:hover {
   transform: none;
   box-shadow: none;
+}
+
+.javis-thread-view > .javis-composer {
+  align-self: end;
+}
+
+.javis-composer.streaming {
+  padding: 10px 20px 12px;
+  border-top: 1px solid var(--glass-border);
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+}
+
+.javis-composer.streaming .javis-composer-continuation-header {
+  width: 100%;
+  margin: 0;
+  border-color: var(--glass-border);
+  color: var(--color-ink);
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: none;
+}
+
+.javis-composer.streaming .javis-composer-continuation-title span,
+.javis-composer.streaming .javis-composer-continuation-actions button {
+  color: var(--color-muted);
+}
+
+.javis-composer.streaming .javis-composer-continuation-actions button:hover {
+  color: var(--color-ink);
+  background: var(--color-accent-soft);
+}
+
+.javis-composer.streaming textarea,
+.javis-composer.streaming .javis-composer-actions {
+  width: 100%;
+  border-color: var(--glass-border);
+  color: var(--color-ink);
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.javis-composer.streaming textarea {
+  min-height: 54px;
+  border-radius: 0;
+  padding: 12px 14px 8px;
+}
+
+.javis-composer.streaming textarea::placeholder {
+  color: var(--color-subtle);
+}
+
+.javis-composer.streaming textarea:focus-visible {
+  box-shadow:
+    inset 0 0 0 1px rgba(45, 111, 103, 0.58),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+.javis-composer.streaming .javis-composer-actions {
+  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.3);
+}
+
+.javis-composer.streaming .javis-attach-button {
+  color: var(--color-muted);
+  background: transparent;
+}
+
+.javis-composer.streaming .javis-attach-button:hover {
+  color: var(--color-ink);
+  background: var(--color-accent-soft);
+}
+
+.javis-composer.streaming .javis-composer-actions > .javis-composer-send-action {
+  color: #ffffff;
+  background: var(--color-accent);
+}
+
+.javis-composer.streaming .javis-composer-actions > .javis-composer-stop-action {
+  color: transparent;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid var(--glass-border);
+}
+
+.javis-composer.streaming .javis-composer-actions > .javis-composer-stop-action .javis-composer-action-icon {
+  color: var(--color-ink);
+}
+
+.javis-task-progress-ring {
+  display: inline-grid;
+  place-items: center;
+}
+
+.javis-task-progress-ring-track {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow:
+    0 8px 18px rgba(28, 41, 35, 0.08),
+    inset 0 0 0 1px var(--glass-border);
+}
+
+.javis-task-progress-ring-track svg {
+  display: block;
 }
 
 
@@ -7619,6 +7793,100 @@ textarea:focus-visible {
   min-height: 34px;
   border-radius: var(--radius-md);
   padding: 0;
+}
+
+.javis-thread-view > .javis-composer.streaming {
+  padding: 10px 28px 14px;
+  border-top: 1px solid var(--glass-border);
+  background: rgba(255, 255, 255, 0.68);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+}
+
+.javis-thread-view > .javis-composer.streaming .javis-composer-continuation-header,
+.javis-thread-view > .javis-composer.streaming textarea,
+.javis-thread-view > .javis-composer.streaming .javis-composer-actions {
+  width: min(100%, 940px);
+  justify-self: center;
+  margin-inline: 0;
+  border-color: rgba(220, 226, 220, 0.92);
+  color: var(--color-ink);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: none;
+}
+
+.javis-thread-view > .javis-composer.streaming .javis-composer-continuation-header {
+  min-height: 40px;
+  margin-bottom: -1px;
+  border-bottom: 0;
+  border-radius: 15px 15px 0 0;
+  padding: 0 14px 0 16px;
+}
+
+.javis-thread-view > .javis-composer.streaming .javis-composer-continuation-title span,
+.javis-thread-view > .javis-composer.streaming .javis-composer-continuation-actions button {
+  color: var(--color-muted);
+}
+
+.javis-thread-view > .javis-composer.streaming .javis-composer-continuation-actions button:hover {
+  color: var(--color-ink);
+  background: var(--color-accent-soft);
+}
+
+.javis-thread-view > .javis-composer.streaming textarea {
+  min-height: 56px;
+  border-radius: 0;
+  padding: 14px 16px 7px;
+}
+
+.javis-thread-view > .javis-composer.streaming textarea::placeholder {
+  color: var(--color-subtle);
+}
+
+.javis-thread-view > .javis-composer.streaming textarea:focus-visible {
+  box-shadow:
+    inset 0 0 0 1px rgba(45, 111, 103, 0.58),
+    inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+.javis-thread-view > .javis-composer.streaming .javis-composer-actions {
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  min-height: 42px;
+  border-top: 0;
+  border-radius: 0 0 15px 15px;
+  padding: 6px 12px 8px;
+  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.3);
+}
+
+.javis-composer-actions > .javis-context-window,
+.javis-composer-actions > .javis-task-progress-ring {
+  grid-column: -3 / -2;
+  justify-self: end;
+}
+
+.javis-thread-view > .javis-composer.streaming .javis-attach-button {
+  color: var(--color-muted);
+  background: transparent;
+}
+
+.javis-thread-view > .javis-composer.streaming .javis-attach-button:hover {
+  color: var(--color-ink);
+  background: var(--color-accent-soft);
+}
+
+.javis-thread-view > .javis-composer.streaming .javis-composer-actions > .javis-composer-send-action {
+  color: #ffffff;
+  background: var(--color-accent);
+}
+
+.javis-thread-view > .javis-composer.streaming .javis-composer-actions > .javis-composer-stop-action {
+  color: transparent;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid var(--glass-border);
+}
+
+.javis-thread-view > .javis-composer.streaming .javis-composer-actions > .javis-composer-stop-action .javis-composer-action-icon {
+  color: var(--color-ink);
 }
 
 .javis-inspector {
@@ -10093,7 +10361,7 @@ textarea:focus-visible {
 }
 
 .javis-main > .javis-new-chat,
-.javis-main > .javis-thread,
+.javis-main > .javis-thread-view,
 .javis-main > .javis-resource-shell,
 .javis-main > .javis-view-panel,
 .javis-settings-detail > .javis-settings-section,

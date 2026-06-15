@@ -1,6 +1,7 @@
 import type { DatabaseValue, DesktopDatabase, DesktopDatabaseMigration } from "./desktop-database";
 import {
   DEFAULT_MODEL_SETTINGS,
+  MODEL_SETTINGS_STORAGE_KEY,
   loadModelSettings,
   sanitizeModelSettings,
   type ModelSettings,
@@ -48,6 +49,9 @@ export function createModelSettingsRepository(
     },
 
     async importFromLocalStorage(storage) {
+      if (storage.getItem(MODEL_SETTINGS_STORAGE_KEY) === null) {
+        return loadModelSettingsFromDatabase(database);
+      }
       const imported = loadModelSettings(storage);
       await saveModelSettingsToDatabase(database, imported);
       return imported;
