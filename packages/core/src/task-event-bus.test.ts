@@ -98,6 +98,7 @@ describe("taskEventToLogEntry", () => {
       { kind: "step.started", taskId: "task-1", stepId: "step-1" },
       { kind: "step.progress", taskId: "task-1", stepId: "step-1", percent: 50, detail: "Halfway" },
       { kind: "step.completed", taskId: "task-1", stepId: "step-1", summary: "Done" },
+      { kind: "step.failed", taskId: "task-1", stepId: "step-2", error: "Build failed" },
       { kind: "tool.planned", taskId: "task-1", toolName: "file.scanMarkdownDocuments", detail: "Scan" },
       { kind: "tool.completed", taskId: "task-1", toolName: "file.scanMarkdownDocuments", detail: "Scanned" },
       { kind: "tool.partial", taskId: "task-1", toolCallId: "tool-1", partialOutput: "partial" },

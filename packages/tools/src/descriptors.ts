@@ -190,6 +190,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Stage explicitly selected workspace files in the Git index after approval.",
     capabilityTags: ["git_stage"],
     ownerAgentKinds: ["code"],
+    requiredInputs: [{ name: "paths", type: "string[]", nonEmpty: true }],
   },
   {
     name: "git.createCommit",
@@ -198,6 +199,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Stage current or explicitly selected workspace changes and create a local Git commit after approval.",
     capabilityTags: ["git_commit"],
     ownerAgentKinds: ["code"],
+    requiredInputs: [{ name: "message", type: "string", nonEmpty: true }],
   },
   {
     name: "git.createPullRequest",
@@ -206,6 +208,10 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Create a draft GitHub pull request from the current branch after approval; requires title and baseBranch, with optional body and draft.",
     capabilityTags: ["git_pr_create"],
     ownerAgentKinds: ["code"],
+    requiredInputs: [
+      { name: "title", type: "string", nonEmpty: true },
+      { name: "baseBranch", type: "string", nonEmpty: true },
+    ],
   },
   {
     name: "git.commentPullRequest",
@@ -214,6 +220,10 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Add a comment to a GitHub pull request after approval; requires pullRequest and body.",
     capabilityTags: ["git_pr_comment"],
     ownerAgentKinds: ["code"],
+    requiredInputs: [
+      { name: "pullRequest", type: "string", nonEmpty: true },
+      { name: "body", type: "string", nonEmpty: true },
+    ],
   },
 
   // ── Research ──────────────────────────────────────────────────────────
@@ -274,6 +284,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "List direct children of a directory for file explorer browsing. Requires toolInput.path as a non-empty string.",
     capabilityTags: ["directory_list"],
     ownerAgentKinds: ["computer"],
+    requiredInputs: [{ name: "path", type: "string", nonEmpty: true }],
   },
   {
     name: "computer.openPath",
@@ -281,6 +292,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Open a file or directory path in the native OS shell. Requires toolInput.path as a non-empty string.",
     capabilityTags: ["local_search"],
     ownerAgentKinds: ["computer"],
+    requiredInputs: [{ name: "path", type: "string", nonEmpty: true }],
   },
   {
     name: "computer.screenshot",

@@ -1,3 +1,5 @@
+import type { CommanderPlanResult } from "./plan-schema";
+
 export type PermissionLevel = "read" | "preview" | "confirmed_write" | "dangerous";
 
 /** Risk classification for confirmed_write operations. */
@@ -310,33 +312,48 @@ export interface CommanderPlanRequest {
   }>;
   availableTools?: ToolDescriptor[];
   workflowId?: string;
+  /**
+   * When set, the commander should treat this as a plan-repair request:
+   * the original plan failed semantic compilation, and the caller is
+   * providing the original user goal + the invalid plan + diagnostics.
+   * Implementations should use a repair-specific prompt template and
+   * only fix the listed diagnostics without changing the user goal.
+   */
+  repairContext?: CommanderPlanRepairContext;
 }
 
-export interface CommanderPlanResult {
-  title: string;
-  reasoning: string;
-  steps: Array<{
-    id: string;
-    title: string;
-    assignedAgentKind: string;
-    toolName?: string;
-    /** Primary capability tag for capability-based dispatch. Must be a valid AgentCapabilityTag. */
-    capability?: string;
-    requiredCapabilities?: string[];
-    /** Step IDs that must complete before this step starts. Empty = can run immediately. */
-    dependsOn?: string[];
-    /** SharedContext keys to read as input for this step. */
-    inputContextKeys?: string[];
-    /** Literal tool input merged with inputContextKeys for direct tool calls. */
-    toolInput?: Record<string, unknown>;
-    /** SharedContext key to write the step's output to. */
-    outputContextKey?: string;
-    /** Suggested answers for clarification steps. */
-    choices?: Array<string | AskUserChoice>;
-    executionMode?: "direct_response" | "direct_tool_call" | "react";
-    successCriteria: string;
+export interface CommanderPlanRepairContext {
+  /** The original user goal that the invalid plan was attempting to satisfy. */
+  originalUserGoal: string;
+  /** The full invalid plan returned by the previous model call. */
+  invalidPlan: unknown;
+  /** Diagnostics from the failed compilation, with suggested fixes. */
+  diagnostics: Array<{
+    code: string;
+    severity: "error" | "warning";
+    path?: string;
+    stepId?: string;
+    message: string;
+    suggestedFix?: string;
   }>;
+  /** 1-based attempt number for this repair call (1 = first repair attempt). */
+  attempt: number;
+  /** Maximum number of repair attempts the caller will make. */
+  maxAttempts: number;
 }
+
+/**
+ * Re-exported from `./plan-schema` (Zod-derived). Kept as a
+ * named `type` symbol for back-compat with downstream callers
+ * that declared `CommanderPlanResult` by name. The structural shape
+ * is identical to the Zod source; if you need to add a field, edit
+ * `CommanderPlanResultShape` in `./plan-schema.ts` and the contract
+ * test in `core/src/planning/__tests__/llm-raw-shape.test.ts` will
+ * catch any drift.
+ */
+export type { CommanderPlanResult } from "./plan-schema";
+export type { CommanderPlanStep } from "./plan-schema";
+export type { StepExecutionModeT, AskUserChoiceT } from "./plan-schema";
 
 export interface CommanderSynthesizeRequest {
   userGoal: string;
@@ -1382,6 +1399,21 @@ export interface VisionTool {
   extractText(request: VisionOcrRequest): Promise<VisionOcrResult>;
 }
 
+/**
+ * Single required input field on a tool, used by the plan compiler
+ * (semantic validation), the planner prompt (LLM contract), and the
+ * runtime dispatch guard (defense in depth). Adding a new required
+ * field to a tool is therefore a one-stop change in the descriptor.
+ */
+export interface ToolRequiredInput {
+  /** Field name expected on `toolInput`. */
+  name: string;
+  /** Expected JSON type. `string[]` enforces array-of-string. */
+  type: "string" | "string[]";
+  /** When true, empty strings / empty arrays are rejected. */
+  nonEmpty?: boolean;
+}
+
 export interface ToolDescriptor {
   name: string;
   permissionLevel: PermissionLevel;
@@ -1392,5 +1424,12 @@ export interface ToolDescriptor {
   capabilityTags: string[];
   /** Agent kinds that are allowed to use this tool. */
   ownerAgentKinds: string[];
+  /**
+   * Required fields on `toolInput` for this tool. Shared between the plan
+   * compiler and planner prompt via descriptor-derived Zod schema; the
+   * runtime dispatch guards retain hand-written checks as defense in depth.
+   * See `ToolRequiredInput`.
+   */
+  requiredInputs?: ToolRequiredInput[];
   metadata?: Record<string, unknown>;
 }

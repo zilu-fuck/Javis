@@ -77,6 +77,7 @@ export type TaskRuntimeEvent =
   | { kind: "step.progress"; taskId: ID; stepId: ID; percent: number; detail: string; agentKind?: AgentKind; agentId?: ID }
   | { kind: "step.started"; taskId: ID; stepId: ID; agentKind?: AgentKind; agentId?: ID }
   | { kind: "step.completed"; taskId: ID; stepId: ID; summary: string; agentKind?: AgentKind; agentId?: ID }
+  | { kind: "step.failed"; taskId: ID; stepId: ID; error: string; agentKind?: AgentKind; agentId?: ID }
   // Tool partial output events
   | { kind: "tool.partial"; taskId: ID; toolCallId: ID; partialOutput: string };
 
@@ -94,6 +95,7 @@ export const AGENT_RUN_EVENT_KINDS = [
   "step.started",
   "step.progress",
   "step.completed",
+  "step.failed",
   "tool.planned",
   "tool.completed",
   "tool.partial",
@@ -388,6 +390,17 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         detail: event.summary,
         userMessage: `${event.stepId} 完成`,
         devDetail: event.summary,
+        agentId: event.agentId ?? agentIdFromOptionalKind(event.agentKind),
+        stepId: event.stepId,
+      };
+    case "step.failed":
+      return {
+        id: `${event.taskId}-step-${event.stepId}-failed`,
+        kind: "tool",
+        title: "step.failed",
+        detail: event.error,
+        userMessage: `${event.stepId} 失败: ${toShortError(event.error)}`,
+        devDetail: event.error,
         agentId: event.agentId ?? agentIdFromOptionalKind(event.agentKind),
         stepId: event.stepId,
       };

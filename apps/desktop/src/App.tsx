@@ -307,6 +307,12 @@ import {
   createFileBackedTaskSessionJsonLineWriter,
 } from "./task-session-log";
 import {
+  RUNTIME_EVENT_MIGRATIONS,
+} from "./runtime-event-store";
+import {
+  WORKFLOW_CHECKPOINT_MIGRATIONS,
+} from "./workflow-checkpoint-store";
+import {
   createUserPreferencesRepository,
   PENDING_USER_PREFERENCES_STORAGE_KEY,
   PREF_KEYS,
@@ -1076,6 +1082,7 @@ function App() {
       modelSettings,
       getModelConfiguration: () => modelConfigRef.current,
       getWorkspacePath: () => workspaceRef.current,
+      getDatabase: () => databaseRef.current,
       getScheduledTasksRepository: () => scheduledTasksRepoRef.current,
       getComputerUseConfig: () => loadComputerUseConfigFromStorage(window.localStorage),
       getAvailableToolDescriptors: () => getEnabledToolDescriptors(
@@ -2264,6 +2271,8 @@ function App() {
       await runDesktopDatabaseMigrations(database, AGENT_MEMORY_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, CURRENT_GOAL_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, GOAL_EVENT_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, RUNTIME_EVENT_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, WORKFLOW_CHECKPOINT_MIGRATIONS);
 
       // One-time import from localStorage
       const taskHistoryRepo = createTaskHistoryRepository(database);

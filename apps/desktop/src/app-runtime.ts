@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { openPath as openNativePath } from "@tauri-apps/plugin-opener";
 import {
   buildCommanderPlanPrompt,
+  buildCommanderPlanRepairPrompt,
   buildCommanderReplanPrompt,
   buildReActDecisionPrompt,
   CONTEXT_KEYS,
@@ -16,6 +17,9 @@ import {
   normalizePromptLocale,
   parseChineseReviewResult,
 } from "@javis/core";
+import type { DesktopDatabase } from "./desktop-database";
+import { createRuntimeEventStore } from "./runtime-event-store";
+import { createWorkflowCheckpointStore } from "./workflow-checkpoint-store";
 import type {
   AgentReActDecision,
   AgentCapabilityVerificationInput,
@@ -346,6 +350,7 @@ interface CreateJavisRuntimeOptions {
   getScheduledTasksRepository?: () => ScheduledTasksRepository | null;
   getComputerUseConfig?: () => ComputerUseLoopOptionsConfig | undefined;
   getAvailableToolDescriptors?: () => ToolDescriptor[] | undefined;
+  getDatabase?: () => DesktopDatabase | null;
   getRuntimePreferences?: () => {
     contextStrategy?: RuntimeExecutionConfig["contextStrategy"];
     agentMaxRoundsPreset?: "4" | "8" | "12" | "custom";
@@ -1265,6 +1270,28 @@ function runtimePreferencesToExecutionConfig(
   };
 }
 
+function createRuntimeEventStoreRef(getDatabase?: () => DesktopDatabase | null) {
+  return {
+    append: async (envelope: import("@javis/core").RuntimeEventEnvelope) => {
+      const database = getDatabase?.();
+      if (!database) return;
+      const store = createRuntimeEventStore(database);
+      await store.append(envelope);
+    },
+  };
+}
+
+function createCheckpointStoreRef(getDatabase?: () => DesktopDatabase | null) {
+  return {
+    save: async (checkpoint: import("@javis/core").WorkflowCheckpoint) => {
+      const database = getDatabase?.();
+      if (!database) return;
+      const store = createWorkflowCheckpointStore(database);
+      await store.save(checkpoint);
+    },
+  };
+}
+
 export function createJavisRuntime({
   getWorkspacePath,
   modelSettings,
@@ -1282,6 +1309,7 @@ export function createJavisRuntime({
   onWorkspaceToolActivity,
   requestBrowserWriteApproval,
   buildAgentMemoryPromptContext,
+  getDatabase,
 }: CreateJavisRuntimeOptions) {
   const fallbackProvider = createConfiguredModelProvider(modelSettings);
   const providerCache = new Map<string, ModelProvider>();
@@ -1312,6 +1340,8 @@ export function createJavisRuntime({
 
   const sharedContext = createSharedTaskContext();
   const eventBus = createTaskEventBus();
+  const runtimeEventStore = createRuntimeEventStoreRef(getDatabase);
+  const checkpointStore = createCheckpointStoreRef(getDatabase);
   const streamingAgentRef: { current: AgentKind } = { current: "commander" };
   let activeComputerUseAbortController: AbortController | undefined;
   const preprocessingByTaskId = new Map<string, Promise<PreprocessedInput | undefined>>();
@@ -1512,6 +1542,8 @@ export function createJavisRuntime({
     getRuntimeConfig: () => runtimePreferencesToExecutionConfig(getRuntimePreferences?.()),
     getAvailableToolDescriptors: () => normalizeAvailableToolDescriptors(getAvailableToolDescriptors?.()),
     getCapabilityVerification,
+    runtimeEventSink: runtimeEventStore,
+    checkpointSink: checkpointStore,
     chatTool: {
       complete: (prompt, options) => providerFor("commander").complete(prompt, options),
       stream: (prompt, options) => providerFor("commander").stream(prompt, options),
@@ -3100,16 +3132,28 @@ async function planWithModelProviderStreaming(
   };
 
   const memoryContext = (await buildMemoryContext?.(request))?.trim() ?? "";
+  const promptSource = request.repairContext
+    ? buildCommanderPlanRepairPrompt({
+        locale: "zh-CN",
+        originalUserGoal: request.repairContext.originalUserGoal,
+        invalidPlan: request.repairContext.invalidPlan,
+        diagnostics: request.repairContext.diagnostics,
+        attempt: request.repairContext.attempt,
+        maxAttempts: request.repairContext.maxAttempts,
+        availableAgents: agentsWithCapabilities,
+        availableTools: effectiveTools,
+      })
+    : buildCommanderPlanPrompt({
+        userGoal: request.userGoal,
+        locale: "zh-CN",
+        priorMessages: request.priorMessages,
+        omittedPriorMessageCount: request.omittedPriorMessageCount,
+        workflowId: request.workflowId ?? "unknown",
+        availableAgents: agentsWithCapabilities,
+        availableTools: effectiveTools,
+      });
   const prompt = appendCommanderMemoryContext(
-    buildCommanderPlanPrompt({
-      userGoal: request.userGoal,
-      locale: "zh-CN",
-      priorMessages: request.priorMessages,
-      omittedPriorMessageCount: request.omittedPriorMessageCount,
-      workflowId: request.workflowId ?? "unknown",
-      availableAgents: agentsWithCapabilities,
-      availableTools: effectiveTools,
-    }),
+    promptSource,
     memoryContext,
     "zh-CN",
   );

@@ -44,6 +44,7 @@ import type { CommanderDagPlan } from "./commander-plan-schema";
 import type { ComputerUseStepTrace } from "./computer-use-types";
 import type { HandoffReport } from "./shared-context";
 import type { RecoveryReport } from "./recovery-report";
+import type { PlanGenerationTrace } from "./planning/plan-generation-trace";
 import {
   createDefaultAgentRegistry,
   demoAgents,
@@ -79,6 +80,8 @@ import {
   isContextOverflowError,
 } from "./context-recovery";
 import type { TaskEventBus } from "./task-event-bus";
+import type { RuntimeEventEnvelope } from "./runtime-event-envelope";
+import type { WorkflowCheckpoint } from "./workflow-checkpoint";
 import {
   createRouteLog,
   routeMessage,
@@ -265,6 +268,18 @@ export type {
   RecoveryReplanStatus,
   RecoveryReport,
 } from "./recovery-report";
+export {
+  buildPlanGenerationTrace,
+  classifyCompileStatus,
+} from "./planning/plan-generation-trace";
+export type {
+  PlanGenerationTrace,
+  PlanGenerationStage,
+  PlanGenerationStageStatus,
+  PlanGenerationStageRecord,
+  PlanRepairAttemptRecord,
+  PlanRecoveryCompileRecord,
+} from "./planning/plan-generation-trace";
 export { localizeError, localizeOpenCodeError } from "./error-localizer";
 export { executeWorkflow } from "./workflow-dag-executor";
 export type {
@@ -281,6 +296,25 @@ export type {
   AgentReActObservation,
   AgentReActTool,
 } from "./agent-react-loop";
+export {
+  compileCommanderPlan,
+  formatDiagnosticSummary,
+  isCompiledPlan,
+  isRepairable,
+  validateCommanderPlan,
+  attemptPlanRepair,
+} from "./planning";
+export type {
+  AttemptPlanRepairInput,
+  AttemptPlanRepairResult,
+  CompileCommanderPlanInput,
+  CompileCommanderPlanResult,
+  CompiledCommanderPlan,
+  PlanDiagnostic,
+  PlanDiagnosticCode,
+  PlanValidationInput,
+  RepairAttemptRecord,
+} from "./planning";
 export { buildReActDecisionPrompt } from "./agent-react-decider";
 export type { ReActDecisionRequest } from "./agent-react-decider";
 export { createAgentStateTracker } from "./agent-state-tracker";
@@ -296,6 +330,49 @@ export type {
   TaskEventMiddleware,
   TaskRuntimeEvent,
 } from "./task-event-bus";
+export {
+  createRuntimeEventEnvelope,
+  currentEnvelopeSequence,
+  extractEventKind,
+  extractStepId,
+  extractAgentKind,
+  isStructuralEvent,
+  isStreamingEvent,
+  nextEnvelopeSequence,
+  resetEnvelopeSequence,
+  STRUCTURAL_EVENT_KINDS,
+  STREAMING_EVENT_KINDS,
+} from "./runtime-event-envelope";
+export type {
+  RuntimeEventEnvelope,
+  RuntimeEventKind,
+} from "./runtime-event-envelope";
+export {
+  createArtifactEnvelope,
+  computeContentHash,
+  isArtifactEnvelope,
+  sanitizeArtifactForPersistence,
+  summarizeArtifactForHandoff,
+  resetArtifactIdCounter,
+} from "./artifact-envelope";
+export type {
+  ArtifactEnvelope,
+  ArtifactProducerRef,
+  ArtifactSensitivity,
+  ArtifactHashAlgorithm,
+  EvidenceReference,
+} from "./artifact-envelope";
+export {
+  buildCheckpointFromDagState,
+  computePlanHash,
+  getResumableStepIds,
+  isCheckpointResumeCompatible,
+  isCheckpointTrigger,
+} from "./workflow-checkpoint";
+export type {
+  WorkflowCheckpoint,
+  CheckpointTrigger,
+} from "./workflow-checkpoint";
 export type {
   WorkbenchWorkflow,
   WorkbenchWorkflowId,
@@ -343,6 +420,7 @@ export {
   COMMANDER_PLAN_SCHEMA_JSON,
   COMMANDER_PLAN_SCHEMA_PROMPT,
   buildCommanderPlanPrompt,
+  buildCommanderPlanRepairPrompt,
   buildCommanderReplanPrompt,
 } from "./commander-plan-schema";
 export type {
@@ -720,6 +798,14 @@ export interface TaskSnapshot {
   handoffReport?: HandoffReport;
   /** Serializable recovery audit generated when failed steps trigger alternate paths. */
   recoveryReport?: RecoveryReport;
+  /**
+   * Structured audit of every Commander plan that flowed through the
+   * executor: initial plan, repair attempts, and per-step recovery
+   * compiles. Mirrors `recoveryReport` at a different layer (compile-time
+   * gates) and is persisted alongside the task snapshot for product
+   * analytics and post-mortem debugging.
+   */
+  planGenerationTrace?: PlanGenerationTrace;
   /** User-readable error message set when task fails. Avoids exposing raw stack traces. */
   userFacingError?: string;
 }
@@ -829,6 +915,14 @@ export interface FileScanRuntimeOptions {
   capabilityVerification?: AgentCapabilityVerificationInput;
   getCapabilityVerification?: () => AgentCapabilityVerificationInput | undefined;
   onTaskStarted?: (taskId: string) => void;
+  /** Optional durable runtime event sink. If provided, the runtime forwards RuntimeEventEnvelope records. */
+  runtimeEventSink?: {
+    append: (envelope: RuntimeEventEnvelope) => void | Promise<void>;
+  };
+  /** Optional durable checkpoint sink. If provided, the runtime persists WorkflowCheckpoint snapshots. */
+  checkpointSink?: {
+    save: (checkpoint: WorkflowCheckpoint) => void | Promise<void>;
+  };
   /** P0-2: LLM-based ReAct decision maker for step execution loops. */
   reactDecideNext?: (request: ReActDecisionRequest) => Promise<AgentReActDecision>;
   /** P0-3: Commander replan after step failure or P0-4: after askUser clarification. */
@@ -1218,6 +1312,8 @@ export function createFileScanTaskRuntime({
   capabilityVerification,
   getCapabilityVerification,
   onTaskStarted,
+  runtimeEventSink,
+  checkpointSink,
   reactDecideNext,
   replanDag,
   computerUseLoopRunner,
@@ -1810,6 +1906,8 @@ export function createFileScanTaskRuntime({
           initialLogs: [routeLogToTaskLog(routeLog)],
           runtimeConfig: effectiveRuntimeConfig,
           availableToolDescriptors: effectiveToolDescriptors,
+          runtimeEventSink,
+          checkpointSink,
           reactDecideNext,
           replanDag,
           computerUseLoopRunner,

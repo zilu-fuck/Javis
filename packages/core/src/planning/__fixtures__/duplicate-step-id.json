@@ -1,0 +1,22 @@
+{
+  "title": "Test: Duplicate Step ID",
+  "reasoning": "Regression fixture for duplicate step id detection.",
+  "steps": [
+    {
+      "id": "scan",
+      "title": "Scan files",
+      "assignedAgentKind": "file",
+      "requiredCapabilities": ["file_scan"],
+      "dependsOn": [],
+      "successCriteria": "Files scanned."
+    },
+    {
+      "id": "scan",
+      "title": "Scan files again",
+      "assignedAgentKind": "file",
+      "requiredCapabilities": ["file_scan"],
+      "dependsOn": [],
+      "successCriteria": "Files scanned again."
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "title": "Test: Missing Computer Path",
+  "reasoning": "Regression fixture for the Wallpaper Engine missing-path failure.",
+  "steps": [
+    {
+      "id": "list-dir",
+      "title": "List directory contents",
+      "assignedAgentKind": "computer",
+      "toolName": "computer.listDirectory",
+      "requiredCapabilities": ["directory_list"],
+      "dependsOn": [],
+      "toolInput": {},
+      "successCriteria": "Directory listed."
+    }
+  ]
+}
