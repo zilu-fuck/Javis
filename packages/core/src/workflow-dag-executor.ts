@@ -4,6 +4,7 @@ import {
   formatStepInputValidationError,
   validateContextValue,
   validateStepInputContext,
+  writeStepOutput,
 } from "./shared-context";
 import { DEFAULT_TASK_TIMEOUT_MS, throwIfTaskAborted, withTaskTimeout } from "./task-wait";
 import type { WorkbenchWorkflow, WorkbenchWorkflowStep } from "./workflows";
@@ -269,9 +270,7 @@ async function executeReadySteps(
     const { step, result } = item;
     results.set(step.id, result.output);
     context.set(`step:${step.id}`, result.output);
-    if (step.outputContextKey && !context.has(step.outputContextKey)) {
-      context.set(step.outputContextKey, result.output);
-    }
+    writeStepOutput(step.outputContextKey, result.output, context);
     const handoffFailure = validateCompletedStepHandoffs({
       step,
       workflow: activeWorkflow,

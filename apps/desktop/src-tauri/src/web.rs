@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
     io::Read,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
     path::PathBuf,
     process::{Command, Output, Stdio},
     thread,
@@ -109,6 +109,12 @@ pub(crate) struct WebSearchResult {
     pub(crate) provider: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+struct ValidatedPublicHttpUrl {
+    url: Url,
+    resolved_addrs: Vec<SocketAddr>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GithubSearchItem {
@@ -120,15 +126,18 @@ pub(crate) struct GithubSearchItem {
 
 #[tauri::command]
 pub(crate) fn fetch_web_source(request: WebSourceRequest) -> Result<WebSource, String> {
-    let url = validate_public_http_url(&request.url)?;
+    let target = validate_public_http_url(&request.url)?;
 
-    let client = reqwest::blocking::Client::builder()
+    let mut builder = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|error| error.to_string())?;
+        .redirect(reqwest::redirect::Policy::none());
+    if let Some(host) = target.url.host_str() {
+        builder = builder.resolve_to_addrs(host, &target.resolved_addrs);
+    }
+    builder = builder.no_proxy();
+    let client = builder.build().map_err(|error| error.to_string())?;
     let body = client
-        .get(url.clone())
+        .get(target.url.clone())
         .header("User-Agent", "Javis/0.1")
         .send()
         .map_err(|error| error.to_string())?
@@ -137,21 +146,21 @@ pub(crate) fn fetch_web_source(request: WebSourceRequest) -> Result<WebSource, S
     let plain_text = html_to_text(&body);
 
     Ok(WebSource {
-        url: url.to_string(),
+        url: target.url.to_string(),
         title: extract_title(&body),
         excerpt: plain_text.chars().take(600).collect(),
         fetched_at: format_system_time(SystemTime::now()),
     })
 }
 
-fn validate_public_http_url(raw_url: &str) -> Result<Url, String> {
+fn validate_public_http_url(raw_url: &str) -> Result<ValidatedPublicHttpUrl, String> {
     validate_public_http_url_with_resolver(raw_url, resolve_host_ips)
 }
 
 fn validate_public_http_url_with_resolver(
     raw_url: &str,
     resolver: impl Fn(&str, u16) -> Result<Vec<IpAddr>, String>,
-) -> Result<Url, String> {
+) -> Result<ValidatedPublicHttpUrl, String> {
     let url = Url::parse(raw_url.trim()).map_err(|_| "Invalid URL.".to_string())?;
     match url.scheme() {
         "http" | "https" => {}
@@ -166,6 +175,7 @@ fn validate_public_http_url_with_resolver(
             "URLs targeting private/loopback addresses are not allowed: {host}"
         ));
     }
+    let port = url.port_or_known_default().unwrap_or(443);
     let ip_host = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = ip_host.parse::<IpAddr>() {
         if is_private_ip(ip) {
@@ -173,18 +183,25 @@ fn validate_public_http_url_with_resolver(
                 "URLs targeting private/loopback addresses are not allowed: {host}"
             ));
         }
+        return Ok(ValidatedPublicHttpUrl {
+            url,
+            resolved_addrs: vec![SocketAddr::new(ip, port)],
+        });
     } else {
-        let port = url.port_or_known_default().unwrap_or(443);
+        let mut resolved_addrs = Vec::new();
         for ip in resolver(host, port)? {
             if is_private_ip(ip) {
                 return Err(format!(
                     "URLs resolving to private/loopback addresses are not allowed: {host}"
                 ));
             }
+            resolved_addrs.push(SocketAddr::new(ip, port));
         }
+        if resolved_addrs.is_empty() {
+            return Err("URL host did not resolve to an address.".to_string());
+        }
+        return Ok(ValidatedPublicHttpUrl { url, resolved_addrs });
     }
-
-    Ok(url)
 }
 
 fn resolve_host_ips(host: &str, port: u16) -> Result<Vec<IpAddr>, String> {
@@ -617,17 +634,45 @@ pub(crate) fn percent_encode_query(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]
     fn validate_public_http_url_allows_public_https() {
-        let url = validate_public_http_url_with_resolver(
+        let target = validate_public_http_url_with_resolver(
             "https://example.com/path?q=1",
             |_host, _port| Ok(vec!["93.184.216.34".parse().unwrap()]),
         )
         .expect("public url");
 
-        assert_eq!(url.scheme(), "https");
-        assert_eq!(url.host_str(), Some("example.com"));
+        assert_eq!(target.url.scheme(), "https");
+        assert_eq!(target.url.host_str(), Some("example.com"));
+        assert_eq!(
+            target.resolved_addrs,
+            vec![SocketAddr::new("93.184.216.34".parse().unwrap(), 443)]
+        );
+    }
+
+    #[test]
+    fn validate_public_http_url_pins_resolved_addrs_with_url_port() {
+        let target = validate_public_http_url_with_resolver(
+            "https://example.com:8443/path",
+            |_host, port| {
+                assert_eq!(port, 8443);
+                Ok(vec![
+                    "93.184.216.34".parse().unwrap(),
+                    "2606:2800:220:1:248:1893:25c8:1946".parse().unwrap(),
+                ])
+            },
+        )
+        .expect("public url");
+
+        assert_eq!(
+            target.resolved_addrs,
+            vec![
+                SocketAddr::new("93.184.216.34".parse().unwrap(), 8443),
+                SocketAddr::new("2606:2800:220:1:248:1893:25c8:1946".parse().unwrap(), 8443),
+            ]
+        );
     }
 
     #[test]
@@ -638,6 +683,20 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_public_http_url_accepts_public_ip_literal_and_pins_port() {
+        let target = validate_public_http_url("http://8.8.8.8:8080/test").expect("public url");
+
+        assert_eq!(target.url.host_str(), Some("8.8.8.8"));
+        assert_eq!(
+            target.resolved_addrs,
+            vec![SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+                8080,
+            )]
+        );
     }
 
     #[test]
