@@ -272,6 +272,54 @@ describe("executeWorkflow", () => {
     expect(replanned[0]).toContain("expected object { diff: string, changedFiles: string[] }");
   });
 
+  it("lets a recovery step replace an invalid handoff value under the same context key", async () => {
+    const workflow = createWorkflow([
+      {
+        ...step("inspect", [], false),
+        outputContextKey: "diffPreview",
+      },
+      {
+        ...step("verify", ["inspect"], false),
+        inputContextKeys: ["diffPreview"],
+      },
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      executeStep: async (workflowStep) => {
+        if (workflowStep.id === "inspect") {
+          return { output: { diff: "diff --git" } };
+        }
+        if (workflowStep.id === "repair-diff") {
+          return { output: { diff: "diff --git", changedFiles: ["src/app.ts"] } };
+        }
+        return { output: workflowStep.id };
+      },
+      onStepFailureReplan: ({ step: failedStep }) => {
+        if (failedStep.id !== "verify") {
+          return undefined;
+        }
+        return {
+          abandonFailedStep: true,
+          steps: [
+            {
+              ...step("repair-diff", ["inspect"], false),
+              outputContextKey: "diffPreview",
+            },
+          ],
+        };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.completedStepIds).toEqual(["inspect", "repair-diff"]);
+    expect(result.abandonedStepIds).toEqual(["verify"]);
+    expect(result.contextSnapshot.diffPreview).toEqual({
+      diff: "diff --git",
+      changedFiles: ["src/app.ts"],
+    });
+  });
+
   it("can append a recovery step after a failed step", async () => {
     const workflow = createWorkflow([
       step("scan-files", [], false),
