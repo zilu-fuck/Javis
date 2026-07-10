@@ -76,9 +76,7 @@ export function ActivityLog({
           aria-controls="javis-activity-panel"
           aria-expanded={isActivityOpen}
           className="javis-activity-toggle"
-          onClick={() => {
-            if (!isActivityOpen) onToggle();
-          }}
+          onClick={onToggle}
           type="button"
         >
           <span>{labels.activityLog}</span>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createGoalEvaluationFromDecision,
   createInitialTaskSnapshot,
@@ -185,7 +185,7 @@ import {
   runRestoredPdfOrganization,
 } from "./restored-approval";
 import { useModelSettingsControls } from "./use-model-settings";
-import { normalizeModelConfigurationConnections } from "./model-settings";
+import { normalizeModelConfigurationConnections, type ModelSettings } from "./model-settings";
 import { createConfiguredModelProvider } from "./model-provider";
 import { fetchProviderModels } from "./provider-models";
 import { useModelProfiles, type ModelProfileRepositoryLike } from "./use-model-profiles";
@@ -862,6 +862,23 @@ function allowsLocalModelWithoutKey(settings: { provider: string; baseUrl: strin
     || baseUrl.startsWith("http://::1");
 }
 
+function modelSettingsFromPrimaryProfile(
+  config: WorkbenchModelConfiguration,
+): ModelSettings | null {
+  const primary = config.profiles.find((profile) => profile.slot === "primary")
+    ?? config.profiles.find((profile) => profile.id === "primary");
+  if (!primary?.provider.trim() || !primary.model.trim()) {
+    return null;
+  }
+  return {
+    provider: primary.provider,
+    model: primary.model,
+    apiKey: primary.apiKey ?? "",
+    apiKeyReference: primary.apiKeyReference || `model.${primary.provider}`,
+    baseUrl: primary.baseUrl,
+  };
+}
+
 function isActiveComputerUseTaskSnapshot(task: TaskSnapshot, isTaskActive: boolean): boolean {
   if (!isTaskActive || !ACTIVE_COMPUTER_USE_STATUSES.has(task.status)) {
     return false;
@@ -959,6 +976,15 @@ function App() {
     () => parseDisabledBuiltinToolNames(loadPreference(BUILTIN_TOOL_DISABLED_NAMES_PREFERENCE_KEY)),
   );
   const { modelSettings, updateModelSettings } = useModelSettingsControls(window.localStorage);
+  const syncLegacyModelSettingsFromConfiguration = useCallback(
+    async (config: WorkbenchModelConfiguration) => {
+      const nextSettings = modelSettingsFromPrimaryProfile(config);
+      if (!nextSettings) return;
+      await updateModelSettings(nextSettings, { persistApiKeySecret: false });
+      await modelSettingsRepoRef.current?.save(nextSettings);
+    },
+    [updateModelSettings],
+  );
   const [computerUseSettings, setComputerUseSettings] = useState(() =>
     loadComputerUseSettingsFromStorage(window.localStorage),
   );
@@ -1033,6 +1059,8 @@ function App() {
       action: request.action,
       previewHash: request.previewHash,
       selector: request.selector,
+      expressionPreview: request.expressionPreview,
+      scriptPreview: request.scriptPreview,
       byteCount: request.byteCount,
       scriptByteCount: request.scriptByteCount,
     });
@@ -1440,7 +1468,10 @@ function App() {
     handleModelConfigurationChange,
   } = useModelProfiles({
     modelProfileRepoRef,
-    onSaved: () => runtime.clearProviderCache(),
+    onSaved: async (savedConfig) => {
+      await syncLegacyModelSettingsFromConfiguration(savedConfig);
+      runtime.clearProviderCache();
+    },
   });
   modelConfigRef.current = modelConfiguration;
 
@@ -2336,8 +2367,20 @@ function App() {
       try {
         const savedConfig = await modelProfileRepo.load();
         if (savedConfig.profiles.length > 0) {
+          const profilesWithKeyStatus = await Promise.all(
+            savedConfig.profiles.map(async (p) => {
+              try {
+                const status = await invoke<{ exists: boolean }>("check_model_api_key_secret", {
+                  keyReference: p.apiKeyReference,
+                });
+                return { ...p, apiKey: "", hasStoredApiKey: status.exists };
+              } catch {
+                return { ...p, apiKey: "", hasStoredApiKey: false };
+              }
+            }),
+          );
           const uiConfig = {
-            profiles: savedConfig.profiles.map((p) => ({ ...p, apiKey: "", hasStoredApiKey: true })),
+            profiles: profilesWithKeyStatus,
             agentOverrides: savedConfig.agentOverrides,
           };
           setModelConfiguration(uiConfig as WorkbenchModelConfiguration);
@@ -2375,6 +2418,7 @@ function App() {
         window.localStorage,
       );
       const legacySettings = await modelSettingsRepo.importFromLocalStorage(window.localStorage);
+      await updateModelSettings(legacySettings, { persistApiKeySecret: false });
       const importedUserProfileMemory = await userProfileMemoryRepo.importFromLocalStorage(window.localStorage);
       let importedCurrentGoal = await currentGoalRepo.importFromLocalStorage(window.localStorage);
       currentGoalRef.current = importedCurrentGoal;
@@ -3030,7 +3074,13 @@ function App() {
         });
         return;
       }
-      queuedContinuationTaskRef.current = null;
+      const shouldCarryInterruptedConversation =
+        (requestedSubmitIntent === "continue_history" || requestedSubmitIntent === "queued_continuation") &&
+        !goalOverride &&
+        !workspacePathOverride &&
+        !scheduledTaskId &&
+        task.id !== "task-idle";
+      queuedContinuationTaskRef.current = shouldCarryInterruptedConversation ? task : null;
       pendingGoalQueueRef.current = [];
       setQueuedGoalCount(0);
       runtime.stopTask();
@@ -4211,7 +4261,11 @@ function App() {
   const fileService = useMemo<WorkbenchFileService>(
     () => ({
       async list(session: WorkbenchAgentSessionContext, path?: string) {
-        return await invoke("list_directory", { path: path || session.workspaceRoot });
+        return await invoke("list_directory", {
+          path: path || session.workspaceRoot,
+          workspaceRoot: session.workspaceRoot,
+          allowedRootIds: null,
+        });
       },
       async search(session: WorkbenchAgentSessionContext, query: string) {
         return await invoke<WorkbenchFileSearchResult[]>("files_search", {

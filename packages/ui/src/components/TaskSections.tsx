@@ -30,6 +30,13 @@ interface TaskSectionsProps {
  * have moved to AgentDetailSections in the right sidebar (InspectorPanel).
  */
 export function TaskSections({ labels, locale, task, onPermissionDecision, onAskUserAnswer }: TaskSectionsProps) {
+  const permissionRequest = task.permissionRequest;
+  const askUserQuestion = task.askUserQuestion;
+  const shouldShowPermissionPrompt =
+    task.status === "waiting_permission" && permissionRequest?.status === "pending";
+  const shouldShowAskUserPrompt =
+    task.status === "waiting_info" && askUserQuestion?.status === "pending";
+
   return (
     <>
       {task.status === "failed" ? (
@@ -49,43 +56,43 @@ export function TaskSections({ labels, locale, task, onPermissionDecision, onAsk
         </section>
       ) : null}
 
-      {task.permissionRequest ? (
+      {shouldShowPermissionPrompt && permissionRequest ? (
         <section className="javis-confirmation" aria-label={translateWorkbenchText("Permission request", locale)}>
           <div className="javis-confirmation-header">
             <div>
               <p className="javis-message-title">
-                {translateWorkbenchText(task.permissionRequest.title, locale)}
+                {translateWorkbenchText(permissionRequest.title, locale)}
               </p>
               <p className="javis-message-body">
-                {translateWorkbenchText(task.permissionRequest.reason, locale)}
+                {translateWorkbenchText(permissionRequest.reason, locale)}
               </p>
             </div>
             <div className="javis-confirmation-badges">
               <span className="javis-status">
-                {translateWorkbenchText(task.permissionRequest.level, locale)}
+                {translateWorkbenchText(permissionRequest.level, locale)}
               </span>
-              {task.permissionRequest.writeRiskLevel ? (
-                <span className={`javis-status javis-risk-status risk-${task.permissionRequest.writeRiskLevel}`}>
-                  {translateWorkbenchText(task.permissionRequest.writeRiskLevel, locale)}
+              {permissionRequest.writeRiskLevel ? (
+                <span className={`javis-status javis-risk-status risk-${permissionRequest.writeRiskLevel}`}>
+                  {translateWorkbenchText(permissionRequest.writeRiskLevel, locale)}
                 </span>
               ) : null}
             </div>
           </div>
           <p className="javis-message-body">
-            {translateWorkbenchText(task.permissionRequest.dryRun.operation, locale)}
+            {translateWorkbenchText(permissionRequest.dryRun.operation, locale)}
           </p>
           <p className="javis-agent-task">
-            {translateWorkbenchText(task.permissionRequest.dryRun.riskSummary, locale)}
+            {translateWorkbenchText(permissionRequest.dryRun.riskSummary, locale)}
           </p>
-          {task.permissionRequest.screenshotDataUrl ? (
+          {permissionRequest.screenshotDataUrl ? (
             <img
               alt={translateWorkbenchText("Desktop preview", locale)}
               className="javis-permission-screenshot"
-              src={task.permissionRequest.screenshotDataUrl}
+              src={permissionRequest.screenshotDataUrl}
             />
           ) : null}
           <div className="javis-dry-run-list">
-            {task.permissionRequest.dryRun.affectedPaths.map((path) => (
+            {permissionRequest.dryRun.affectedPaths.map((path) => (
               <article className="javis-dry-run-item" key={`${path.source}-${path.target}`}>
                 <strong>{translateWorkbenchText(path.action, locale)}</strong>
                 <p>{path.source}</p>
@@ -98,24 +105,24 @@ export function TaskSections({ labels, locale, task, onPermissionDecision, onAsk
           </div>
           <div className="javis-confirmation-actions">
             <button
-              disabled={task.permissionRequest.status !== "pending"}
+              disabled={permissionRequest.status !== "pending"}
               onClick={() => onPermissionDecision?.("approved")}
               type="button"
             >
               {labels.approve}
             </button>
-            {canShowComputerTaskApproval(task.permissionRequest) ? (
+            {canShowComputerTaskApproval(permissionRequest) ? (
               <button
-                disabled={task.permissionRequest.status !== "pending"}
+                disabled={permissionRequest.status !== "pending"}
                 onClick={() => onPermissionDecision?.("approved_always")}
                 type="button"
               >
                 {translateWorkbenchText("Allow this task", locale)}
               </button>
-            ) : task.permissionRequest.dryRun.operation.startsWith("computer.") ||
-              task.permissionRequest.allowAlways === false ? null : (
+            ) : permissionRequest.dryRun.operation.startsWith("computer.") ||
+              permissionRequest.allowAlways === false ? null : (
               <button
-                disabled={task.permissionRequest.status !== "pending"}
+                disabled={permissionRequest.status !== "pending"}
                 onClick={() => onPermissionDecision?.("approved_always")}
                 type="button"
               >
@@ -123,46 +130,41 @@ export function TaskSections({ labels, locale, task, onPermissionDecision, onAsk
               </button>
             )}
             <button
-              disabled={task.permissionRequest.status !== "pending"}
+              disabled={permissionRequest.status !== "pending"}
               onClick={() => onPermissionDecision?.("denied")}
               type="button"
             >
               {labels.deny}
             </button>
             <span>
-              {labels.status}: {translateWorkbenchText(task.permissionRequest.status, locale)}
+              {labels.status}: {translateWorkbenchText(permissionRequest.status, locale)}
             </span>
           </div>
-          {task.permissionRequest.status === "denied" ? (
-            <p className="javis-agent-task">
-              {translateWorkbenchText("No write operation executed", locale)}
-            </p>
-          ) : null}
         </section>
       ) : null}
 
-      {task.askUserQuestion ? (
+      {shouldShowAskUserPrompt && askUserQuestion ? (
         <section className="javis-ask-user" aria-label={translateWorkbenchText(labels.askUserQuestion, locale)}>
           <div className="javis-ask-user-header">
             <p className="javis-message-title">
               {translateWorkbenchText(labels.askUserQuestion, locale)}
             </p>
             <span className="javis-status">
-              {translateWorkbenchText(task.askUserQuestion.status, locale)}
+              {translateWorkbenchText(askUserQuestion.status, locale)}
             </span>
           </div>
           <p className="javis-message-body">
-            {translateWorkbenchText(task.askUserQuestion.question, locale)}
+            {translateWorkbenchText(askUserQuestion.question, locale)}
           </p>
-          {task.askUserQuestion.choices && task.askUserQuestion.choices.length > 0 ? (
+          {askUserQuestion.choices && askUserQuestion.choices.length > 0 ? (
             <div className="javis-ask-user-choices">
-              {task.askUserQuestion.choices.map((rawChoice) => {
+              {askUserQuestion.choices.map((rawChoice) => {
                 const choice = normalizeAskUserChoice(rawChoice);
                 return (
                   <button
                     className={choice.isRecommended ? "recommended" : undefined}
                     key={choice.value}
-                    disabled={task.askUserQuestion!.status !== "pending"}
+                    disabled={askUserQuestion.status !== "pending"}
                     onClick={() => onAskUserAnswer?.(choice.value)}
                     type="button"
                   >
@@ -171,7 +173,7 @@ export function TaskSections({ labels, locale, task, onPermissionDecision, onAsk
                 );
               })}
               <button
-                disabled={task.askUserQuestion.status !== "pending"}
+                disabled={askUserQuestion.status !== "pending"}
                 onClick={() => onAskUserAnswer?.(HELP_ME_DECIDE_ANSWER)}
                 type="button"
               >
@@ -179,12 +181,12 @@ export function TaskSections({ labels, locale, task, onPermissionDecision, onAsk
               </button>
             </div>
           ) : null}
-          {task.askUserQuestion.status === "pending" ? (
+          {askUserQuestion.status === "pending" ? (
             <AskUserFreeFormInput onSubmit={(answer) => onAskUserAnswer?.(answer)} labels={labels} />
           ) : null}
-          {task.askUserQuestion.answer ? (
+          {askUserQuestion.answer ? (
             <p className="javis-agent-task">
-              {translateWorkbenchText(task.askUserQuestion.answer, locale)}
+              {translateWorkbenchText(askUserQuestion.answer, locale)}
             </p>
           ) : null}
         </section>

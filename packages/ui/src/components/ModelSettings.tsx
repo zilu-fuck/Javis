@@ -66,7 +66,7 @@ interface ModelSettingsProps {
   onReadAgentStyle?: (kind: string) => Promise<WorkbenchAgentStyleState>;
   onSaveAgentStyle?: (kind: string, content: string) => Promise<WorkbenchAgentStyleState | void>;
   onResetAgentStyle?: (kind: string) => Promise<WorkbenchAgentStyleState | void>;
-  /** Save a per-provider API key to the OS credential store immediately. */
+  /** Save a per-provider API key to the OS credential store immediately; pass an empty key to clear it. */
   onSaveProviderApiKey?: (keyReference: string, apiKey: string) => Promise<void>;
   /**
    * Fetch available model IDs from the provider API.
@@ -161,6 +161,15 @@ const PROVIDERS_BY_ID = new Map<string, ProviderCatalogEntry>(
   PROVIDER_CATALOG.map((provider) => [provider.id, provider]),
 );
 
+const CUSTOM_PROVIDER_STORAGE_KEY = "javis.customModelProviders.v1";
+
+interface CustomProviderDraft {
+  label: string;
+  id: string;
+  baseUrl: string;
+  modelListMode: ModelListMode;
+}
+
 const DEFAULT_COMPUTER_USE_LOCAL_VISION_SETTINGS: WorkbenchComputerUseLocalVisionSettings = {
   mode: "off",
   modelPath: "models/local-vision/yolo26n-ui.onnx",
@@ -216,6 +225,8 @@ interface ConfiguredModelOption {
   model: string;
   baseUrl: string;
   apiKeyReference: string;
+  apiKey?: string;
+  hasStoredApiKey?: boolean;
   contextTokens?: number;
 }
 
@@ -237,6 +248,13 @@ function emptyProfile(slot: WorkbenchModelSlot): WorkbenchModelProfile {
     apiKey: "",
     capabilities: { vision: false, code: false, longContext: false },
   };
+}
+
+function clearUnusableRemoteSlotProfile(profile: WorkbenchModelProfile): WorkbenchModelProfile {
+  if (!profile.slot || !profile.provider.trim() || !profile.model.trim()) return profile;
+  if (profile.apiKey.trim() || profile.hasStoredApiKey) return profile;
+  if (isLocalModelProvider(profile.provider, profile.baseUrl)) return profile;
+  return emptyProfile(profile.slot);
 }
 
 export function ModelSettings({
@@ -283,29 +301,18 @@ export function ModelSettings({
     [agentCatalog, effectiveLocale],
   );
 
-  // Effective catalog: external prop overrides built-in, falls back to hardcoded default.
-  const effectiveCatalog = providerCatalog ?? PROVIDER_CATALOG;
-  const effectiveOptions = useMemo(
-    () => effectiveCatalog.map((p) => p.id),
-    [effectiveCatalog],
-  );
-  const effectiveLabels: Record<string, string> = useMemo(
-    () => Object.fromEntries(effectiveCatalog.map((p) => [p.id, p.label])),
-    [effectiveCatalog],
-  );
-  const effectiveById = useMemo(
-    () => new Map(effectiveCatalog.map((p) => [p.id, p])),
-    [effectiveCatalog],
-  );
-
-  function resolveDefaultCapabilities(provider: string): ProviderCapabilities {
-    return getProviderCapabilities?.(provider) ?? { vision: false, code: false, longContext: false };
-  }
-
   // Per-provider state
   const [providerApiKeys, setProviderApiKeys] = useState<Record<string, string>>({});
   const [providerKeySaved, setProviderKeySaved] = useState<Record<string, boolean>>({});
   const [providerBaseUrls, setProviderBaseUrls] = useState<Record<string, string>>({});
+  const [customProviders, setCustomProviders] = useState<ProviderCatalogEntry[]>(() =>
+    loadCustomProviders(),
+  );
+  const [showCustomProviderForm, setShowCustomProviderForm] = useState(false);
+  const [customProviderError, setCustomProviderError] = useState("");
+  const [customProviderDraft, setCustomProviderDraft] = useState<CustomProviderDraft>(() =>
+    createEmptyCustomProviderDraft(),
+  );
 
   // Local editing state for multi-model configuration
   const [slotProfiles, setSlotProfiles] = useState<WorkbenchModelProfile[]>(
@@ -326,6 +333,31 @@ export function ModelSettings({
   const [modelIdToAdd, setModelIdToAdd] = useState("");
   const modelMenuTriggerRef = useRef<HTMLButtonElement>(null);
   const [modelMenuStyle, setModelMenuStyle] = useState<CSSProperties>({});
+  const baseProviderCatalog = providerCatalog ?? PROVIDER_CATALOG;
+  const effectiveCatalog = useMemo(
+    () => mergeProviderCatalog(
+      baseProviderCatalog,
+      customProviders,
+      inferCustomProvidersFromProfiles(slotProfiles, baseProviderCatalog, customProviders),
+    ),
+    [baseProviderCatalog, customProviders, slotProfiles],
+  );
+  const effectiveOptions = useMemo(
+    () => effectiveCatalog.map((p) => p.id),
+    [effectiveCatalog],
+  );
+  const effectiveLabels: Record<string, string> = useMemo(
+    () => Object.fromEntries(effectiveCatalog.map((p) => [p.id, p.label])),
+    [effectiveCatalog],
+  );
+  const effectiveById = useMemo(
+    () => new Map(effectiveCatalog.map((p) => [p.id, p])),
+    [effectiveCatalog],
+  );
+
+  function resolveDefaultCapabilities(provider: string): ProviderCapabilities {
+    return getProviderCapabilities?.(provider) ?? { vision: false, code: false, longContext: false };
+  }
 
   function openModelMenu() {
     if (modelMenuTriggerRef.current) {
@@ -367,7 +399,9 @@ export function ModelSettings({
     if (modelConfiguration && modelConfiguration !== prevConfigRef.current) {
       prevConfigRef.current = modelConfiguration;
       setSlotProfiles(
-        modelConfiguration.profiles.map((p) => ({ ...p, apiKey: "" })),
+        modelConfiguration.profiles.map((p) =>
+          clearUnusableRemoteSlotProfile({ ...p, apiKey: "" }),
+        ),
       );
       setAgentOverrides({ ...modelConfiguration.agentOverrides });
       // Restore per-provider key saved status from stored profiles
@@ -465,6 +499,8 @@ export function ModelSettings({
         model: option.model,
         apiKeyReference: option.apiKeyReference,
         baseUrl: option.baseUrl,
+        apiKey: option.apiKey ?? "",
+        hasStoredApiKey: option.hasStoredApiKey,
         contextTokens: option.contextTokens,
       };
       const inferredProfile = withInferredContextTokens(nextProfile);
@@ -478,27 +514,51 @@ export function ModelSettings({
     setOpenModelSlot(null);
   }
 
-  function handleSaveConfiguration() {
+  async function handleSaveConfiguration() {
     if (!onModelConfigurationChange) return;
     try {
-      const addedProfiles = slotProfiles.filter((profile) => profile.slot === null);
-      onModelConfigurationChange({
-        profiles: [
-          ...addedProfiles.map((profile) => ({ ...profile })),
-          ...MODEL_SLOTS.map((slot) =>
-            normalizeSlotProfileConnection(
-              getProfileForSlot(slot),
-              addedProfiles,
-              providerBaseUrls,
-              modelSettings,
-              effectiveById,
-            ),
+      const addedProfiles = slotProfiles.filter((profile) =>
+        profile.slot === null && profileHasUsableCredentials(profile),
+      );
+      const slotProfilesToSave = MODEL_SLOTS.map((slot) =>
+          normalizeSlotProfileConnection(
+            getProfileForSlot(slot),
+            addedProfiles,
+            providerBaseUrls,
+            modelSettings,
+            effectiveById,
           ),
-        ],
+        ).map((profile) =>
+          profile.provider.trim() &&
+          profile.model.trim() &&
+          !profileHasUsableCredentials(profile) &&
+          profile.slot
+            ? emptyProfile(profile.slot)
+            : profile,
+        );
+      const nextProfiles = [
+        ...addedProfiles.map((profile) => ({ ...profile })),
+        ...slotProfilesToSave,
+      ];
+      const missingCredentialProfile = nextProfiles.find((profile) =>
+        profile.provider.trim() &&
+        profile.model.trim() &&
+        !profileHasUsableCredentials(profile),
+      );
+      if (missingCredentialProfile) {
+        throw new Error(
+          `Save the API key for ${missingCredentialProfile.provider} before assigning ${missingCredentialProfile.model}.`,
+        );
+      }
+      await onModelConfigurationChange({
+        profiles: nextProfiles,
         agentOverrides: { ...agentOverrides },
       });
+      setModelFetchMessage("");
       setSaveStatus("saved");
-    } catch {
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setModelFetchMessage(message);
       setSaveStatus("error");
     }
     setTimeout(() => setSaveStatus("idle"), 2500);
@@ -542,7 +602,150 @@ export function ModelSettings({
 
   function selectProvider(provider: string) {
     setSelectedProvider(provider);
-    updateModelSetting("provider", provider);
+  }
+
+  function openCustomProviderForm() {
+    const nextDraft = createEmptyCustomProviderDraft();
+    setCustomProviderDraft(nextDraft);
+    setCustomProviderError("");
+    setShowCustomProviderForm(true);
+  }
+
+  function updateCustomProviderLabel(label: string) {
+    setCustomProviderDraft((current) => ({
+      ...current,
+      label,
+      id: current.id || makeCustomProviderId(label),
+    }));
+  }
+
+  function saveCustomProvider() {
+    const label = customProviderDraft.label.trim() || (isZh ? "自定义中转" : "Custom Gateway");
+    const rawId = sanitizeProviderId(customProviderDraft.id) || makeCustomProviderId(label);
+    const id = rawId === "custom" || rawId.startsWith("custom-") ? rawId : `custom-${rawId}`;
+    const baseUrl = customProviderDraft.baseUrl.trim().replace(/\/+$/, "");
+    if (!baseUrl) {
+      setCustomProviderError(isZh ? "请填写 Base URL" : "Base URL is required");
+      return;
+    }
+    const provider: ProviderCatalogEntry = {
+      id: uniqueProviderId(id, effectiveCatalog),
+      label,
+      defaultBaseUrl: baseUrl,
+      apiType: "openai-compatible",
+      modelListMode: customProviderDraft.modelListMode,
+    };
+    setCustomProviders((current) => {
+      const next = upsertProviderCatalogEntry(current, provider);
+      saveCustomProviders(next);
+      return next;
+    });
+    setProviderBaseUrls((current) => ({ ...current, [provider.id]: baseUrl }));
+    setSelectedProvider(provider.id);
+    setShowCustomProviderForm(false);
+    setCustomProviderError("");
+    onModelSettingsChange?.({
+      ...modelSettings,
+      provider: provider.id,
+      baseUrl,
+      apiKeyReference: `model.${provider.id}`,
+    });
+  }
+
+  function updateCustomProviderBaseUrl(providerId: string, baseUrl: string) {
+    setCustomProviders((current) => {
+      if (!current.some((provider) => provider.id === providerId)) return current;
+      const next = current.map((provider) =>
+        provider.id === providerId
+          ? { ...provider, defaultBaseUrl: baseUrl.trim().replace(/\/+$/, "") }
+          : provider,
+      );
+      saveCustomProviders(next);
+      return next;
+    });
+  }
+
+  async function deleteCustomProvider(providerId: string) {
+    if (!isDeletableCustomProvider(providerId, baseProviderCatalog)) return;
+    const providerProfiles = slotProfiles.filter((profile) => profile.provider === providerId);
+    const deletedProfileIds = new Set(providerProfiles.map((profile) => profile.id));
+    const keyReferencesToDelete = Array.from(new Set([
+      `model.${providerId}`,
+      ...providerProfiles
+        .map((profile) => profile.apiKeyReference)
+        .filter((keyReference) => keyReference.trim()),
+    ]));
+    if (onSaveProviderApiKey) {
+      try {
+        await Promise.all(
+          keyReferencesToDelete.map((keyReference) =>
+            onSaveProviderApiKey(keyReference, ""),
+          ),
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setModelFetchMessage(`Failed to delete provider key: ${message}`);
+        return;
+      }
+    }
+    setCustomProviders((current) => {
+      const next = current.filter((provider) => provider.id !== providerId);
+      saveCustomProviders(next);
+      return next;
+    });
+    setSlotProfiles((current) =>
+      current
+        .filter((profile) => !(profile.provider === providerId && profile.slot === null))
+        .map((profile) =>
+          profile.provider === providerId && profile.slot
+            ? emptyProfile(profile.slot)
+            : profile,
+        ),
+    );
+    setAgentOverrides((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([, profileId]) => !deletedProfileIds.has(profileId)),
+      ),
+    );
+    setProviderBaseUrls((current) => omitRecordKey(current, providerId));
+    setProviderApiKeys((current) => omitRecordKey(current, providerId));
+    setProviderKeySaved((current) => omitRecordKey(current, providerId));
+    setFetchedModelsByProvider((current) => omitRecordKey(current, providerId));
+    setModelIdToAdd("");
+    setModelFetchMessage("");
+    if (selectedProvider === providerId) {
+      setSelectedProvider(baseProviderCatalog[0]?.id ?? "openai");
+    }
+    if (modelSettings.provider === providerId) {
+      const fallbackProvider = baseProviderCatalog[0]?.id ?? "openai";
+      onModelSettingsChange?.({
+        ...modelSettings,
+        provider: fallbackProvider,
+        model: "",
+        apiKey: "",
+        apiKeyReference: `model.${fallbackProvider}`,
+        baseUrl: getProviderDefaultBaseUrl(fallbackProvider, effectiveById),
+      });
+    }
+  }
+
+  function providerHasUsableCredentials(provider: string, baseUrl: string): boolean {
+    if (isLocalModelProvider(provider, baseUrl)) return true;
+    if (providerApiKeys[provider]?.trim()) return true;
+    if (providerKeySaved[provider]) return true;
+    if (modelSettings.provider === provider && modelSettings.apiKey.trim()) return true;
+    return slotProfiles.some((profile) =>
+      profile.provider === provider &&
+      Boolean(profile.apiKey?.trim() || profile.hasStoredApiKey),
+    );
+  }
+
+  function profileHasUsableCredentials(profile: WorkbenchModelProfile): boolean {
+    return providerHasUsableCredentials(profile.provider, profile.baseUrl);
+  }
+
+  function modelHasUsableCredentials(model: ConfiguredModelOption): boolean {
+    return providerHasUsableCredentials(model.provider, model.baseUrl);
   }
 
   function updateApiType(apiType: ApiType) {
@@ -553,7 +756,11 @@ export function ModelSettings({
   }
 
   function providerCount(provider: string): number {
-    return slotProfiles.filter((profile) => profile.slot === null && profile.provider === provider).length;
+    return slotProfiles.filter((profile) =>
+      profile.slot === null &&
+      profile.provider === provider &&
+      profileHasUsableCredentials(profile),
+    ).length;
   }
 
   function addProviderModel(model: string) {
@@ -570,14 +777,21 @@ export function ModelSettings({
       effectiveById,
     );
     // Always use per-provider key reference — not legacy "default"
+    if (!providerHasUsableCredentials(selectedProvider, baseUrl)) {
+      setModelFetchMessage("Save this provider API key before adding remote models.");
+      return;
+    }
     const apiKeyReference = matchingProviderProfile?.apiKeyReference ?? `model.${selectedProvider}`;
     setSlotProfiles((current) => {
-      if (current.some((profile) => profile.provider === selectedProvider && profile.model === model)) {
-        return current;
-      }
+      const existingProviderModel = current.find((profile) =>
+        profile.slot === null &&
+        profile.provider === selectedProvider &&
+        profile.model === model,
+      );
       const id = uniqueProfileId(current, `${selectedProvider}.${model}`);
-      const apiKey = providerApiKeys[selectedProvider]?.trim() ?? "";
-      const nextProfile = withInferredContextTokens({
+      const apiKey = providerApiKeys[selectedProvider]?.trim()
+        || (modelSettings.provider === selectedProvider ? modelSettings.apiKey.trim() : "");
+      const nextProfile = existingProviderModel ?? withInferredContextTokens({
         id,
         slot: null,
         displayName: model,
@@ -589,10 +803,11 @@ export function ModelSettings({
         hasStoredApiKey: Boolean(apiKey) || providerKeySaved[selectedProvider],
         capabilities: resolveDefaultCapabilities(selectedProvider),
       });
-      return [
-        ...current,
-        nextProfile,
-      ];
+      const nextProfiles = existingProviderModel ? current : [...current, nextProfile];
+      if (!shouldAutoAssignPrimaryToProviderModel(current, nextProfile)) {
+        return nextProfiles;
+      }
+      return upsertPrimarySlotFromProviderModel(nextProfiles, nextProfile);
     });
     if (modelSettings.provider === selectedProvider && modelSettings.model !== model) {
       updateModelSetting("model", model);
@@ -600,12 +815,16 @@ export function ModelSettings({
     setModelIdToAdd("");
   }
 
-  const configuredModels = buildConfiguredModelOptions(modelSettings, slotProfiles.filter((profile) => profile.slot === null), effectiveLabels);
+  const configuredModels = buildConfiguredModelOptions(
+    modelSettings,
+    slotProfiles.filter((profile) => profile.slot === null),
+    effectiveLabels,
+  ).filter((model) => modelHasUsableCredentials(model));
   const providerModels = buildConfiguredModelOptions(
     { ...modelSettings, model: "" },
     slotProfiles.filter((profile) => profile.slot === null && profile.provider === selectedProvider),
     effectiveLabels,
-  );
+  ).filter((model) => modelHasUsableCredentials(model));
   const fetchedProviderModels = fetchedModelsByProvider[selectedProvider] ?? [];
   const addedProviderModelNames = new Set(providerModels.map((model) => model.model));
   const selectedProviderLabel = effectiveLabels[selectedProvider] ?? selectedProvider;
@@ -636,6 +855,12 @@ export function ModelSettings({
       return;
     }
 
+    if (!providerHasUsableCredentials(selectedProvider, baseUrl)) {
+      openModelMenu();
+      setModelFetchMessage("Save this provider API key before fetching remote models.");
+      return;
+    }
+
     if (!onFetchProviderModels) {
       openModelMenu();
       setModelFetchMessage(
@@ -646,7 +871,8 @@ export function ModelSettings({
       return;
     }
 
-    const typedKey = providerApiKeys[selectedProvider]?.trim() ?? "";
+    const typedKey = providerApiKeys[selectedProvider]?.trim()
+      || (modelSettings.provider === selectedProvider ? modelSettings.apiKey.trim() : "");
     const selectedApiType = resolveApiType(selectedProvider, effectiveById);
     const keyRef = getProviderKeyReference(selectedProvider, slotProfiles);
 
@@ -1237,17 +1463,38 @@ export function ModelSettings({
                       <div className="javis-ai-provider-group">
                         <span>API</span>
                         {effectiveOptions.map((provider) => (
-                          <button
-                            className={selectedProvider === provider ? "active" : ""}
-                            key={provider}
-                            onClick={() => selectProvider(provider)}
-                            type="button"
-                          >
-                            <span className="javis-ai-provider-dot" />
-                            <strong>{effectiveLabels[provider] ?? provider}</strong>
-                            <em>{providerCount(provider)}</em>
-                          </button>
+                          <div className="javis-ai-provider-row" key={provider}>
+                            <button
+                              className={`javis-ai-provider-select ${selectedProvider === provider ? "active" : ""}`}
+                              onClick={() => selectProvider(provider)}
+                              type="button"
+                            >
+                              <span className="javis-ai-provider-dot" />
+                              <strong>{effectiveLabels[provider] ?? provider}</strong>
+                              <em>{providerCount(provider)}</em>
+                            </button>
+                            {isDeletableCustomProvider(provider, baseProviderCatalog) ? (
+                              <button
+                                aria-label={`Delete provider ${effectiveLabels[provider] ?? provider}`}
+                                className="javis-ai-provider-delete"
+                                onClick={() => deleteCustomProvider(provider)}
+                                title={isZh ? "Delete custom provider" : "Delete custom provider"}
+                                type="button"
+                              >
+                                x
+                              </button>
+                            ) : null}
+                          </div>
                         ))}
+                        <button
+                          className="javis-ai-provider-add"
+                          onClick={openCustomProviderForm}
+                          type="button"
+                        >
+                          <span className="javis-ai-provider-dot" />
+                          <strong>{isZh ? "自定义中转" : "Custom Gateway"}</strong>
+                          <em>+</em>
+                        </button>
                       </div>
                     </aside>
                     <div className="javis-ai-provider-detail">
@@ -1281,6 +1528,105 @@ export function ModelSettings({
                         {labels.modelBackendUnavailable}
                       </p>
                     ) : null}
+                      {showCustomProviderForm ? (
+                        <div className="javis-ai-custom-provider-editor">
+                          <header>
+                            <h4>{isZh ? "新增自定义 API 中转" : "Add Custom API Gateway"}</h4>
+                            <button
+                              onClick={() => {
+                                setShowCustomProviderForm(false);
+                                setCustomProviderError("");
+                              }}
+                              type="button"
+                            >
+                              {isZh ? "取消" : "Cancel"}
+                            </button>
+                          </header>
+                          <div className="javis-ai-custom-provider-grid">
+                            <label>
+                              <span>{isZh ? "显示名称" : "Display name"}</span>
+                              <input
+                                aria-label={isZh ? "自定义供应商显示名称" : "Custom provider display name"}
+                                onChange={(event) => updateCustomProviderLabel(event.currentTarget.value)}
+                                placeholder="OpenAI Proxy"
+                                value={customProviderDraft.label}
+                              />
+                            </label>
+                            <label>
+                              <span>Provider ID</span>
+                              <input
+                                aria-label="Custom provider ID"
+                                onChange={(event) => {
+                                  const nextValue = sanitizeProviderId(event.currentTarget.value);
+                                  setCustomProviderDraft((current) => ({
+                                    ...current,
+                                    id: nextValue,
+                                  }));
+                                }}
+                                placeholder="custom-openai-proxy"
+                                value={customProviderDraft.id}
+                              />
+                            </label>
+                            <label className="wide">
+                              <span>{labels.modelBaseUrl}</span>
+                              <input
+                                aria-label={isZh ? "自定义供应商 Base URL" : "Custom provider Base URL"}
+                                onChange={(event) => {
+                                  const nextValue = event.currentTarget.value;
+                                  setCustomProviderDraft((current) => ({
+                                    ...current,
+                                    baseUrl: nextValue,
+                                  }));
+                                }}
+                                placeholder="https://api.example.com/v1"
+                                value={customProviderDraft.baseUrl}
+                              />
+                            </label>
+                            <label>
+                              <span>{isZh ? "API 类型" : "API Type"}</span>
+                              <input
+                                aria-label={isZh ? "自定义供应商 API 类型" : "Custom provider API type"}
+                                readOnly
+                                value="OpenAI Compatible"
+                              />
+                            </label>
+                            <label>
+                              <span>{isZh ? "模型列表" : "Model list"}</span>
+                              <RoundedSelect
+                                aria-label={isZh ? "自定义供应商模型列表" : "Custom provider model list"}
+                                onChange={(value) =>
+                                  setCustomProviderDraft((current) => ({
+                                    ...current,
+                                    modelListMode: value as ModelListMode,
+                                  }))}
+                                options={[
+                                  { value: "openai", label: "OpenAI /models" },
+                                  { value: "unsupported", label: isZh ? "手动输入模型 ID" : "Manual model ID" },
+                                ]}
+                                value={customProviderDraft.modelListMode}
+                              />
+                            </label>
+                          </div>
+                          <div className="javis-ai-custom-provider-actions">
+                            {customProviderError ? (
+                              <span role="status">{customProviderError}</span>
+                            ) : (
+                              <span>
+                                {isZh
+                                  ? "适合 NewAPI、One API、OpenRouter 类 OpenAI-Compatible 中转。"
+                                  : "For OpenAI-compatible gateways such as NewAPI, One API, and OpenRouter-style proxies."}
+                              </span>
+                            )}
+                            <button
+                              disabled={!customProviderDraft.baseUrl.trim()}
+                              onClick={saveCustomProvider}
+                              type="button"
+                            >
+                              {isZh ? "保存中转" : "Save Gateway"}
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
                       <div className="javis-ai-provider-fields">
                         <label>
                           <span>
@@ -1362,6 +1708,7 @@ export function ModelSettings({
                                 ...prev,
                                 [selectedProvider]: nextValue,
                               }));
+                              updateCustomProviderBaseUrl(selectedProvider, nextValue);
                             }}
                             placeholder={getProviderDefaultBaseUrl(selectedProvider, effectiveById)}
                             value={getProviderBaseUrl(
@@ -1506,6 +1853,7 @@ export function ModelSettings({
                           const selectedModelValue = getConfiguredModelValue(profile, configuredModels);
                           const selectedModel = configuredModels.find((model) => model.value === selectedModelValue);
                           const modelMenuId = `javis-model-slot-menu-${slot}`;
+                          const canOpenModelMenu = configuredModels.length > 0 || Boolean(profile.provider || profile.model);
                           return (
                             <div className={`javis-ai-model-card ${slot === "multimodal" ? "wide" : ""}`} key={slot}>
                               <h3>{slotLabel}</h3>
@@ -1524,7 +1872,7 @@ export function ModelSettings({
                                     aria-expanded={openModelSlot === slot}
                                     aria-haspopup="listbox"
                                     className="javis-ai-model-select-trigger"
-                                    disabled={configuredModels.length === 0}
+                                    disabled={!canOpenModelMenu}
                                     onClick={() => setOpenModelSlot((current) => current === slot ? null : slot)}
                                     type="button"
                                   >
@@ -1537,7 +1885,7 @@ export function ModelSettings({
                                     </span>
                                     <span className="javis-ai-model-select-caret">⌄</span>
                                   </button>
-                                  {openModelSlot === slot && configuredModels.length > 0 ? (
+                                  {openModelSlot === slot && canOpenModelMenu ? (
                                     <div
                                       className="javis-ai-model-select-menu"
                                       id={modelMenuId}
@@ -2129,6 +2477,7 @@ function buildConfiguredModelOptions(
     model: modelSettings.model,
     baseUrl: modelSettings.baseUrl,
     apiKeyReference: modelSettings.apiKeyReference,
+    apiKey: modelSettings.apiKey,
     contextTokens: undefined,
   });
 
@@ -2140,6 +2489,8 @@ function buildConfiguredModelOptions(
       model: profile.model,
       baseUrl: profile.baseUrl,
       apiKeyReference: profile.apiKeyReference,
+      apiKey: profile.apiKey,
+      hasStoredApiKey: profile.hasStoredApiKey,
       contextTokens: profile.contextTokens,
     });
   });
@@ -2182,6 +2533,76 @@ function normalizeSlotProfileConnection(
     ),
     apiKeyReference: getProviderKeyReference(profile.provider, providerProfiles),
   };
+}
+
+function shouldAutoAssignPrimaryToProviderModel(
+  profiles: WorkbenchModelProfile[],
+  providerModel: WorkbenchModelProfile,
+): boolean {
+  if (!isCustomProviderId(providerModel.provider)) return false;
+  const primary = profiles.find((profile) => profile.slot === "primary");
+  if (!primary?.provider || !primary.model) return true;
+  if (primary.provider === providerModel.provider && primary.model === providerModel.model) {
+    return false;
+  }
+  if (isLocalModelProvider(primary.provider, primary.baseUrl)) return false;
+  return !profiles.some((profile) =>
+    profile.provider === primary.provider &&
+    profile.hasStoredApiKey,
+  );
+}
+
+function upsertPrimarySlotFromProviderModel(
+  profiles: WorkbenchModelProfile[],
+  providerModel: WorkbenchModelProfile,
+): WorkbenchModelProfile[] {
+  const existingPrimary = profiles.find((profile) => profile.slot === "primary");
+  const nextPrimary = withInferredContextTokens({
+    ...(existingPrimary ?? emptyProfile("primary")),
+    provider: providerModel.provider,
+    model: providerModel.model,
+    apiKeyReference: providerModel.apiKeyReference,
+    baseUrl: providerModel.baseUrl,
+    contextTokens: providerModel.contextTokens,
+    capabilities: providerModel.capabilities,
+    hasStoredApiKey: providerModel.hasStoredApiKey,
+  });
+  if (!existingPrimary) return [...profiles, nextPrimary];
+  return profiles.map((profile) =>
+    profile.slot === "primary" ? nextPrimary : profile,
+  );
+}
+
+function isCustomProviderId(provider: string): boolean {
+  const normalized = provider.trim().toLowerCase();
+  return normalized === "custom" || normalized.startsWith("custom-");
+}
+
+function isDeletableCustomProvider(
+  provider: string,
+  baseCatalog: readonly ProviderCatalogEntry[],
+): boolean {
+  const normalized = provider.trim();
+  if (!isCustomProviderId(normalized)) return false;
+  return !baseCatalog.some((entry) => entry.id === normalized);
+}
+
+function omitRecordKey<T>(
+  record: Record<string, T>,
+  keyToOmit: string,
+): Record<string, T> {
+  const { [keyToOmit]: _omitted, ...rest } = record;
+  return rest;
+}
+
+function isLocalModelProvider(provider: string, baseUrl: string): boolean {
+  const normalizedProvider = provider.trim().toLowerCase();
+  const normalizedBaseUrl = baseUrl.trim().toLowerCase();
+  return normalizedProvider === "ollama" ||
+    normalizedBaseUrl.startsWith("http://localhost") ||
+    normalizedBaseUrl.startsWith("http://127.") ||
+    normalizedBaseUrl.startsWith("http://[::1]") ||
+    normalizedBaseUrl.startsWith("http://::1");
 }
 
 function providerBaseUrlsFromProfiles(
@@ -2325,4 +2746,126 @@ function buildAssignableAgentOptions(
 function extractProviderFromKeyRef(keyRef: string): string | null {
   const match = keyRef.match(/^model\.(.+)$/);
   return match ? match[1] : null;
+}
+
+function createEmptyCustomProviderDraft(): CustomProviderDraft {
+  return {
+    label: "",
+    id: "",
+    baseUrl: "",
+    modelListMode: "openai",
+  };
+}
+
+function loadCustomProviders(): ProviderCatalogEntry[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const rawValue = window.localStorage.getItem(CUSTOM_PROVIDER_STORAGE_KEY);
+    if (!rawValue) return [];
+    const parsed = JSON.parse(rawValue);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((entry) => sanitizeCustomProvider(entry))
+      .filter((entry): entry is ProviderCatalogEntry => Boolean(entry));
+  } catch {
+    return [];
+  }
+}
+
+function saveCustomProviders(providers: ProviderCatalogEntry[]) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(CUSTOM_PROVIDER_STORAGE_KEY, JSON.stringify(providers));
+  } catch {
+    // Ignore storage failures; the active in-memory provider still works.
+  }
+}
+
+function sanitizeCustomProvider(value: unknown): ProviderCatalogEntry | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<ProviderCatalogEntry>;
+  const id = sanitizeProviderId(candidate.id ?? "");
+  const label = typeof candidate.label === "string" ? candidate.label.trim() : "";
+  const defaultBaseUrl = typeof candidate.defaultBaseUrl === "string"
+    ? candidate.defaultBaseUrl.trim().replace(/\/+$/, "")
+    : "";
+  const modelListMode = candidate.modelListMode === "unsupported" ? "unsupported" : "openai";
+  if (!id || !defaultBaseUrl) return null;
+  return {
+    id,
+    label: label || id,
+    defaultBaseUrl,
+    apiType: "openai-compatible",
+    modelListMode,
+  };
+}
+
+function makeCustomProviderId(label: string): string {
+  const suffix = sanitizeProviderId(label).replace(/^custom-/, "") || "gateway";
+  return `custom-${suffix}`;
+}
+
+function sanitizeProviderId(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function uniqueProviderId(seed: string, catalog: readonly ProviderCatalogEntry[]): string {
+  const base = sanitizeProviderId(seed) || "custom-gateway";
+  const ids = new Set(catalog.map((provider) => provider.id));
+  if (!ids.has(base)) return base;
+  let index = 2;
+  while (ids.has(`${base}-${index}`)) {
+    index += 1;
+  }
+  return `${base}-${index}`;
+}
+
+function upsertProviderCatalogEntry(
+  providers: ProviderCatalogEntry[],
+  entry: ProviderCatalogEntry,
+): ProviderCatalogEntry[] {
+  const existingIndex = providers.findIndex((provider) => provider.id === entry.id);
+  if (existingIndex < 0) return [...providers, entry];
+  return providers.map((provider, index) => index === existingIndex ? entry : provider);
+}
+
+function mergeProviderCatalog(
+  ...groups: Array<readonly ProviderCatalogEntry[]>
+): ProviderCatalogEntry[] {
+  const byId = new Map<string, ProviderCatalogEntry>();
+  for (const group of groups) {
+    for (const entry of group) {
+      byId.set(entry.id, entry);
+    }
+  }
+  return [...byId.values()];
+}
+
+function inferCustomProvidersFromProfiles(
+  profiles: WorkbenchModelProfile[],
+  baseCatalog: readonly ProviderCatalogEntry[],
+  customProviders: readonly ProviderCatalogEntry[],
+): ProviderCatalogEntry[] {
+  const known = new Set([
+    ...baseCatalog.map((provider) => provider.id),
+    ...customProviders.map((provider) => provider.id),
+  ]);
+  const inferred: ProviderCatalogEntry[] = [];
+  for (const profile of profiles) {
+    const provider = sanitizeProviderId(profile.provider);
+    if (!provider || known.has(provider) || !profile.baseUrl.trim()) continue;
+    inferred.push({
+      id: provider,
+      label: profile.provider,
+      defaultBaseUrl: profile.baseUrl.trim().replace(/\/+$/, ""),
+      apiType: "openai-compatible",
+      modelListMode: "openai",
+    });
+    known.add(provider);
+  }
+  return inferred;
 }

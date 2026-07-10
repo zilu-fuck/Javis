@@ -107,8 +107,15 @@ function createScanId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-export async function listDirectory(path: string): Promise<FileEntry[]> {
-  return invoke<FileEntry[]>("list_directory", { path });
+export async function listDirectory(
+  path: string,
+  options?: { workspaceRoot?: string; allowedRootIds?: string[] },
+): Promise<FileEntry[]> {
+  return invoke<FileEntry[]>("list_directory", {
+    path,
+    workspaceRoot: options?.workspaceRoot ?? null,
+    allowedRootIds: options?.allowedRootIds ?? null,
+  });
 }
 
 interface ClassifiableInput {
@@ -169,7 +176,7 @@ async function classifyEntries(
   const totalBatches = batches.length;
   let completedBatches = 0;
   let failedBatches = 0;
-  const maxConcurrent = options?.maxConcurrentBatches ?? DEFAULT_MAX_CONCURRENT_BATCHES;
+  const maxConcurrent = normalizeMaxConcurrentBatches(options?.maxConcurrentBatches);
 
   // Process batches with concurrency limit
   for (let i = 0; i < totalBatches; i += maxConcurrent) {
@@ -211,6 +218,13 @@ function createDocumentPrompt(files: ClassifiableInput[]): string {
 
 function normalizeClassificationPath(path: string): string {
   return path.trim().replace(/\\/g, "/").toLowerCase();
+}
+
+function normalizeMaxConcurrentBatches(value: number | undefined): number {
+  if (!Number.isFinite(value) || value === undefined) {
+    return DEFAULT_MAX_CONCURRENT_BATCHES;
+  }
+  return Math.max(1, Math.floor(value));
 }
 
 function parseClassificationResponse(

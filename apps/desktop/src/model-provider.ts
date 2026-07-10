@@ -103,15 +103,16 @@ export function createConfiguredModelProvider(settings: ModelSettings): ModelPro
 export function createModelProviderFromProfile(
   profile: { id?: string; provider: string; model: string; apiKeyReference: string; baseUrl: string },
 ): ModelProvider {
+  const provider = normalizeProviderForRequest(profile.provider, profile.apiKeyReference);
   const providerSettings: ModelProviderSettings = {
-    provider: profile.provider,
+    provider,
     model: profile.model,
     apiKeyReference: profile.apiKeyReference,
     baseUrl: profile.baseUrl,
   };
-  const adapter = getAdapter(profile.provider);
+  const adapter = getAdapter(provider);
   return {
-    id: profile.id ?? profile.provider,
+    id: profile.id ?? provider,
     settings: providerSettings,
     defaultSettingsForLocale: localeDefaultModelSettings,
     async complete(prompt, options) {
@@ -130,8 +131,9 @@ export function createModelProviderFromProfile(
 }
 
 export function toModelProviderSettings(settings: ModelSettings): ModelProviderSettings {
+  const provider = normalizeProviderForRequest(settings.provider, settings.apiKeyReference);
   return {
-    provider: settings.provider,
+    provider,
     model: settings.model,
     apiKeyReference: settings.apiKeyReference,
     baseUrl: settings.baseUrl,
@@ -290,7 +292,10 @@ async function createModelRequest(
   options?: CompletionOptions,
   adapter?: ProviderAdapter,
 ) {
-  const providerId = providerSettings.provider || (
+  const providerId = normalizeProviderForRequest(
+    providerSettings.provider,
+    providerSettings.apiKeyReference,
+  ) || (
     options?.locale ? localeDefaultModelSettings(options.locale).provider : undefined
   ) || "";
 
@@ -330,6 +335,24 @@ async function createModelRequest(
     locale: options?.locale,
     timeoutMs: options?.timeoutMs,
   };
+}
+
+function normalizeProviderForRequest(provider: string, apiKeyReference: string): string {
+  const keyProvider = providerFromApiKeyReference(apiKeyReference);
+  if (keyProvider && isCustomProviderId(keyProvider)) {
+    return keyProvider;
+  }
+  return provider;
+}
+
+function providerFromApiKeyReference(value: string): string | null {
+  const match = value.trim().match(/^model\.(.+)$/);
+  return match?.[1] || null;
+}
+
+function isCustomProviderId(provider: string): boolean {
+  const normalized = provider.trim().toLowerCase();
+  return normalized === "custom" || normalized.startsWith("custom-");
 }
 
 function shouldInjectTerminologyForRequest(prompt: string, options?: CompletionOptions): boolean {

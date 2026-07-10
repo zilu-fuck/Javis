@@ -43,6 +43,31 @@ describe("model settings persistence", () => {
     expect(imported).toEqual(legacy);
     expect(await loadModelSettingsFromDatabase(database)).toEqual(legacy);
   });
+
+  it("keeps existing database settings instead of re-importing stale localStorage", async () => {
+    const database = createMemoryModelSettingsDatabase();
+    const repository = createModelSettingsRepository(database);
+    const saved: ModelSettings = {
+      provider: "custom-s",
+      model: "deepseek-v4-flash",
+      apiKey: "",
+      apiKeyReference: "model.custom-s",
+      baseUrl: "http://101.251.162.103:8080/v1",
+    };
+    const staleLegacy: ModelSettings = {
+      provider: "deepseek",
+      model: "deepseek-v4-pro",
+      apiKey: "",
+      apiKeyReference: "model.deepseek",
+      baseUrl: "https://api.deepseek.com",
+    };
+
+    await saveModelSettingsToDatabase(database, saved, "2026-06-14T00:00:00.000Z");
+    const imported = await repository.importFromLocalStorage(createStorage(JSON.stringify(staleLegacy)));
+
+    expect(imported).toEqual(saved);
+    expect(await loadModelSettingsFromDatabase(database)).toEqual(saved);
+  });
 });
 
 function createStorage(rawValue: string | null): Pick<Storage, "getItem" | "setItem"> {

@@ -212,11 +212,15 @@ export function sanitizeModelSettings(value: unknown): ModelSettings {
   }
 
   const candidate = value as Partial<Record<keyof ModelSettings, unknown>>;
+  const apiKeyReference = sanitizeModelApiKeyReference(candidate.apiKeyReference);
+  const keyProvider = providerFromApiKeyReference(apiKeyReference);
   return {
-    provider: sanitizeText(candidate.provider) || DEFAULT_MODEL_SETTINGS.provider,
+    provider: isCustomModelProviderId(keyProvider)
+      ? keyProvider
+      : sanitizeText(candidate.provider) || DEFAULT_MODEL_SETTINGS.provider,
     model: sanitizeText(candidate.model),
     apiKey: sanitizeText(candidate.apiKey),
-    apiKeyReference: sanitizeModelApiKeyReference(candidate.apiKeyReference),
+    apiKeyReference,
     baseUrl: sanitizeText(candidate.baseUrl),
   };
 }
@@ -278,6 +282,12 @@ function providerFromApiKeyReference(value: string): string | null {
   if (trimmed === "default") return null;
   const match = trimmed.match(/^model\.(.+)$/);
   return match?.[1] || null;
+}
+
+function isCustomModelProviderId(provider: string | null): provider is string {
+  if (!provider) return false;
+  const normalized = provider.trim().toLowerCase();
+  return normalized === "custom" || normalized.startsWith("custom-");
 }
 
 function providerApiKeyReference(provider: string): string {

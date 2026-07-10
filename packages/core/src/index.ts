@@ -88,6 +88,7 @@ import {
   type RouteDecision,
   type RouteLog,
 } from "./local-router";
+import { decideRuntimeChain } from "./runtime-chain";
 import { isTaskCancelledError, throwIfTaskAborted, withTaskTimeout } from "./task-wait";
 import { isTerminalTaskStatus } from "./state/task-state";
 import { inferVisionMode } from "./vision-utils";
@@ -1005,19 +1006,51 @@ function normalizeRuntimeToolDescriptors(
   return normalized;
 }
 
+type RuntimeToolAvailability = {
+  browserTool?: BrowserTool;
+  codeTool?: CodeTool;
+  commanderTool?: CommanderTool;
+  computerTool?: ComputerTool;
+  fileTool?: FileTool;
+  gitTool?: GitTool;
+  memoryTool?: MemoryTool;
+  mcpTool?: McpTool;
+  schedulerTool?: SchedulerTool;
+  shellTool?: ShellTool;
+  trendTool?: TrendTool;
+  verifierTool?: VerifierTool;
+  visionTool?: VisionTool;
+  webTool?: WebTool;
+  workspaceTool?: WorkspaceTool;
+};
+
+function hasRuntimeFunction(tool: object | undefined, name: string): boolean {
+  return typeof (tool as Record<string, unknown> | undefined)?.[name] === "function";
+}
+
 function filterRuntimeToolDescriptorsForAvailableTools(
   toolDescriptors: readonly ToolDescriptor[],
-  tools: { codeTool?: CodeTool; trendTool?: TrendTool },
+  tools: RuntimeToolAvailability,
 ): ToolDescriptor[] {
   return toolDescriptors.filter((descriptor) => {
+    if (descriptor.name === "file.planWriteText") {
+      return hasRuntimeFunction(tools.fileTool, "planWriteText");
+    }
+    if (descriptor.name === "file.writeText") {
+      return hasRuntimeFunction(tools.fileTool, "planWriteText") &&
+        hasRuntimeFunction(tools.fileTool, "writeText");
+    }
     if (descriptor.name === "code.searchRepository") {
-      return Boolean(tools.codeTool?.searchRepository);
+      return hasRuntimeFunction(tools.codeTool, "searchRepository");
     }
     if (descriptor.name === "code.traceCallChain") {
-      return Boolean(tools.codeTool?.traceCallChain);
+      return hasRuntimeFunction(tools.codeTool, "traceCallChain");
+    }
+    if (descriptor.name === "web.search") {
+      return hasRuntimeFunction(tools.webTool, "searchWeb");
     }
     if (descriptor.name === "trend.fetchHotList") {
-      return Boolean(tools.trendTool?.fetchHotList);
+      return Boolean(tools.browserTool || hasRuntimeFunction(tools.trendTool, "fetchHotList"));
     }
     return true;
   });
@@ -1203,8 +1236,9 @@ function routeLogToTaskLog(routeLog: RouteLog): TaskLogEntry {
     kind: "event",
     title: "route_decided",
     detail: JSON.stringify(routeLog),
-    userMessage: `Route ${routeLog.routeLevel}: ${routeLog.mode}`,
+    userMessage: "已选择合适的处理方式。",
     devDetail: [
+      `route=${routeLog.routeLevel}/${routeLog.mode}`,
       `score=${routeLog.complexityScore}`,
       `reasons=${routeLog.reasons.join(",") || "none"}`,
       `escalated=${routeLog.escalated}`,
@@ -1417,7 +1451,10 @@ export function createFileScanTaskRuntime({
     if (
       isConversationAnswerStatus(nextSnapshot.status) &&
       nextSnapshot.commanderMessage.trim() &&
-      conversationMessages[conversationMessages.length - 1]?.role !== "assistant"
+      !isSameAssistantTextMessage(
+        conversationMessages[conversationMessages.length - 1],
+        nextSnapshot.commanderMessage,
+      )
     ) {
       conversationMessages.push({
         role: "assistant",
@@ -1588,6 +1625,19 @@ export function createFileScanTaskRuntime({
     return next;
   }
 
+  function isSameAssistantTextMessage(
+    message: ConversationMessage | undefined,
+    content: string,
+  ): boolean {
+    return Boolean(
+      message &&
+        message.role === "assistant" &&
+        message.kind !== "ask_user_question" &&
+        message.kind !== "permission_request" &&
+        message.content.trim() === content.trim(),
+    );
+  }
+
   function appendAskUserAnswerMessageOnce(
     messages: ConversationMessage[],
     answer: string,
@@ -1674,49 +1724,70 @@ export function createFileScanTaskRuntime({
       const availableCodeTool = filterCodeToolForAvailability(codeTool, hasTool);
       const availableGitTool = filterGitToolForAvailability(gitTool, hasTool);
       effectiveToolDescriptors = filterRuntimeToolDescriptorsForAvailableTools(effectiveToolDescriptors, {
+        browserTool,
+        commanderTool,
+        computerTool,
         codeTool: availableCodeTool,
+        fileTool,
+        gitTool,
+        memoryTool,
+        mcpTool,
+        schedulerTool,
+        shellTool,
         trendTool,
+        verifierTool,
+        visionTool,
+        webTool,
+        workspaceTool,
       });
+      const urls = extractUrls(userGoal);
       const recommendedWorkflowIds = getRecommendedWorkflowIds(userGoal);
-      const hasKnownRouteIntent = Boolean(
-        extractUrls(userGoal).length > 0 ||
-        recommendedWorkflowIds.length > 0 ||
-        isReadCurrentProjectGoal(userGoal) ||
-        isTextWriteGoal(userGoal) ||
-        isVisionGoal(userGoal) ||
-        isResearchGoal(userGoal) ||
-        isProjectInspectionGoal(userGoal) ||
-        isCodeReviewGoal(userGoal) ||
-        isPdfOrganizationGoal(userGoal)
+      const readCurrentProjectGoal = isReadCurrentProjectGoal(userGoal);
+      const textWriteGoal = isTextWriteGoal(userGoal);
+      const visionGoal = isVisionGoal(userGoal);
+      const researchGoal = isResearchGoal(userGoal);
+      const projectInspectionGoal = isProjectInspectionGoal(userGoal);
+      const codeReviewGoal = isCodeReviewGoal(userGoal);
+      const pdfOrganizationGoal = isPdfOrganizationGoal(userGoal);
+      const hasVisionTask = Boolean(
+        visionTool &&
+        visionGoal &&
+        !userGoal.includes("<vision-context>") &&
+        hasTool(getVisionToolNameForGoal(userGoal))
       );
-      if (startMode === "chat") {
-        if (chatTool) {
-          void runDirectChatTask(
-            taskId,
-            userGoal,
-            chatTool,
-            priorMessages,
-            modelContext.messages,
-            modelContext.omittedCount,
-            options.displayGoal,
-            options.displayAttachments,
-            routeDecision,
-            routeLog,
-            effectiveRuntimeConfig,
-            signal,
-            appendUserMessage,
-          );
-          return;
-        }
+      const hasKnownRouteIntent = Boolean(
+        urls.length > 0 ||
+        recommendedWorkflowIds.length > 0 ||
+        readCurrentProjectGoal ||
+        textWriteGoal ||
+        visionGoal ||
+        researchGoal ||
+        projectInspectionGoal ||
+        codeReviewGoal ||
+        pdfOrganizationGoal
+      );
+      const chainDecision = decideRuntimeChain({
+        userGoal,
+        startMode,
+        routeDecision,
+        recommendedWorkflowIds,
+        hasChatTool: Boolean(chatTool),
+        hasCommanderTool: Boolean(commanderTool),
+        hasKnownRouteIntent,
+        hasVisionTask,
+        hasUrl: urls.length > 0,
+        isTextWriteGoal: textWriteGoal,
+        isReadCurrentProjectGoal: readCurrentProjectGoal,
+        isResearchGoal: researchGoal,
+        isProjectInspectionGoal: projectInspectionGoal,
+        isCodeReviewGoal: codeReviewGoal,
+        isPdfOrganizationGoal: pdfOrganizationGoal,
+      });
+      if (chainDecision.dispatch.kind === "clarification") {
         runClarificationTask(taskId, userGoal);
         return;
       }
-      if (
-        startMode !== "project" &&
-        routeDecision.level === "L1" &&
-        chatTool &&
-        !hasKnownRouteIntent
-      ) {
+      if (chainDecision.dispatch.kind === "direct_chat" && chatTool) {
         void runDirectChatTask(
           taskId,
           userGoal,
@@ -1743,12 +1814,7 @@ export function createFileScanTaskRuntime({
       // Commander uses the primary (non-vision) model and cannot handle
       // image analysis; the vision flow uses the multimodal slot.
       // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
-      if (
-        visionTool &&
-        isVisionGoal(userGoal) &&
-        !userGoal.includes("<vision-context>") &&
-        hasTool(getVisionToolNameForGoal(userGoal))
-      ) {
+      if (chainDecision.dispatch.kind === "vision_task" && visionTool) {
         void runVisionTask({
           controller,
           visionTool,
@@ -1766,8 +1832,8 @@ export function createFileScanTaskRuntime({
       // executed by the generic capability-based DAG executor.
       // Legacy branches below are fallbacks for when Commander is unavailable.
       // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
-      if (startMode !== "project" && routeDecision.level === "L2") {
-        if (availableWebTool && hasTool("web.fetchSource") && extractUrls(userGoal).length > 0) {
+      if (chainDecision.dispatch.kind === "single_agent_task") {
+        if (availableWebTool && hasTool("web.fetchSource") && urls.length > 0) {
           void runResearchSourceTask({ controller, taskId, userGoal, webTool: availableWebTool, commanderTool });
           return;
         }
@@ -1776,7 +1842,7 @@ export function createFileScanTaskRuntime({
           projectTool &&
           hasTool("file.scanMarkdownDocuments") &&
           hasTool("shell.runReadOnlyCommand") &&
-          isReadCurrentProjectGoal(userGoal)
+          readCurrentProjectGoal
         ) {
           void runReadCurrentProjectWorkflow({
             controller,
@@ -1794,7 +1860,7 @@ export function createFileScanTaskRuntime({
         }
         if (
           availableFileTool?.planWriteText &&
-          isTextWriteGoal(userGoal)
+          textWriteGoal
         ) {
           void runTextWriteTask({
             controller,
@@ -1811,12 +1877,12 @@ export function createFileScanTaskRuntime({
           availableWebTool?.searchWeb &&
           hasTool("web.search") &&
           hasTool("web.fetchSource") &&
-          isResearchGoal(userGoal)
+          researchGoal
         ) {
           void runResearchSearchTask({ controller, taskId, userGoal, webTool: availableWebTool, commanderTool });
           return;
         }
-        if (shellTool && projectTool && hasTool("shell.runReadOnlyCommand") && isProjectInspectionGoal(userGoal)) {
+        if (shellTool && projectTool && hasTool("shell.runReadOnlyCommand") && projectInspectionGoal) {
           void runProjectInspectionTask(
             controller,
             taskId,
@@ -1832,7 +1898,7 @@ export function createFileScanTaskRuntime({
           shellTool &&
           hasTool("code.inspectRepository") &&
           hasTool("shell.runReadOnlyCommand") &&
-          isCodeReviewGoal(userGoal)
+          codeReviewGoal
         ) {
           void runCodeReviewTask({
             controller,
@@ -1847,7 +1913,7 @@ export function createFileScanTaskRuntime({
         }
         if (
           availableFileTool?.planPdfOrganization &&
-          isPdfOrganizationGoal(userGoal)
+          pdfOrganizationGoal
         ) {
           void runPdfOrganizationPreviewTask({
             controller,
@@ -1859,7 +1925,7 @@ export function createFileScanTaskRuntime({
           });
           return;
         }
-        if (chatTool) {
+        if (!commanderTool && chatTool) {
           void runChatTask(
             taskId,
             userGoal,
@@ -1879,7 +1945,10 @@ export function createFileScanTaskRuntime({
         }
       }
 
-      if (commanderTool) {
+      if (
+        commanderTool &&
+        (chainDecision.dispatch.kind === "commander_task" || chainDecision.dispatch.kind === "single_agent_task")
+      ) {
         void runCommanderDagTask({
           controller,
           commanderTool,

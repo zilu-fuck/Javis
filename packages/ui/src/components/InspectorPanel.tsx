@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   BrowserQuickResult,
   BrowserQuickRequest,
@@ -28,6 +28,7 @@ import type {
   WorkbenchWorkspaceToolAction,
 } from "../types";
 import { isChineseLocale, translateWorkbenchText } from "../utils";
+import { getParticipatingAgents } from "./agent-visibility";
 import { AgentDetailPanel } from "./inspector/AgentDetailPanel";
 import { AgentGraphPanel } from "./inspector/AgentGraphPanel";
 import { ResourceStatusPanel } from "./inspector/ResourceStatusPanel";
@@ -163,6 +164,12 @@ export function InspectorPanel({
   const [agentTabIds, setAgentTabIds] = useState<string[]>([]);
   const changedFiles = getReviewChangedFiles(task);
   const detailCount = detailItem ? 1 : changedFiles.length;
+  const participatingAgents = useMemo(() => getParticipatingAgents(task), [task]);
+  const participatingAgentIds = useMemo(
+    () => new Set(participatingAgents.map((agent) => agent.id)),
+    [participatingAgents],
+  );
+  const agentCount = participatingAgents.length;
   const detailsLabel = isChineseLocale(locale) ? "详情" : "Details";
   const resourcesLabel = isChineseLocale(locale) ? "资源" : "Resources";
 
@@ -180,15 +187,20 @@ export function InspectorPanel({
   }, [detailItem]);
 
   useEffect(() => {
-    const validAgentIds = new Set(task.agents.map((agent) => agent.id));
-    setAgentTabIds((prev) => prev.filter((agentId) => validAgentIds.has(agentId)));
-  }, [task.agents]);
+    setAgentTabIds((prev) => {
+      const next = prev.filter((agentId) => participatingAgentIds.has(agentId));
+      return next.length === prev.length ? prev : next;
+    });
+    if (selectedAgentId && !participatingAgentIds.has(selectedAgentId)) {
+      onClearSelectedAgent?.();
+    }
+  }, [onClearSelectedAgent, participatingAgentIds, selectedAgentId]);
 
   useEffect(() => {
-    if (!selectedAgentId || !task.agents.some((agent) => agent.id === selectedAgentId)) return;
+    if (!selectedAgentId || !participatingAgentIds.has(selectedAgentId)) return;
     setAgentTabIds((prev) => prev.includes(selectedAgentId) ? prev : [...prev, selectedAgentId]);
     setActiveSection("details");
-  }, [selectedAgentId, task.agents]);
+  }, [participatingAgentIds, selectedAgentId]);
 
   // When new tabs open, switch to details
   useEffect(() => {
@@ -218,10 +230,10 @@ export function InspectorPanel({
   }
 
   const selectedAgent = selectedAgentId
-    ? task.agents.find((agent) => agent.id === selectedAgentId)
+    ? participatingAgents.find((agent) => agent.id === selectedAgentId)
     : undefined;
   const agentTabs = agentTabIds
-    .map((agentId) => task.agents.find((agent) => agent.id === agentId))
+    .map((agentId) => participatingAgents.find((agent) => agent.id === agentId))
     .filter((agent): agent is WorkbenchAgent => Boolean(agent));
   const rawActiveTab = openTabs.find((tab) => tab.id === activeToolTabId) ?? openTabs[activeTabIndex] ?? openTabs[openTabs.length - 1] ?? null;
   const activeTab = selectedAgent ? null : rawActiveTab;
@@ -238,7 +250,7 @@ export function InspectorPanel({
           type="button"
         >
           <span>{labels.agentGraph}</span>
-          <span className="javis-activity-count">{task.agents.length}</span>
+          <span className="javis-activity-count">{agentCount}</span>
           <span>{isInspectorOpen && activeSection === "agents" ? labels.collapseInspector : labels.expandInspector}</span>
         </button>
         <button

@@ -202,6 +202,59 @@ describe("model provider", () => {
     });
   });
 
+  it("uses the custom provider encoded in the API key reference for legacy settings", async () => {
+    invokeMock.mockResolvedValueOnce({
+      text: "done",
+      model: "deepseek-v4-flash",
+      provider: "custom-s",
+    });
+    const provider = createConfiguredModelProvider({
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      apiKey: "",
+      apiKeyReference: "model.custom-s",
+      baseUrl: "http://101.251.162.103:8080/v1",
+    });
+
+    await provider.complete("hello", { locale: "zh-CN" });
+
+    expect(invokeMock).toHaveBeenCalledWith("complete_model_prompt", {
+      request: expect.objectContaining({
+        providerId: "custom-s",
+        model: "deepseek-v4-flash",
+        apiKeyReference: "model.custom-s",
+        baseUrl: "http://101.251.162.103:8080/v1",
+      }),
+    });
+  });
+
+  it("uses the custom provider encoded in the API key reference for profiles", async () => {
+    invokeMock.mockResolvedValueOnce({
+      text: "done",
+      model: "deepseek-v4-flash",
+      provider: "custom-s",
+    });
+    const provider = createModelProviderFromProfile({
+      id: "primary",
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      apiKeyReference: "model.custom-s",
+      baseUrl: "http://101.251.162.103:8080/v1",
+    });
+
+    await provider.complete("hello", { locale: "zh-CN" });
+
+    expect(provider.settings.provider).toBe("custom-s");
+    expect(invokeMock).toHaveBeenCalledWith("complete_model_prompt", {
+      request: expect.objectContaining({
+        providerId: "custom-s",
+        model: "deepseek-v4-flash",
+        apiKeyReference: "model.custom-s",
+        baseUrl: "http://101.251.162.103:8080/v1",
+      }),
+    });
+  });
+
   it("awaits profile model request assembly before invoking completion", async () => {
     invokeMock.mockResolvedValueOnce({
       text: "done",

@@ -823,7 +823,7 @@ describe("JavisWorkbench permission cards", () => {
       undefined,
       undefined,
       undefined,
-      { intent: "new_task" },
+      { intent: "continue_history" },
     );
 
     cleanup();
@@ -856,6 +856,45 @@ describe("JavisWorkbench permission cards", () => {
       undefined,
       undefined,
       undefined,
+      { intent: "continue_history" },
+    );
+  });
+
+  it("continues an existing thread when submitting image attachments", async () => {
+    const onSubmitGoal = vi.fn();
+    const view = render(
+      <JavisWorkbench
+        draftGoal="Describe this screenshot"
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={onSubmitGoal}
+        task={{
+          ...createIdleTask(),
+          id: "task-history-attachment",
+          status: "completed",
+          title: "History with attachment",
+          userGoal: "First question",
+          commanderMessage: "First answer",
+          conversationMessages: [
+            { role: "user", content: "First question" },
+            { role: "assistant", content: "First answer" },
+          ],
+        }}
+      />,
+    );
+    const file = new File(["fake image"], "screenshot.png", { type: "image/png" });
+
+    fireEvent.change(view.container.querySelector<HTMLInputElement>(".javis-hidden-file-input")!, {
+      target: { files: [file] },
+    });
+    fireEvent.submit(view.container.querySelector(".javis-composer")!);
+
+    await waitFor(() => expect(onSubmitGoal).toHaveBeenCalledTimes(1));
+    expect(onSubmitGoal).toHaveBeenCalledWith(
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [expect.stringMatching(/^data:image\/png;base64,/)],
       { intent: "continue_history" },
     );
   });
@@ -916,7 +955,7 @@ describe("JavisWorkbench permission cards", () => {
     expect(container.querySelector<HTMLTextAreaElement>(".javis-composer textarea")?.disabled).toBe(true);
   });
 
-  it("renders demo-inspired orchestration progress with agent cards", () => {
+  it("renders compact orchestration progress before the assistant summary", () => {
     const html = renderWorkbench({
       id: "task-progress-rich",
       title: "Inspecting project",
@@ -934,14 +973,40 @@ describe("JavisWorkbench permission cards", () => {
       logs: [],
     });
 
-    expect(html).toContain("javis-task-stepper");
-    expect(html).toContain("javis-dispatch-lines");
-    expect(html).toContain("data-testid=\"dispatch-connector-svg\"");
+    expect(html).not.toContain("javis-task-stepper");
+    expect(html).not.toContain("javis-dispatch-lines");
     expect(html).toContain("javis-agent-run-grid");
     expect(html).toContain("File Agent");
     expect(html).toContain("Shell Agent");
     expect(html).toContain("Checking scripts");
     expect(html).toContain("1.2s");
+    expect(html.indexOf("Execution progress")).toBeLessThan(
+      html.indexOf("Commander is coordinating a project inspection."),
+    );
+  });
+
+  it("keeps multi-message thread order when execution panels are shown", () => {
+    const html = renderWorkbench({
+      ...createOrchestrationTask(),
+      conversationMessages: [
+        { id: "message-1", role: "user", content: "First question" },
+        { id: "message-2", role: "assistant", content: "First answer" },
+        { id: "message-3", role: "user", content: "Second question" },
+        { id: "message-4", role: "assistant", content: "Second answer" },
+      ],
+    });
+
+    const firstQuestion = html.indexOf("First question");
+    const firstAnswer = html.indexOf("First answer");
+    const secondQuestion = html.indexOf("Second question");
+    const executionProgress = html.indexOf("Execution progress");
+    const secondAnswer = html.indexOf("Second answer");
+
+    expect(firstQuestion).toBeGreaterThanOrEqual(0);
+    expect(firstQuestion).toBeLessThan(firstAnswer);
+    expect(firstAnswer).toBeLessThan(secondQuestion);
+    expect(secondQuestion).toBeLessThan(executionProgress);
+    expect(executionProgress).toBeLessThan(secondAnswer);
   });
 
   it("hides queued agents that are not assigned to current plan steps", () => {
@@ -965,6 +1030,52 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).toContain("Commander");
     expect(html).not.toContain("File Agent");
     expect(html).not.toContain("Security Reviewer");
+  });
+
+  it("counts only participating agents in the inspector", async () => {
+    const task: WorkbenchTask = {
+      id: "task-participating-agent-count",
+      title: "Text file written",
+      userGoal: "Write a short story to md",
+      status: "completed",
+      commanderMessage: "File Agent wrote D:/test/111/javis-output.md.",
+      plan: [
+        { id: "write", title: "Write approved file", status: "completed", agentKind: "file" },
+        { id: "verify", title: "Verify written file", status: "completed", agentKind: "verifier" },
+      ],
+      agents: [
+        { id: "agent-commander", name: "Commander", role: "Plans", status: "completed", task: "Coordinated the task" },
+        { id: "agent-file", name: "File Agent", role: "Writes files", status: "completed", task: "Wrote the text file" },
+        { id: "agent-verifier", name: "Verifier", role: "Checks results", status: "completed", task: "Verified the output" },
+        { id: "agent-shell", name: "Shell Agent", role: "Runs commands", status: "queued", task: "No workflow task assigned" },
+      ],
+      logs: [{ id: "log-1", kind: "info", title: "done", detail: "completed" }],
+    };
+    const view = render(
+      <JavisWorkbench
+        draftGoal=""
+        initialIsInspectorOpen
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={task}
+      />,
+    );
+    const toggles = view.container.querySelectorAll<HTMLButtonElement>(".javis-inspector-toggle");
+    const graphBody = view.container.querySelector(".javis-agent-graph-body");
+
+    expect(toggles[0]?.querySelector(".javis-activity-count")?.textContent).toBe("2");
+    expect(view.container.querySelectorAll(".javis-agent-graph-body .javis-agent")).toHaveLength(2);
+    expect(graphBody?.textContent).toContain("File Agent");
+    expect(graphBody?.textContent).toContain("Verifier");
+    expect(graphBody?.textContent).not.toContain("Shell Agent");
+    expect(graphBody?.textContent).not.toContain("Commander");
+
+    fireEvent.click(toggles[2]!);
+
+    await waitFor(() => {
+      expect(view.container.querySelector(".javis-agent-resource-header")?.textContent).toContain("2/2");
+    });
+    expect(view.container.textContent?.replace(/\s/g, "")).toContain("Agentsdone2/2");
   });
 
   it("opens inspector details when a central orchestration agent card is selected", async () => {
@@ -1624,6 +1735,11 @@ describe("JavisWorkbench permission cards", () => {
     Element.prototype.scrollIntoView = vi.fn();
     const task: WorkbenchTask = {
       ...createOrchestrationTask(),
+      plan: [
+        { id: "scan", title: "Scan files", status: "completed", agentKind: "file" },
+        { id: "inspect", title: "Inspect package scripts", status: "running", agentKind: "shell" },
+        { id: "research", title: "Check references", status: "pending", agentKind: "research" },
+      ],
       agents: [
         { id: "agent-file", name: "File Agent", role: "Reads files", status: "completed", task: "Scanned files" },
         { id: "agent-shell", name: "Shell Agent", role: "Checks commands", status: "running", task: "Checking scripts" },
@@ -1704,6 +1820,74 @@ describe("JavisWorkbench permission cards", () => {
 
     expect(view.container.querySelector(".javis-selected-agent-detail")).toBeNull();
     expect(view.container.querySelector(".javis-inspector-details")?.textContent).not.toContain("Shell Agent");
+  });
+
+  it("drops stale selected agent details when the agent is no longer assigned to the current plan", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const view = render(
+      <JavisWorkbench
+        draftGoal="Research the topic"
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={{
+          id: "task-research-selected",
+          title: "Research topic",
+          userGoal: "Research a topic",
+          status: "running",
+          commanderMessage: "Research Agent is checking sources.",
+          plan: [
+            { id: "research", title: "Check sources", status: "running", agentKind: "research" },
+          ],
+          agents: [
+            { id: "agent-research", name: "Research Agent", role: "Checks sources", status: "queued", task: "Waiting for sources" },
+          ],
+          logs: [],
+        }}
+      />,
+    );
+    const researchCard = Array.from(
+      view.container.querySelectorAll<HTMLButtonElement>(".javis-agent-run-card"),
+    ).find((card) => card.textContent?.includes("Research Agent"));
+
+    expect(researchCard).toBeTruthy();
+    fireEvent.click(researchCard!);
+
+    await waitFor(() => {
+      expect(view.container.querySelector(".javis-selected-agent-detail")?.textContent).toContain("Research Agent");
+    });
+
+    view.rerender(
+      <JavisWorkbench
+        draftGoal="Write text"
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={{
+          id: "task-file-only",
+          title: "Text file written",
+          userGoal: "Write a text file",
+          status: "completed",
+          commanderMessage: "File Agent wrote D:/test/111/javis-output.md.",
+          plan: [
+            { id: "write", title: "Write approved file", status: "completed", agentKind: "file" },
+            { id: "verify", title: "Verify written file", status: "completed", agentKind: "verifier" },
+          ],
+          agents: [
+            { id: "agent-file", name: "File Agent", role: "Writes files", status: "completed", task: "Wrote the text file" },
+            { id: "agent-verifier", name: "Verifier", role: "Checks results", status: "completed", task: "Verified the output" },
+            { id: "agent-research", name: "Research Agent", role: "Checks sources", status: "queued", task: "No workflow task assigned" },
+          ],
+          logs: [],
+        }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(view.container.querySelector(".javis-selected-agent-detail")).toBeNull();
+    });
+    expect(view.container.querySelector(".javis-inspector-details")?.textContent).not.toContain("Research Agent");
+    expect(Array.from(view.container.querySelectorAll(".javis-tool-tab")).map((tab) => tab.textContent).join(" "))
+      .not.toContain("Research Agent");
+    expect(view.container.querySelector(".javis-inspector-toggle .javis-activity-count")?.textContent).toBe("2");
   });
 
   it("opens the inspector resource status section from the rail", async () => {
@@ -2260,25 +2444,64 @@ describe("JavisWorkbench permission cards", () => {
     });
   });
 
-  it("keeps confirmation actions enabled only while permission is pending", () => {
+  it("shows confirmation actions only while permission is pending", () => {
     const pendingHtml = renderWorkbench(createTaskWithPermission("pending"));
     const approvedHtml = renderWorkbench(createTaskWithPermission("approved"));
+    const completedWithStalePendingHtml = renderWorkbench({
+      ...createTaskWithPermission("pending"),
+      status: "completed",
+      title: "Text file written",
+      commanderMessage: "File Agent wrote D:/test/111/javis-output.md.",
+    });
 
     expect(pendingHtml).toContain("<button type=\"button\">Approve</button>");
     expect(pendingHtml).toContain("<button type=\"button\">Deny</button>");
     expect(pendingHtml).not.toContain("No write operation executed");
-    expect(approvedHtml).toContain("<button disabled=\"\" type=\"button\">Approve</button>");
-    expect(approvedHtml).toContain("<button disabled=\"\" type=\"button\">Deny</button>");
-    expect(approvedHtml).toContain("Status: approved");
+    expect(approvedHtml).not.toContain("javis-confirmation");
+    expect(approvedHtml).not.toContain("<button disabled=\"\" type=\"button\">Approve</button>");
+    expect(approvedHtml).not.toContain("<button disabled=\"\" type=\"button\">Deny</button>");
+    expect(completedWithStalePendingHtml).not.toContain("javis-confirmation");
+    expect(completedWithStalePendingHtml).not.toContain("Review the permission card above to continue.");
   });
 
-  it("shows a no-op result when confirmed-write permission is denied", () => {
+  it("hides resolved confirmed-write permission prompts after denial", () => {
     const deniedHtml = renderWorkbench(createTaskWithPermission("denied"));
 
-    expect(deniedHtml).toContain("<button disabled=\"\" type=\"button\">Approve</button>");
-    expect(deniedHtml).toContain("<button disabled=\"\" type=\"button\">Deny</button>");
-    expect(deniedHtml).toContain("Status: denied");
-    expect(deniedHtml).toContain("No write operation executed");
+    expect(deniedHtml).not.toContain("javis-confirmation");
+    expect(deniedHtml).not.toContain("<button disabled=\"\" type=\"button\">Approve</button>");
+    expect(deniedHtml).not.toContain("<button disabled=\"\" type=\"button\">Deny</button>");
+    expect(deniedHtml).not.toContain("No write operation executed");
+  });
+
+  it("keeps resolved permission requests as non-interactive history cards", () => {
+    const permissionTask = createTaskWithPermission("approved");
+    const html = renderWorkbench({
+      ...permissionTask,
+      status: "completed",
+      title: "Text file written",
+      commanderMessage: "File Agent wrote D:/test/111/javis-output.md.",
+      conversationMessages: [
+        { role: "user", content: "Write a short story to md" },
+        {
+          id: permissionTask.permissionRequest!.id,
+          kind: "permission_request",
+          role: "assistant",
+          content: permissionTask.permissionRequest!.reason,
+          permissionRequest: permissionTask.permissionRequest,
+        },
+        {
+          role: "assistant",
+          content: "File Agent wrote D:/test/111/javis-output.md.",
+        },
+      ],
+    });
+
+    expect(html).toContain("javis-message-inline-card");
+    expect(html).toContain("Approve PDF move plan");
+    expect(html).toContain("Moving files changes the local filesystem");
+    expect(html).not.toContain("javis-confirmation");
+    expect(html).not.toContain("<button disabled=\"\" type=\"button\">Approve</button>");
+    expect(html).not.toContain("Review the permission card above to continue.");
   });
 
   it("does not show Always Allow when a generic permission request disallows it", () => {

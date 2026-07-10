@@ -536,6 +536,16 @@ function BrowserPanel({
         <div className="javis-terminal-approval-card javis-browser-approval-card">
           <strong>{isChinese ? "\u5ba1\u6279\u6d4f\u89c8\u5668\u5199\u64cd\u4f5c" : "Approve browser write"}</strong>
           <span>{browserWriteApprovalSummary(pendingBrowserWriteApproval, isChinese)}</span>
+          {pendingBrowserWriteApproval.expressionPreview ? (
+            <code className="javis-browser-approval-preview">
+              {pendingBrowserWriteApproval.expressionPreview}
+            </code>
+          ) : null}
+          {pendingBrowserWriteApproval.scriptPreview ? (
+            <code className="javis-browser-approval-preview">
+              {pendingBrowserWriteApproval.scriptPreview}
+            </code>
+          ) : null}
           <span>{isChinese ? "\u4f1a\u8bdd" : "Session"} {pendingBrowserWriteApproval.sessionId}</span>
           <span>hash {pendingBrowserWriteApproval.previewHash}</span>
           <button

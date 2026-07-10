@@ -4,6 +4,8 @@ import {
   getTopRoutes,
   getRecommendedWorkflowIds,
   extractUrls,
+  isCodebaseUnderstandingGoal,
+  isCodeReviewGoal,
   isPdfOrganizationGoal,
   isComputerUseGoal,
   scoreRoutes,
@@ -24,6 +26,15 @@ describe("routing", () => {
       score: 3,
       signals: ["code-review-keyword", "git-changes-context"],
     });
+  });
+
+  it("routes source-backed project understanding to read-current-project instead of code review", () => {
+    const goal = "\u544a\u8bc9\u6211\u8fd9\u4e2a\u9879\u76ee\u662f\u5e72\u561b\u7684, \u4e0d\u8981\u5149\u770breadme, \u8981\u7ed3\u5408\u5b9e\u9645\u4ee3\u7801\u60c5\u51b5";
+
+    expect(getTopRoute(goal)?.route).toBe("codebase");
+    expect(getRecommendedWorkflowIds(goal)).toEqual(["read-current-project"]);
+    expect(isCodebaseUnderstandingGoal(goal)).toBe(true);
+    expect(isCodeReviewGoal(goal)).toBe(false);
   });
 
   it("does not select a route below the confidence threshold", () => {

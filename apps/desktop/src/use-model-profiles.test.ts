@@ -35,11 +35,11 @@ function buildConfig(
         id: "secondary",
         slot: null,
         displayName: "Secondary",
-        provider: "deepseek",
-        model: "deepseek-chat",
+        provider: "ollama",
+        model: "llama3.1",
         apiKey: "",
-        apiKeyReference: "model.deepseek",
-        baseUrl: "",
+        apiKeyReference: "model.ollama",
+        baseUrl: "http://localhost:11434/v1",
         capabilities: { vision: false, code: true, contextTokens: 128000 },
       },
     ],
@@ -78,6 +78,7 @@ describe("useModelProfiles", () => {
   it("keeps stored api key when hasStoredApiKey is true and apiKey is empty", async () => {
     const repo = createModelProfileRepo();
     const repoRef = { current: repo } as any;
+    mockInvoke.mockResolvedValueOnce({ exists: true });
 
     const { result } = renderHook(() =>
       useModelProfiles({ modelProfileRepoRef: repoRef } as any),
@@ -105,6 +106,9 @@ describe("useModelProfiles", () => {
     });
 
     expect(mockInvoke).not.toHaveBeenCalledWith("delete_model_api_key_secret", expect.anything());
+    expect(mockInvoke).toHaveBeenCalledWith("check_model_api_key_secret", {
+      keyReference: "model.openai",
+    });
     expect(result.current.modelConfiguration?.profiles[0]?.hasStoredApiKey).toBe(true);
   });
 
@@ -216,6 +220,46 @@ describe("useModelProfiles", () => {
       await expect(result.current.handleModelConfigurationChange(buildConfig())).rejects.toThrow("keyring unavailable");
     });
 
+    expect(repo.save).not.toHaveBeenCalled();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(result.current.modelConfiguration).toBeUndefined();
+  });
+
+  it("rejects remote profiles without a saved api key", async () => {
+    const repo = createModelProfileRepo();
+    const repoRef = { current: repo } as any;
+    const onSaved = vi.fn();
+    mockInvoke.mockResolvedValueOnce({ exists: false });
+
+    const { result } = renderHook(() =>
+      useModelProfiles({ modelProfileRepoRef: repoRef, onSaved } as any),
+    );
+
+    const config = buildConfig({
+      profiles: [
+        {
+          id: "primary",
+          slot: "primary",
+          displayName: "Primary",
+          provider: "deepseek",
+          model: "deepseek-v4-pro",
+          apiKey: "",
+          apiKeyReference: "model.deepseek",
+          baseUrl: "https://api.deepseek.com",
+          capabilities: { vision: false, code: true, contextTokens: 1000000 },
+        } as any,
+      ],
+    });
+
+    await act(async () => {
+      await expect(result.current.handleModelConfigurationChange(config)).rejects.toThrow(
+        "API key is not saved for deepseek",
+      );
+    });
+
+    expect(mockInvoke).toHaveBeenCalledWith("check_model_api_key_secret", {
+      keyReference: "model.deepseek",
+    });
     expect(repo.save).not.toHaveBeenCalled();
     expect(onSaved).not.toHaveBeenCalled();
     expect(result.current.modelConfiguration).toBeUndefined();

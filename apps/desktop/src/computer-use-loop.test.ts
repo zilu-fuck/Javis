@@ -126,6 +126,67 @@ describe("runComputerUseLoop", () => {
     expect(steps[1].confidence).toBe("high");
   });
 
+  it("treats an empty allowed tool list as fail-closed", async () => {
+    const modelProvider = createModelProvider(JSON.stringify({
+      observation: "A target button is visible",
+      action: { tool: "computer.click", params: { x: 100, y: 200 } },
+      target: "Click the target",
+      confidence: "high",
+    }));
+    const computerTool = createComputerTool();
+
+    const steps = await runComputerUseLoop({
+      modelProvider,
+      computerTool,
+      userGoal: "Click the target",
+      allowedToolNames: [],
+      config: { maxSteps: 1 },
+    });
+
+    expect(computerTool.click).not.toHaveBeenCalled();
+    expect(steps[0].phase).toBe("failed");
+    expect(steps[0].error).toContain("Computer Use tool is disabled: computer.click");
+  });
+
+  it("checks the actual structured action against the allowed tool list", async () => {
+    const modelProvider = createModelProvider(JSON.stringify({
+      observation: "The Save button is visible",
+      action: { tool: "computer.click", params: { x: 120, y: 80 } },
+      target: "Click Save",
+      confidence: "high",
+    }));
+    const computerTool = createComputerTool();
+    vi.mocked(computerTool.listWindows).mockResolvedValue({
+      windows: [{
+        handle: 42,
+        title: "Target App",
+        className: "TargetWindow",
+        rect: { x: 0, y: 0, width: 800, height: 600 },
+        isVisible: true,
+        isForeground: true,
+      }],
+    });
+    vi.mocked(computerTool.inspectUi).mockResolvedValue({
+      tree: "<Button automationId=\"saveButton\" name=\"Save\">",
+      nodeCount: 1,
+    });
+
+    const steps = await runComputerUseLoop({
+      modelProvider,
+      computerTool,
+      userGoal: "Click Save",
+      allowedToolNames: ["computer.click"],
+      approveAction: vi.fn(async () => ({ approvalId: "approval-1", taskId: "task-1" })),
+      config: { maxSteps: 1 },
+    });
+
+    expect(computerTool.click).not.toHaveBeenCalled();
+    expect(computerTool.invokeUi).not.toHaveBeenCalled();
+    expect(steps[0].phase).toBe("failed");
+    expect(steps[0].action.tool).toBe("computer.invokeUi");
+    expect(steps[0].error).toContain("Computer Use tool is disabled: computer.invokeUi");
+  });
+
   it("passes the current screenshot to approval when live previews are enabled", async () => {
     const modelProvider = createModelProvider(JSON.stringify({
       observation: "A target button is visible",

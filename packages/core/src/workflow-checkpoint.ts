@@ -1,5 +1,10 @@
 import type { WorkbenchWorkflow, WorkbenchWorkflowStep } from "./workflows";
-import type { ArtifactEnvelope } from "./artifact-envelope";
+import {
+  createArtifactEnvelope,
+  isArtifactEnvelope,
+  sanitizeArtifactForPersistence,
+  type ArtifactEnvelope,
+} from "./artifact-envelope";
 
 export interface WorkflowCheckpoint {
   taskId: string;
@@ -95,8 +100,28 @@ export function buildCheckpointFromDagState(input: {
   const contextSnapshot: Record<string, ArtifactEnvelope> = {};
   if (input.envelopes) {
     for (const [key, envelope] of Object.entries(input.envelopes)) {
-      contextSnapshot[key] = envelope;
+      contextSnapshot[key] = sanitizeArtifactForPersistence(envelope);
     }
+  }
+  for (const [key, value] of Object.entries(input.contextSnapshot)) {
+    if (value === undefined || contextSnapshot[key]) {
+      continue;
+    }
+    if (isArtifactEnvelope(value)) {
+      contextSnapshot[key] = sanitizeArtifactForPersistence(value);
+      continue;
+    }
+    const producerStep = input.workflow.steps.find((step) => step.outputContextKey === key);
+    contextSnapshot[key] = sanitizeArtifactForPersistence(createArtifactEnvelope(value, {
+      taskId: input.taskId,
+      runId: input.runId,
+      type: `sharedContext.${key}`,
+      producer: {
+        stepId: producerStep?.id ?? "checkpoint",
+        agentKind: producerStep?.agentKind,
+      },
+      sensitivity: "workspace",
+    }));
   }
 
   return {

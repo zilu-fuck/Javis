@@ -1,5 +1,6 @@
 import type { WorkbenchLocale, WorkbenchTask } from "../../types";
 import { isChineseLocale, translateWorkbenchText } from "../../utils";
+import { getParticipatingAgents } from "../agent-visibility";
 import { agentIcon, agentKind, agentProgress, agentStatusLabel, normalizeStatus } from "./inspector-utils";
 
 interface AgentGraphPanelProps {
@@ -11,10 +12,11 @@ interface AgentGraphPanelProps {
 
 export function AgentGraphPanel({ locale, onSelectAgent, selectedAgentId, task }: AgentGraphPanelProps) {
   const isChinese = isChineseLocale(locale);
+  const participatingAgents = getParticipatingAgents(task);
 
   return (
     <section className="javis-agent-list javis-agent-graph" aria-label={locale.labels.agentStates}>
-      <TaskStatusCard isChinese={isChinese} task={task} />
+      <TaskStatusCard agentCount={participatingAgents.length} isChinese={isChinese} task={task} />
       <div className="javis-agent-graph-root" aria-label="Commander">
         <span className="javis-agent-icon agent-commander">C</span>
         <span>
@@ -22,9 +24,9 @@ export function AgentGraphPanel({ locale, onSelectAgent, selectedAgentId, task }
           <small>{translateWorkbenchText(task.commanderMessage || task.title, locale)}</small>
         </span>
       </div>
-      <AgentGraphLines agentCount={task.agents.length} />
+      <AgentGraphLines agentCount={participatingAgents.length} />
       <div className="javis-agent-graph-body">
-        {task.agents.map((agent) => (
+        {participatingAgents.map((agent) => (
           <button
             className={`javis-agent status-${normalizeStatus(agent.status)}${selectedAgentId === agent.id ? " active" : ""}`}
             key={agent.id}
@@ -52,7 +54,7 @@ export function AgentGraphPanel({ locale, onSelectAgent, selectedAgentId, task }
   );
 }
 
-function TaskStatusCard({ isChinese, task }: { isChinese: boolean; task: WorkbenchTask }) {
+function TaskStatusCard({ agentCount, isChinese, task }: { agentCount: number; isChinese: boolean; task: WorkbenchTask }) {
   return (
     <section className="javis-overview-card javis-agent-graph-task-status">
       <div className="javis-overview-card-header">
@@ -60,7 +62,7 @@ function TaskStatusCard({ isChinese, task }: { isChinese: boolean; task: Workben
         <span className={`javis-badge status-${task.status}`}>{task.status}</span>
       </div>
       <div className="javis-overview-stats">
-        <StatRow label={isChinese ? "Agent 数" : "Agents"} value={String(task.agents.length)} />
+        <StatRow label={isChinese ? "Agent 数" : "Agents"} value={String(agentCount)} />
         <StatRow label={isChinese ? "日志条数" : "Log entries"} value={String(task.logs.length)} />
         {task.workspacePath ? (
           <StatRow label={isChinese ? "工作区" : "Workspace"} value={task.workspacePath} />

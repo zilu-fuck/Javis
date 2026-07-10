@@ -299,6 +299,15 @@ export interface TokenUsageSummary {
 
 export interface CommanderPlanRequest {
   userGoal: string;
+  /**
+   * Date context supplied by the runtime so Commander can plan date-based
+   * filenames or labels without shelling out just to ask what day it is.
+   */
+  currentDate?: {
+    iso: string;
+    localDate: string;
+    timezone?: string;
+  };
   /** Recent conversation context for follow-up planning. May be windowed. */
   priorMessages?: Array<{
     role: "user" | "assistant";
@@ -871,6 +880,7 @@ export interface McpTool {
 export interface BrowserNavigateRequest {
   url: string;
   waitForSelector?: string;
+  referrer?: string;
   timeoutMs?: number;
 }
 

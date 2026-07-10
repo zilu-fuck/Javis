@@ -22,6 +22,7 @@ describe("ThreadView", () => {
 
   it("disables the composer for a pending ask-user prompt", () => {
     const task = createTask({
+      status: "waiting_info",
       askUserQuestion: {
         id: "ask-1",
         question: "Need detail?",

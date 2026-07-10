@@ -970,6 +970,8 @@ export interface WorkbenchBrowserWriteApprovalPreview {
   action: WorkbenchBrowserWriteApprovalAction;
   previewHash: string;
   selector?: string;
+  expressionPreview?: string;
+  scriptPreview?: string;
   byteCount?: number;
   scriptByteCount?: number;
 }

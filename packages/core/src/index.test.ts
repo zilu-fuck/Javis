@@ -12,6 +12,7 @@ import { initialToolDescriptors } from "@javis/tools";
 import type {
   FileOrganizationExecution,
   FileOrganizationPlan,
+  BrowserTool,
   CommanderTool,
   CodeTool,
   MarkdownDocument,
@@ -184,6 +185,8 @@ describe("createFileScanTaskRuntime", () => {
     expect(waitingSnapshot.logs.some((log) => log.title === "route_decided")).toBe(true);
     expect(waitingSnapshot.logs.find((log) => log.title === "route_decided")?.detail)
       .toContain('"routeLevel":"L1"');
+    expect(waitingSnapshot.logs.find((log) => log.title === "route_decided")?.userMessage)
+      .toBe("已选择合适的处理方式。");
 
     unsubscribe();
     runtime.dispose();
@@ -226,6 +229,153 @@ describe("createFileScanTaskRuntime", () => {
     expect(commanderPlan).toHaveBeenCalledTimes(1);
     expect(finalSnapshot.logs.find((log) => log.title === "route_decided")?.detail)
       .toContain('"routeLevel":"L3"');
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("routes source-backed project understanding through Commander-selected evidence and review agents", async () => {
+    const goal = "\u544a\u8bc9\u6211\u8fd9\u4e2a\u9879\u76ee\u662f\u5e72\u561b\u7684, \u4e0d\u8981\u5149\u770breadme, \u8981\u7ed3\u5408\u5b9e\u9645\u4ee3\u7801\u60c5\u51b5";
+    const commanderPlan = vi.fn<CommanderTool["plan"]>(async (request) => {
+      const codeAgent = request.availableAgents.find((agent) => agent.kind === "code");
+      const verifierAgent = request.availableAgents.find((agent) => agent.kind === "verifier");
+
+      expect(codeAgent?.allowedToolNames).toContain("code.searchRepository");
+      expect(verifierAgent?.allowedToolNames).toContain("verifier.check");
+      return {
+        title: "理解项目",
+        reasoning: "Commander 决定先让 Code Agent 收集实际代码证据，再让 Verifier 审查证据，最后自然总结。",
+        steps: [{
+          id: "search-repository",
+          title: "检索实际代码结构",
+          assignedAgentKind: "code",
+          toolName: "code.searchRepository",
+          toolInput: { goal, knownTerms: ["main", "src", "config"] },
+          requiredCapabilities: ["code_search"],
+          dependsOn: [] as string[],
+          outputContextKey: "repoEvidence",
+          successCriteria: "Code Agent 收集到入口、模块和配置证据。",
+        }, {
+          id: "review-repository-evidence",
+          title: "审查代码证据是否足够支撑结论",
+          assignedAgentKind: "verifier",
+          toolName: "verifier.check",
+          toolInput: {
+            stepId: "review-repository-evidence",
+            successCriteria: "代码证据足够支撑项目功能结论。",
+            evidence: [{
+              kind: "log",
+              label: "repoEvidence",
+              data: "Code Agent repository evidence is available through inputContextKeys.",
+            }],
+          },
+          requiredCapabilities: ["evidence_check"],
+          dependsOn: ["search-repository"] as string[],
+          inputContextKeys: ["repoEvidence"],
+          outputContextKey: "reviewReport",
+          successCriteria: "Verifier 给出 pass/warn/fail 和缺失证据说明。",
+        }, {
+          id: "summarize-project-understanding",
+          title: "输出自然语言项目理解结论",
+          assignedAgentKind: "commander",
+          executionMode: "direct_response" as const,
+          requiredCapabilities: ["synthesis"],
+          dependsOn: ["search-repository", "review-repository-evidence"] as string[],
+          inputContextKeys: ["repoEvidence", "reviewReport"],
+          outputContextKey: "finalAnswer",
+          successCriteria: "Commander 只向用户展示自然语言结论和风险提示。",
+        }],
+      };
+    });
+    const searchRepository = vi.fn<NonNullable<CodeTool["searchRepository"]>>(async () => ({
+      actualFound: [{
+        path: "src/main.ts",
+        line: 1,
+        excerpt: "export function main() {}",
+        matchedTerms: ["main"],
+      }],
+      inferred: ["入口在 src/main.ts。"],
+      needsConfirmation: [],
+      keyFiles: ["src/main.ts"],
+      relatedTestFiles: [],
+      testFileCandidates: [],
+      clusters: [],
+      attempts: [],
+    }));
+    const verifierCheck = vi.fn(async () => ({
+      status: "pass" as const,
+      summary: "代码证据足够支撑项目功能结论。",
+      detail: "repoEvidence 包含入口文件和模块线索。",
+    }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => []),
+      },
+      chatTool: {
+        complete: vi.fn(async () => ({ text: "chat fallback" })),
+      },
+      commanderTool: {
+        plan: commanderPlan,
+        synthesize: vi.fn(async () => ({
+          message: "这个项目的主入口在 src/main.ts；从代码证据看，它是一个本地 Javis Agent 运行链路。审查结果通过，但仍建议继续补充模块级调用链。",
+        })),
+      },
+      codeTool: {
+        inspectRepository: vi.fn(async () => ({
+          workspacePath: "E:/Javis",
+          changedFiles: [],
+          diffStat: "0 files changed",
+          diff: "",
+        })),
+        searchRepository,
+      },
+      verifierTool: {
+        check: verifierCheck,
+      },
+      availableToolDescriptors: initialToolDescriptors,
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start(goal);
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(commanderPlan).toHaveBeenCalledTimes(1);
+    expect(searchRepository).toHaveBeenCalledWith({
+      goal,
+      knownTerms: ["main", "src", "config"],
+      entryFile: undefined,
+      priorityPaths: undefined,
+      maxAttempts: undefined,
+      maxKeyFiles: undefined,
+    });
+    expect(finalSnapshot.logs.find((log) => log.title === "route_decided")?.detail)
+      .toContain('"routeLevel":"L3"');
+    expect(finalSnapshot.repoSearchReport?.keyFiles).toEqual(["src/main.ts"]);
+    expect(verifierCheck).toHaveBeenCalledWith(expect.objectContaining({
+      stepId: "review-repository-evidence",
+      successCriteria: "代码证据足够支撑项目功能结论。",
+    }));
+    expect(finalSnapshot.commanderMessage).toContain("这个项目的主入口在 src/main.ts");
+    expect(finalSnapshot.commanderMessage).not.toContain("assignedAgentKind");
+    expect(finalSnapshot.plan.map((step) => step.id)).toEqual([
+      "search-repository",
+      "review-repository-evidence",
+      "summarize-project-understanding",
+    ]);
+    expect(finalSnapshot.handoffReport?.handoffs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        contextKey: "repoEvidence",
+        producedByStepId: "search-repository",
+        consumedByStepIds: ["review-repository-evidence", "summarize-project-understanding"],
+      }),
+      expect.objectContaining({
+        contextKey: "reviewReport",
+        producedByStepId: "review-repository-evidence",
+        consumedByStepIds: ["summarize-project-understanding"],
+      }),
+    ]));
 
     unsubscribe();
     runtime.dispose();
@@ -502,6 +652,44 @@ describe("createFileScanTaskRuntime", () => {
     expect(synthesize).toHaveBeenCalled();
     expect(reactDecideNext).not.toHaveBeenCalled();
     expect(scanMarkdownDocuments).not.toHaveBeenCalled();
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("falls through unmatched L2 tool tasks to Commander instead of chat when Commander is available", async () => {
+    const commanderPlan = vi.fn<CommanderTool["plan"]>(async () => ({
+      title: "Commander handles unmatched L2",
+      reasoning: "The router found tool intent, but no deterministic legacy tool is available, so Commander should plan the answer.",
+      steps: [{
+        id: "synthesize-answer",
+        title: "Synthesize answer",
+        assignedAgentKind: "commander",
+        dependsOn: [] as string[],
+        executionMode: "direct_response" as const,
+        requiredCapabilities: ["synthesis"],
+        successCriteria: "The user receives a natural answer.",
+      }],
+    }));
+    const synthesize = vi.fn(async () => ({ message: "Commander handled the unmatched L2 task." }));
+    const chatComplete = vi.fn(async () => ({ text: "Chat should not answer this." }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      chatTool: { complete: chatComplete },
+      commanderTool: { plan: commanderPlan, synthesize },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("search local notes about scheduler routing");
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(finalSnapshot.logs.find((log) => log.title === "route_decided")?.detail)
+      .toContain('"routeLevel":"L2"');
+    expect(commanderPlan).toHaveBeenCalledTimes(1);
+    expect(synthesize).toHaveBeenCalled();
+    expect(chatComplete).not.toHaveBeenCalled();
+    expect(finalSnapshot.commanderMessage).toBe("Commander handled the unmatched L2 task.");
 
     unsubscribe();
     runtime.dispose();
@@ -1901,6 +2089,188 @@ describe("createFileScanTaskRuntime", () => {
     );
     expect(finalSnapshot.permissionRequest?.status).toBe("approved");
     expect(finalSnapshot.verificationSummary).toContain("was written");
+    const finalMessages = finalSnapshot.conversationMessages ?? [];
+    expect(finalMessages.some((message) =>
+      message.kind === "permission_request" &&
+      message.permissionRequest?.id === finalSnapshot.permissionRequest?.id,
+    )).toBe(true);
+    expect(finalMessages[finalMessages.length - 1]).toMatchObject({
+      role: "assistant",
+      content: finalSnapshot.commanderMessage,
+    });
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("routes project-mode text writes through approval instead of Commander DAG", async () => {
+    const plan = createTextWritePlan("javis-output.md");
+    const commanderPlan = vi.fn<CommanderTool["plan"]>(async () => ({
+      title: "Should not run",
+      reasoning: "Text write goals must use the dedicated approval flow.",
+      steps: [{
+        id: "write-story",
+        title: "Write story",
+        assignedAgentKind: "file",
+        toolName: "file.writeText",
+        requiredCapabilities: [],
+        dependsOn: [] as string[],
+        successCriteria: "The story is written.",
+      }],
+    }));
+    const writeText = vi.fn(async (request: { targetPath: string; content: string }) =>
+      createTextWriteResult(request.targetPath, request.content.length),
+    );
+    const planWriteText = vi.fn(async (request: { targetPath: string; content: string }) => {
+      expect(request.targetPath).toBe("javis-output.md");
+      expect(request.content).toContain("Generated from request");
+      return plan;
+    });
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+        planWriteText,
+        writeText,
+      },
+      commanderTool: {
+        plan: commanderPlan,
+      },
+      availableToolDescriptors: initialToolDescriptors,
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("\u5199\u4e00\u7bc72000\u5b57\u5de6\u53f3\u7684\u77ed\u7bc7\u5c0f\u8bf4\uff0c\u4fdd\u5b58\u4e3a md \u6587\u4ef6", { mode: "project" });
+    const permissionSnapshot = await waitForStatus(snapshots, "waiting_permission");
+    runtime.resolvePermission("approved");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(commanderPlan).not.toHaveBeenCalled();
+    expect(planWriteText).toHaveBeenCalledTimes(1);
+    expect(permissionSnapshot.permissionRequest?.level).toBe("confirmed_write");
+    expect(permissionSnapshot.permissionRequest?.dryRun.operation).toBe("Write text file");
+    expect(writeText).toHaveBeenCalledWith(
+      expect.objectContaining({ targetPath: "javis-output.md" }),
+      plan.approvalId,
+      expect.stringMatching(/^task-/),
+    );
+    expect(finalSnapshot.permissionRequest?.status).toBe("approved");
+    const finalMessages = finalSnapshot.conversationMessages ?? [];
+    expect(finalMessages.some((message) => message.kind === "permission_request")).toBe(true);
+    expect(finalMessages[finalMessages.length - 1]).toMatchObject({
+      role: "assistant",
+      content: finalSnapshot.commanderMessage,
+    });
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("lets Commander plan research-backed text file writes with Research evidence before approval", async () => {
+    const goal = "\u5e2e\u6211\u62c9\u53d6\u5fae\u535a\u70ed\u641c\u524d20\u7684\u6570\u636e\uff0c\u4fdd\u5b58\u4e3amd\u6587\u4ef6\uff0c\u6587\u4ef6\u540d\u4ee5\u65e5\u671f\u52a0\u5fae\u535a\u70ed\u641c\u7684\u683c\u5f0f\uff0c\u5b58\u653e\u5728\u5f53\u524d\u76ee\u5f55\u4e0b";
+    const targetPath = "2026-07-09-\u5fae\u535a\u70ed\u641c.md";
+    const commanderPlan = vi.fn<CommanderTool["plan"]>(async (request) => {
+      const toolNames = (request.availableTools ?? []).map((tool) => tool.name);
+      expect(toolNames).toContain("trend.fetchHotList");
+      expect(toolNames).toContain("file.writeText");
+      return {
+        title: "Weibo hot list report",
+        reasoning: "Research evidence is needed before writing the markdown file.",
+        steps: [
+          {
+            id: "fetch-weibo-hotlist",
+            title: "Fetch Weibo hot list",
+            assignedAgentKind: "research",
+            toolName: "trend.fetchHotList",
+            requiredCapabilities: ["trend_fetch"],
+            dependsOn: [] as string[],
+            toolInput: { provider: "weibo", limit: 20 },
+            outputContextKey: "weiboHotList",
+            successCriteria: "The top Weibo hot list items are collected.",
+          },
+          {
+            id: "write-report",
+            title: "Write markdown report",
+            assignedAgentKind: "file",
+            toolName: "file.writeText",
+            requiredCapabilities: [],
+            dependsOn: ["fetch-weibo-hotlist"],
+            inputContextKeys: ["weiboHotList"],
+            toolInput: { targetPath },
+            successCriteria: "The markdown file is written from collected evidence.",
+          },
+        ],
+      };
+    });
+    const navigate = vi.fn<BrowserTool["navigate"]>(async (request) => ({
+      url: request.url,
+      title: "Weibo",
+      status: 200,
+      loadState: "load",
+    }));
+    const getContent = vi.fn<BrowserTool["getContent"]>(async () => ({
+      url: "https://weibo.com/ajax/side/hotSearch",
+      title: "Weibo hot search",
+      content: JSON.stringify({
+        data: {
+          realtime: [
+            { word: "\u8bdd\u9898\u4e00", raw_hot: 123456, label_name: "\u70ed" },
+            { word: "\u8bdd\u9898\u4e8c", raw_hot: 65432 },
+          ],
+        },
+      }),
+    }));
+    const browserTool: BrowserTool = {
+      navigate,
+      getContent,
+      screenshot: vi.fn(async () => ({ dataUrl: "data:image/png;base64,test", width: 1, height: 1 })),
+      click: vi.fn(async (request) => ({ selector: request.selector, clicked: true })),
+      type: vi.fn(async (request) => ({ selector: request.selector, typed: true, value: request.text })),
+      evaluate: vi.fn(async () => ({ result: "{}", type: "json" })),
+      runTest: vi.fn(async () => ({ passed: true, exitCode: 0, stdout: "", stderr: "", duration: 1 })),
+    };
+    const planWriteText = vi.fn(async (request: { targetPath: string; content: string }) => {
+      expect(request.targetPath).toBe(targetPath);
+      expect(request.content).toContain("\u8bdd\u9898\u4e00");
+      expect(request.content).toContain("\u8bdd\u9898\u4e8c");
+      expect(request.content).toContain("| 1 |");
+      expect(request.content).not.toContain("Generated from request");
+      return createTextWritePlan(request.targetPath);
+    });
+    const writeText = vi.fn(async (request: { targetPath: string; content: string }) =>
+      createTextWriteResult(request.targetPath, request.content.length),
+    );
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+        planWriteText,
+        writeText,
+      },
+      browserTool,
+      commanderTool: { plan: commanderPlan },
+      availableToolDescriptors: initialToolDescriptors,
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start(goal, { mode: "project" });
+    const permissionSnapshot = await waitForStatus(snapshots, "waiting_permission");
+    runtime.resolvePermission("approved");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(commanderPlan).toHaveBeenCalledTimes(1);
+    expect(navigate).toHaveBeenCalled();
+    expect(planWriteText).toHaveBeenCalledTimes(1);
+    expect(writeText).toHaveBeenCalledWith(
+      expect.objectContaining({ targetPath }),
+      "write-approval-1",
+      expect.stringMatching(/^task-/),
+    );
+    expect(permissionSnapshot.plan.map((step) => step.assignedAgentKind)).toEqual(["research", "file"]);
+    expect(finalSnapshot.researchReport?.rows[0]?.claim).toContain("\u8bdd\u9898\u4e00");
+    expect(finalSnapshot.permissionRequest?.status).toBe("approved");
 
     unsubscribe();
     runtime.dispose();
@@ -3293,11 +3663,23 @@ describe("createFileScanTaskRuntime", () => {
       heading: "Test",
       excerpt: "A test file.",
     }]);
+    const appendedEnvelopes: Array<import("./runtime-event-envelope").RuntimeEventEnvelope> = [];
+    const savedCheckpoints: Array<import("./workflow-checkpoint").WorkflowCheckpoint> = [];
 
     const runtime = createFileScanTaskRuntime({
       delayMs: 0,
       commanderTool: { plan: commanderPlan },
       fileTool: { scanMarkdownDocuments: scanDocs },
+      runtimeEventSink: {
+        append: async (envelope) => {
+          appendedEnvelopes.push(envelope);
+        },
+      },
+      checkpointSink: {
+        save: async (checkpoint) => {
+          savedCheckpoints.push(checkpoint);
+        },
+      },
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
@@ -3346,6 +3728,16 @@ describe("createFileScanTaskRuntime", () => {
     expect(logs.some((log) => log.title === "waiting_model" && log.detail.includes("commander.plan"))).toBe(true);
     expect(logs.some((log) => log.title === "waiting_user" && log.detail.includes("askUser"))).toBe(true);
     expect(logs.some((log) => log.title === "waiting_tool" && log.detail.includes("tool dispatch scan"))).toBe(true);
+    expect(appendedEnvelopes.some((envelope) =>
+      (envelope.payload as { kind?: string }).kind === "ask_user.responded"
+    )).toBe(true);
+    expect(appendedEnvelopes.some((envelope) =>
+      (envelope.payload as { kind?: string; stepId?: string }).kind === "step.completed" &&
+      (envelope.payload as { stepId?: string }).stepId === "scan"
+    )).toBe(true);
+    expect(savedCheckpoints.some((checkpoint) =>
+      checkpoint.workflowSnapshot.steps.some((step) => step.id === "scan")
+    )).toBe(true);
 
     unsubscribe();
     runtime.dispose();

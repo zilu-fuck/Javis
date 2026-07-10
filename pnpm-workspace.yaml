@@ -2,3 +2,7 @@ packages:
   - "apps/*"
   - "apps/desktop/src-tauri/sidecar/*"
   - "packages/*"
+allowBuilds:
+  esbuild: true
+  onnxruntime-node: true
+  opencode-ai: true

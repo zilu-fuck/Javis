@@ -103,8 +103,9 @@ pub(crate) fn write_mcp_config(json: String) -> Result<(), String> {
 
 fn write_mcp_config_impl(json: &str) -> Result<(), JavisError> {
     // Validate JSON before writing
-    serde_json::from_str::<serde_json::Value>(json)
+    let value = serde_json::from_str::<serde_json::Value>(json)
         .map_err(|e| JavisError::Validation(format!("Invalid JSON for MCP config: {e}")))?;
+    validate_javis_mcp_config_for_write(&value)?;
 
     let config_dir = dirs::config_dir()
         .ok_or_else(|| JavisError::Io("Cannot determine config directory".into()))?;
@@ -120,6 +121,75 @@ fn write_mcp_config_impl(json: &str) -> Result<(), JavisError> {
     fs::rename(&tmp_path, &config_path)
         .map_err(|e| JavisError::Io(format!("Cannot finalize MCP config: {e}")))?;
 
+    Ok(())
+}
+
+fn validate_javis_mcp_config_for_write(value: &serde_json::Value) -> Result<(), JavisError> {
+    if let Some(servers) = value.get("mcpServers").and_then(|entry| entry.as_object()) {
+        for (name, config) in servers {
+            validate_javis_mcp_server_config_for_write(name, config)?;
+        }
+        return Ok(());
+    }
+    if let Some(items) = value.as_array() {
+        for item in items {
+            let name = item
+                .get("name")
+                .and_then(|entry| entry.as_str())
+                .ok_or_else(|| {
+                    JavisError::Validation(
+                        "Javis MCP config array entries must include a server name.".to_string(),
+                    )
+                })?;
+            validate_javis_mcp_server_config_for_write(name, item)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_javis_mcp_server_config_for_write(
+    name: &str,
+    config: &serde_json::Value,
+) -> Result<(), JavisError> {
+    validate_mcp_name(name)?;
+    let object = config.as_object().ok_or_else(|| {
+        JavisError::Validation("Javis MCP server config must be an object.".to_string())
+    })?;
+    let transport = object
+        .get("transport")
+        .and_then(|value| value.as_str())
+        .unwrap_or("stdio");
+    if transport == "stdio"
+        || object.contains_key("command")
+        || object.contains_key("args")
+        || object.contains_key("cwd")
+        || object.contains_key("env")
+    {
+        return Err(JavisError::Validation(
+            "Javis MCP config cannot define local stdio process commands. Install trusted stdio MCP servers through the Javis GitHub installer or Codex config.".to_string(),
+        ));
+    }
+    if transport != "sse" {
+        return Err(JavisError::Validation(format!(
+            "Unsupported Javis MCP transport: {transport}"
+        )));
+    }
+    let url = object
+        .get("url")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            JavisError::Validation("Javis MCP SSE server config requires a url.".to_string())
+        })?;
+    if !(url.starts_with("https://")
+        || url.starts_with("http://localhost")
+        || url.starts_with("http://127.0.0.1"))
+    {
+        return Err(JavisError::Validation(
+            "Javis MCP SSE server url must be https or localhost http.".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -687,6 +757,11 @@ struct StdioMcpClient {
 
 impl StdioMcpClient {
     fn start(server: &CodexMcpServerSummary) -> Result<Self, JavisError> {
+        if server.source == "javis" {
+            return Err(JavisError::Validation(
+                "Javis MCP config cannot launch local stdio MCP servers.".to_string(),
+            ));
+        }
         if server.transport != "stdio" {
             return Err(JavisError::Validation(
                 "Only stdio MCP servers are supported by this Javis runtime bridge.".to_string(),
@@ -2100,6 +2175,41 @@ while ($true) {
     }
 
     #[test]
+    fn write_mcp_config_rejects_local_stdio_commands() {
+        let config = serde_json::json!({
+            "mcpServers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "powershell",
+                    "args": ["-Command", "Write-Host unsafe"]
+                }
+            }
+        });
+        let result = validate_javis_mcp_config_for_write(&config);
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("local stdio process"));
+    }
+
+    #[test]
+    fn write_mcp_config_allows_remote_sse_servers() {
+        let config = serde_json::json!({
+            "mcpServers": {
+                "demo": {
+                    "transport": "sse",
+                    "url": "https://example.com/mcp"
+                }
+            }
+        });
+        let result = validate_javis_mcp_config_for_write(&config);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn read_mcp_config_returns_none_when_missing() {
         // dirs::config_dir() is system-dependent; just verify the function
         // doesn't panic on None case
@@ -2123,6 +2233,29 @@ while ($true) {
             mcp_request_timeout(None).as_millis(),
             MCP_DEFAULT_REQUEST_TIMEOUT_MS as u128
         );
+    }
+
+    #[test]
+    fn stdio_mcp_client_rejects_javis_configured_servers_before_spawn() {
+        let server = CodexMcpServerSummary {
+            name: "unsafe".to_string(),
+            transport: "stdio".to_string(),
+            command: Some("definitely-not-a-real-command".to_string()),
+            url: None,
+            args: Vec::new(),
+            cwd: None,
+            env: BTreeMap::new(),
+            enabled: true,
+            source: "javis".to_string(),
+            removable: true,
+        };
+        let result = StdioMcpClient::start(&server);
+
+        assert!(result.is_err());
+        let error = result
+            .err()
+            .expect("server should be rejected before spawn");
+        assert!(error.to_string().contains("cannot launch local stdio"));
     }
 
     #[test]
@@ -2513,7 +2646,7 @@ enabled = false # disabled by user
             cwd: None,
             env: BTreeMap::new(),
             enabled: true,
-            source: "javis".to_string(),
+            source: "codex".to_string(),
             removable: true,
         };
         let timeout = Duration::from_secs(5);

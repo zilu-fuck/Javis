@@ -25,7 +25,7 @@ function makeInput(overrides: Partial<CompileCommanderPlanInput> & { plan: Comma
     availableAgents: [
       { kind: "commander", allowedToolNames: ["commander.plan", "commander.synthesize", "commander.askUser"] },
       { kind: "code", allowedToolNames: ["code.inspectRepository", "code.searchRepository", "shell.runReadOnlyCommand"] },
-      { kind: "file", allowedToolNames: ["file.scanMarkdownDocuments", "file.writeText"] },
+      { kind: "file", allowedToolNames: ["file.scanMarkdownDocuments", "file.writeText", "file.executePdfOrganization"] },
       { kind: "computer", allowedToolNames: ["computer.listDirectory", "computer.openPath", "computer.screenshot"] },
       { kind: "verifier", allowedToolNames: ["verifier.check"] },
       { kind: "research", allowedToolNames: ["web.search", "web.fetchSource"] },
@@ -36,9 +36,26 @@ function makeInput(overrides: Partial<CompileCommanderPlanInput> & { plan: Comma
       makeToolDescriptor("commander.askUser", { capabilityTags: ["clarification"], ownerAgentKinds: ["commander"] }),
       makeToolDescriptor("code.inspectRepository", { capabilityTags: ["git_inspect"], ownerAgentKinds: ["code", "explorer"] }),
       makeToolDescriptor("code.searchRepository", { capabilityTags: ["code_search"], ownerAgentKinds: ["code"] }),
-      makeToolDescriptor("shell.runReadOnlyCommand", { capabilityTags: ["shell_readonly"], ownerAgentKinds: ["shell", "code"] }),
+      makeToolDescriptor("shell.runReadOnlyCommand", {
+        capabilityTags: ["shell_readonly"],
+        ownerAgentKinds: ["shell", "code"],
+        requiredInputs: [
+          { name: "program", type: "string", nonEmpty: true },
+          { name: "args", type: "string[]", nonEmpty: true },
+        ],
+      }),
       makeToolDescriptor("file.scanMarkdownDocuments", { capabilityTags: ["file_scan"], ownerAgentKinds: ["file", "verifier"] }),
-      makeToolDescriptor("file.writeText", { permissionLevel: "confirmed_write", capabilityTags: ["file_execute"], ownerAgentKinds: ["file"] }),
+      makeToolDescriptor("file.writeText", {
+        permissionLevel: "confirmed_write",
+        capabilityTags: ["file_execute"],
+        ownerAgentKinds: ["file"],
+        requiredInputs: [{ name: "targetPath", type: "string", nonEmpty: true }],
+      }),
+      makeToolDescriptor("file.executePdfOrganization", {
+        permissionLevel: "confirmed_write",
+        capabilityTags: ["file_execute"],
+        ownerAgentKinds: ["file"],
+      }),
       makeToolDescriptor("computer.listDirectory", {
         capabilityTags: ["directory_list"],
         ownerAgentKinds: ["computer"],
@@ -84,7 +101,7 @@ function makeInput(overrides: Partial<CompileCommanderPlanInput> & { plan: Comma
         ],
       }),
     ],
-    supportedApprovalGatedTools: ["git.stageFiles", "git.createCommit", "git.createPullRequest", "git.commentPullRequest"],
+    supportedApprovalGatedTools: ["git.stageFiles", "git.createCommit", "git.createPullRequest", "git.commentPullRequest", "file.writeText"],
     preloadedContextKeys: ["userGoal", "taskId"],
     ...overrides,
   };
@@ -233,13 +250,72 @@ describe("compileCommanderPlan", () => {
       title: "Approval gated",
       reasoning: "test",
       steps: [
-        { id: "step", title: "Step", assignedAgentKind: "file", toolName: "file.writeText", requiredCapabilities: [], dependsOn: [], successCriteria: "." },
+        { id: "step", title: "Step", assignedAgentKind: "file", toolName: "file.executePdfOrganization", requiredCapabilities: [], dependsOn: [], successCriteria: "." },
       ],
     };
     const result = compileCommanderPlan(makeInput({ plan }));
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.diagnostics.some((d) => d.code === "UNSUPPORTED_APPROVAL_GATED_TOOL")).toBe(true);
+    }
+  });
+
+  it("accepts file.writeText when it has a target path and upstream context input", () => {
+    const plan: CommanderDagPlan = {
+      title: "Write evidence",
+      reasoning: "test",
+      steps: [
+        {
+          id: "collect",
+          title: "Collect evidence",
+          assignedAgentKind: "research",
+          toolName: "web.search",
+          requiredCapabilities: ["web_search"],
+          dependsOn: [],
+          toolInput: { query: "latest topic" },
+          outputContextKey: "researchEvidence",
+          successCriteria: ".",
+        },
+        {
+          id: "write",
+          title: "Write report",
+          assignedAgentKind: "file",
+          toolName: "file.writeText",
+          requiredCapabilities: [],
+          dependsOn: ["collect"],
+          inputContextKeys: ["researchEvidence"],
+          toolInput: { targetPath: "report.md" },
+          successCriteria: ".",
+        },
+      ],
+    };
+    const result = compileCommanderPlan(makeInput({ plan }));
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects capability-only approval-gated steps that omit the exact toolName", () => {
+    const plan: CommanderDagPlan = {
+      title: "Ambiguous write",
+      reasoning: "test",
+      steps: [
+        {
+          id: "write",
+          title: "Write output",
+          assignedAgentKind: "file",
+          capability: "file_execute",
+          requiredCapabilities: [],
+          dependsOn: [],
+          toolInput: { targetPath: "report.md" },
+          successCriteria: ".",
+        },
+      ],
+    };
+    const result = compileCommanderPlan(makeInput({ plan }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const diag = result.diagnostics.find((d) => d.code === "UNSUPPORTED_APPROVAL_GATED_TOOL");
+      expect(diag?.message).toContain("no explicit toolName");
+      expect(diag?.suggestedFix).toContain("toolName");
     }
   });
 
@@ -1052,6 +1128,36 @@ describe("compileCommanderPlan", () => {
       expect(result.diagnostics.some(
         (d) => d.code === "MISSING_TOOL_INPUT" && d.path?.includes("path"),
       )).toBe(true);
+    }
+  });
+
+  it("rejects shell.runReadOnlyCommand without explicit program and args", () => {
+    const plan: CommanderDagPlan = {
+      title: "Missing shell input",
+      reasoning: "test",
+      steps: [
+        {
+          id: "get-date",
+          title: "Get current date",
+          assignedAgentKind: "code",
+          toolName: "shell.runReadOnlyCommand",
+          requiredCapabilities: ["shell_readonly"],
+          dependsOn: [],
+          toolInput: {},
+          successCriteria: ".",
+        },
+      ],
+    };
+    const result = compileCommanderPlan(makeInput({ plan }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.diagnostics.some(
+        (d) => d.code === "MISSING_TOOL_INPUT" && d.path?.includes("program"),
+      )).toBe(true);
+      expect(result.diagnostics.some(
+        (d) => d.code === "MISSING_TOOL_INPUT" && d.path?.includes("args"),
+      )).toBe(true);
+      expect(result.repairable).toBe(true);
     }
   });
 

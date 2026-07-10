@@ -31,8 +31,11 @@ describe("Browser write command contract", () => {
     expect(appRuntimeTs).toContain("inputBytes: byteLength(request.text)");
     expect(appRuntimeTs).toContain("scriptHash: fnv1aHash(request.script)");
     expect(appRuntimeTs).toContain("scriptBytes: byteLength(request.script)");
+    expect(appRuntimeTs).toContain("expressionPreview: previewBrowserWriteText(request.expression)");
+    expect(appRuntimeTs).toContain("scriptPreview: previewBrowserWriteText(request.script)");
     expect(browserRs).toContain("browser_text_hash(&request.text)");
-    expect(browserRs).toContain("browser_text_hash(&script)");
+    expect(browserRs).toContain("browser_run_test_execution_binding");
+    expect(browserRs).toContain("browser_test_file_binding");
 
     for (const entry of BROWSER_WRITE_COMMANDS) {
       expect(libRs).toContain(`browser::${entry.tauri}`);

@@ -7,7 +7,7 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    env,
+    env, fs,
     io::{BufRead, BufReader, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs},
     path::{Path, PathBuf},
@@ -93,6 +93,7 @@ pub(crate) struct BrowserNavigateRequest {
     session_id: Option<String>,
     allow_localhost: Option<bool>,
     wait_for_selector: Option<String>,
+    referrer: Option<String>,
     timeout_ms: Option<u64>,
 }
 
@@ -820,6 +821,64 @@ fn browser_text_bytes(value: &str) -> usize {
     value.as_bytes().len()
 }
 
+struct BrowserRunTestScriptBinding {
+    test_file: Option<String>,
+    script_hash: String,
+    script_bytes: usize,
+}
+
+fn browser_run_test_plan_binding(
+    test_file: Option<&str>,
+    script_hash: Option<&str>,
+    script_bytes: Option<usize>,
+) -> Result<BrowserRunTestScriptBinding, JavisError> {
+    if let Some(file_path) = test_file.and_then(non_empty_browser_path) {
+        return browser_test_file_binding(file_path);
+    }
+    Ok(BrowserRunTestScriptBinding {
+        test_file: None,
+        script_hash: script_hash.unwrap_or_default().to_string(),
+        script_bytes: script_bytes.unwrap_or_default(),
+    })
+}
+
+fn browser_run_test_execution_binding(
+    test_file: Option<&str>,
+    script: &str,
+) -> Result<BrowserRunTestScriptBinding, JavisError> {
+    if let Some(file_path) = test_file.and_then(non_empty_browser_path) {
+        return browser_test_file_binding(file_path);
+    }
+    Ok(BrowserRunTestScriptBinding {
+        test_file: None,
+        script_hash: browser_text_hash(script),
+        script_bytes: browser_text_bytes(script),
+    })
+}
+
+fn non_empty_browser_path(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn browser_test_file_binding(path: &str) -> Result<BrowserRunTestScriptBinding, JavisError> {
+    let canonical = fs::canonicalize(path).map_err(|error| {
+        JavisError::Validation(format!("Cannot resolve browser test file: {error}"))
+    })?;
+    if !canonical.is_file() {
+        return Err(JavisError::Validation(
+            "Browser testFile must point to a file.".to_string(),
+        ));
+    }
+    let bytes = fs::read(&canonical)
+        .map_err(|error| JavisError::Io(format!("Cannot read browser test file: {error}")))?;
+    Ok(BrowserRunTestScriptBinding {
+        test_file: Some(canonical.to_string_lossy().to_string()),
+        script_hash: create_fnv1a_hash(&bytes),
+        script_bytes: bytes.len(),
+    })
+}
+
 fn validate_browser_session_id(session_id: &str) -> Result<String, JavisError> {
     let trimmed = session_id.trim();
     if trimmed.is_empty() {
@@ -1079,6 +1138,7 @@ pub(crate) fn browser_navigate(
     let params = serde_json::json!({
         "url": request.url,
         "waitForSelector": request.wait_for_selector,
+        "referrer": request.referrer,
         "timeoutMs": request.timeout_ms,
         "allowLocalhost": request.allow_localhost.unwrap_or(false),
     });
@@ -1319,15 +1379,34 @@ pub(crate) fn browser_plan_write(
     let tool_name = browser_tool_name(&request.action)
         .map_err(|e| e.to_string())?
         .to_string();
+    let (test_file, script_hash, script_bytes) = if request.action == "runTest" {
+        let binding = browser_run_test_plan_binding(
+            request.test_file.as_deref(),
+            request.script_hash.as_deref(),
+            request.script_bytes,
+        )
+        .map_err(|e| e.to_string())?;
+        (
+            serde_json::json!(binding.test_file),
+            serde_json::json!(binding.script_hash),
+            serde_json::json!(binding.script_bytes),
+        )
+    } else {
+        (
+            serde_json::json!(request.test_file),
+            serde_json::json!(request.script_hash),
+            serde_json::json!(request.script_bytes),
+        )
+    };
     let payload = browser_write_payload(
         serde_json::json!(request.selector),
         serde_json::json!(request.expression),
-        serde_json::json!(request.test_file),
+        test_file,
         serde_json::json!(request.input_summary),
         serde_json::json!(request.input_hash),
         serde_json::json!(request.input_bytes),
-        serde_json::json!(request.script_hash),
-        serde_json::json!(request.script_bytes),
+        script_hash,
+        script_bytes,
     );
     let preview_hash = create_browser_preview_hash(&session_id, &request.action, &payload);
     let approval_id = create_approval_id();
@@ -1553,11 +1632,11 @@ pub(crate) fn browser_run_test(
         test_file,
         timeout_ms,
     } = request;
-    let script_hash = browser_text_hash(&script);
-    let script_bytes = browser_text_bytes(&script);
+    let binding = browser_run_test_execution_binding(test_file.as_deref(), &script)
+        .map_err(|e| e.to_string())?;
     let params = serde_json::json!({
         "script": script.clone(),
-        "testFile": test_file,
+        "testFile": binding.test_file.clone(),
         "timeoutMs": timeout_ms,
     });
     require_browser_approval(
@@ -1569,12 +1648,12 @@ pub(crate) fn browser_run_test(
         &browser_write_payload(
             serde_json::Value::Null,
             serde_json::Value::Null,
-            params.get("testFile").cloned().unwrap_or_default(),
+            serde_json::json!(binding.test_file.clone()),
             serde_json::json!("browser test"),
             serde_json::Value::Null,
             serde_json::Value::Null,
-            serde_json::json!(script_hash),
-            serde_json::json!(script_bytes),
+            serde_json::json!(binding.script_hash),
+            serde_json::json!(binding.script_bytes),
         ),
     )
     .map_err(|e| e.to_string())?;
@@ -2092,6 +2171,80 @@ mod tests {
                 preview_hash,
                 binding,
             },
+        );
+
+        assert!(require_browser_approval(
+            &state,
+            Some("approval-1"),
+            None,
+            Some("session-1"),
+            "runTest",
+            &changed_payload,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn browser_native_approval_rejects_changed_test_file_contents() {
+        let state = BrowserState::new();
+        let temp_dir = tempfile::Builder::new()
+            .prefix("javis-browser-test-")
+            .tempdir_in(std::env::current_dir().expect("current dir"))
+            .expect("tempdir");
+        let test_file = temp_dir.path().join("browser.spec.ts");
+        let test_file_text = test_file.to_string_lossy().to_string();
+        fs::write(&test_file, "expect(page).toBeTruthy();").expect("write approved test file");
+        let approved_binding = browser_run_test_plan_binding(Some(&test_file_text), None, None)
+            .expect("approved binding");
+        let approved_payload = browser_write_payload(
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::json!(approved_binding.test_file),
+            serde_json::json!("browser test"),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::json!(approved_binding.script_hash),
+            serde_json::json!(approved_binding.script_bytes),
+        );
+        let preview_hash = create_browser_preview_hash("session-1", "runTest", &approved_payload);
+        let mut binding = create_native_approval_binding(
+            "approval-1".to_string(),
+            "browser.runTest",
+            String::new(),
+            preview_hash.clone(),
+            false,
+        );
+        approve_native_approval_binding(
+            &mut binding,
+            "approval-1",
+            "browser.runTest",
+            None,
+            &preview_hash,
+            "approved test file",
+        )
+        .expect("approve browser test file");
+        state.approvals.lock().unwrap().insert(
+            "approval-1".to_string(),
+            PendingBrowserApproval {
+                action: "runTest".to_string(),
+                session_id: "session-1".to_string(),
+                preview_hash,
+                binding,
+            },
+        );
+
+        fs::write(&test_file, "await page.click('#delete');").expect("mutate test file");
+        let changed_binding =
+            browser_run_test_execution_binding(Some(&test_file_text), "").expect("changed binding");
+        let changed_payload = browser_write_payload(
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::json!(changed_binding.test_file),
+            serde_json::json!("browser test"),
+            serde_json::Value::Null,
+            serde_json::Value::Null,
+            serde_json::json!(changed_binding.script_hash),
+            serde_json::json!(changed_binding.script_bytes),
         );
 
         assert!(require_browser_approval(

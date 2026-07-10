@@ -38,6 +38,27 @@ export interface PlanValidationInput {
 // field should be added to the descriptor; the validator picks it up
 // automatically.
 
+const COMPUTER_USE_APPROVAL_CAPABILITIES = new Set([
+  "desktop_focus",
+  "desktop_ui_input",
+  "desktop_input",
+]);
+
+function isApprovalGatedTool(tool: ToolDescriptor): boolean {
+  return tool.permissionLevel === "confirmed_write" || tool.permissionLevel === "dangerous";
+}
+
+function stepCapabilities(step: CommanderDagStep): string[] {
+  return [
+    ...(step.capability ? [step.capability] : []),
+    ...step.requiredCapabilities,
+  ];
+}
+
+function isComputerUseApprovalLoopStep(step: CommanderDagStep, capabilities: readonly string[]): boolean {
+  return step.assignedAgentKind === "computer" &&
+    capabilities.some((capability) => COMPUTER_USE_APPROVAL_CAPABILITIES.has(capability));
+}
 
 export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnostic[] {
   const {
@@ -172,10 +193,7 @@ export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnosti
   // --- Rule: Capability Not Available for Agent -----------------------------
   for (let i = 0; i < plan.steps.length; i++) {
     const step = plan.steps[i];
-    const requiredCaps = [
-      ...(step.capability ? [step.capability] : []),
-      ...step.requiredCapabilities,
-    ];
+    const requiredCaps = stepCapabilities(step);
     if (requiredCaps.length === 0) continue;
 
     const agent = availableAgents.find((a) => a.kind === step.assignedAgentKind);
@@ -256,7 +274,7 @@ export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnosti
     const tool = toolByName.get(step.toolName);
     if (!tool) continue; // already flagged
 
-    const needsApproval = tool.permissionLevel === "confirmed_write" || tool.permissionLevel === "dangerous";
+    const needsApproval = isApprovalGatedTool(tool);
     if (needsApproval && !supportedApprovalGatedTools.includes(step.toolName)) {
       diagnostics.push({
         code: "UNSUPPORTED_APPROVAL_GATED_TOOL",
@@ -267,6 +285,35 @@ export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnosti
         suggestedFix: `Remove this step or add "${step.toolName}" to the supported approval-gated tools.`,
       });
     }
+  }
+
+  // --- Rule: Approval-Gated Capability Needs Explicit Tool ------------------
+  // Capability-only steps cannot validate required toolInput or pick a safe
+  // approval runner when multiple tools share a capability tag. Keep Computer
+  // Use loops as the intentional exception: they approve concrete actions
+  // inside the loop rather than at DAG compile time.
+  for (let i = 0; i < plan.steps.length; i++) {
+    const step = plan.steps[i];
+    if (step.toolName) continue;
+
+    const capabilities = stepCapabilities(step).filter(isValidCapabilityTag);
+    if (capabilities.length === 0 || isComputerUseApprovalLoopStep(step, capabilities)) continue;
+
+    const approvalTools = availableTools.filter((tool) =>
+      tool.ownerAgentKinds.includes(step.assignedAgentKind) &&
+      isApprovalGatedTool(tool) &&
+      capabilities.some((capability) => tool.capabilityTags.includes(capability))
+    );
+    if (approvalTools.length === 0) continue;
+
+    diagnostics.push({
+      code: "UNSUPPORTED_APPROVAL_GATED_TOOL",
+      severity: "error",
+      stepId: step.id,
+      path: `steps[${i}].toolName`,
+      message: `Step capability "${capabilities.join(", ")}" resolves to approval-gated tool(s) ${approvalTools.map((tool) => `"${tool.name}"`).join(", ")} but no explicit toolName was provided.`,
+      suggestedFix: `Set toolName to the exact supported approval-gated tool and include its required toolInput so the dedicated approval runner can validate and execute it.`,
+    });
   }
 
   // --- Rule: Missing Required Tool Input ------------------------------------

@@ -1,5 +1,6 @@
 import type { WorkbenchLocale, WorkbenchSystemResources, WorkbenchTask } from "../../types";
 import { isChineseLocale } from "../../utils";
+import { getParticipatingAgents } from "../agent-visibility";
 import { formatMemoryMetric, formatMetricPercent, normalizeMetricPercent } from "./inspector-utils";
 
 interface ResourceStatusPanelProps {
@@ -10,7 +11,9 @@ interface ResourceStatusPanelProps {
 
 export function ResourceStatusPanel({ locale, systemResources, task }: ResourceStatusPanelProps) {
   const isChinese = isChineseLocale(locale);
-  const completedCount = task.agents.filter((agent) => agent.status.toLowerCase().includes("complete")).length;
+  const participatingAgents = getParticipatingAgents(task);
+  const completedCount = participatingAgents.filter((agent) => agent.status.toLowerCase().includes("complete")).length;
+  const totalCount = participatingAgents.length;
   const cpu = normalizeMetricPercent(systemResources?.cpuPercent);
   const memory = normalizeMetricPercent(systemResources?.memoryPercent);
   const wallTimeMs = task.executionTrace?.totalWallTimeMs;
@@ -20,7 +23,7 @@ export function ResourceStatusPanel({ locale, systemResources, task }: ResourceS
       <article className="javis-agent-resource-card" aria-label={isChinese ? "资源使用" : "Resource usage"}>
         <div className="javis-agent-resource-header">
           <strong>{isChinese ? "资源使用" : "Resource usage"}</strong>
-          <span>{completedCount}/{task.agents.length}</span>
+          <span>{completedCount}/{totalCount}</span>
         </div>
         <div className="javis-agent-resource-grid">
           <Metric label="CPU" value={formatMetricPercent(systemResources?.cpuPercent)} percent={cpu} />
@@ -36,7 +39,7 @@ export function ResourceStatusPanel({ locale, systemResources, task }: ResourceS
           <span>{task.status}</span>
         </div>
         <div className="javis-overview-stats">
-          <StatRow label={isChinese ? "Agent 完成数" : "Agents done"} value={`${completedCount}/${task.agents.length}`} />
+          <StatRow label={isChinese ? "Agent 完成数" : "Agents done"} value={`${completedCount}/${totalCount}`} />
           <StatRow label={isChinese ? "日志条数" : "Log entries"} value={String(task.logs.length)} />
           {typeof wallTimeMs === "number" ? (
             <StatRow label={isChinese ? "总耗时" : "Wall time"} value={`${(wallTimeMs / 1000).toFixed(1)}s`} />

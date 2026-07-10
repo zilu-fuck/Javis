@@ -818,8 +818,8 @@ fn ensure_saved_model_key_matches_base_url(
         return Ok(());
     };
     let normalized_provider = provider_id.trim().to_ascii_lowercase();
-    if normalized_provider == "custom" {
-        return Err(saved_model_key_base_url_error());
+    if is_custom_model_provider(&normalized_provider) {
+        return Ok(());
     }
     let normalized_base_url = normalize_base_url_for_secret_scope(&base_url);
     for candidate in valid_base_urls_for_provider(&normalized_provider) {
@@ -828,6 +828,10 @@ fn ensure_saved_model_key_matches_base_url(
         }
     }
     Err(saved_model_key_base_url_error())
+}
+
+fn is_custom_model_provider(provider_id: &str) -> bool {
+    provider_id == "custom" || provider_id.starts_with("custom-")
 }
 
 /// Returns all known valid base URLs for a provider. Useful for providers
@@ -1410,6 +1414,7 @@ static PROVIDER_DEFAULT_BASE_URLS: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
         ("modelscope", "https://api-inference.modelscope.cn/v1"),
         ("moonshot", "https://api.moonshot.cn/v1"),
         ("ollama", "http://localhost:11434/v1"),
+        ("openai", "https://api.openai.com/v1"),
         ("openrouter", "https://openrouter.ai/api/v1"),
         ("perplexity", "https://api.perplexity.ai"),
         ("siliconflow", "https://api.siliconflow.cn/v1"),
@@ -3871,10 +3876,29 @@ mod tests {
         )
         .is_err());
         assert!(ensure_saved_model_key_matches_base_url(
+            "openai",
+            Some("https://proxy.example.test/v1")
+        )
+        .is_err());
+        assert!(ensure_saved_model_key_matches_base_url(
+            "unknown",
+            Some("https://proxy.example.test/v1")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn saved_model_key_scope_allows_custom_provider_base_url() {
+        assert!(ensure_saved_model_key_matches_base_url(
             "custom",
             Some("https://api.example.test/v1")
         )
-        .is_err());
+        .is_ok());
+        assert!(ensure_saved_model_key_matches_base_url(
+            "custom-newapi",
+            Some("https://gateway.example.test/v1")
+        )
+        .is_ok());
     }
 
     #[test]

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { encodeMcpToolServerName, initialToolDescriptors, type BrowserTool, type CodeTool, type CommanderTool, type ComputerTool, type FileTool, type GitTool, type McpTool, type MemoryTool, type ProjectTool, type SchedulerTool, type ShellTool, type ToolDescriptor, type TrendTool, type VerifierTool, type WorkspaceTool } from "@javis/tools";
 import { createInitialTaskSnapshot, type TaskSnapshot } from "./index";
 import { createSharedTaskContext } from "./shared-context";
-import { executeCapabilityStep, runCommanderDagTask, runGenericWorkbenchWorkflow, runReadCurrentProjectWorkflow, SUPPORTED_APPROVAL_GATED_TOOLS } from "./workflow-executor";
+import { executeCapabilityStep, isReadCurrentProjectGoal, runCommanderDagTask, runGenericWorkbenchWorkflow, runReadCurrentProjectWorkflow, SUPPORTED_APPROVAL_GATED_TOOLS } from "./workflow-executor";
 import type { ReActDecisionRequest } from "./agent-react-decider";
 
 function createTestController(options: { withPermissionHandler?: boolean } = {}) {
@@ -66,6 +66,14 @@ function createBrowserTool(overrides: Partial<BrowserTool> = {}): BrowserTool {
     ...overrides,
   };
 }
+
+describe("isReadCurrentProjectGoal", () => {
+  it("recognizes source-backed project understanding requests", () => {
+    const goal = "\u544a\u8bc9\u6211\u8fd9\u4e2a\u9879\u76ee\u662f\u5e72\u561b\u7684, \u4e0d\u8981\u5149\u770breadme, \u8981\u7ed3\u5408\u5b9e\u9645\u4ee3\u7801\u60c5\u51b5";
+
+    expect(isReadCurrentProjectGoal(goal)).toBe(true);
+  });
+});
 
 describe("runCommanderDagTask observability", () => {
   it("emits an explicit sub-agent dispatch snapshot after Commander planning", async () => {
@@ -197,6 +205,98 @@ describe("runCommanderDagTask observability", () => {
       codeTool,
       taskId: "task-plan-without-repo-search",
       userGoal: "search the repository for memory code",
+    });
+
+    expect(commanderTool.plan).toHaveBeenCalled();
+  });
+
+  it("filters unavailable runtime tools out of Commander DAG planning", async () => {
+    const unavailableToolNames = [
+      "web.search",
+      "web.fetchSource",
+      "browser.navigate",
+      "verifier.check",
+      "scheduler.createTask",
+      "workspace.list",
+      "shell.runReadOnlyCommand",
+      "file.scanMarkdownDocuments",
+      "code.inspectRepository",
+      "computer.screenshot",
+      "memory.search",
+    ];
+    const commanderTool: CommanderTool = {
+      plan: vi.fn<CommanderTool["plan"]>(async (request) => {
+        const toolNames = new Set((request.availableTools ?? []).map((tool) => tool.name));
+        for (const toolName of unavailableToolNames) {
+          expect(toolNames.has(toolName)).toBe(false);
+        }
+        for (const agent of request.availableAgents) {
+          for (const toolName of unavailableToolNames) {
+            expect(agent.allowedToolNames).not.toContain(toolName);
+          }
+        }
+        expect(toolNames.has("commander.plan")).toBe(true);
+        return {
+          title: "Only Commander tools",
+          reasoning: "No worker tools are runtime-available.",
+          steps: [{
+            id: "answer",
+            title: "Answer directly",
+            assignedAgentKind: "commander",
+            executionMode: "direct_response" as const,
+            requiredCapabilities: [],
+            dependsOn: [],
+            successCriteria: "User receives an answer.",
+          }],
+        };
+      }),
+    };
+    const { controller } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      taskId: "task-runtime-tool-filter",
+      userGoal: "inspect unavailable tools",
+    });
+
+    expect(commanderTool.plan).toHaveBeenCalled();
+  });
+
+  it("passes required tool inputs into Commander DAG planning", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn<CommanderTool["plan"]>(async (request) => {
+        const writeTextDescriptor = request.availableTools?.find((tool) => tool.name === "file.writeText");
+        expect(writeTextDescriptor?.requiredInputs).toEqual([
+          { name: "targetPath", type: "string", nonEmpty: true },
+        ]);
+        return {
+          title: "Inputs visible",
+          reasoning: "Planner sees descriptor-derived required inputs.",
+          steps: [{
+            id: "answer",
+            title: "Answer directly",
+            assignedAgentKind: "commander",
+            executionMode: "direct_response" as const,
+            requiredCapabilities: [],
+            dependsOn: [],
+            successCriteria: "User receives an answer.",
+          }],
+        };
+      }),
+    };
+    const { controller } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => []),
+        planWriteText: vi.fn(),
+        writeText: vi.fn(),
+      },
+      taskId: "task-required-inputs-visible",
+      userGoal: "write a report",
     });
 
     expect(commanderTool.plan).toHaveBeenCalled();
@@ -1026,6 +1126,156 @@ describe("executeCapabilityStep trend dispatch", () => {
     });
   });
 
+  it("uses the browser tool for structured hot-list research when available", async () => {
+    const context = createSharedTaskContext({
+      userGoal: "summarize top 2 Weibo hot searches",
+      taskId: "task-browser-trend-fetch",
+    });
+    const navigate = vi.fn<BrowserTool["navigate"]>(async (request) => ({
+      url: request.url,
+      title: "Weibo hot list",
+      status: 200,
+      loadState: "load",
+    }));
+    const getContent = vi.fn<BrowserTool["getContent"]>(async () => ({
+      url: "https://weibo.com/ajax/side/hotSearch",
+      title: "Weibo hot list",
+      content: JSON.stringify({
+        data: {
+          realtime: [
+            { word: "Browser collected topic", raw_hot: 123 },
+            { note: "Second browser topic", num: "99" },
+          ],
+        },
+      }),
+    }));
+    const browserTool = createBrowserTool({ navigate, getContent });
+    const fetchHotList = vi.fn<TrendTool["fetchHotList"]>(async () => {
+      throw new Error("direct trend tool should not be used");
+    });
+
+    const result = await executeCapabilityStep(
+      {
+        id: "fetch-hot-list",
+        title: "Fetch Weibo hot list",
+        assignedAgentKind: "research",
+        capability: "trend_fetch",
+        requiredCapabilities: ["trend_fetch"],
+        dependsOn: [],
+        toolInput: { provider: "weibo", limit: 2 },
+        outputContextKey: "hotList",
+        successCriteria: "Structured hot list is collected.",
+      },
+      context,
+      { browserTool, trendTool: { fetchHotList } },
+    );
+
+    expect(result.toolName).toBe("trend.fetchHotList");
+    expect(fetchHotList).not.toHaveBeenCalled();
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({
+      url: "https://weibo.com/ajax/side/hotSearch",
+      referrer: "https://weibo.com/",
+    }));
+    expect(getContent).toHaveBeenCalledWith(expect.objectContaining({
+      format: "text",
+    }));
+    expect(context.get("hotList")).toMatchObject({
+      provider: "weibo",
+      expectedCount: 2,
+      complete: true,
+      items: [
+        expect.objectContaining({ rank: 1, title: "Browser collected topic", hotScore: 123 }),
+        expect.objectContaining({ rank: 2, title: "Second browser topic", hotScore: 99 }),
+      ],
+      diagnostics: [
+        expect.objectContaining({
+          provider: "weibo:browser:weibo-side-hot-search",
+          status: "completed",
+          itemCount: 2,
+        }),
+      ],
+    });
+  });
+
+  it("falls back to the direct trend tool when browser hot-list extraction fails", async () => {
+    const context = createSharedTaskContext({
+      userGoal: "summarize top 2 Weibo hot searches",
+      taskId: "task-browser-trend-fallback",
+    });
+    const navigate = vi.fn<BrowserTool["navigate"]>(async () => {
+      throw new Error("sidecar unavailable");
+    });
+    const browserTool = createBrowserTool({
+      navigate,
+      getContent: vi.fn<BrowserTool["getContent"]>(),
+    });
+    const fetchHotList = vi.fn<TrendTool["fetchHotList"]>(async () => ({
+      provider: "weibo",
+      fetchedAt: "2026-06-10T00:00:00.000Z",
+      sourceUrl: "https://weibo.com/ajax/side/hotSearch",
+      expectedCount: 2,
+      complete: true,
+      warnings: [],
+      diagnostics: [{
+        provider: "weibo",
+        sourceUrl: "https://weibo.com/ajax/side/hotSearch",
+        requestedLimit: 2,
+        startedAt: "2026-06-10T00:00:00.000Z",
+        finishedAt: "2026-06-10T00:00:00.000Z",
+        durationMs: 0,
+        status: "completed",
+        httpStatus: 200,
+        itemCount: 2,
+      }],
+      items: [
+        { rank: 1, title: "Direct fallback topic", hotScore: 321 },
+        { rank: 2, title: "Second fallback topic", hotScore: 99 },
+      ],
+    }));
+
+    const result = await executeCapabilityStep(
+      {
+        id: "fetch-hot-list",
+        title: "Fetch Weibo hot list",
+        assignedAgentKind: "research",
+        capability: "trend_fetch",
+        requiredCapabilities: ["trend_fetch"],
+        dependsOn: [],
+        toolInput: { provider: "weibo", limit: 2 },
+        outputContextKey: "hotList",
+        successCriteria: "Structured hot list is collected.",
+      },
+      context,
+      { browserTool, trendTool: { fetchHotList } },
+    );
+
+    expect(result.toolName).toBe("trend.fetchHotList");
+    expect(fetchHotList).toHaveBeenCalledWith({
+      provider: "weibo",
+      fallbackProviders: undefined,
+      limit: 2,
+    });
+    expect(context.get("hotList")).toEqual(expect.objectContaining({
+      provider: "weibo",
+      items: expect.arrayContaining([
+        expect.objectContaining({ title: "Direct fallback topic" }),
+        expect.objectContaining({ title: "Second fallback topic" }),
+      ]),
+      warnings: expect.arrayContaining([expect.stringContaining("direct trend provider fallback")]),
+      diagnostics: expect.arrayContaining([
+        expect.objectContaining({
+          provider: "weibo:browser:weibo-side-hot-search",
+          status: "failed",
+          error: expect.stringContaining("sidecar unavailable"),
+        }),
+        expect.objectContaining({
+          provider: "weibo",
+          status: "completed",
+        }),
+      ]),
+    }));
+  });
+
   it("does not expose trend.fetchHotList when the trend tool is missing", async () => {
     const commanderTool: CommanderTool = {
       plan: vi.fn<CommanderTool["plan"]>(async (request) => {
@@ -1187,6 +1437,34 @@ describe("runCommanderDagTask plan repair loop", () => {
       (log.detail ?? "").includes("Commander plan compilation failed"),
     );
     expect(failureLog).toBeDefined();
+  });
+
+  it("records INVALID_PLAN_SHAPE for malformed initial plans without desktop fallback", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn<CommanderTool["plan"]>(async () => ({
+        title: "Malformed",
+        reasoning: "Missing steps.",
+      } as unknown as Awaited<ReturnType<CommanderTool["plan"]>>)),
+    };
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      taskId: "task-repair-invalid-shape",
+      userGoal: "Click the save button",
+    });
+
+    const finalSnapshot = emitted[emitted.length - 1];
+    expect(finalSnapshot.status).toBe("failed");
+    expect(finalSnapshot.planGenerationTrace?.stages[0]).toMatchObject({
+      stage: "initial",
+      status: "failed_non_repairable",
+      diagnostics: [expect.objectContaining({ code: "INVALID_PLAN_SHAPE" })],
+    });
+    expect(emitted.flatMap((snapshot) => snapshot.logs).some((log) =>
+      (log.detail ?? "").includes("Commander JSON plan failed")
+    )).toBe(false);
   });
 });
 
@@ -2213,6 +2491,35 @@ describe("executeCapabilityStep permissions", () => {
     expect(scaffold).toHaveBeenCalledWith("knowledge workspace");
   });
 
+  it("rejects shell.runReadOnlyCommand before dispatch when program or args are missing", async () => {
+    const runReadOnlyCommand = vi.fn<ShellTool["runReadOnlyCommand"]>(async () => ({
+      command: "",
+      cwd: "E:/Javis",
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    }));
+
+    await expect(executeCapabilityStep(
+      {
+        id: "shell-date",
+        title: "Get current date",
+        assignedAgentKind: "code",
+        toolName: "shell.runReadOnlyCommand",
+        requiredCapabilities: ["shell_readonly"],
+        dependsOn: [],
+        toolInput: {},
+        successCriteria: "Date collected.",
+      },
+      createSharedTaskContext({}),
+      {
+        shellTool: { runReadOnlyCommand },
+      },
+    )).rejects.toThrow("shell.runReadOnlyCommand requires explicit toolInput.program");
+
+    expect(runReadOnlyCommand).not.toHaveBeenCalled();
+  });
+
   it("dispatches explicit user image scans through the FileTool contract", async () => {
     const scanUserImages = vi.fn<NonNullable<FileTool["scanUserImages"]>>(async () => [{
       name: "photo.png",
@@ -2531,7 +2838,7 @@ describe("executeCapabilityStep permissions", () => {
         createSharedTaskContext({}),
         { computerTool },
       ),
-    ).rejects.toThrow("computer.openPath requires explicit toolInput.path");
+    ).rejects.toThrow("Tool computer.openPath requires confirmed_write approval");
 
     expect(listDirectory).not.toHaveBeenCalled();
     expect(openPath).not.toHaveBeenCalled();
@@ -2561,6 +2868,7 @@ describe("executeCapabilityStep permissions", () => {
         {
           fileTool: {
             scanMarkdownDocuments: vi.fn(async () => []),
+            planWriteText: vi.fn(),
             writeText,
           },
         },
@@ -2594,6 +2902,7 @@ describe("executeCapabilityStep permissions", () => {
         {
           fileTool: {
             scanMarkdownDocuments: vi.fn(async () => []),
+            planWriteText: vi.fn(),
             writeText,
           },
         },
@@ -2696,6 +3005,65 @@ describe("executeCapabilityStep permissions", () => {
     expect(finalSnapshot?.researchReport?.rows[0]?.sourceProvider).toBe("weibo");
     expect(finalSnapshot?.researchReport?.summary).toContain("Diagnostics: 1 completed, 1 failed.");
     expect(finalSnapshot?.researchReport?.unknowns).toContain("Trend provider mirror failed: HTTP 503; HTTP 503");
+  });
+
+  it("uses the browser tool before direct trend fetch for hot-list research workflows", async () => {
+    const navigate = vi.fn<BrowserTool["navigate"]>(async (request) => ({
+      url: request.url,
+      title: "Weibo hot list",
+      status: 200,
+      loadState: "load",
+    }));
+    const getContent = vi.fn<BrowserTool["getContent"]>(async () => ({
+      url: "https://weibo.com/ajax/side/hotSearch",
+      title: "Weibo hot list",
+      content: JSON.stringify({
+        data: {
+          realtime: [
+            { word: "Browser workflow topic", raw_hot: 101 },
+            { word: "Browser workflow second", raw_hot: 88 },
+          ],
+        },
+      }),
+    }));
+    const browserTool = createBrowserTool({ navigate, getContent });
+    const fetchHotList = vi.fn<TrendTool["fetchHotList"]>(async () => {
+      throw new Error("direct trend tool should not run when browser is available");
+    });
+    const fetchWebSource = vi.fn(async (request: { url: string }) => ({
+      url: request.url,
+      title: "detail",
+      excerpt: "detail",
+      fetchedAt: "2026-06-10T00:00:01.000Z",
+      provider: "fixture",
+    }));
+    const { controller, emitted } = createTestController();
+
+    await runGenericWorkbenchWorkflow({
+      controller,
+      browserTool,
+      trendTool: { fetchHotList },
+      webTool: { fetchWebSource },
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      taskId: "task-browser-weibo-hot-list",
+      userGoal: "summarize top 2 Weibo hot searches",
+      workflowId: "research-trending-topics",
+    });
+
+    expect(fetchHotList).not.toHaveBeenCalled();
+    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({
+      url: "https://weibo.com/ajax/side/hotSearch",
+      referrer: "https://weibo.com/",
+    }));
+    const finalSnapshot = emitted[emitted.length - 1];
+    expect(finalSnapshot?.status).toBe("completed");
+    expect(finalSnapshot?.researchReport?.title).toBe("Weibo trend top 2");
+    expect(finalSnapshot?.researchReport?.rows.map((row) => row.claim)).toEqual([
+      "1. Browser workflow topic",
+      "2. Browser workflow second",
+    ]);
+    expect(finalSnapshot?.researchReport?.rows[0]?.sourceProvider).toBe("weibo");
+    expect(finalSnapshot?.researchReport?.summary).toContain("Diagnostics: 1 completed, 0 failed.");
   });
 
   it("records browser-test confirmed-write steps as unsupported instead of running tests", async () => {
@@ -2948,6 +3316,7 @@ describe("executeCapabilityStep permissions", () => {
     await runCommanderDagTask({
       controller,
       commanderTool,
+      mcpTool: { call: vi.fn(async () => ({})) },
       reactDecideNext,
       taskId: "task-react-mcp-cap",
       userGoal: "search with MCP",
@@ -3712,13 +4081,16 @@ describe("SUPPORTED_APPROVAL_GATED_TOOLS allowlist", () => {
     // The set MUST be closed — every member is either a Git tool with a
     // dedicated plan/preview handler, or a computer-use tool routed through
     // computerUseLoopRunner. No generic confirmed_write tools allowed.
-    expect(SUPPORTED_APPROVAL_GATED_TOOLS).toHaveLength(4 + 8);
+    expect(SUPPORTED_APPROVAL_GATED_TOOLS).toHaveLength(5 + 8);
   });
 
-  it("does not list generic confirmed_write tools that lack explicit preflight", () => {
-    // file.writeText has a dispatch path but no plan/preview step in
-    // runCommanderDagTask(). It must NOT appear in the allowlist.
-    expect(SUPPORTED_APPROVAL_GATED_TOOLS).not.toContain("file.writeText");
+  it("lists file.writeText because Commander has an explicit preflight handler", () => {
+    // file.writeText is routed through runCommanderDagTask() where it
+    // first creates a preview and waits for confirmed_write approval.
+    expect(SUPPORTED_APPROVAL_GATED_TOOLS).toContain("file.writeText");
+  });
+
+  it("does not list browser confirmed-write tools that lack Commander preflight", () => {
     // Browser write tools are not part of the commander DAG — they have
     // their own approval flow separate from this allowlist.
     expect(SUPPORTED_APPROVAL_GATED_TOOLS).not.toContain("browser.click");

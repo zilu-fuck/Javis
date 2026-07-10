@@ -195,6 +195,21 @@ function normalizeAvailableToolDescriptors(
   return normalized;
 }
 
+function mergeAvailableToolDescriptorSources(
+  ...sources: Array<readonly ToolDescriptor[] | undefined>
+): ToolDescriptor[] | undefined {
+  const merged: ToolDescriptor[] = [];
+  let sawSource = false;
+  for (const source of sources) {
+    if (!source) {
+      continue;
+    }
+    sawSource = true;
+    merged.push(...source);
+  }
+  return sawSource ? merged : undefined;
+}
+
 function commanderPromptToolDescriptors(toolDescriptors: readonly ToolDescriptor[] | undefined) {
   return limitMcpPromptToolDescriptors(normalizeAvailableToolDescriptors(toolDescriptors)).map((descriptor) => ({
     name: descriptor.name,
@@ -202,6 +217,7 @@ function commanderPromptToolDescriptors(toolDescriptors: readonly ToolDescriptor
     summary: descriptor.summary,
     capabilityTags: descriptor.capabilityTags,
     ownerAgentKinds: descriptor.ownerAgentKinds,
+    ...(descriptor.requiredInputs ? { requiredInputs: descriptor.requiredInputs } : {}),
   }));
 }
 
@@ -396,6 +412,8 @@ export interface BrowserWriteApprovalRequest {
   action: BrowserWriteAction;
   previewHash: string;
   selector?: string;
+  expressionPreview?: string;
+  scriptPreview?: string;
   byteCount?: number;
   scriptByteCount?: number;
 }
@@ -1492,7 +1510,7 @@ export function createJavisRuntime({
   function browserWriteApprovalPreview(
     action: BrowserWriteAction,
     request: BrowserClickRequest | BrowserTypeRequest | BrowserEvaluateRequest | BrowserRunTestRequest,
-  ): Pick<BrowserWriteApprovalRequest, "selector" | "byteCount" | "scriptByteCount"> {
+  ): Pick<BrowserWriteApprovalRequest, "selector" | "expressionPreview" | "scriptPreview" | "byteCount" | "scriptByteCount"> {
     if (action === "click" && "selector" in request) {
       return { selector: request.selector };
     }
@@ -1500,12 +1518,23 @@ export function createJavisRuntime({
       return { selector: request.selector, byteCount: byteLength(request.text) };
     }
     if (action === "evaluate" && "expression" in request) {
-      return { byteCount: byteLength(request.expression) };
+      return {
+        byteCount: byteLength(request.expression),
+        expressionPreview: previewBrowserWriteText(request.expression),
+      };
     }
     if (action === "runTest" && "script" in request) {
-      return { scriptByteCount: byteLength(request.script) };
+      return {
+        scriptByteCount: byteLength(request.script),
+        scriptPreview: previewBrowserWriteText(request.script),
+      };
     }
     return {};
+  }
+
+  function previewBrowserWriteText(value: string): string {
+    const normalized = value.replace(/\s+/g, " ").trim();
+    return normalized.length > 500 ? `${normalized.slice(0, 500)}...` : normalized;
   }
 
   function byteLength(value: string): number {
@@ -1748,7 +1777,7 @@ export function createJavisRuntime({
         if (!path) {
           throw new Error("computer.listDirectory requires a path.");
         }
-        const entries = await listDirectory(path);
+        const entries = await listDirectory(path, { workspaceRoot: getWorkspacePath() });
         return entries.map((entry): ComputerFileCandidate => ({
           name: entry.name,
           path: entry.path,
@@ -3106,14 +3135,15 @@ async function planWithModelProviderStreaming(
   buildMemoryContext?: (request: CommanderPlanRequest) => Promise<string>,
   fallbackToolDescriptors?: ToolDescriptor[],
 ): Promise<CommanderPlanResult> {
+  const requestWithDate = withCommanderCurrentDateContext(request);
   // Enrich available agents with capability tags so the Commander can
   // plan by capability rather than hardcoded agent kind.
   const registry = createDefaultAgentRegistry();
   const effectiveTools = commanderPromptToolDescriptors(
-    request.availableTools ?? fallbackToolDescriptors,
+    mergeAvailableToolDescriptorSources(requestWithDate.availableTools, fallbackToolDescriptors),
   );
   const effectiveToolNames = new Set(effectiveTools.map((tool) => tool.name));
-  const agentsWithCapabilities = request.availableAgents.map((a) => {
+  const agentsWithCapabilities = requestWithDate.availableAgents.map((a) => {
     const reg = registry.findByKind(a.kind);
     return {
       kind: a.kind,
@@ -3123,7 +3153,7 @@ async function planWithModelProviderStreaming(
     };
   });
   const validationRequest: CommanderPlanRequest = {
-    ...request,
+    ...requestWithDate,
     availableAgents: agentsWithCapabilities.map(({ kind, allowedToolNames }) => ({
       kind,
       allowedToolNames,
@@ -3131,24 +3161,26 @@ async function planWithModelProviderStreaming(
     availableTools: effectiveTools,
   };
 
-  const memoryContext = (await buildMemoryContext?.(request))?.trim() ?? "";
-  const promptSource = request.repairContext
+  const memoryContext = (await buildMemoryContext?.(requestWithDate))?.trim() ?? "";
+  const promptSource = requestWithDate.repairContext
     ? buildCommanderPlanRepairPrompt({
         locale: "zh-CN",
-        originalUserGoal: request.repairContext.originalUserGoal,
-        invalidPlan: request.repairContext.invalidPlan,
-        diagnostics: request.repairContext.diagnostics,
-        attempt: request.repairContext.attempt,
-        maxAttempts: request.repairContext.maxAttempts,
+        originalUserGoal: requestWithDate.repairContext.originalUserGoal,
+        currentDate: requestWithDate.currentDate,
+        invalidPlan: requestWithDate.repairContext.invalidPlan,
+        diagnostics: requestWithDate.repairContext.diagnostics,
+        attempt: requestWithDate.repairContext.attempt,
+        maxAttempts: requestWithDate.repairContext.maxAttempts,
         availableAgents: agentsWithCapabilities,
         availableTools: effectiveTools,
       })
     : buildCommanderPlanPrompt({
-        userGoal: request.userGoal,
+        userGoal: requestWithDate.userGoal,
+        currentDate: requestWithDate.currentDate,
         locale: "zh-CN",
-        priorMessages: request.priorMessages,
-        omittedPriorMessageCount: request.omittedPriorMessageCount,
-        workflowId: request.workflowId ?? "unknown",
+        priorMessages: requestWithDate.priorMessages,
+        omittedPriorMessageCount: requestWithDate.omittedPriorMessageCount,
+        workflowId: requestWithDate.workflowId ?? "unknown",
         availableAgents: agentsWithCapabilities,
         availableTools: effectiveTools,
       });
@@ -3165,6 +3197,27 @@ async function planWithModelProviderStreaming(
     onChunk,
     (value) => normalizeCommanderPlan(value, validationRequest),
   );
+}
+
+function withCommanderCurrentDateContext(request: CommanderPlanRequest): CommanderPlanRequest {
+  if (request.currentDate?.iso && request.currentDate.localDate) {
+    return request;
+  }
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const localDate = [
+    now.getFullYear(),
+    pad(now.getMonth() + 1),
+    pad(now.getDate()),
+  ].join("-");
+  return {
+    ...request,
+    currentDate: {
+      iso: now.toISOString(),
+      localDate,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    },
+  };
 }
 
 function withPreprocessedCommanderGoal(

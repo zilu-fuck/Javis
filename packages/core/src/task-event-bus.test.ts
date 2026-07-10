@@ -15,7 +15,7 @@ describe("taskEventToLogEntry", () => {
       summary: "Step completed in 24ms",
     });
 
-    expect(log.userMessage).toBe("step-a 完成");
+    expect(log.userMessage).toBe("这一步已完成。");
     expect(log.devDetail).toBe("Step completed in 24ms");
     expect(log.stepId).toBe("step-a");
   });

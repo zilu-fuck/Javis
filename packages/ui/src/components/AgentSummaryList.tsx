@@ -1,4 +1,5 @@
 import type { WorkbenchAgent, WorkbenchLocale, WorkbenchTask } from "../types";
+import { getParticipatingAgents } from "./agent-visibility";
 import { AgentSummaryCard, buildAgentSummary } from "./AgentSummaryCard";
 
 interface AgentSummaryListProps {
@@ -10,25 +11,9 @@ interface AgentSummaryListProps {
   onSelectAgent: (agentId: string) => void;
 }
 
-/** Tasks that indicate no real work was assigned to the agent. */
-const PLACEHOLDER_TASKS = [
-  "未分配工作任务",
-  "No workflow task assigned",
-];
-
-/** The Commander is the main orchestrator — its output goes in the conversation, not as a card. */
-function isSubAgent(agent: WorkbenchAgent): boolean {
-  const name = (agent.name + agent.role).toLowerCase();
-  return !name.includes("commander");
-}
-
 export function AgentSummaryList({ agents, task, selectedAgentId, locale, onSelectAgent }: AgentSummaryListProps) {
-  // Only show sub-agents that completed or failed with real work to report
-  const visibleAgents = agents.filter(
-    (a) =>
-      isSubAgent(a) &&
-      (a.status === "completed" || a.status === "failed") &&
-      !PLACEHOLDER_TASKS.some((p) => a.task.includes(p)),
+  const visibleAgents = getParticipatingAgents({ ...task, agents }).filter(
+    (agent) => agent.status === "completed" || agent.status === "failed",
   );
 
   if (visibleAgents.length === 0) {

@@ -1,3 +1,5 @@
+import { inferSpecialistAgentHints, isCodebaseUnderstandingRequest } from "./agent-intent";
+
 export type RouteLevel = "L1" | "L2" | "L3";
 
 export type RouteMode = "direct_chat" | "single_agent_task" | "commander_dag";
@@ -92,6 +94,20 @@ export function scoreComplexity(input: string): { score: number; reasons: string
     reasons.push("workspace_reference");
   }
 
+  if (isCodebaseUnderstandingRequest(text)) {
+    score += 4;
+    reasons.push("codebase_understanding_intent");
+  }
+
+  const specialistHints = inferSpecialistAgentHints(text);
+  if (specialistHints.length > 0) {
+    score += 4;
+    reasons.push("specialist_agent_intent");
+    for (const hint of specialistHints) {
+      reasons.push(hint.reason);
+    }
+  }
+
   return { score, reasons };
 }
 
@@ -107,6 +123,24 @@ export function routeMessage(input: string): RouteDecision {
   }
 
   const { score, reasons } = scoreComplexity(text);
+
+  if (reasons.includes("codebase_understanding_intent")) {
+    return {
+      level: "L3",
+      mode: "commander_dag",
+      score,
+      reasons: [...reasons, "codebase_understanding"],
+    };
+  }
+
+  if (reasons.includes("specialist_agent_intent")) {
+    return {
+      level: "L3",
+      mode: "commander_dag",
+      score,
+      reasons: [...reasons, "specialist_agent"],
+    };
+  }
 
   if (score <= 2 && !reasons.includes("tool_intent") && !reasons.includes("design_intent")) {
     return {

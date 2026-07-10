@@ -149,7 +149,7 @@ export async function runComputerUseLoop(
 ): Promise<ComputerUseStep[]> {
   const { modelProvider, computerTool, userGoal, allowedToolNames, approveAction, onStep, onProgress, signal } = options;
   const config = normalizeComputerUseLoopConfig(options.config);
-  const allowedToolNameSet = allowedToolNames?.length ? new Set(allowedToolNames) : undefined;
+  const allowedToolNameSet = allowedToolNames ? new Set(allowedToolNames) : undefined;
 
   const steps: ComputerUseStep[] = [];
   let correctionHint = "";
@@ -497,6 +497,23 @@ export async function runComputerUseLoop(
       : requestedAction;
     const strategyResult = preferStructuredAction(mappedAction, observation, rawOutput);
     const executedAction = strategyResult.action;
+    if (allowedToolNameSet && !allowedToolNameSet.has(executedAction.tool)) {
+      pendingAutoCrop = undefined;
+      const disabledToolStep: ComputerUseStep = {
+        stepIndex: i,
+        screenshotDataUrl: screenshot?.dataUrl ?? "",
+        observation: rawOutput?.observation ?? "",
+        action: executedAction,
+        target: rawOutput?.target ?? "",
+        confidence: rawOutput?.confidence ?? "low",
+        phase: "failed",
+        trace: finishTrace(trace, stepStartedAt),
+        error: `Computer Use tool is disabled: ${executedAction.tool}`,
+      };
+      recordStep(disabledToolStep);
+      correctionHint = `The tool ${executedAction.tool} is disabled. Choose one of the enabled tools: ${[...allowedToolNameSet].join(", ")}.`;
+      continue;
+    }
     const localVisionPreflightAction = isCoordinateAction(executedAction) ? requestedAction : executedAction;
     const actionRequiresFreshApproval = requiresFreshApprovalForCurrentAction(
       executedAction,

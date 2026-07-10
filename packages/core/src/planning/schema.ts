@@ -44,7 +44,7 @@ export const COMMANDER_PLAN_SCHEMA_VERSION = "1.0.0";
  * post-mortem analytics can correlate plan success with prompt
  * version.
  */
-export const COMMANDER_PLAN_PROMPT_VERSION = "1.0.0";
+export const COMMANDER_PLAN_PROMPT_VERSION = "1.1.1";
 
 // --- Tool descriptor input shapes --------------------------------------------
 

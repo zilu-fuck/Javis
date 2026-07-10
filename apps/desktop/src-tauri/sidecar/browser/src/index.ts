@@ -208,10 +208,15 @@ async function handleNavigate(params: Record<string, unknown> | undefined): Prom
   const { page } = await ensureBrowser();
   const url = String(params?.url ?? "");
   const waitForSelector = params?.waitForSelector ? String(params.waitForSelector) : undefined;
+  const referrer = params?.referrer ? String(params.referrer) : undefined;
   const timeoutMs = params?.timeoutMs ? Number(params.timeoutMs) : 30_000;
   setRequestPolicy(params?.allowLocalhost === true);
 
-  const response = await page.goto(url, { waitUntil: "load", timeout: timeoutMs });
+  const response = await page.goto(url, {
+    waitUntil: "load",
+    timeout: timeoutMs,
+    referer: referrer,
+  });
 
   if (waitForSelector) {
     await page.waitForSelector(waitForSelector, { timeout: timeoutMs });

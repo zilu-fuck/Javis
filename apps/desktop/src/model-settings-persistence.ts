@@ -49,8 +49,12 @@ export function createModelSettingsRepository(
     },
 
     async importFromLocalStorage(storage) {
+      const existing = await loadPersistedModelSettingsFromDatabase(database);
+      if (existing) {
+        return existing;
+      }
       if (storage.getItem(MODEL_SETTINGS_STORAGE_KEY) === null) {
-        return loadModelSettingsFromDatabase(database);
+        return DEFAULT_MODEL_SETTINGS;
       }
       const imported = loadModelSettings(storage);
       await saveModelSettingsToDatabase(database, imported);
@@ -62,6 +66,12 @@ export function createModelSettingsRepository(
 export async function loadModelSettingsFromDatabase(
   database: Pick<DesktopDatabase, "select">,
 ): Promise<ModelSettings> {
+  return await loadPersistedModelSettingsFromDatabase(database) ?? DEFAULT_MODEL_SETTINGS;
+}
+
+async function loadPersistedModelSettingsFromDatabase(
+  database: Pick<DesktopDatabase, "select">,
+): Promise<ModelSettings | null> {
   const rows = await database.select<{
     provider: string;
     model: string;
@@ -73,7 +83,7 @@ export async function loadModelSettingsFromDatabase(
   );
   const row = rows[0];
   if (!row) {
-    return DEFAULT_MODEL_SETTINGS;
+    return null;
   }
   return sanitizeModelSettings({
     provider: row.provider,
