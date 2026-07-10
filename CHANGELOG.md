@@ -4,6 +4,31 @@ All notable changes to Javis are documented here. Versions follow
 `major.minor.patch` (semantic versioning adapted for Windows MSI constraints:
 major/minor ≤ 255, patch ≤ 65535).
 
+## Unreleased (2026-07-10)
+
+### Runtime & Routing
+- Added a runtime-chain decision layer for direct chat, single-agent flows, vision tasks, and Commander DAG dispatch.
+- Added specialist agent intent detection for security review, build-fix, test-runner, doc-updater, performance analysis, refactor, language review, and explorer flows.
+- Expanded Commander DAG execution for evidence-backed text writes, workflow checkpoint restoration, browser-backed trend collection fallback, and structured malformed-plan diagnostics.
+
+### Safety Hardening
+- Reclassified `computer.openPath` as confirmed-write because it launches native OS handlers.
+- Hardened computer-use tool allowlists so empty allowlists fail closed and structured-action rewrites are rechecked before execution.
+- Added visible browser script/expression approval previews and bound browser `runTest` approvals to canonical test-file contents.
+- Blocked Javis-managed MCP configs from launching local stdio process commands; allowed only HTTPS or localhost SSE configs.
+- Routed GitHub PR listing through the sandboxed read-only network command path.
+- Restricted native directory listing to allowed roots and sensitive-path checks.
+
+### Model Settings & UI
+- Added custom model-provider handling, per-provider stored-key checks, and tests around model settings persistence.
+- Improved thread/task panels, agent visibility filtering, browser approval cards, and ActivityLog collapse behavior.
+
+### CI & Local Vision
+- Added a cargo wrapper that creates temporary Tauri resource stubs for `rust:check` and `rust:test`, so source checks do not require a local YOLO model file.
+- Kept release verification strict: packaged releases must still include a real `models/local-vision/yolo26n-ui.onnx`.
+- Added/updated tests across core, desktop, tools, UI, Rust, and local-vision scripts.
+- Added the final review log at `docs/qa/2026-07-10/final-review-and-fix-log.md`.
+
 ## 0.1.0 (2026-05-28)
 
 ### Desktop Workbench
