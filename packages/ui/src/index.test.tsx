@@ -1,5 +1,5 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   JavisWorkbench,
@@ -975,6 +975,7 @@ describe("JavisWorkbench permission cards", () => {
 
     expect(html).not.toContain("javis-task-stepper");
     expect(html).not.toContain("javis-dispatch-lines");
+    expect(html).toContain("javis-execution-summary");
     expect(html).toContain("javis-agent-run-grid");
     expect(html).toContain("File Agent");
     expect(html).toContain("Shell Agent");
@@ -983,6 +984,12 @@ describe("JavisWorkbench permission cards", () => {
     expect(html.indexOf("Execution progress")).toBeLessThan(
       html.indexOf("Commander is coordinating a project inspection."),
     );
+  });
+
+  it("does not render an empty execution summary", () => {
+    const html = renderWorkbench(createIdleTask());
+
+    expect(html).not.toContain("javis-execution-summary");
   });
 
   it("keeps multi-message thread order when execution panels are shown", () => {
@@ -2422,6 +2429,68 @@ describe("JavisWorkbench permission cards", () => {
     expect(folderButton).toBeTruthy();
     fireEvent.click(folderButton!);
     expect(onNavigateDirectory).toHaveBeenCalledWith("E:\\Docs\\Project");
+
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>(".javis-inspector-quick-card.action-files")!);
+    expect(view.container.querySelector(".javis-inspector-details.has-active-tool.tool-files")).not.toBeNull();
+    expect(view.container.querySelector(".javis-tool-panel.files-panel")).not.toBeNull();
+    expect(view.container.querySelectorAll(".javis-tool-files-content")).toHaveLength(1);
+  });
+
+  it("replaces directory entries with file search results and clears stale results when the query changes", async () => {
+    let resolveLateSearch!: (results: Array<{ path: string; line: number; preview: string }>) => void;
+    const list = vi.fn(async () => [
+      { name: "Notes.md", path: "E:/Docs/Notes.md", isDir: false, extension: "md" },
+    ]);
+    const search = vi.fn()
+      .mockResolvedValueOnce([
+        { path: "E:/Docs/src/large-file.ts", line: 123456, preview: "needle match" },
+      ])
+      .mockImplementationOnce(() => new Promise((resolve) => {
+        resolveLateSearch = resolve;
+      }));
+    const view = render(
+      <JavisWorkbench
+        activeView="computer"
+        computerEntries={[]}
+        computerPath="E:/Docs"
+        currentWorkspacePath="E:/Docs"
+        draftGoal="Inspect files"
+        fileService={{ list, search }}
+        initialIsInspectorOpen={true}
+        onDraftGoalChange={vi.fn()}
+        onSubmitGoal={vi.fn()}
+        task={createIdleTask()}
+      />,
+    );
+
+    fireEvent.click(within(view.container).getByText("Details").closest("button")!);
+    fireEvent.click(view.container.querySelector<HTMLButtonElement>(".javis-inspector-quick-card.action-files")!);
+    await waitFor(() => expect(list).toHaveBeenCalled());
+
+    const input = view.container.querySelector<HTMLInputElement>(".javis-tool-filter-input")!;
+    fireEvent.change(input, { target: { value: "needle" } });
+    fireEvent.submit(input.closest("form")!);
+
+    await waitFor(() => expect(search).toHaveBeenCalled());
+    expect(view.container.querySelector(".javis-tool-files-list.search-results")).not.toBeNull();
+    expect(view.container.querySelector(".javis-tool-files-list.directory-entries")).toBeNull();
+    expect(view.container.querySelector(".javis-tool-file-marker.has-label")?.textContent).toBe("123456");
+    expect(view.container.querySelector(".javis-tool-files-count")?.textContent).toBe("1 item");
+
+    fireEvent.change(input, { target: { value: "" } });
+    expect(view.container.querySelector(".javis-tool-files-list.search-results")).toBeNull();
+    expect(view.container.querySelector(".javis-tool-files-list.directory-entries")?.textContent).toContain("Notes.md");
+
+    fireEvent.change(input, { target: { value: "slow" } });
+    fireEvent.submit(input.closest("form")!);
+    await waitFor(() => expect(search).toHaveBeenCalledTimes(2));
+    fireEvent.change(input, { target: { value: "" } });
+    await act(async () => {
+      resolveLateSearch([{ path: "E:/Docs/stale.ts", line: 9, preview: "stale result" }]);
+      await Promise.resolve();
+    });
+    expect(view.container.querySelector(".javis-tool-files-list.search-results")).toBeNull();
+    expect(view.container.textContent).not.toContain("stale.ts");
   });
 
   it("creates scheduled tasks from the automated view form", () => {

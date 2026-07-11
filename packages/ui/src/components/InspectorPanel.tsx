@@ -289,7 +289,7 @@ export function InspectorPanel({
             </h2>
           </header>
           {activeSection === "details" ? (
-            <section className="javis-inspector-details">
+            <section className={`javis-inspector-details${activeTool ? ` has-active-tool tool-${activeTool}` : ""}`}>
               {activeTool || selectedAgent ? null : <InspectorQuickActions locale={locale} onQuickAction={onQuickAction} />}
               {/* Tab bar */}
               {openTabs.length > 0 || agentTabs.length > 0 ? (

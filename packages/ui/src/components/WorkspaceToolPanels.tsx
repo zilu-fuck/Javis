@@ -126,6 +126,7 @@ function FilesPanel({
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const searchRequestRef = useRef(0);
   const effectiveEntries = serviceEntries ?? computerEntries;
   const effectivePath = servicePath || computerPath || session.workspaceRoot;
   const dirs = effectiveEntries.filter((entry) => entry.isDir);
@@ -133,6 +134,11 @@ function FilesPanel({
   const filtered = filter
     ? [...dirs, ...files].filter((entry) => entry.name.toLowerCase().includes(filter.toLowerCase()))
     : null;
+  const visibleEntryCount = searchResults.length > 0
+    ? searchResults.length
+    : filtered
+      ? filtered.length
+      : effectiveEntries.length;
 
   useEffect(() => {
     if (!fileService?.watchStart || !fileService.watchStop || !session.workspaceRoot) {
@@ -179,6 +185,10 @@ function FilesPanel({
   }, [fileService, session.sessionId, session.workspaceRoot, servicePath]);
 
   function handleNavigate(path: string) {
+    searchRequestRef.current += 1;
+    setSearchResults([]);
+    setSearching(false);
+    setSearchError(null);
     if (fileService) {
       setServicePath(path);
       setServiceEntries(null);
@@ -194,15 +204,31 @@ function FilesPanel({
   async function handleSearch(event: FormEvent) {
     event.preventDefault();
     const query = filter.trim();
-    if (!fileService || !query) return;
+    if (!fileService || !query) {
+      searchRequestRef.current += 1;
+      setSearchResults([]);
+      setSearching(false);
+      setSearchError(null);
+      return;
+    }
+    const requestId = searchRequestRef.current + 1;
+    searchRequestRef.current = requestId;
     setSearching(true);
     setSearchError(null);
+    setSearchResults([]);
     try {
-      setSearchResults(await fileService.search(session, query));
+      const results = await fileService.search(session, query);
+      if (searchRequestRef.current === requestId) {
+        setSearchResults(results);
+      }
     } catch (err) {
-      setSearchError(err instanceof Error ? err.message : String(err));
+      if (searchRequestRef.current === requestId) {
+        setSearchError(err instanceof Error ? err.message : String(err));
+      }
     } finally {
-      setSearching(false);
+      if (searchRequestRef.current === requestId) {
+        setSearching(false);
+      }
     }
   }
 
@@ -227,7 +253,7 @@ function FilesPanel({
   }
 
   return (
-    <div className="javis-tool-panel">
+    <div className="javis-tool-panel files-panel">
       <div className="javis-tool-panel-header">
         <button className="javis-tool-header-btn has-icon icon-folder" type="button">
           <span aria-hidden="true" />
@@ -242,44 +268,58 @@ function FilesPanel({
           <span aria-hidden="true" />
         </button>
       </div>
-      <form onSubmit={handleSearch}>
+      <form className="javis-tool-filter-form" onSubmit={handleSearch}>
+        <span aria-hidden="true" className="javis-tool-filter-icon" />
         <input
           className="javis-tool-filter-input"
-          onChange={(event) => setFilter(event.currentTarget.value)}
+          onChange={(event) => {
+            searchRequestRef.current += 1;
+            setFilter(event.currentTarget.value);
+            setSearchResults([]);
+            setSearching(false);
+            setSearchError(null);
+          }}
           placeholder={fileService ? (isChinese ? "\u7b5b\u9009\u6216 rg \u641c\u7d22..." : "Filter or rg search...") : (isChinese ? "\u7b5b\u9009\u6587\u4ef6..." : "Filter files...")}
           value={filter}
         />
       </form>
-      <div className="javis-tool-files-path" title={computerPath}>
-        {effectivePath || (isChinese ? "\u6b64\u7535\u8111" : "This PC")}
-      </div>
-      {searchError ? <p className="javis-tool-error">{searchError}</p> : null}
-      {searching ? <p>{isChinese ? "\u641c\u7d22\u4e2d..." : "Searching..."}</p> : null}
-      {searchResults.length > 0 ? (
-        <ul className="javis-tool-files-list">
-          {searchResults.map((result) => (
-            <li key={`${result.path}:${result.line ?? 0}`}>
-              <button
-                className={`javis-tool-file-entry file${selectedPath === result.path ? " selected" : ""}`}
-                onClick={() => selectSearchResult(result)}
-                onDoubleClick={() => onOpenFile?.(result.path)}
-                type="button"
-              >
-                <span className="javis-tool-file-marker">{result.line ?? "rg"}</span> {result.path}
-              </button>
-              {result.preview ? <p className="javis-tool-search-preview">{result.preview}</p> : null}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      {effectiveEntries.length === 0 ? (
-        <div className="javis-tool-empty">
-          <span className="javis-tool-empty-icon file" aria-hidden="true" />
-          <p>{isChinese ? "\u6253\u5f00\u6587\u4ef6" : "Open file"}</p>
-          <span>{isChinese ? "\u4ece\u5de5\u4f5c\u533a\u76ee\u5f55\u6811\u4e2d\u9009\u62e9\u6587\u4ef6" : "Select a file from the workspace tree"}</span>
+      <div className="javis-tool-files-meta">
+        <div className="javis-tool-files-path" title={effectivePath}>
+          <span aria-hidden="true" className="javis-tool-path-icon" />
+          <span>{effectivePath || (isChinese ? "\u6b64\u7535\u8111" : "This PC")}</span>
         </div>
-      ) : (
-        <ul className="javis-tool-files-list">
+        <span className="javis-tool-files-count">
+          {isChinese ? `${visibleEntryCount} \u9879` : `${visibleEntryCount} item${visibleEntryCount === 1 ? "" : "s"}`}
+        </span>
+      </div>
+      <div className="javis-tool-files-content">
+        {searchError ? <p className="javis-tool-error">{searchError}</p> : null}
+        {searching ? <p className="javis-tool-search-status">{isChinese ? "\u641c\u7d22\u4e2d..." : "Searching..."}</p> : null}
+        {searchResults.length > 0 ? (
+          <ul className="javis-tool-files-list search-results">
+            {searchResults.map((result) => (
+              <li key={`${result.path}:${result.line ?? 0}`}>
+                <button
+                  className={`javis-tool-file-entry file${selectedPath === result.path ? " selected" : ""}`}
+                  onClick={() => selectSearchResult(result)}
+                  onDoubleClick={() => onOpenFile?.(result.path)}
+                  type="button"
+                >
+                  <span className="javis-tool-file-marker file has-label">{result.line ?? "rg"}</span>
+                  <span className="javis-tool-file-name">{result.path}</span>
+                </button>
+                {result.preview ? <p className="javis-tool-search-preview">{result.preview}</p> : null}
+              </li>
+            ))}
+          </ul>
+        ) : effectiveEntries.length === 0 ? (
+          <div className="javis-tool-empty">
+            <span className="javis-tool-empty-icon file" aria-hidden="true" />
+            <p>{isChinese ? "\u6253\u5f00\u6587\u4ef6" : "Open file"}</p>
+            <span>{isChinese ? "\u4ece\u5de5\u4f5c\u533a\u76ee\u5f55\u6811\u4e2d\u9009\u62e9\u6587\u4ef6" : "Select a file from the workspace tree"}</span>
+          </div>
+        ) : (
+          <ul className="javis-tool-files-list directory-entries">
           {(onNavigateDirectory || fileService) && effectivePath ? (
             <li>
               <button
@@ -287,14 +327,16 @@ function FilesPanel({
                 onClick={() => handleNavigate(getParentPath(effectivePath))}
                 type="button"
               >
-                ..
+                <span aria-hidden="true" className="javis-tool-file-marker parent" />
+                <span className="javis-tool-file-name">{isChinese ? "\u4e0a\u4e00\u7ea7" : "Parent folder"}</span>
               </button>
             </li>
           ) : null}
           {(filtered ?? dirs).map((entry) => (
             <li key={entry.path}>
               <button className="javis-tool-file-entry dir" onClick={() => handleNavigate(entry.path)} type="button">
-                <span className="javis-tool-file-marker">{">"}</span> {entry.name}
+                <span aria-hidden="true" className="javis-tool-file-marker folder" />
+                <span className="javis-tool-file-name">{entry.name}</span>
               </button>
             </li>
           ))}
@@ -308,7 +350,10 @@ function FilesPanel({
                   onDoubleClick={() => onOpenFile?.(entry.path)}
                   type="button"
                 >
-                  {marker ? <span className="javis-tool-file-marker">{marker}</span> : null} {entry.name}
+                  <span className={`javis-tool-file-marker file${marker ? " has-label" : ""}`}>
+                    {marker}
+                  </span>
+                  <span className="javis-tool-file-name">{entry.name}</span>
                 </button>
               </li>
             );
@@ -318,8 +363,9 @@ function FilesPanel({
               {isChinese ? `...\u8fd8\u6709 ${files.length - 60} \u4e2a\u6587\u4ef6` : `...${files.length - 60} more files`}
             </li>
           ) : null}
-        </ul>
-      )}
+          </ul>
+        )}
+      </div>
     </div>
   );
 }

@@ -6249,8 +6249,8 @@ textarea:focus-visible {
 }
 
 .icon-add span {
-  mask-image: url("./assets/570icons/grid_add.svg");
-  -webkit-mask-image: url("./assets/570icons/grid_add.svg");
+  mask-image: url("./assets/570icons/add.svg");
+  -webkit-mask-image: url("./assets/570icons/add.svg");
 }
 
 .icon-folder span {
@@ -13352,4 +13352,520 @@ ul.javis-mention-dropdown {
   color: var(--color-ink);
   background-color: var(--color-control-bg);
   box-shadow: none;
+}
+
+/* Dense task results and inspector workspace */
+.javis-thread {
+  gap: 14px;
+  padding: 24px clamp(24px, 3vw, 44px) 18px;
+  background: var(--color-surface-soft);
+}
+
+.javis-execution-summary {
+  display: grid;
+  width: min(780px, calc(100% - 108px));
+  min-width: 0;
+  margin-left: 68px;
+  overflow: hidden;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  box-shadow: 0 8px 24px rgba(28, 41, 35, 0.055);
+}
+
+.javis-execution-summary .javis-task-progress-card {
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  padding: 12px 14px;
+  background: transparent;
+  box-shadow: none;
+}
+
+.javis-execution-summary .javis-task-progress-card-header {
+  grid-template-columns: minmax(0, 1fr) auto auto 14px;
+  gap: 9px;
+  font-size: 12px;
+}
+
+.javis-execution-summary .javis-task-progress-card-header::after {
+  width: 12px;
+  height: 12px;
+  background: currentColor;
+  content: "";
+  mask: url("./assets/570icons/arrow_right.svg") center / 12px 12px no-repeat;
+  -webkit-mask: url("./assets/570icons/arrow_right.svg") center / 12px 12px no-repeat;
+  transform: rotate(90deg);
+  transition: transform var(--duration-fast) var(--ease-smooth);
+}
+
+.javis-execution-summary .javis-task-progress-card-header[aria-expanded="false"]::after {
+  transform: rotate(0deg);
+}
+
+.javis-execution-summary .javis-task-progress-track {
+  height: 3px;
+  margin-top: 9px;
+}
+
+.javis-execution-summary .javis-agent-run-stage,
+.javis-execution-summary .javis-task-step-list {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-line-soft);
+}
+
+.javis-execution-summary .javis-agent-summary-list {
+  display: grid;
+  width: 100%;
+  margin: 0;
+  gap: 0;
+  border-top: 1px solid var(--color-line-soft);
+}
+
+.javis-execution-summary .javis-agent-summary-card {
+  min-height: 58px;
+  gap: 3px;
+  border: 0;
+  border-bottom: 1px solid var(--color-line-soft);
+  border-radius: 0;
+  padding: 9px 14px 10px;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.javis-execution-summary .javis-agent-summary-card:last-child {
+  border-bottom: 0;
+}
+
+.javis-execution-summary .javis-agent-summary-card:hover {
+  border-color: var(--color-line-soft);
+  background: var(--color-accent-soft);
+  box-shadow: none;
+}
+
+.javis-execution-summary .javis-agent-summary-card.active {
+  background: var(--color-accent-soft);
+  box-shadow: inset 3px 0 0 var(--color-accent-strong);
+}
+
+.javis-execution-summary .javis-agent-summary-card-header {
+  gap: 7px;
+}
+
+.javis-execution-summary .javis-agent-summary-card-icon {
+  display: inline-grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--color-accent-strong);
+  background: var(--color-accent-soft);
+  font-size: 11px;
+  font-weight: 760;
+}
+
+.javis-execution-summary .javis-agent-summary-card-name,
+.javis-execution-summary .javis-agent-summary-card-body {
+  font-size: 12px;
+}
+
+.javis-execution-summary .javis-agent-summary-card-body {
+  margin-left: 29px;
+  line-height: 17px;
+  -webkit-line-clamp: 1;
+}
+
+.javis-execution-summary + .javis-message:not(.user),
+.javis-execution-summary + .javis-message-inline-card {
+  width: min(780px, calc(100% - 108px));
+}
+
+.javis-inspector {
+  grid-template-rows: 52px minmax(0, 1fr);
+  border-width: 0 0 0 1px;
+  border-color: var(--color-line);
+  border-radius: 0;
+  background: var(--color-surface-raised);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.javis-inspector-rail {
+  min-height: 52px;
+  gap: 18px;
+  padding: 0 18px;
+  border-color: var(--color-line);
+  background: var(--color-surface-raised);
+}
+
+.javis-inspector-toggle {
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.javis-inspector-toggle .javis-activity-count {
+  min-width: 19px;
+  height: 19px;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  color: var(--color-accent-strong);
+  background: var(--color-accent-soft);
+  font-size: 10px;
+  line-height: 19px;
+  text-align: center;
+}
+
+.javis-inspector-details {
+  gap: 10px;
+  padding: 14px;
+}
+
+.javis-inspector-details.has-active-tool {
+  grid-template-rows: auto auto auto;
+  align-content: start;
+  height: 100%;
+  overflow: auto;
+  padding: 0;
+}
+
+.javis-inspector-details.has-active-tool .javis-tool-tab-bar {
+  margin: 0;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--color-line);
+  background: var(--color-surface-raised);
+}
+
+.javis-inspector-details.has-active-tool .javis-tool-tab {
+  min-width: 0;
+  min-height: 30px;
+  max-width: 180px;
+  border-color: var(--color-control-border);
+  padding-left: 9px;
+  background: var(--color-control-bg-muted);
+}
+
+.javis-inspector-details.has-active-tool .javis-tool-tab.active {
+  border-color: var(--color-control-border-hover);
+  background: var(--color-control-bg);
+  box-shadow: none;
+}
+
+.javis-inspector-details.has-active-tool .javis-tool-panel {
+  grid-row: 2;
+  height: auto;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--color-surface-raised);
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.javis-inspector-details.has-active-tool > .javis-review-inspector {
+  grid-row: 3;
+  padding: 12px;
+  border-top: 1px solid var(--color-line);
+}
+
+.javis-inspector-details.has-active-tool.tool-files {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  align-content: stretch;
+  overflow: hidden;
+}
+
+.javis-inspector-details.has-active-tool.tool-files .javis-tool-panel {
+  height: 100%;
+  overflow: hidden;
+}
+
+.javis-inspector-details.has-active-tool.tool-files > .javis-review-inspector {
+  max-height: min(240px, 30vh);
+  overflow: auto;
+}
+
+.javis-inspector-details.has-active-tool.tool-sideChat,
+.javis-inspector-details.has-active-tool.tool-browser,
+.javis-inspector-details.has-active-tool.tool-terminal {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  align-content: stretch;
+  overflow: hidden;
+}
+
+.javis-inspector-details.has-active-tool.tool-sideChat .javis-tool-panel,
+.javis-inspector-details.has-active-tool.tool-browser .javis-tool-panel,
+.javis-inspector-details.has-active-tool.tool-terminal .javis-tool-panel {
+  height: 100%;
+  overflow: hidden;
+}
+
+.javis-inspector-details.has-active-tool.tool-sideChat > .javis-review-inspector,
+.javis-inspector-details.has-active-tool.tool-browser > .javis-review-inspector,
+.javis-inspector-details.has-active-tool.tool-terminal > .javis-review-inspector {
+  max-height: min(240px, 30vh);
+  overflow: auto;
+}
+
+.javis-tool-panel.files-panel {
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+}
+
+.javis-tool-files-content {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-color: var(--color-subtle) transparent;
+}
+
+.javis-tool-files-content .javis-tool-files-list {
+  width: 100%;
+  overflow: visible;
+}
+
+.javis-tool-files-content li,
+.javis-tool-files-content .javis-tool-file-entry {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.javis-tool-search-status,
+.javis-tool-files-content .javis-tool-error {
+  margin: 0;
+  padding: 7px 12px;
+  font-size: 11px;
+}
+
+.files-panel .javis-tool-panel-header {
+  min-height: 48px;
+  padding: 8px 12px;
+  border-color: var(--color-line-soft);
+  background: var(--color-surface-soft);
+}
+
+.files-panel .javis-tool-header-btn {
+  min-height: 30px;
+  padding: 5px 9px;
+  color: var(--color-ink);
+  font-size: 12px;
+}
+
+.files-panel .javis-tool-icon-btn {
+  width: 30px;
+  height: 30px;
+  border-color: var(--color-control-border);
+  background: var(--color-control-bg);
+}
+
+.javis-tool-filter-form {
+  position: relative;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  margin: 10px 12px 8px;
+  border: 1px solid var(--color-control-border);
+  border-radius: var(--radius-sm);
+  padding: 0 9px;
+  background: var(--color-control-bg);
+  transition:
+    border-color var(--duration-fast) var(--ease-smooth),
+    box-shadow var(--duration-fast) var(--ease-smooth);
+}
+
+.javis-tool-filter-form:focus-within {
+  border-color: var(--color-control-border-hover);
+  box-shadow: 0 0 0 3px var(--color-control-focus);
+}
+
+.javis-tool-filter-icon {
+  display: block;
+  width: 15px;
+  height: 15px;
+  color: var(--color-subtle);
+  background: currentColor;
+  mask: url("./assets/570icons/search.svg") center / 15px 15px no-repeat;
+  -webkit-mask: url("./assets/570icons/search.svg") center / 15px 15px no-repeat;
+}
+
+.javis-tool-filter-form .javis-tool-filter-input {
+  width: 100%;
+  min-height: 34px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+  outline: 0;
+  font-size: 12px;
+}
+
+.javis-tool-filter-form .javis-tool-filter-input:hover,
+.javis-tool-filter-form .javis-tool-filter-input:focus {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.javis-tool-files-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--color-line-soft);
+}
+
+.javis-tool-files-path {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  padding: 0;
+  color: var(--color-muted);
+}
+
+.javis-tool-files-path > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-tool-path-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  color: var(--color-amber);
+  background: currentColor;
+  mask: url("./assets/570icons/folder.svg") center / 14px 14px no-repeat;
+  -webkit-mask: url("./assets/570icons/folder.svg") center / 14px 14px no-repeat;
+}
+
+.javis-tool-files-count {
+  color: var(--color-subtle);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.files-panel .javis-tool-files-list {
+  gap: 1px;
+  padding: 6px 8px 12px;
+}
+
+.files-panel .javis-tool-file-entry {
+  min-height: 32px;
+  gap: 8px;
+  border-radius: 6px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.javis-tool-file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-tool-file-marker {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  place-items: center;
+  color: var(--color-subtle);
+  background: currentColor;
+}
+
+.javis-tool-file-marker.folder {
+  color: var(--color-amber);
+  mask: url("./assets/570icons/folder.svg") center / 17px 17px no-repeat;
+  -webkit-mask: url("./assets/570icons/folder.svg") center / 17px 17px no-repeat;
+}
+
+.javis-tool-file-marker.parent {
+  mask: url("./assets/570icons/arrow_right.svg") center / 13px 13px no-repeat;
+  -webkit-mask: url("./assets/570icons/arrow_right.svg") center / 13px 13px no-repeat;
+  transform: rotate(180deg);
+}
+
+.javis-tool-file-marker.file {
+  mask: url("./assets/570icons/file.svg") center / 16px 16px no-repeat;
+  -webkit-mask: url("./assets/570icons/file.svg") center / 16px 16px no-repeat;
+}
+
+.javis-tool-file-marker.file.has-label {
+  width: auto;
+  min-width: 18px;
+  max-width: 46px;
+  height: 18px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: 1px solid var(--color-control-border);
+  border-radius: 4px;
+  padding: 0 3px;
+  color: var(--color-accent-strong);
+  background: var(--color-control-bg-muted);
+  mask: none;
+  -webkit-mask: none;
+  font-size: 8px;
+  font-weight: 760;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (min-width: 901px) and (max-width: 1279px) {
+  .javis-shell.mode-chat.inspector-open.sidebar-open {
+    grid-template-columns: clamp(200px, 20vw, 220px) minmax(0, 1fr) clamp(300px, 28vw, 340px);
+  }
+
+  .javis-shell.mode-chat.inspector-open.sidebar-collapsed {
+    grid-template-columns: 0 minmax(0, 1fr) clamp(300px, 28vw, 340px);
+  }
+}
+
+@media (min-width: 1280px) {
+  .javis-shell.mode-chat.inspector-open.sidebar-open {
+    grid-template-columns: var(--javis-sidebar-width, 248px) minmax(640px, 1fr) clamp(360px, 24vw, 410px);
+  }
+
+  .javis-shell.mode-chat.inspector-open.sidebar-collapsed {
+    grid-template-columns: 0 minmax(640px, 1fr) clamp(360px, 24vw, 410px);
+  }
+}
+
+@media (max-width: 900px) {
+  .javis-thread {
+    padding-inline: 18px;
+  }
+
+  .javis-execution-summary,
+  .javis-execution-summary + .javis-message:not(.user),
+  .javis-execution-summary + .javis-message-inline-card {
+    width: calc(100% - 48px);
+    margin-left: 48px;
+  }
+}
+
+@media (max-width: 640px) {
+  .javis-thread {
+    padding-inline: 12px;
+  }
+
+  .javis-execution-summary,
+  .javis-execution-summary + .javis-message:not(.user),
+  .javis-execution-summary + .javis-message-inline-card {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .javis-execution-summary .javis-agent-summary-card-body {
+    -webkit-line-clamp: 2;
+  }
 }

@@ -20,6 +20,7 @@ import {
 import { AgentDetailSections } from "./AgentDetailSections";
 import { AgentOrchestrationPanel } from "./AgentOrchestrationPanel";
 import { AgentSummaryList } from "./AgentSummaryList";
+import { getParticipatingAgents } from "./agent-visibility";
 import { ChatComposer } from "./ChatComposer";
 import { ContextRing } from "./ContextRing";
 import { ContextStats } from "./ContextStats";
@@ -109,6 +110,10 @@ export function ThreadView({
   );
   const hasActivePrompt = hasPendingPermissionRequest || hasPendingAskUserQuestion;
   const showExecutionPanels = !hasActivePrompt;
+  const hasExecutionProgress = Boolean(task.plan?.length) && task.status !== "created";
+  const hasExecutionResults = getParticipatingAgents(task).some(
+    (agent) => agent.status === "completed" || agent.status === "failed",
+  );
   const sourceConversationMessages = task.conversationMessages?.length
     ? task.conversationMessages
     : createFallbackConversationMessages(task);
@@ -190,9 +195,13 @@ export function ThreadView({
   }
 
   function renderExecutionPanels() {
-    if (!showExecutionPanels) return null;
+    if (!showExecutionPanels || (!hasExecutionProgress && !hasExecutionResults)) return null;
     return (
-      <>
+      <div
+        aria-label={translateWorkbenchText("Execution progress", locale)}
+        className="javis-execution-summary"
+        role="region"
+      >
         <AgentOrchestrationPanel
           task={task}
           locale={locale}
@@ -207,7 +216,7 @@ export function ThreadView({
           locale={locale}
           onSelectAgent={(id) => onSelectAgent?.(id)}
         />
-      </>
+      </div>
     );
   }
 
