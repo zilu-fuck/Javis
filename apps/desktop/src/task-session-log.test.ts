@@ -128,6 +128,24 @@ describe("task session JSONL", () => {
         unrecoveredCount: 0,
         abandonedStepIds: ["collect-primary"],
         replannedStepIds: ["collect-fallback"],
+        progressLedger: {
+          completed: [{
+            stepId: "parse-request",
+            title: "Parse request",
+            agentKind: "commander",
+          }],
+          failed: [{
+            stepId: "collect-primary",
+            title: "Collect primary evidence",
+            agentKind: "research",
+            errorSummary: "HTTP 503 from primary provider",
+          }],
+          blocked: [],
+          repeatedActions: [],
+          remainingWork: ["collect-fallback"],
+        },
+        stuckSignals: [],
+        commanderGuidance: [],
         attempts: [{
           failedStepId: "collect-primary",
           failedStepTitle: "Collect primary evidence",
@@ -153,6 +171,9 @@ describe("task session JSONL", () => {
       status: "recovered",
       abandonedStepIds: ["collect-primary"],
       replannedStepIds: ["collect-fallback"],
+      progressLedger: {
+        remainingWork: ["collect-fallback"],
+      },
     });
     expect(parsed[0]?.snapshot.recoveryReport?.attempts[0]).toMatchObject({
       failedStepId: "collect-primary",

@@ -1,0 +1,99 @@
+{
+  "ok": true,
+  "qq": {
+    "handle": 460748,
+    "title": "QQ",
+    "className": "Chrome_WidgetWin_1",
+    "rect": {
+      "x": 752,
+      "y": 185,
+      "width": 1088,
+      "height": 721
+    },
+    "isVisible": true,
+    "isForeground": false
+  },
+  "clickReq": {
+    "x": 872,
+    "y": 565,
+    "button": "left",
+    "clickCount": 1
+  },
+  "typed": {
+    "typed": true,
+    "length": 25
+  },
+  "logs": [
+    {
+      "phase": "approved",
+      "toolName": "computer.focusWindow",
+      "approvalId": "qa-focus-qq-type-smoke-001",
+      "request": {
+        "handle": 460748
+      }
+    },
+    {
+      "phase": "executed",
+      "cmd": "computer_focus_window",
+      "approvalId": "qa-focus-qq-type-smoke-001",
+      "result": {
+        "focused": true,
+        "title": "QQ"
+      }
+    },
+    {
+      "phase": "approved",
+      "toolName": "computer.click",
+      "approvalId": "qa-click-qq-input-smoke-001",
+      "request": {
+        "x": 872,
+        "y": 565,
+        "button": "left",
+        "clickCount": 1
+      }
+    },
+    {
+      "phase": "executed",
+      "cmd": "computer_click",
+      "approvalId": "qa-click-qq-input-smoke-001",
+      "result": {
+        "x": 872,
+        "y": 565,
+        "clicked": true
+      }
+    },
+    {
+      "phase": "approved",
+      "toolName": "computer.type",
+      "approvalId": "qa-type-qq-unicode-space-001",
+      "request": {
+        "text": "Javis computer-use 测试，请忽略",
+        "delayMs": 20,
+        "clearBefore": true
+      }
+    },
+    {
+      "phase": "executed",
+      "cmd": "computer_type",
+      "approvalId": "qa-type-qq-unicode-space-001",
+      "result": {
+        "typed": true,
+        "length": 25
+      }
+    }
+  ],
+  "shotMeta": {
+    "width": 1088,
+    "height": 721,
+    "methodUsed": "printWindow",
+    "health": {
+      "sampledPixels": 4096,
+      "dominantColorRatio": 0.58349609375,
+      "darkPixelRatio": 0.008056640625,
+      "suspiciousBlank": false,
+      "reason": null
+    },
+    "dataUrlLength": 412590
+  },
+  "shotDataUrl": "[redacted data url length=412590]"
+}

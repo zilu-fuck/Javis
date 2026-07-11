@@ -532,7 +532,58 @@ export interface WorkbenchRecoveryReport {
   unrecoveredCount: number;
   abandonedStepIds: string[];
   replannedStepIds: string[];
+  progressLedger?: WorkbenchProgressLedger;
+  stuckSignals: WorkbenchStuckSignal[];
+  commanderGuidance: string[];
   attempts: WorkbenchRecoveryAttemptRecord[];
+}
+
+export interface WorkbenchProgressLedger {
+  completed: WorkbenchProgressStepSummary[];
+  failed: WorkbenchProgressFailureSummary[];
+  blocked: WorkbenchProgressBlockedSummary[];
+  currentHypothesis?: string;
+  repeatedActions: WorkbenchProgressActionFingerprint[];
+  remainingWork: string[];
+}
+
+export interface WorkbenchProgressStepSummary {
+  stepId: string;
+  title?: string;
+  agentKind?: string;
+  outputContextKey?: string;
+}
+
+export interface WorkbenchProgressFailureSummary {
+  stepId: string;
+  title?: string;
+  agentKind?: string;
+  toolName?: string;
+  inputFingerprint?: string;
+  errorSummary: string;
+  missingContextKeys?: string[];
+}
+
+export interface WorkbenchProgressBlockedSummary {
+  reason: string;
+  stepId?: string;
+  missingContextKeys?: string[];
+}
+
+export interface WorkbenchProgressActionFingerprint {
+  kind: "tool" | "replan" | "verifier" | "handoff";
+  fingerprint: string;
+  count: number;
+  lastStepId?: string;
+}
+
+export interface WorkbenchStuckSignal {
+  kind: string;
+  fingerprint: string;
+  count: number;
+  severity: "warn" | "blocked";
+  hint: string;
+  evidence: string[];
 }
 
 export interface WorkbenchRecoveryAttemptRecord {
@@ -540,7 +591,7 @@ export interface WorkbenchRecoveryAttemptRecord {
   failedStepTitle?: string;
   agentKind?: string;
   errorSummary: string;
-  failureKind: "timeout" | "permission_denied" | "unavailable" | "network" | "validation" | "unknown";
+  failureKind: "timeout" | "permission_denied" | "handoff" | "unavailable" | "network" | "validation" | "unknown";
   completedBefore: string[];
   replanAttempted: boolean;
   replanStatus: "not_attempted" | "planned" | "failed";
@@ -970,6 +1021,8 @@ export interface WorkbenchBrowserWriteApprovalPreview {
   action: WorkbenchBrowserWriteApprovalAction;
   previewHash: string;
   selector?: string;
+  expressionPreview?: string;
+  scriptPreview?: string;
   byteCount?: number;
   scriptByteCount?: number;
 }

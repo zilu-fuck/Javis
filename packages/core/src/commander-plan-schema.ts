@@ -12,7 +12,6 @@
  * validation with permissive defaults for missing fields.
  */
 
-import { ALL_CAPABILITY_TAGS } from "./agent-capability";
 import { normalizePromptLocale, type AgentPromptLocale } from "./agents/prompt/styleLoader";
 import {
   CommanderDagStepT,
@@ -86,6 +85,11 @@ export {
  */
 export function buildCommanderPlanPrompt(params: {
   userGoal: string;
+  currentDate?: {
+    iso: string;
+    localDate: string;
+    timezone?: string;
+  };
   locale?: string;
   priorMessages?: Array<{
     role: "user" | "assistant";
@@ -120,12 +124,87 @@ export function buildCommanderPlanPrompt(params: {
   return [
     ...getCommanderPlanIntro(locale),
     COMMANDER_PLAN_SCHEMA_PROMPT,
-    "UI handoff rule: for UI-change requests based on what is visible on screen, plan an explicit Computer -> Code handoff: Computer produces outputContextKey=\"uiEvidence\" with screenshot/UI facts, then Code consumes inputContextKeys=[\"uiEvidence\"] before proposing code changes.",
+    ...getCommanderDelegationRules(),
+    "UI handoff rule: Computer -> Code handoff for visible UI changes; Computer writes outputContextKey=\"uiEvidence\", Code consumes inputContextKeys=[\"uiEvidence\"].",
+    "Local project understanding rule: for project/source explanations, use an evidence chain: assignedAgentKind=\"code\" toolName=\"code.searchRepository\"; add trace when call flow matters; add a review/check step with the most relevant available reviewer (verifier/evidence_check, language-reviewer, security-reviewer, test-runner, build-fix, perf-analyzer, refactor). final Commander step consumes both the code evidence and the review/check output. Do not answer with direct_response from README alone.",
+    "Specialist agent routing rule: security-reviewer for security, language-reviewer for language semantics, build-fix for build/typecheck/compiler failures, test-runner for tests, doc-updater for docs, perf-analyzer for performance, refactor for scoped rewrites, explorer for read-only discovery; each writes outputContextKey for Commander synthesis.",
     "",
     ...getCommanderPlanRules(locale),
     ...formatRequiredToolInputsBlock(params.availableTools, locale),
+    params.currentDate ? `Current date context: ${JSON.stringify(params.currentDate)}` : "",
     "",
     conversationContext ? `${localizedLabel(locale, "Conversation context", "对话上下文")}:\n${conversationContext}` : "",
+    `${localizedLabel(locale, "User goal", "用户目标")}: ${params.userGoal}`,
+    `${localizedLabel(locale, "Workflow id", "工作流 id")}: ${params.workflowId}`,
+    `${localizedLabel(locale, "Available agents", "可用 Agent")}: ${JSON.stringify(params.availableAgents)}`,
+    `${localizedLabel(locale, "Available tools", "可用工具")}: ${JSON.stringify(params.availableTools ?? [])}`,
+  ].filter(Boolean).join("\n");
+}
+
+function getCommanderDelegationRules(): string[] {
+  return [
+    "Commander delegation protocol:",
+    "- Commander is the orchestrator, not the worker; answer directly only for greetings, tiny follow-ups, or clarification.",
+    "- For evidence-bearing goals, produce a DAG; select the smallest capable agent set, gather read-only evidence, then synthesize.",
+    "- For code/project review, security, build, test, performance, refactor, file, web, UI, or device tasks, do not use a one-step direct_response when a capable worker exists.",
+    "- Treat runtime-selected capabilities as hints; choose by goal, available tools, risk, and missing evidence.",
+    "- Every worker step that another step relies on must write outputContextKey; each consumer lists inputContextKeys.",
+    "- Use Current date context directly; do not create a shell/tool step solely to discover today's date.",
+    "- Evidence then write: collect/fetch/search/inspect first, then file.writeText consumes outputContextKey values and explicit targetPath.",
+    "- Review risky claims before the final answer with the most relevant reviewer/check step.",
+    "- The final user-facing step belongs to commander; do not expose plan JSON, run ids, raw logs, route ids, or tool dumps.",
+    "- If required inputs are missing, ask exactly one blocking clarification question.",
+  ];
+}
+
+export function buildComputerUseCommanderPlanPrompt(params: {
+  userGoal: string;
+  locale?: string;
+  workflowId: string;
+  availableAgents: Array<{
+    kind: string;
+    allowedToolNames: string[];
+    capabilities: readonly string[];
+  }>;
+  availableTools?: Array<{
+    name: string;
+    permissionLevel: string;
+    summary: string;
+    capabilityTags: string[];
+    ownerAgentKinds: string[];
+    requiredInputs?: Array<{
+      name: string;
+      type: "string" | "string[]";
+      nonEmpty?: boolean;
+    }>;
+  }>;
+}): string {
+  const locale = normalizePromptLocale(params.locale);
+  const rules = locale === "zhCN"
+    ? [
+        "Computer Use 专用规划规则:",
+        "- 只返回 JSON，不要 Markdown。",
+        "- 如果目标是桌面应用操作，优先输出一个 computer 步骤，capability=\"desktop_input\"。",
+        "- 该步骤应把 inputContextKeys 设为 [\"userGoal\"]，outputContextKey 设为 \"computerUseSteps\"。",
+        "- 如果用户明确要求发送前停止，把 successCriteria 写成停在发送/提交前并等待人工确认。",
+        "- 不要添加代码、文件、研究或文档步骤，除非用户目标明确要求。",
+      ]
+    : [
+        "Computer Use planning rules:",
+        "- Return JSON only; no markdown.",
+        "- For desktop app operation goals, prefer one computer step with capability=\"desktop_input\".",
+        "- Set inputContextKeys to [\"userGoal\"] and outputContextKey to \"computerUseSteps\".",
+        "- If the user asks to stop before sending/submitting, successCriteria must say to stop before send/submit and wait for human confirmation.",
+        "- Do not add code, file, research, or documentation steps unless explicitly requested.",
+      ];
+
+  return [
+    ...getCommanderPlanIntro(locale),
+    COMMANDER_PLAN_SCHEMA_PROMPT,
+    "",
+    ...rules,
+    ...formatRequiredToolInputsBlock(params.availableTools, locale),
+    "",
     `${localizedLabel(locale, "User goal", "用户目标")}: ${params.userGoal}`,
     `${localizedLabel(locale, "Workflow id", "工作流 id")}: ${params.workflowId}`,
     `${localizedLabel(locale, "Available agents", "可用 Agent")}: ${JSON.stringify(params.availableAgents)}`,
@@ -169,6 +248,11 @@ function formatConversationContext(
 export function buildCommanderPlanRepairPrompt(params: {
   locale?: string;
   originalUserGoal: string;
+  currentDate?: {
+    iso: string;
+    localDate: string;
+    timezone?: string;
+  };
   invalidPlan: unknown;
   diagnostics: Array<{
     code: string;
@@ -269,6 +353,7 @@ export function buildCommanderPlanRepairPrompt(params: {
     planSection,
     "",
     `${goalLabel}: ${params.originalUserGoal}`,
+    params.currentDate ? `Current date context: ${JSON.stringify(params.currentDate)}` : "",
     `${agentsLabel}: ${JSON.stringify(params.availableAgents)}`,
     `${toolsLabel}: ${JSON.stringify(params.availableTools ?? [])}`,
   ].join("\n");
@@ -334,7 +419,7 @@ function getCommanderPlanRules(locale: AgentPromptLocale): string[] {
     return [
       "规则:",
       "- ids 使用唯一 kebab-case；dependsOn 只引用更早步骤 id，根步骤用 []。",
-      "- capability 和 requiredCapabilities 只能使用: " + JSON.stringify([...ALL_CAPABILITY_TAGS]),
+      "- capability/requiredCapabilities 只能用 Available agents/tools 中的 capabilityTags。",
       "- assignedAgentKind 必须可用；toolName 如存在，必须是该 Agent 允许的工具。",
       "- 已知工具/能力用 direct_tool_call，综合回答用 direct_response，只有探索工具时才用 react。",
       "- language_review、security_review、build_fix、test_run、doc_update、code_explore、performance_analysis、refactor 是 Agent 角色能力；使用这些 capability 时优先 executionMode=\"react\"，不要把它们当成 direct_tool_call 的工具 capability。",
@@ -352,7 +437,7 @@ function getCommanderPlanRules(locale: AgentPromptLocale): string[] {
   return [
     "Rules:",
     "- ids are unique kebab-case; dependsOn references prior step ids or [] for roots.",
-    "- capability and requiredCapabilities must use only: " + JSON.stringify([...ALL_CAPABILITY_TAGS]),
+    "- capability and requiredCapabilities must use only capabilityTags from Available agents/tools.",
     "- assignedAgentKind must be available; toolName, if present, must be allowed by that agent.",
     "- Use direct_tool_call for known tools/capabilities, direct_response for synthesis, react only for tool exploration.",
     "- language_review, security_review, build_fix, test_run, doc_update, code_explore, performance_analysis, and refactor are agent role capabilities. Use executionMode=\"react\" for those capabilities; do not treat them as direct_tool_call tool capabilities.",

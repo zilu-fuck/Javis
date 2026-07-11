@@ -1,0 +1,23 @@
+{
+  "completion": {
+    "provider": "mimo",
+    "model": "mimo-v2.5",
+    "elapsedMs": 7484,
+    "textChars": 316
+  },
+  "parsed": {
+    "observation": "桌面已观察完毕。当前状态：Javis 应用在前台，显示聊天界面。背景中可见 VS Code（Git面板显示中，有未提交变更）。任务栏显示多个运行中的应用。桌面布局清晰，无异常。",
+    "action": "computer.wait",
+    "target": "",
+    "confidence": 1,
+    "status": "complete",
+    "summary": "桌面检查完成。前台: Javis聊天应用 | 后台: VS Code(含Git面板)、QQ、Clash for Windows、文件资源管理器等。系统正常运行，无明显异常。"
+  },
+  "parseError": "",
+  "screenshot": {
+    "width": 1920,
+    "height": 1080,
+    "methodUsed": "bitblt"
+  },
+  "rawPreview": "```json\n{\n  \"observation\": \"桌面已观察完毕。当前状态：Javis 应用在前台，显示聊天界面。背景中可见 VS Code（Git面板显示中，有未提交变更）。任务栏显示多个运行中的应用。桌面布局清晰，无异常。\",\n  \"action\": \"computer.wait\",\n  \"target\": \"\",\n  \"confidence\": 1.0,\n  \"status\": \"complete\",\n  \"summary\": \"桌面检查完成。前台: Javis聊天应用 | 后台: VS Code(含Git面板)、QQ、Clash for Windows、文件资源管理器等。系统正常运行，无明显异常。\"\n}\n```"
+}

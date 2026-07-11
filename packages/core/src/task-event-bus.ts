@@ -377,7 +377,7 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "event",
         title: "step.started",
         detail: `Step ${event.stepId} started.`,
-        userMessage: `正在执行: ${event.stepId}`,
+        userMessage: "正在执行下一步。",
         devDetail: `Dispatching step ${event.stepId}.`,
         agentId: event.agentId ?? agentIdFromOptionalKind(event.agentKind),
         stepId: event.stepId,
@@ -388,7 +388,7 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "event",
         title: "step.completed",
         detail: event.summary,
-        userMessage: `${event.stepId} 完成`,
+        userMessage: "这一步已完成。",
         devDetail: event.summary,
         agentId: event.agentId ?? agentIdFromOptionalKind(event.agentKind),
         stepId: event.stepId,
@@ -399,7 +399,7 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "tool",
         title: "step.failed",
         detail: event.error,
-        userMessage: `${event.stepId} 失败: ${toShortError(event.error)}`,
+        userMessage: `这一步失败了: ${toShortError(event.error)}`,
         devDetail: event.error,
         agentId: event.agentId ?? agentIdFromOptionalKind(event.agentKind),
         stepId: event.stepId,
@@ -434,6 +434,54 @@ function agentIdFromToolName(toolName: string): string | undefined {
   return agentIdFromKind(prefix as AgentKind);
 }
 
+const AGENT_DISPLAY_NAMES: Partial<Record<AgentKind, string>> = {
+  commander: "Commander",
+  file: "File Agent",
+  shell: "Shell Agent",
+  code: "Code Agent",
+  "language-reviewer": "Language Reviewer",
+  "security-reviewer": "Security Reviewer",
+  "build-fix": "Build Fix Agent",
+  "test-runner": "Test Runner",
+  "doc-updater": "Doc Updater",
+  explorer: "Explorer",
+  "perf-analyzer": "Performance Analyzer",
+  refactor: "Refactor Agent",
+  research: "Research Agent",
+  computer: "Computer Agent",
+  scheduler: "Scheduler Agent",
+  verifier: "Verifier",
+  vision: "Vision Agent",
+  workspace: "Workspace Agent",
+  browser: "Browser Agent",
+};
+
+const TOOL_DISPLAY_NAMES: Record<string, string> = {
+  "commander.plan": "任务规划",
+  "commander.synthesize": "结果总结",
+  "commander.askUser": "补充信息确认",
+  "memory.search": "记忆检索",
+  "file.scanMarkdownDocuments": "文档扫描",
+  "file.scanUserDocuments": "本地文档扫描",
+  "file.classifyDocuments": "文档分类",
+  "file.planPdfOrganization": "PDF 整理预览",
+  "file.executePdfOrganization": "PDF 整理",
+  "file.planWriteText": "文本写入预览",
+  "file.writeText": "文本写入",
+  "shell.runReadOnlyCommand": "只读命令检查",
+  "code.inspectRepository": "仓库变更检查",
+  "code.searchRepository": "代码库检索",
+  "code.traceCallChain": "调用链追踪",
+  "code.proposeEdit": "代码修改预览",
+  "code.applyProposedEdit": "代码修改应用",
+  "web.search": "网页搜索",
+  "web.fetchSource": "网页读取",
+};
+
+function getAgentDisplayName(agentKind: AgentKind): string {
+  return AGENT_DISPLAY_NAMES[agentKind] ?? String(agentKind);
+}
+
 function getAgentStatusUserMessage(
   agentKind: AgentKind,
   status: AgentRunStatus,
@@ -443,10 +491,10 @@ function getAgentStatusUserMessage(
     return `正在处理: ${message}`;
   }
   if (status === "completed") {
-    return `${agentKind} 已完成`;
+    return `${getAgentDisplayName(agentKind)} 已完成`;
   }
   if (status === "failed") {
-    return `${agentKind} 执行失败`;
+    return `${getAgentDisplayName(agentKind)} 执行失败`;
   }
   if (status === "waiting_permission") {
     return "等待你的确认";
@@ -455,7 +503,7 @@ function getAgentStatusUserMessage(
 }
 
 function getToolUserMessage(toolName: string, phase: "planned" | "completed"): string {
-  const readableName = toolName
+  const readableName = TOOL_DISPLAY_NAMES[toolName] ?? toolName
     .replace(/^commander\./, "")
     .replace(/\./g, " ");
   return phase === "planned"

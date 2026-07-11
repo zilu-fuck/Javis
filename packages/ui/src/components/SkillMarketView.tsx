@@ -40,10 +40,10 @@ interface SkillMarketViewProps {
 }
 
 const PERMISSION_COLORS: Record<string, string> = {
-  read: "#2f9b68",
-  preview: "#d89a12",
-  confirmed_write: "#f07d18",
-  dangerous: "#d84f45",
+  read: "var(--color-permission-read, #2f9b68)",
+  preview: "var(--color-permission-preview, #d89a12)",
+  confirmed_write: "var(--color-permission-confirmed, #f07d18)",
+  dangerous: "var(--color-permission-dangerous, #d84f45)",
 };
 
 const PERMISSION_LABELS: Record<string, string> = {

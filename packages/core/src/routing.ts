@@ -1,9 +1,11 @@
 import type { ShellCommandRequest } from "@javis/tools";
+import { isCodebaseUnderstandingRequest } from "./agent-intent";
 import type { WorkbenchWorkflowId } from "./workflows";
 
 export type RouteKind =
   | "pdf"
   | "code"
+  | "codebase"
   | "research"
   | "project"
   | "file-scan"
@@ -79,6 +81,10 @@ export function isCodeReviewGoal(userGoal: string): boolean {
   return getTopRoute(userGoal)?.route === "code";
 }
 
+export function isCodebaseUnderstandingGoal(userGoal: string): boolean {
+  return getTopRoute(userGoal)?.route === "codebase";
+}
+
 export function isPdfOrganizationGoal(userGoal: string): boolean {
   return getTopRoute(userGoal)?.route === "pdf";
 }
@@ -105,6 +111,7 @@ export function scoreRoutes(
     createLocalDocumentRouteScore(userGoal),
     createSpringBootRouteScore(userGoal),
     createPdfRouteScore(userGoal),
+    createCodebaseRouteScore(userGoal),
     createCodeRouteScore(userGoal, context),
     createResearchRouteScore(userGoal, urls),
     createProjectRouteScore(userGoal, context),
@@ -187,6 +194,8 @@ function routeToWorkflowId(
       return /test|e2e|playwright/i.test(userGoal) ? "browser-test" : "browser-research";
     case "pdf":
       return "pdf-organization";
+    case "codebase":
+      return "read-current-project";
     case "code":
       return "code-review";
     case "file-scan":
@@ -284,6 +293,20 @@ function createPdfRouteScore(userGoal: string): RouteScore {
   return {
     route: "pdf",
     score: hasAction && hasContext ? score : 0,
+    signals,
+  };
+}
+
+function createCodebaseRouteScore(userGoal: string): RouteScore {
+  const signals: string[] = [];
+  const score = isCodebaseUnderstandingRequest(userGoal) ? 4 : 0;
+  if (score > 0) {
+    signals.push("codebase-subject", "codebase-understanding-intent");
+  }
+
+  return {
+    route: "codebase",
+    score,
     signals,
   };
 }

@@ -691,41 +691,34 @@ pub(crate) fn git_list_pull_requests(
 ) -> Result<GitPullRequestsSnapshot, String> {
     let cwd = resolve_workspace_path(Some(request.workspace_root.clone()))?;
     let workspace_root = normalize_path(&cwd);
-    let gh = match resolve_program_from_path(&resolve_command_program("gh"), Some(&cwd)) {
-        Some(path) => path,
-        None => {
-            return Ok(unavailable_pull_requests_snapshot(
-                request.session_id,
-                workspace_root,
-                "GitHub CLI (gh) was not found on trusted PATH.",
-            ));
-        }
-    };
-    let output = Command::new(gh)
-        .args([
-            "pr",
-            "list",
-            "--limit",
-            "20",
-            "--json",
-            "number,title,state,url,author,headRefName,baseRefName,updatedAt",
-        ])
-        .env("GH_PROMPT_DISABLED", "1")
-        .current_dir(&cwd)
-        .output()
-        .map_err(|error| error.to_string())?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if resolve_program_from_path(&resolve_command_program("gh"), Some(&cwd)).is_none() {
         return Ok(unavailable_pull_requests_snapshot(
             request.session_id,
             workspace_root,
-            &format!(
-                "GitHub CLI could not list pull requests: {}",
-                truncate_git_message(&stderr)
-            ),
+            "GitHub CLI (gh) was not found on trusted PATH.",
         ));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let gh_args = [
+        "pr",
+        "list",
+        "--limit",
+        "20",
+        "--json",
+        "number,title,state,url,author,headRefName,baseRefName,updatedAt",
+    ];
+    let stdout = match run_sandboxed_gh_readonly_network_command(&cwd, &gh_args) {
+        Ok(stdout) => stdout,
+        Err(error) => {
+            return Ok(unavailable_pull_requests_snapshot(
+                request.session_id,
+                workspace_root,
+                &format!(
+                    "GitHub CLI could not list pull requests: {}",
+                    truncate_git_message(&error)
+                ),
+            ));
+        }
+    };
     let pull_requests = parse_gh_pull_requests(&stdout)?;
 
     Ok(GitPullRequestsSnapshot {
@@ -1087,6 +1080,29 @@ fn run_sandboxed_gh_command(
         policy,
         env: Vec::new(),
         stdin,
+        timeout_ms: None,
+    })
+    .map_err(|error| error.to_string())?;
+    if output.exit_code.unwrap_or(1) != 0 {
+        return Err(output.stderr.trim().to_string());
+    }
+    Ok(output.stdout.trim().to_string())
+}
+
+fn run_sandboxed_gh_readonly_network_command(cwd: &Path, args: &[&str]) -> Result<String, String> {
+    let mut policy = read_only_policy(cwd);
+    policy.network_access = true;
+    let arg_strings = args
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect::<Vec<_>>();
+    let output = run_sandboxed_command(SandboxCommandRequest {
+        program: "gh".to_string(),
+        args: arg_strings,
+        cwd: cwd.to_path_buf(),
+        policy,
+        env: vec![("GH_PROMPT_DISABLED".to_string(), "1".to_string())],
+        stdin: None,
         timeout_ms: None,
     })
     .map_err(|error| error.to_string())?;

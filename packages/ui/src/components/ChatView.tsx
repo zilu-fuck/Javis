@@ -101,8 +101,7 @@ export function ChatView({
   const labels = locale.labels;
   const isChinese = isChineseLocale(locale);
   const isNewChat = task.id === "task-idle";
-  const shouldContinueCurrentTask = !isNewChat && !["completed", "failed", "cancelled"].includes(task.status);
-  const submitIntent = isNewChat ? "new_chat" : shouldContinueCurrentTask ? "continue_history" : "new_task";
+  const submitIntent = isNewChat ? "new_chat" : "continue_history";
   const showWorkspaceContext =
     activeComposeMode === "project" || Boolean(task.project || task.codeReviewPreview || task.codeProposedEdit || task.codeApplyResult);
   const pendingAttachmentsRef = useRef<File[]>([]);
@@ -133,7 +132,7 @@ export function ChatView({
     );
   }
 
-  async function handleSubmitWithAttachments(goal: string, files: File[]) {
+  async function handleSubmitWithAttachments(_goal: string, files: File[]) {
     // Limit: max 5 images, max 10 MB each.
     const imageFiles = files.filter((f) => f.type.startsWith("image/")).slice(0, 5);
     const validFiles = imageFiles.filter((f) => f.size <= 10 * 1024 * 1024);
@@ -142,7 +141,7 @@ export function ChatView({
     // Don't pass goalOverride — let submitGoal read from draftGoal so
     // conversation continuation works (continuation checks !goalOverride).
     onSubmitGoal(
-      goal,
+      undefined,
       undefined,
       undefined,
       undefined,

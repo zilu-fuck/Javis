@@ -50,11 +50,11 @@ export function ContextRing({
   const breakdown = task.tokenUsage?.byAgentKind ?? [];
 
   const color =
-    ratio > 0.6 ? "var(--color-danger, #c8463b)"
-    : ratio > 0.3 ? "var(--color-amber, #b77a19)"
-    : "var(--color-accent, #2d6f67)";
+    ratio > 0.6 ? "var(--color-danger)"
+    : ratio > 0.3 ? "var(--color-amber)"
+    : "var(--color-accent)";
 
-  const trackColor = "var(--color-line, #dce2dc)";
+  const trackColor = "var(--color-line)";
   const label = usedTokens > 0 ? `${pct}%` : "0%";
   const isOpen = panelMode !== "closed";
 
@@ -105,7 +105,7 @@ export function ContextRing({
               y="22"
               textAnchor="middle"
               dominantBaseline="middle"
-              fill="var(--color-ink, #161817)"
+              fill="var(--color-ink)"
               fontSize="11"
               fontWeight="650"
             >
@@ -264,13 +264,13 @@ function totalShareLabel(value: number, total: number): string {
 function agentBarColor(agentKind: string, fallback: string): string {
   switch (agentKind) {
     case "commander":
-      return "var(--color-accent-strong, #174f49)";
+      return "var(--color-accent-strong)";
     case "verifier":
-      return "var(--color-danger, #c8463b)";
+      return "var(--color-danger)";
     case "research":
-      return "var(--color-blue, #3f6ea8)";
+      return "var(--color-blue)";
     case "code":
-      return "var(--color-amber, #b77a19)";
+      return "var(--color-amber)";
     default:
       return fallback;
   }

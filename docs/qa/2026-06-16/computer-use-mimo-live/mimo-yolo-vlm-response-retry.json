@@ -1,0 +1,28 @@
+﻿{
+    "id":  "0750e868c9734434aee0ba5696261fbf",
+    "choices":  [
+                    {
+                        "finish_reason":  "stop",
+                        "index":  0,
+                        "message":  {
+                                        "content":  "```json\n{\n  \"observation\": \"Javis chat interface is open with input field ready.\",\n  \"yolo_used\": true,\n  \"yolo_candidate_count\": 5,\n  \"action\": {\n    \"tool\": \"click\",\n    \"x\": 485,\n    \"y\": 540,\n    \"text\": null,\n    \"reason\": \"Click the chat input field to focus it for typing.\"\n  },\n  \"risks\": [\"None\"]\n}\n```",
+                                        "role":  "assistant",
+                                        "tool_calls":  null
+                                    }
+                    }
+                ],
+    "created":  1781602633,
+    "model":  "mimo-v2.5",
+    "object":  "chat.completion",
+    "usage":  {
+                  "completion_tokens":  103,
+                  "prompt_tokens":  2626,
+                  "total_tokens":  2729,
+                  "completion_tokens_details":  {
+                                                    "reasoning_tokens":  0
+                                                },
+                  "prompt_tokens_details":  {
+                                                "image_tokens":  2040
+                                            }
+              }
+}

@@ -28,6 +28,7 @@ export type RuntimeEventKind =
   | "task.replan_failed"
   | "task.completed"
   | "task.failed"
+  | "runtime.compacted"
   | "agent.status"
   | "agent.chunk_start"
   | "agent.chunk"
@@ -53,6 +54,7 @@ export const STRUCTURAL_EVENT_KINDS: ReadonlySet<RuntimeEventKind> = new Set([
   "task.replan_failed",
   "task.completed",
   "task.failed",
+  "runtime.compacted",
   "step.started",
   "step.completed",
   "step.failed",
@@ -103,6 +105,14 @@ let envelopeSequenceCounter = new Map<string, number>();
 
 export function resetEnvelopeSequence(runId: string): void {
   envelopeSequenceCounter.delete(runId);
+}
+
+export function seedEnvelopeSequence(runId: string, sequence: number): void {
+  if (!Number.isFinite(sequence) || sequence < 0) {
+    throw new Error(`Invalid runtime event sequence seed for ${runId}: ${sequence}`);
+  }
+  const current = envelopeSequenceCounter.get(runId) ?? 0;
+  envelopeSequenceCounter.set(runId, Math.max(current, Math.floor(sequence)));
 }
 
 export function nextEnvelopeSequence(runId: string): number {

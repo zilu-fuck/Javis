@@ -59,6 +59,27 @@ describe("task history persistence", () => {
     expect(storage.getItem(TASK_HISTORY_STORAGE_KEY)).not.toContain("data:image");
   });
 
+  it("keeps approval outcomes in completed task history", () => {
+    const storage = createMemoryStorage();
+    const task = {
+      ...createTask("task-approval-outcome"),
+      approvalOutcome: {
+        approvalId: "permission-1",
+        status: "approved",
+        resolvedAt: "2026-05-23T00:00:01.000Z",
+      },
+    } satisfies TaskSnapshot;
+
+    saveTaskHistory(storage, [task]);
+    const loaded = loadTaskHistory(storage);
+
+    expect(loaded[0]?.approvalOutcome).toEqual({
+      approvalId: "permission-1",
+      status: "approved",
+      resolvedAt: "2026-05-23T00:00:01.000Z",
+    });
+  });
+
   it("keeps resolved Git and PR dry-run actions in completed task history", () => {
     const storage = createMemoryStorage();
     const task = {
@@ -503,6 +524,37 @@ describe("task history persistence", () => {
         unrecoveredCount: 0,
         abandonedStepIds: ["collect-evidence"],
         replannedStepIds: ["recover-with-partial-evidence"],
+        progressLedger: {
+          completed: [{
+            stepId: "parse-request",
+            title: "Parse request",
+            agentKind: "commander",
+            outputContextKey: "requestSummary",
+          }],
+          failed: [{
+            stepId: "collect-evidence",
+            title: "Collect evidence",
+            agentKind: "code",
+            errorSummary: "HTTP 503 from repository search provider",
+          }],
+          blocked: [],
+          repeatedActions: [{
+            kind: "tool",
+            fingerprint: "tool:code.searchRepository:{}",
+            count: 2,
+            lastStepId: "collect-evidence",
+          }],
+          remainingWork: ["recover-with-partial-evidence"],
+        },
+        stuckSignals: [{
+          kind: "repeated_tool_failure",
+          fingerprint: "tool:search",
+          count: 2,
+          severity: "blocked",
+          hint: "switch tool",
+          evidence: ["collect-evidence: Repository search failed twice."],
+        }],
+        commanderGuidance: ["switch tool"],
         attempts: [{
           failedStepId: "collect-evidence",
           failedStepTitle: "Collect evidence",
@@ -527,12 +579,81 @@ describe("task history persistence", () => {
       status: "recovered",
       abandonedStepIds: ["collect-evidence"],
       replannedStepIds: ["recover-with-partial-evidence"],
+      commanderGuidance: ["switch tool"],
+      progressLedger: {
+        remainingWork: ["recover-with-partial-evidence"],
+      },
     });
     expect(loaded[0]?.recoveryReport?.attempts[0]).toMatchObject({
       failedStepId: "collect-evidence",
       failureKind: "network",
       replanStatus: "planned",
       recoveryStepIds: ["recover-with-partial-evidence"],
+    });
+  });
+
+  it("normalizes legacy recovery reports without stuck metadata", () => {
+    const storage = createMemoryStorage();
+    const task = {
+      ...createTask("task-legacy-recovery-report"),
+      recoveryReport: {
+        generatedAt: "2026-06-11T00:00:00.000Z",
+        status: "recovered",
+        failureCount: 1,
+        recoveredCount: 1,
+        unrecoveredCount: 0,
+        abandonedStepIds: ["collect-evidence"],
+        replannedStepIds: ["recover-with-partial-evidence"],
+        attempts: [{
+          failedStepId: "collect-evidence",
+          errorSummary: "Missing upstream artifact",
+          failureKind: "handoff",
+          completedBefore: [],
+          replanAttempted: true,
+          replanStatus: "planned",
+          abandonedFailedStep: true,
+          recoveryStepIds: ["recover-with-partial-evidence"],
+          suggestedAlternatives: ["produce the missing upstream artifact before replanning"],
+        }],
+      },
+    };
+
+    storage.setItem(TASK_HISTORY_STORAGE_KEY, JSON.stringify([task]));
+    const loaded = loadTaskHistory(storage);
+
+    expect(loaded[0]?.recoveryReport?.stuckSignals).toEqual([]);
+    expect(loaded[0]?.recoveryReport?.commanderGuidance).toEqual([]);
+    expect(loaded[0]?.recoveryReport?.attempts[0]?.failureKind).toBe("handoff");
+  });
+
+  it("keeps durable resume metadata in completed task history", () => {
+    const storage = createMemoryStorage();
+    const task = {
+      ...createTask("task-durable-resume"),
+      durableResume: {
+        runId: "run-1",
+        source: "event-log",
+        checkpointEventSequence: 2,
+        latestEventSequence: 3,
+        completedStepIds: ["collect-evidence"],
+        retryStepIds: ["summarize-evidence"],
+        approvalRequestIds: ["approval-1"],
+        rebuilt: true,
+      },
+    } satisfies TaskSnapshot;
+
+    saveTaskHistory(storage, [task]);
+    const loaded = loadTaskHistory(storage);
+
+    expect(loaded[0]?.durableResume).toMatchObject({
+      runId: "run-1",
+      source: "event-log",
+      checkpointEventSequence: 2,
+      latestEventSequence: 3,
+      completedStepIds: ["collect-evidence"],
+      retryStepIds: ["summarize-evidence"],
+      approvalRequestIds: ["approval-1"],
+      rebuilt: true,
     });
   });
 
@@ -634,6 +755,27 @@ describe("task history persistence", () => {
     expect(loaded[0]?.codeProposedEdit?.patch).toBe("");
     expect(storage.getItem(TASK_HISTORY_STORAGE_KEY)).not.toContain("diff --git");
     expect(loaded[0]?.codeApplyResult?.applied).toBe(true);
+  });
+
+  it("keeps verifier results in completed task history", () => {
+    const storage = createMemoryStorage();
+    const task = {
+      ...createTask("task-verifier-result"),
+      verificationResult: {
+        status: "pass",
+        summary: "Checks passed.",
+        detail: "Verifier confirmed the evidence.",
+      },
+    } satisfies TaskSnapshot;
+
+    saveTaskHistory(storage, [task]);
+    const loaded = loadTaskHistory(storage);
+
+    expect(loaded[0]?.verificationResult).toMatchObject({
+      status: "pass",
+      summary: "Checks passed.",
+      detail: "Verifier confirmed the evidence.",
+    });
   });
 
   it("keeps token usage summaries in completed task history", () => {

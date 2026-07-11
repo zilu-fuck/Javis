@@ -82,6 +82,12 @@ describe("artifact-envelope", () => {
       expect(computeContentHash(a)).toBe(computeContentHash(b));
     });
 
+    it("uses sha256 over canonical JSON", () => {
+      expect(computeContentHash({ b: 2, a: 1 })).toBe(
+        "43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777",
+      );
+    });
+
     it("returns different hash for different payloads", () => {
       expect(computeContentHash({ x: 1 })).not.toBe(computeContentHash({ x: 2 }));
     });
@@ -355,5 +361,13 @@ describe("buildHandoffReport with artifact provenance", () => {
     expect(handoff?.artifact?.artifactId).toBe(envelope2.artifactId);
     expect(handoff?.artifact?.producer.stepId).toBe("s1-replan");
     expect(handoff?.artifact?.contentHash).not.toBe(envelope1.contentHash);
+    expect(ctx.getEnvelopeHistory("diffPreview")).toEqual([envelope1]);
+    expect(handoff?.artifact?.previousArtifacts).toEqual([
+      {
+        artifactId: envelope1.artifactId,
+        contentHash: envelope1.contentHash,
+        producer: { stepId: "s1", agentKind: undefined, toolName: undefined },
+      },
+    ]);
   });
 });

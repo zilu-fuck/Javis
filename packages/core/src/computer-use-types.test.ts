@@ -248,6 +248,41 @@ describe("parseModelAction", () => {
     expect(result).toEqual({ tool: "computer.screenshot", params: {} });
   });
 
+  it("normalizes fenced MiMo-style bare action output", () => {
+    const raw = [
+      "```json",
+      JSON.stringify({
+        observation: "Javis chat interface is open with input field ready.",
+        action: {
+          tool: "click",
+          x: 485,
+          y: 540,
+          text: null,
+          reason: "Click the chat input field to focus it for typing.",
+        },
+        target: "Focus the chat input",
+        confidence: "medium",
+      }, null, 2),
+      "```",
+    ].join("\n");
+
+    const result = parseModelAction(raw);
+
+    expect(result).toEqual({ tool: "computer.click", params: { x: 485, y: 540 } });
+  });
+
+  it("extracts a valid action object from surrounding model prose", () => {
+    const raw = [
+      "I should click the input first.",
+      '{"observation":"Input is visible","action":{"tool":"computer.click","params":{"x":100,"y":200}},"target":"Focus input","confidence":"high"}',
+      "Next I will type.",
+    ].join("\n\n");
+
+    const result = parseModelAction(raw);
+
+    expect(result).toEqual({ tool: "computer.click", params: { x: 100, y: 200 } });
+  });
+
   it("throws on invalid JSON", () => {
     expect(() => parseModelAction("not json")).toThrow();
   });
@@ -306,6 +341,12 @@ describe("parseModelOutput", () => {
     const raw = '```json\n{"observation":"test","action":{"tool":"computer.wait","params":{"ms":0}},"target":"done","confidence":"high"}\n```';
     const result = parseModelOutput(raw);
     expect(result.observation).toBe("test");
+  });
+
+  it("extracts JSON from prose without accepting malformed action schemas", () => {
+    const raw = 'Analysis first.\n{"observation":"test","action":{"tool":"computer.wait","params":{"ms":0}},"target":"done","confidence":"high"}';
+    const result = parseModelOutput(raw);
+    expect(result.action.tool).toBe("computer.wait");
   });
 
   it("throws on invalid JSON", () => {

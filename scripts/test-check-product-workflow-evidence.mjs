@@ -74,6 +74,11 @@ const browserTerminalFiles = [
   "41-browser-write-approval-card.png",
 ];
 
+const agentRuntimeDurabilityFiles = [
+  "46-agent-runtime-restored-approval-linked.png",
+  "47-agent-runtime-resumed-downstream.png",
+];
+
 const repoIntelligenceFiles = [
   "42-repo-search-key-files.png",
   "43-repo-trace-symbol-graph.png",
@@ -184,6 +189,8 @@ async function main() {
     assert(missingGit.stdout.includes("Trend output records provider id"), "trend provider requirement should be visible");
     assert(missingGit.stdout.includes("BLOCKED browser-terminal-approvals"), "missing Browser/Terminal approval evidence should be reported as a known blocker");
     assert(missingGit.stdout.includes("Stale preview is rejected"), "Browser/Terminal stale-preview requirement should be visible");
+    assert(missingGit.stdout.includes("BLOCKED agent-runtime-durability-restart-resume"), "missing agent runtime durability restart-resume evidence should be reported as a known blocker");
+    assert(missingGit.stdout.includes("Completed upstream steps are not rerun"), "agent runtime durability upstream-rerun requirement should be visible");
     assert(missingGit.stdout.includes("BLOCKED repo-intelligence-package-live"), "missing repo intelligence packaged evidence should be reported as a known blocker");
     assert(missingGit.stdout.includes("Repository trace records symbol graph"), "repo intelligence symbol graph requirement should be visible");
     assert(missingGit.stdout.includes("BLOCKED agent-memory-embedding-provider-live"), "missing embedding provider live evidence should be reported as a known blocker");
@@ -377,6 +384,39 @@ async function main() {
     const withBrowserTerminal = await runCheck(["-QaRoot", qaRoot, "-AllowKnownBlockers"]);
     assert(withBrowserTerminal.code === 0, `inventory should pass with Browser/Terminal evidence present: ${withBrowserTerminal.stderr || withBrowserTerminal.stdout}`);
     assert(withBrowserTerminal.stdout.includes("PASS    browser-terminal-approvals"), "Browser/Terminal approval workflow should pass with complete evidence");
+
+    for (const file of agentRuntimeDurabilityFiles) {
+      await writeFile(join(qaRoot, file), `${file}\n`);
+    }
+    await writeFile(
+      join(qaRoot, "agent-runtime-durability-restart-qa-output.txt"),
+      [
+        ...packagedQaLines(agentRuntimeDurabilityFiles),
+        "workflow.checkpoint.linked",
+        "runtime events persisted: PASS",
+        "checkpoint persisted: PASS",
+        "restored approval linked: PASS",
+        "approval step advanced once: PASS",
+        "upstream not rerun: PASS",
+        "downstream resumed: PASS",
+        "artifact context restored: PASS",
+        "",
+        "json:",
+        JSON.stringify({
+          runtimeEventsPersisted: "pass",
+          checkpointPersisted: "pass",
+          restoredApprovalLinked: "pass",
+          approvalStepAdvancedOnce: "pass",
+          upstreamNotRerun: "pass",
+          downstreamResumed: "pass",
+          artifactContextRestored: "pass",
+        }, null, 2),
+      ].join("\n"),
+    );
+
+    const withAgentRuntimeDurability = await runCheck(["-QaRoot", qaRoot, "-AllowKnownBlockers"]);
+    assert(withAgentRuntimeDurability.code === 0, `inventory should pass with agent runtime durability evidence present: ${withAgentRuntimeDurability.stderr || withAgentRuntimeDurability.stdout}`);
+    assert(withAgentRuntimeDurability.stdout.includes("PASS    agent-runtime-durability-restart-resume"), "agent runtime durability restart-resume workflow should pass with complete evidence");
 
     for (const file of repoIntelligenceFiles) {
       await writeFile(join(qaRoot, file), `${file}\n`);

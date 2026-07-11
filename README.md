@@ -1,5 +1,18 @@
 # Javis
 
+## 2026-07-10 review update
+
+The latest hardening pass focused on making the runtime chain, approval boundaries, and CI gate more reliable:
+
+- Runtime routing now separates direct chat, single-agent tool flows, vision tasks, and Commander DAG work through a dedicated runtime-chain decision layer.
+- Commander workflows now preserve checkpoint context, report malformed initial plans with structured diagnostics, and support safer evidence-backed file-write DAG steps.
+- Desktop/browser/computer/native safety gates were tightened: tool allowlists fail closed, browser write approvals show script previews, MCP stdio launch from Javis config is blocked, and native directory listing is constrained to allowed roots.
+- Model settings now handle custom providers and stored provider keys more defensively.
+- `pnpm check` is the expected source-level gate. It runs TypeScript checks, Vitest, Rust tests/checks, local-vision worker tests, and the desktop frontend build.
+- Source-level Rust checks no longer require a real `artifacts/local-vision/yolo26n-ui.onnx`; release packaging still must include the real model and is guarded by `local-vision:verify-release-resources`.
+
+Detailed review notes live in `docs/qa/2026-07-10/final-review-and-fix-log.md`.
+
 Javis 是一个本地优先的桌面 Agent 工作台，面向“让 AI 真正参与日常项目工作”这个目标构建。它不是只把聊天窗口搬到桌面上，而是把任务拆解、工具调用、证据记录、权限审批和结果恢复都放进同一个可观察的界面里。
 
 当前版本仍处在产品化打磨阶段，但已经具备一个可运行的 Windows 桌面原型：你可以选择项目目录，发起研究、项目检查、文档扫描、代码审查和文件整理任务，并在写入本地文件之前看到明确的 dry-run / approval 流程。

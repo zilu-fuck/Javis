@@ -3,12 +3,15 @@ import { localeDefaultModelSettings } from "./model-settings";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { buildAgentSystemPrompt, injectTerminologyPrompt, getAdapter } from "@javis/core";
-import type { AgentKind, AgentStyleRecord, ProviderAdapter, WorkspacePromptProfile } from "@javis/core";
+import type { AgentKind, AgentStyleRecord, ModelMediaInput, ProviderAdapter, WorkspacePromptProfile } from "@javis/core";
 
 export interface CompletionOptions {
   model?: string;
   imageDataUrl?: string;
   images?: string[];
+  media?: ModelMediaInput[];
+  enableMediaUuid?: boolean;
+  disableThinking?: boolean;
   maxTokens?: number;
   temperature?: number;
   stopSequences?: string[];
@@ -103,15 +106,16 @@ export function createConfiguredModelProvider(settings: ModelSettings): ModelPro
 export function createModelProviderFromProfile(
   profile: { id?: string; provider: string; model: string; apiKeyReference: string; baseUrl: string },
 ): ModelProvider {
+  const provider = normalizeProviderForRequest(profile.provider, profile.apiKeyReference);
   const providerSettings: ModelProviderSettings = {
-    provider: profile.provider,
+    provider,
     model: profile.model,
     apiKeyReference: profile.apiKeyReference,
     baseUrl: profile.baseUrl,
   };
-  const adapter = getAdapter(profile.provider);
+  const adapter = getAdapter(provider);
   return {
-    id: profile.id ?? profile.provider,
+    id: profile.id ?? provider,
     settings: providerSettings,
     defaultSettingsForLocale: localeDefaultModelSettings,
     async complete(prompt, options) {
@@ -130,8 +134,9 @@ export function createModelProviderFromProfile(
 }
 
 export function toModelProviderSettings(settings: ModelSettings): ModelProviderSettings {
+  const provider = normalizeProviderForRequest(settings.provider, settings.apiKeyReference);
   return {
-    provider: settings.provider,
+    provider,
     model: settings.model,
     apiKeyReference: settings.apiKeyReference,
     baseUrl: settings.baseUrl,
@@ -290,7 +295,10 @@ async function createModelRequest(
   options?: CompletionOptions,
   adapter?: ProviderAdapter,
 ) {
-  const providerId = providerSettings.provider || (
+  const providerId = normalizeProviderForRequest(
+    providerSettings.provider,
+    providerSettings.apiKeyReference,
+  ) || (
     options?.locale ? localeDefaultModelSettings(options.locale).provider : undefined
   ) || "";
 
@@ -304,6 +312,9 @@ async function createModelRequest(
       prompt: requestPrompt,
       imageDataUrl: options?.imageDataUrl,
       images: options?.images,
+      media: options?.media,
+      enableMediaUuid: options?.enableMediaUuid,
+      disableThinking: options?.disableThinking,
       model: options?.model ?? providerSettings.model,
       providerId,
       baseUrl: providerSettings.baseUrl,
@@ -320,6 +331,9 @@ async function createModelRequest(
     prompt: requestPrompt,
     imageDataUrl: options?.imageDataUrl,
     images: options?.images,
+    media: options?.media,
+    enableMediaUuid: options?.enableMediaUuid,
+    disableThinking: options?.disableThinking,
     providerId,
     model: options?.model ?? providerSettings.model,
     apiKeyReference: providerSettings.apiKeyReference,
@@ -330,6 +344,24 @@ async function createModelRequest(
     locale: options?.locale,
     timeoutMs: options?.timeoutMs,
   };
+}
+
+function normalizeProviderForRequest(provider: string, apiKeyReference: string): string {
+  const keyProvider = providerFromApiKeyReference(apiKeyReference);
+  if (keyProvider && isCustomProviderId(keyProvider)) {
+    return keyProvider;
+  }
+  return provider;
+}
+
+function providerFromApiKeyReference(value: string): string | null {
+  const match = value.trim().match(/^model\.(.+)$/);
+  return match?.[1] || null;
+}
+
+function isCustomProviderId(provider: string): boolean {
+  const normalized = provider.trim().toLowerCase();
+  return normalized === "custom" || normalized.startsWith("custom-");
 }
 
 function shouldInjectTerminologyForRequest(prompt: string, options?: CompletionOptions): boolean {

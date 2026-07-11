@@ -9,13 +9,13 @@ export type ModelProfileRepositoryLike = ReturnType<typeof createModelProfileRep
 
 interface UseModelProfilesOptions {
   modelProfileRepoRef: MutableRefObject<ModelProfileRepositoryLike>;
-  onSaved?: () => void;
+  onSaved?: (config: WorkbenchModelConfiguration) => void | Promise<void>;
 }
 
 export interface ModelProfilesControls {
   modelConfiguration: WorkbenchModelConfiguration | undefined;
   setModelConfiguration: React.Dispatch<React.SetStateAction<WorkbenchModelConfiguration | undefined>>;
-  handleModelConfigurationChange(config: WorkbenchModelConfiguration): Promise<void>;
+  handleModelConfigurationChange(config: WorkbenchModelConfiguration): Promise<WorkbenchModelConfiguration>;
 }
 
 export function useModelProfiles({
@@ -48,6 +48,17 @@ export function useModelProfiles({
           });
           return { ...profile, apiKey: "", hasStoredApiKey: false };
         }
+        if (requiresStoredApiKey(profile)) {
+          const status = await invoke<{ exists: boolean }>("check_model_api_key_secret", {
+            keyReference: profile.apiKeyReference,
+          });
+          if (!status.exists) {
+            throw new Error(
+              `API key is not saved for ${profile.provider} (${profile.apiKeyReference}). Save the provider key before assigning ${profile.model}.`,
+            );
+          }
+          return { ...profile, apiKey: "", hasStoredApiKey: true };
+        }
         return { ...profile, apiKey: "" };
       }),
     );
@@ -61,7 +72,8 @@ export function useModelProfiles({
       );
     }
     setModelConfiguration(savedConfig);
-    onSaved?.();
+    await onSaved?.(savedConfig);
+    return savedConfig;
   }, [modelProfileRepoRef, onSaved]);
 
   return {
@@ -69,4 +81,21 @@ export function useModelProfiles({
     setModelConfiguration,
     handleModelConfigurationChange,
   };
+}
+
+function requiresStoredApiKey(profile: WorkbenchModelConfiguration["profiles"][number]): boolean {
+  if (!profile.provider.trim() || !profile.model.trim()) {
+    return false;
+  }
+  return !allowsLocalModelWithoutKey(profile);
+}
+
+function allowsLocalModelWithoutKey(profile: { provider: string; baseUrl: string }): boolean {
+  const provider = profile.provider.trim().toLowerCase();
+  const baseUrl = profile.baseUrl.trim().toLowerCase();
+  return provider === "ollama"
+    || baseUrl.startsWith("http://localhost")
+    || baseUrl.startsWith("http://127.")
+    || baseUrl.startsWith("http://[::1]")
+    || baseUrl.startsWith("http://::1");
 }

@@ -41,6 +41,9 @@ describe("OpenAIAdapter", () => {
       ...baseInput,
       imageDataUrl: "data:image/png;base64,one",
       images: ["data:image/png;base64,one", "data:image/png;base64,two"],
+      media: [{ url: "data:image/png;base64,one", uuid: "screen:one" }],
+      enableMediaUuid: true,
+      disableThinking: true,
       maxTokens: 1024,
       temperature: 0.7,
       stopSequences: ["STOP"],
@@ -48,6 +51,9 @@ describe("OpenAIAdapter", () => {
     });
     expect(payload.imageDataUrl).toBe("data:image/png;base64,one");
     expect(payload.images).toEqual(["data:image/png;base64,one", "data:image/png;base64,two"]);
+    expect(payload.media).toEqual([{ url: "data:image/png;base64,one", uuid: "screen:one" }]);
+    expect(payload.enableMediaUuid).toBe(true);
+    expect(payload.disableThinking).toBe(true);
     expect(payload.maxTokens).toBe(1024);
     expect(payload.temperature).toBe(0.7);
     expect(payload.stopSequences).toEqual(["STOP"]);
@@ -84,10 +90,16 @@ describe("OpenAICompatibleAdapter", () => {
       providerId: "dashscope",
       baseUrl: "https://example.test/v1///",
       images: ["data:image/png;base64,one", "data:image/png;base64,two"],
+      media: [{ url: "data:image/png;base64,one", uuid: "screen:one" }],
+      enableMediaUuid: true,
+      disableThinking: true,
     });
 
     expect(payload.baseUrl).toBe("https://example.test/v1");
     expect(payload.images).toEqual(["data:image/png;base64,one", "data:image/png;base64,two"]);
+    expect(payload.media).toEqual([{ url: "data:image/png;base64,one", uuid: "screen:one" }]);
+    expect(payload.enableMediaUuid).toBe(true);
+    expect(payload.disableThinking).toBe(true);
   });
 });
 

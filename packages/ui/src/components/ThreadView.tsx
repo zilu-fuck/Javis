@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEventHandler } from "react";
+import { Fragment, useEffect, useRef, useState, type FormEventHandler } from "react";
 import type {
   WorkbenchFileEntry,
   WorkbenchChatMessage,
@@ -100,10 +100,12 @@ export function ThreadView({
   const [editingMessageKey, setEditingMessageKey] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState("");
   const [copiedMessageKey, setCopiedMessageKey] = useState<string | null>(null);
-  const hasPendingPermissionRequest = task.permissionRequest?.status === "pending";
-  const hasPendingAskUserQuestion = task.askUserQuestion?.status === "pending";
+  const hasPendingPermissionRequest =
+    task.status === "waiting_permission" && task.permissionRequest?.status === "pending";
+  const hasPendingAskUserQuestion =
+    task.status === "waiting_info" && task.askUserQuestion?.status === "pending";
   const hasInlinePrompts = Boolean(
-    task.status === "failed" || task.permissionRequest || task.askUserQuestion,
+    task.status === "failed" || hasPendingPermissionRequest || hasPendingAskUserQuestion,
   );
   const hasActivePrompt = hasPendingPermissionRequest || hasPendingAskUserQuestion;
   const showExecutionPanels = !hasActivePrompt;
@@ -112,10 +114,11 @@ export function ThreadView({
     : createFallbackConversationMessages(task);
   const conversationMessages = localConversationMessages ?? sourceConversationMessages;
   const hasConversationMessages = conversationMessages.length > 0;
+  const lastAssistantMessageIndex = findLastAssistantMessageIndex(conversationMessages);
   const actionLabels = getMessageActionLabels(locale);
-  const composerStatusHint = task.status === "waiting_info"
+  const composerStatusHint = hasPendingAskUserQuestion
     ? translateWorkbenchText("Answer the question card above to continue.", locale)
-    : task.status === "waiting_permission"
+    : hasPendingPermissionRequest
       ? translateWorkbenchText("Review the permission card above to continue.", locale)
       : undefined;
   const isActiveTask = !["completed", "failed", "cancelled"].includes(task.status);
@@ -186,6 +189,28 @@ export function ThreadView({
     handleCancelEdit();
   }
 
+  function renderExecutionPanels() {
+    if (!showExecutionPanels) return null;
+    return (
+      <>
+        <AgentOrchestrationPanel
+          task={task}
+          locale={locale}
+          selectedAgentId={selectedAgentId}
+          onSelectAgent={onSelectAgent}
+        />
+
+        <AgentSummaryList
+          agents={task.agents}
+          task={task}
+          selectedAgentId={selectedAgentId}
+          locale={locale}
+          onSelectAgent={(id) => onSelectAgent?.(id)}
+        />
+      </>
+    );
+  }
+
   async function handleCopyMessage(messageKey: string, displayContent: string) {
     await writeClipboardText(displayContent);
     setCopiedMessageKey(messageKey);
@@ -251,107 +276,112 @@ export function ThreadView({
             const translatedDisplayContent = translateWorkbenchText(displayContent, locale);
             const messageKey = getConversationMessageKey(message, index);
             const canMutateMessage = message.role === "user" && !isActiveTask;
+            const shouldInsertExecutionPanels = !showStreaming &&
+              message.role === "assistant" &&
+              index === lastAssistantMessageIndex;
             return (
-            <article
-              className={`javis-message ${message.role === "user" ? "user" : ""}`}
-              key={messageKey}
-            >
-              <p className="javis-message-title">
-                <span>{message.role === "user" ? labels.user : formatCommanderTitle(labels.commander)}</span>
-                {message.createdAt ? (
-                  <time dateTime={message.createdAt}>{formatMessageTime(message.createdAt)}</time>
-                ) : null}
-              </p>
-              {message.role === "user" && message.attachments?.filter(isSafeAttachmentUrl).map((url, i) => (
-                <img key={i} src={url} className="javis-message-attachment" alt="" />
-              ))}
-              {editingMessageKey === messageKey ? (
-                <div className="javis-message-edit">
-                  <textarea
-                    aria-label={actionLabels.editTextarea}
-                    onChange={(event) => setEditingContent(event.currentTarget.value)}
-                    value={editingContent}
-                  />
-                  <div className="javis-message-edit-actions">
+              <Fragment key={messageKey}>
+                {shouldInsertExecutionPanels ? renderExecutionPanels() : null}
+                <article
+                  className={`javis-message ${message.role === "user" ? "user" : ""}`}
+                >
+                  <p className="javis-message-title">
+                    <span>{message.role === "user" ? labels.user : formatCommanderTitle(labels.commander)}</span>
+                    {message.createdAt ? (
+                      <time dateTime={message.createdAt}>{formatMessageTime(message.createdAt)}</time>
+                    ) : null}
+                  </p>
+                  {message.role === "user" && message.attachments?.filter(isSafeAttachmentUrl).map((url, i) => (
+                    <img key={i} src={url} className="javis-message-attachment" alt="" />
+                  ))}
+                  {editingMessageKey === messageKey ? (
+                    <div className="javis-message-edit">
+                      <textarea
+                        aria-label={actionLabels.editTextarea}
+                        onChange={(event) => setEditingContent(event.currentTarget.value)}
+                        value={editingContent}
+                      />
+                      <div className="javis-message-edit-actions">
+                        <button
+                          disabled={!editingContent.trim()}
+                          onClick={() => handleSaveEdit(index)}
+                          type="button"
+                        >
+                          {actionLabels.save}
+                        </button>
+                        <button onClick={handleCancelEdit} type="button">
+                          {actionLabels.cancel}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <Markdown
+                      className="javis-message-body"
+                      text={translatedDisplayContent}
+                    />
+                  )}
+                  <div className="javis-message-actions" aria-label={actionLabels.actions}>
                     <button
-                      disabled={!editingContent.trim()}
-                      onClick={() => handleSaveEdit(index)}
+                      aria-label={copiedMessageKey === messageKey ? actionLabels.copied : actionLabels.copy}
+                      className="javis-message-action action-copy"
+                      onClick={() => void handleCopyMessage(messageKey, translatedDisplayContent)}
+                      title={copiedMessageKey === messageKey ? actionLabels.copied : actionLabels.copy}
                       type="button"
                     >
-                      {actionLabels.save}
+                      <span aria-hidden="true" className="javis-message-action-icon" />
+                      <span className="javis-message-action-label">
+                        {copiedMessageKey === messageKey ? actionLabels.copied : actionLabels.copy}
+                      </span>
                     </button>
-                    <button onClick={handleCancelEdit} type="button">
-                      {actionLabels.cancel}
+                    {canMutateMessage ? (
+                      <button
+                        aria-label={actionLabels.withdraw}
+                        className="javis-message-action action-withdraw"
+                        onClick={() => handleWithdrawMessage(index)}
+                        title={actionLabels.withdraw}
+                        type="button"
+                      >
+                        <span aria-hidden="true" className="javis-message-action-icon" />
+                        <span className="javis-message-action-label">{actionLabels.withdraw}</span>
+                      </button>
+                    ) : null}
+                    <button
+                      aria-label={actionLabels.quote}
+                      className="javis-message-action action-quote"
+                      onClick={() => handleQuoteMessage(message, translatedDisplayContent)}
+                      title={actionLabels.quote}
+                      type="button"
+                    >
+                      <span aria-hidden="true" className="javis-message-action-icon" />
+                      <span className="javis-message-action-label">{actionLabels.quote}</span>
                     </button>
+                    {canMutateMessage ? (
+                      <button
+                        aria-label={actionLabels.edit}
+                        className="javis-message-action action-edit"
+                        onClick={() => handleStartEdit(messageKey, translatedDisplayContent)}
+                        title={actionLabels.edit}
+                        type="button"
+                      >
+                        <span aria-hidden="true" className="javis-message-action-icon" />
+                        <span className="javis-message-action-label">{actionLabels.edit}</span>
+                      </button>
+                    ) : null}
                   </div>
-                </div>
-              ) : (
-                <Markdown
-                  className="javis-message-body"
-                  text={translatedDisplayContent}
-                />
-              )}
-              <div className="javis-message-actions" aria-label={actionLabels.actions}>
-                <button
-                  aria-label={copiedMessageKey === messageKey ? actionLabels.copied : actionLabels.copy}
-                  className="javis-message-action action-copy"
-                  onClick={() => void handleCopyMessage(messageKey, translatedDisplayContent)}
-                  title={copiedMessageKey === messageKey ? actionLabels.copied : actionLabels.copy}
-                  type="button"
-                >
-                  <span aria-hidden="true" className="javis-message-action-icon" />
-                  <span className="javis-message-action-label">
-                    {copiedMessageKey === messageKey ? actionLabels.copied : actionLabels.copy}
-                  </span>
-                </button>
-                {canMutateMessage ? (
-                  <button
-                    aria-label={actionLabels.withdraw}
-                    className="javis-message-action action-withdraw"
-                    onClick={() => handleWithdrawMessage(index)}
-                    title={actionLabels.withdraw}
-                    type="button"
-                  >
-                    <span aria-hidden="true" className="javis-message-action-icon" />
-                    <span className="javis-message-action-label">{actionLabels.withdraw}</span>
-                  </button>
-                ) : null}
-                <button
-                  aria-label={actionLabels.quote}
-                  className="javis-message-action action-quote"
-                  onClick={() => handleQuoteMessage(message, translatedDisplayContent)}
-                  title={actionLabels.quote}
-                  type="button"
-                >
-                  <span aria-hidden="true" className="javis-message-action-icon" />
-                  <span className="javis-message-action-label">{actionLabels.quote}</span>
-                </button>
-                {canMutateMessage ? (
-                  <button
-                    aria-label={actionLabels.edit}
-                    className="javis-message-action action-edit"
-                    onClick={() => handleStartEdit(messageKey, translatedDisplayContent)}
-                    title={actionLabels.edit}
-                    type="button"
-                  >
-                    <span aria-hidden="true" className="javis-message-action-icon" />
-                    <span className="javis-message-action-label">{actionLabels.edit}</span>
-                  </button>
-                ) : null}
-              </div>
-              {message.role === "assistant" && index === conversationMessages.length - 1 ? (
-                <ArtifactCards
-                  task={task}
-                  locale={locale}
-                  onOpenDetail={onOpenDetail}
-                  onOpenFile={onOpenFile}
-                  onOpenWorkspaceTool={onOpenWorkspaceTool}
-                />
-              ) : null}
-              {message.role === "assistant" && index === conversationMessages.length - 1 ? (
-                <ContextStats task={task} labels={labels} />
-              ) : null}
-            </article>
+                  {message.role === "assistant" && index === conversationMessages.length - 1 ? (
+                    <ArtifactCards
+                      task={task}
+                      locale={locale}
+                      onOpenDetail={onOpenDetail}
+                      onOpenFile={onOpenFile}
+                      onOpenWorkspaceTool={onOpenWorkspaceTool}
+                    />
+                  ) : null}
+                  {message.role === "assistant" && index === conversationMessages.length - 1 ? (
+                    <ContextStats task={task} labels={labels} />
+                  ) : null}
+                </article>
+              </Fragment>
           )})
         ) : (
           <article className="javis-message user">
@@ -361,15 +391,20 @@ export function ThreadView({
         )}
 
         {showStreaming ? (
-          <StreamingMessage
-            text={getReadableStreamingContent(streaming.text, task, locale)}
-            isStreaming={streaming.showCursor}
-            agentLabel={formatCommanderTitle(getStreamingAgentLabel(streaming.agentKind, labels))}
-            thinkingLabel={getThinkingLabel(locale)}
-            thinkingMessages={getThinkingMessages(locale)}
-          />
+          <>
+            {renderExecutionPanels()}
+            <StreamingMessage
+              text={getReadableStreamingContent(streaming.text, task, locale)}
+              isStreaming={streaming.showCursor}
+              agentLabel={formatCommanderTitle(getStreamingAgentLabel(streaming.agentKind, labels))}
+              thinkingLabel={getThinkingLabel(locale)}
+              thinkingMessages={getThinkingMessages(locale)}
+            />
+          </>
         ) : !hasConversationMessages ? (
-          <article className="javis-message">
+          <>
+            {renderExecutionPanels()}
+            <article className="javis-message">
             <button
               className="javis-message-title javis-expandable-title"
               onClick={() => setCommanderExpanded((prev) => !prev)}
@@ -391,26 +426,7 @@ export function ThreadView({
             {commanderExpanded ? (
               <AgentDetailSections labels={labels} locale={locale} task={task} />
             ) : null}
-          </article>
-        ) : null}
-
-        {/* Agent summary cards — click to open right sidebar with details */}
-        {showExecutionPanels ? (
-          <>
-            <AgentOrchestrationPanel
-              task={task}
-              locale={locale}
-              selectedAgentId={selectedAgentId}
-              onSelectAgent={onSelectAgent}
-            />
-
-            <AgentSummaryList
-              agents={task.agents}
-              task={task}
-              selectedAgentId={selectedAgentId}
-              locale={locale}
-              onSelectAgent={(id) => onSelectAgent?.(id)}
-            />
+            </article>
           </>
         ) : null}
 
@@ -449,18 +465,15 @@ export function ThreadView({
         draftGoal={draftGoal}
         labels={labels}
         permissionControls={
-          task.permissionRequest
+          hasPendingPermissionRequest && task.permissionRequest
             ? {
                 canRequestApproval: false,
-                pendingRequest:
-                  task.permissionRequest.status === "pending"
-                    ? {
-                        allowAlways: task.permissionRequest.allowAlways,
-                        onApprove: () => onPermissionDecision?.("approved"),
-                        onAllowTask: () => onPermissionDecision?.("approved_always"),
-                        onDeny: () => onPermissionDecision?.("denied"),
-                      }
-                    : undefined,
+                pendingRequest: {
+                  allowAlways: task.permissionRequest.allowAlways,
+                  onApprove: () => onPermissionDecision?.("approved"),
+                  onAllowTask: () => onPermissionDecision?.("approved_always"),
+                  onDeny: () => onPermissionDecision?.("denied"),
+                },
               }
             : undefined
         }
@@ -596,6 +609,15 @@ function formatMessageTime(value: string): string {
 
 function getConversationMessageKey(message: WorkbenchChatMessage, index: number): string {
   return message.id ?? `${message.role}-${index}`;
+}
+
+function findLastAssistantMessageIndex(messages: WorkbenchChatMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "assistant") {
+      return index;
+    }
+  }
+  return -1;
 }
 
 function createFallbackConversationMessages(task: WorkbenchTask): WorkbenchChatMessage[] {

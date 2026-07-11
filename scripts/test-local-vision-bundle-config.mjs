@@ -21,12 +21,17 @@ async function main() {
     "scripts/node_modules/onnxruntime-node/",
     "bin/node/",
   ];
+  const optionalDevSourceTargets = new Set([
+    "models/local-vision/yolo26n-ui.onnx",
+  ]);
   const resourceTargets = new Set(Object.values(resources));
   for (const target of requiredTargets) {
     assert(resourceTargets.has(target), `missing local vision bundled resource target: ${target}`);
     const source = sourceForTarget(resources, target);
     assert(source, `missing local vision bundled resource source for target: ${target}`);
-    assertResourceSourceExists(configDir, source, target);
+    assertResourceSourceExists(configDir, source, target, {
+      optional: optionalDevSourceTargets.has(target),
+    });
   }
 
   const onnxRuntimeNodeSource = sourceForTarget(resources, "scripts/node_modules/onnxruntime-node/");
@@ -53,12 +58,15 @@ function sourceForTarget(resources, target) {
   return undefined;
 }
 
-function assertResourceSourceExists(configDir, source, target) {
+function assertResourceSourceExists(configDir, source, target, options = {}) {
   const sourcePath = resolve(configDir, source);
   let info;
   try {
     info = statSync(sourcePath);
   } catch (error) {
+    if (options.optional) {
+      return;
+    }
     throw new Error(`missing local vision bundle source for ${target}: ${sourcePath}; ${error.message}`);
   }
   if (target.endsWith("/")) {

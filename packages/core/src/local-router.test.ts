@@ -29,6 +29,29 @@ describe("local-router", () => {
     });
   });
 
+  it("routes source-backed project understanding to L3 Commander", () => {
+    const input = "\u544a\u8bc9\u6211\u8fd9\u4e2a\u9879\u76ee\u662f\u5e72\u561b\u7684, \u4e0d\u8981\u5149\u770breadme, \u8981\u7ed3\u5408\u5b9e\u9645\u4ee3\u7801\u60c5\u51b5";
+    const decision = routeMessage(input);
+
+    expect(decision).toMatchObject({
+      level: "L3",
+      mode: "commander_dag",
+    });
+    expect(decision.reasons).toContain("codebase_understanding_intent");
+  });
+
+  it("routes specialist agent requests to L3 Commander", () => {
+    const decision = routeMessage("\u8bf7\u5b89\u5168\u5ba1\u67e5\u8fd9\u4e2a TypeScript \u9879\u76ee, \u5e76\u68c0\u67e5\u6743\u9650\u6f0f\u6d1e");
+
+    expect(decision).toMatchObject({
+      level: "L3",
+      mode: "commander_dag",
+    });
+    expect(decision.reasons).toContain("specialist_agent_intent");
+    expect(decision.reasons).toContain("security_review_intent");
+    expect(decision.reasons).toContain("language_review_intent");
+  });
+
   it("scores explicit multi-step requests as complex", () => {
     const result = scoreComplexity("先读取文件，然后分析差异，最后生成重构方案");
 

@@ -1,3 +1,10 @@
+import {
+  createArtifactEnvelope,
+  isArtifactEnvelope,
+  type ArtifactEnvelope,
+  type ArtifactSensitivity,
+} from "./artifact-envelope";
+
 export interface SharedTaskContext {
   set<T>(key: string, value: T): void;
   get<T>(key: string): T | undefined;
@@ -8,7 +15,20 @@ export interface SharedTaskContext {
   setEnvelope<T>(key: string, envelope: import("./artifact-envelope").ArtifactEnvelope<T>): void;
   getEnvelope(key: string): import("./artifact-envelope").ArtifactEnvelope | undefined;
   hasEnvelope(key: string): boolean;
+  getEnvelopeHistory(key: string): import("./artifact-envelope").ArtifactEnvelope[];
   envelopeSnapshot(): Record<string, import("./artifact-envelope").ArtifactEnvelope>;
+}
+
+export interface StepArtifactOutputContext {
+  taskId: string;
+  runId: string;
+  stepId: string;
+  agentKind?: string;
+  agentId?: string;
+  toolName?: string;
+  type?: string;
+  schemaVersion?: number;
+  sensitivity?: ArtifactSensitivity;
 }
 
 export const CONTEXT_KEYS = {
@@ -70,6 +90,11 @@ export interface HandoffReportRecord {
     contentHash: string;
     sensitivity: string;
     producer: { stepId: string; agentKind?: string; toolName?: string };
+    previousArtifacts?: Array<{
+      artifactId: string;
+      contentHash: string;
+      producer: { stepId: string; agentKind?: string; toolName?: string };
+    }>;
   };
 }
 
@@ -130,6 +155,7 @@ export function createSharedTaskContext(
 ): SharedTaskContext {
   const store = new Map<string, unknown>(Object.entries(initialValues));
   const envelopeStore = new Map<string, import("./artifact-envelope").ArtifactEnvelope>();
+  const envelopeHistory = new Map<string, import("./artifact-envelope").ArtifactEnvelope[]>();
 
   return {
     set(key, value) {
@@ -147,11 +173,16 @@ export function createSharedTaskContext(
     clear() {
       store.clear();
       envelopeStore.clear();
+      envelopeHistory.clear();
     },
     resolveKey(key, locale) {
       return contextKeyForLocale(key, locale);
     },
     setEnvelope(key, envelope) {
+      const previous = envelopeStore.get(key);
+      if (previous) {
+        envelopeHistory.set(key, [...(envelopeHistory.get(key) ?? []), previous]);
+      }
       store.set(key, (envelope as { payload: unknown }).payload);
       envelopeStore.set(key, envelope);
     },
@@ -160,6 +191,9 @@ export function createSharedTaskContext(
     },
     hasEnvelope(key) {
       return envelopeStore.has(key);
+    },
+    getEnvelopeHistory(key) {
+      return [...(envelopeHistory.get(key) ?? [])];
     },
     envelopeSnapshot() {
       return Object.fromEntries(envelopeStore);
@@ -199,6 +233,46 @@ export function writeStepOutput(
 ): void {
   if (!outputContextKey) return;
   context.set(outputContextKey, output);
+}
+
+export function writeStepArtifactOutput(
+  outputContextKey: string | undefined,
+  output: unknown,
+  context: SharedTaskContext,
+  artifactContext: StepArtifactOutputContext,
+): void {
+  if (!outputContextKey) return;
+  const artifact = toArtifactEnvelope(output, outputContextKey, artifactContext);
+  context.setEnvelope(outputContextKey, artifact);
+}
+
+function toArtifactEnvelope(
+  value: unknown,
+  outputContextKey: string,
+  context: StepArtifactOutputContext,
+): ArtifactEnvelope {
+  if (isArtifactEnvelope(value)) {
+    return value;
+  }
+  return createArtifactEnvelope(value, {
+    taskId: context.taskId,
+    runId: context.runId,
+    type: context.type ?? outputContextKey,
+    schemaVersion: context.schemaVersion,
+    producer: {
+      stepId: context.stepId,
+      agentKind: context.agentKind,
+      agentId: context.agentId,
+      toolName: context.toolName,
+    },
+    sensitivity: context.sensitivity ?? inferArtifactSensitivity(outputContextKey),
+  });
+}
+
+function inferArtifactSensitivity(outputContextKey: string): ArtifactSensitivity {
+  return /secret|credential|token|cookie|password|api[_-]?key/i.test(outputContextKey)
+    ? "secret"
+    : "workspace";
 }
 
 export const DEFAULT_CONTEXT_KEY_SCHEMAS: readonly ContextKeySchema[] = [
@@ -367,6 +441,15 @@ export function buildHandoffReport(
         : schemaValidation.reason
       : undefined;
     const envelope = envelopeSource?.getEnvelope(contextKey);
+    const previousArtifacts = envelopeSource?.getEnvelopeHistory(contextKey).map((previous) => ({
+      artifactId: previous.artifactId,
+      contentHash: previous.contentHash,
+      producer: {
+        stepId: previous.producer.stepId,
+        agentKind: previous.producer.agentKind,
+        toolName: previous.producer.toolName,
+      },
+    }));
     const artifact = envelope ? {
       artifactId: envelope.artifactId,
       type: envelope.type,
@@ -378,6 +461,7 @@ export function buildHandoffReport(
         agentKind: envelope.producer.agentKind,
         toolName: envelope.producer.toolName,
       },
+      ...((previousArtifacts?.length ?? 0) > 0 ? { previousArtifacts } : {}),
     } : undefined;
     return {
       contextKey,

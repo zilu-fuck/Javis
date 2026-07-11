@@ -336,6 +336,22 @@ function RecoveryReportSection({
             {translateWorkbenchText("Recovery steps", locale)}: {report.replannedStepIds.join(", ")}
           </p>
         ) : null}
+        {report.commanderGuidance.length > 0 ? (
+          <p>
+            {translateWorkbenchText("Guidance", locale)}: {report.commanderGuidance.join("; ")}
+          </p>
+        ) : null}
+        {report.stuckSignals.length > 0 ? (
+          <div>
+            <p>{translateWorkbenchText("Stuck signals", locale)}:</p>
+            {report.stuckSignals.slice(0, 4).map((signal) => (
+              <p key={signal.fingerprint}>
+                {signal.kind} / {signal.severity} / {signal.hint}
+                {signal.evidence.length > 0 ? ` - ${signal.evidence.join(" | ")}` : ""}
+              </p>
+            ))}
+          </div>
+        ) : null}
       </article>
       {report.attempts.slice(0, 6).map((attempt) => (
         <article className="javis-document" key={`${attempt.failedStepId}-${attempt.replanStatus}`}>

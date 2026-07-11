@@ -18,6 +18,7 @@ type DryRunSummary = PermissionRequest["dryRun"];
 export interface DurableApprovalRecord {
   approvalId: string;
   taskId: string;
+  runId?: string;
   toolName: string;
   workspacePath: string;
   permissionLevel: "preview" | "confirmed_write";
@@ -121,6 +122,7 @@ export interface DurableGitCommentPullRequestPlan {
 
 export interface ApprovalRecordInput {
   taskId: string;
+  runId?: string;
   toolName: string;
   workspacePath: string;
   permissionRequest: PermissionRequest;
@@ -190,6 +192,7 @@ export function upsertApprovalRecord(
 
 export function createApprovalRecordFromPermissionRequest({
   taskId,
+  runId,
   toolName,
   workspacePath,
   permissionRequest,
@@ -212,6 +215,7 @@ export function createApprovalRecordFromPermissionRequest({
   return sanitizeApprovalRecord({
     approvalId: permissionRequest.id,
     taskId,
+    ...(runId ? { runId } : {}),
     toolName,
     workspacePath,
     permissionLevel: permissionRequest.level,
@@ -307,6 +311,7 @@ export function sanitizeApprovalRecord(value: unknown): DurableApprovalRecord | 
     !isRecord(value) ||
     !isString(value.approvalId) ||
     !isString(value.taskId) ||
+    ("runId" in value && !isString(value.runId)) ||
     !isString(value.toolName) ||
     !isString(value.workspacePath) ||
     !isPermissionLevel(value.permissionLevel) ||
@@ -383,6 +388,7 @@ export function sanitizeApprovalRecord(value: unknown): DurableApprovalRecord | 
   const record: DurableApprovalRecord = {
     approvalId: value.approvalId,
     taskId: value.taskId,
+    ...(isString(value.runId) ? { runId: value.runId } : {}),
     toolName: value.toolName,
     workspacePath: value.workspacePath,
     permissionLevel: value.permissionLevel,
@@ -537,7 +543,7 @@ function sanitizeCodeProposedEdit(value: unknown): CodeProposedEdit | null {
   ) {
     return null;
   }
-  return {
+  const edit: CodeProposedEdit = {
     ...(isString(value.approvalId) ? { approvalId: value.approvalId } : {}),
     proposalId: value.proposalId,
     workspacePath: value.workspacePath,
@@ -546,6 +552,13 @@ function sanitizeCodeProposedEdit(value: unknown): CodeProposedEdit | null {
     patch: value.patch,
     patchHash: value.patchHash,
   };
+  if (isString(value.baseGitHead)) {
+    edit.baseGitHead = value.baseGitHead;
+  }
+  if (Array.isArray(value.hunks)) {
+    edit.hunks = value.hunks;
+  }
+  return edit;
 }
 
 function sanitizeGitPushPlan(value: unknown): DurableGitPushPlan | null {

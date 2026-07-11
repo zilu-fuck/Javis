@@ -9,6 +9,7 @@ import {
   type DurableApprovalRecord,
 } from "./approval-records";
 import {
+  APPROVAL_RECORDS_ADD_RUN_ID_SQL,
   APPROVAL_RECORDS_CREATE_EXPIRATION_INDEX_SQL,
   APPROVAL_RECORDS_CREATE_STATUS_INDEX_SQL,
   APPROVAL_RECORDS_CREATE_TABLE_SQL,
@@ -32,15 +33,19 @@ describe("approval records persistence", () => {
 
     expect(APPROVAL_RECORDS_CREATE_TABLE_SQL).toContain("CREATE TABLE IF NOT EXISTS approval_records");
     expect(APPROVAL_RECORDS_CREATE_TABLE_SQL).toContain("approval_id TEXT PRIMARY KEY");
+    expect(APPROVAL_RECORDS_CREATE_TABLE_SQL).toContain("run_id TEXT");
+    expect(APPROVAL_RECORDS_ADD_RUN_ID_SQL).toBe("ALTER TABLE approval_records ADD COLUMN run_id TEXT");
     expect(APPROVAL_RECORDS_CREATE_STATUS_INDEX_SQL).toContain("status, tool_name");
     expect(APPROVAL_RECORDS_CREATE_EXPIRATION_INDEX_SQL).toContain("expires_at");
     expect(APPROVAL_RECORDS_MIGRATIONS.map((migration) => migration.id)).toEqual([
       "approval-records-v1-table",
+      "approval-records-v2-run-id",
       "approval-records-v1-status-index",
       "approval-records-v1-expiration-index",
     ]);
     expect(database.executedSql).toEqual([
       APPROVAL_RECORDS_CREATE_TABLE_SQL,
+      APPROVAL_RECORDS_ADD_RUN_ID_SQL,
       APPROVAL_RECORDS_CREATE_STATUS_INDEX_SQL,
       APPROVAL_RECORDS_CREATE_EXPIRATION_INDEX_SQL,
     ]);
@@ -48,8 +53,8 @@ describe("approval records persistence", () => {
 
   it("upserts sanitized records and loads newest records first", async () => {
     const database = createMemoryApprovalDatabase();
-    const older = createApprovalRecord("approval-older", "2026-05-24T00:00:00.000Z");
-    const newer = createApprovalRecord("approval-newer", "2026-05-24T00:01:00.000Z");
+    const older = createApprovalRecord("approval-older", "2026-05-24T00:00:00.000Z", "run-older");
+    const newer = createApprovalRecord("approval-newer", "2026-05-24T00:01:00.000Z", "run-newer");
 
     await upsertApprovalRecordInDatabase(database, older, "2026-05-24T00:02:00.000Z");
     await upsertApprovalRecordInDatabase(database, newer, "2026-05-24T00:03:00.000Z");
@@ -157,6 +162,7 @@ describe("approval records persistence", () => {
 interface StoredApprovalRecordRow extends Record<string, unknown> {
   approval_id: string;
   created_at: string;
+  run_id?: unknown;
   record_json: string;
   updated_at: string;
 }
@@ -212,25 +218,27 @@ function createStoredRow(values: DatabaseValue[]): StoredApprovalRecordRow {
   return {
     approval_id: String(values[0]),
     task_id: values[1],
-    tool_name: values[2],
-    workspace_path: values[3],
-    permission_level: values[4],
-    preview_hash: values[5],
-    expires_at: values[6],
-    status: values[7],
-    created_at: String(values[8]),
-    resolved_at: values[9],
-    decision: values[10],
-    permission_request_json: values[11],
-    code_proposed_edit_json: values[12],
-    record_json: String(values[13]),
-    updated_at: String(values[14]),
+    run_id: values[2],
+    tool_name: values[3],
+    workspace_path: values[4],
+    permission_level: values[5],
+    preview_hash: values[6],
+    expires_at: values[7],
+    status: values[8],
+    created_at: String(values[9]),
+    resolved_at: values[10],
+    decision: values[11],
+    permission_request_json: values[12],
+    code_proposed_edit_json: values[13],
+    record_json: String(values[14]),
+    updated_at: String(values[15]),
   };
 }
 
 function createApprovalRecord(
   approvalId = "approval-1",
   createdAt = "2026-05-24T00:00:00.000Z",
+  runId?: string,
 ): DurableApprovalRecord {
   const minute = createdAt.slice(14, 16);
   const dryRun: DryRunSummary = {
@@ -249,6 +257,7 @@ function createApprovalRecord(
   return {
     approvalId,
     taskId: "task-1",
+    ...(runId ? { runId } : {}),
     toolName: "file.executePdfOrganization",
     workspacePath: "C:/Users/example/Downloads",
     permissionLevel: "confirmed_write",

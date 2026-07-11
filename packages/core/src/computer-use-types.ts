@@ -23,6 +23,24 @@ export interface ComputerUseLoopConfig {
   heartbeatMs: number;
   /** Short-lived UIA cache duration in milliseconds. */
   uiCacheMs: number;
+  /** Optional screenshot stabilization before sending the frame to the model. */
+  screenshotStabilization: {
+    enabled: boolean;
+    settleMs: number;
+    maxAttempts: number;
+  };
+  /** Optional full-screen plus focused crop strategy for high-resolution local regions. */
+  regionFocus: {
+    enabled: boolean;
+    minScore: number;
+    paddingPx: number;
+    maxAreaRatio: number;
+    optionalWaitMs: number;
+  };
+  /** Controls multimodal media cache hints sent to compatible model servers. */
+  mediaCache: {
+    mode: "auto" | "off" | "vllm";
+  };
   /** Default mouse movement speed when the model does not specify one. */
   mouseSpeed: "instant" | "linear";
   /** Default linear mouse movement duration in milliseconds. */
@@ -229,26 +247,21 @@ export interface ComputerUseModelOutput {
  * Throws if JSON is invalid or tool is not recognized.
  */
 export function parseModelAction(raw: string): ComputerUseAction | null {
-  let cleaned = raw.trim();
-  // Strip markdown code fences if present
-  if (cleaned.startsWith("```")) {
-    cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```\s*$/, "");
-  }
-
-  const parsed: ComputerUseModelOutput = JSON.parse(cleaned);
+  const parsed = parseModelOutput(raw);
+  const modelAction = normalizeModelAction(parsed.action);
 
   // Check for completion signal. Completion must be an explicit no-op so a
   // contradictory "complete + click/type" output cannot silently skip work.
   if (parsed.status === "complete") {
-    if (!parsed.action || !parsed.action.tool) {
+    if (!modelAction || !modelAction.tool) {
       throw new Error("Completion signal missing action.tool field");
     }
-    if (!ALLOWED_TOOLS.has(parsed.action.tool)) {
-      throw new Error(`Tool "${parsed.action.tool}" not in allowed list: ${[...ALLOWED_TOOLS].join(", ")}`);
+    if (!ALLOWED_TOOLS.has(modelAction.tool)) {
+      throw new Error(`Tool "${modelAction.tool}" not in allowed list: ${[...ALLOWED_TOOLS].join(", ")}`);
     }
     const completionAction = validateActionParams(
-      parsed.action.tool,
-      normalizeActionParams(parsed.action.tool, parsed.action.params ?? {}),
+      modelAction.tool,
+      normalizeActionParams(modelAction.tool, modelAction.params ?? {}),
     );
     if (completionAction.tool !== "computer.wait" || completionAction.params.ms !== 0) {
       throw new Error("Completion signal must use computer.wait with ms=0");
@@ -259,15 +272,26 @@ export function parseModelAction(raw: string): ComputerUseAction | null {
     return null;
   }
 
-  if (!parsed.action || !parsed.action.tool) {
+  if (!modelAction || !modelAction.tool) {
     throw new Error("Model output missing action.tool field");
   }
 
-  if (!ALLOWED_TOOLS.has(parsed.action.tool)) {
-    throw new Error(`Tool "${parsed.action.tool}" not in allowed list: ${[...ALLOWED_TOOLS].join(", ")}`);
+  if (!ALLOWED_TOOLS.has(modelAction.tool)) {
+    throw new Error(`Tool "${modelAction.tool}" not in allowed list: ${[...ALLOWED_TOOLS].join(", ")}`);
   }
 
-  return validateActionParams(parsed.action.tool, normalizeActionParams(parsed.action.tool, parsed.action.params ?? {}));
+  return validateActionParams(modelAction.tool, normalizeActionParams(modelAction.tool, modelAction.params ?? {}));
+}
+
+function normalizeModelAction(action: ComputerUseModelOutput["action"] | undefined): ComputerUseModelOutput["action"] | undefined {
+  if (!action || !action.tool) return action;
+  const tool = action.tool.startsWith("computer.") ? action.tool : `computer.${action.tool}`;
+  if (tool === action.tool && action.params !== undefined) return action;
+  const record = action as unknown as Record<string, unknown>;
+  const params = action.params ?? Object.fromEntries(
+    Object.entries(record).filter(([key, value]) => key !== "tool" && value !== null && value !== undefined),
+  );
+  return { tool, params };
 }
 
 /**
@@ -279,7 +303,52 @@ export function parseModelOutput(raw: string): ComputerUseModelOutput {
   if (cleaned.startsWith("```")) {
     cleaned = cleaned.replace(/^```(?:json)?\s*\n?/, "").replace(/\n?```\s*$/, "");
   }
-  return JSON.parse(cleaned);
+  try {
+    return JSON.parse(cleaned);
+  } catch (error) {
+    const extracted = extractJsonObjectText(cleaned);
+    if (!extracted) throw error;
+    return JSON.parse(extracted);
+  }
+}
+
+function extractJsonObjectText(text: string): string | undefined {
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const ch = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === "\"") {
+      inString = true;
+      continue;
+    }
+    if (ch === "{") {
+      if (depth === 0) start = index;
+      depth += 1;
+      continue;
+    }
+    if (ch !== "}") continue;
+    if (depth === 0) continue;
+    depth -= 1;
+    if (depth === 0 && start >= 0) {
+      return text.slice(start, index + 1);
+    }
+  }
+
+  return undefined;
 }
 
 function validateActionParams(

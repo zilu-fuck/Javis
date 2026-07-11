@@ -11,6 +11,7 @@
  */
 
 import type { ModelProvider } from "./model-provider";
+import type { CompletionOptions } from "./model-provider";
 import type {
   ComputerDetectUiObjectsResult,
   ComputerListWindowsResult,
@@ -47,10 +48,6 @@ const PROMPT_CORRECTION_HINT_MAX_LENGTH = 1_000;
 const LOCAL_VISION_PATH_INPUT_MAX_LENGTH = 1_024;
 const LOCAL_VISION_IMAGE_DATA_URL_PATTERN = /data:image(?:\/|\\\/)[a-z0-9.+-]+;base64,/i;
 const LOCAL_VISION_OBSERVE_WAIT_MAX_MS = 160;
-const AUTO_CROP_MIN_SCORE = 0.88;
-const AUTO_CROP_PADDING_PX = 24;
-const AUTO_CROP_MAX_AREA_RATIO = 0.45;
-const AUTO_CROP_OPTIONAL_WAIT_MAX_MS = 160;
 const TASK_APPROVAL_LEASE_TTL_MS = 2 * 60 * 1000;
 const TASK_APPROVAL_LEASE_MAX_ACTIONS = 12;
 const LOCAL_VISION_SLOW_LATENCY_RATIO = 0.85;
@@ -62,6 +59,11 @@ const COMPUTER_WAIT_TIMEOUT_OVERHEAD_MS = 250;
 const POST_APPROVAL_PREFLIGHT_REFRESH_THRESHOLD_MS = 1_000;
 const SUSPICIOUS_SCREENSHOT_MIN_AREA = 300_000;
 const SUSPICIOUS_SCREENSHOT_MAX_BYTES_PER_PIXEL = 0.01;
+const VLLM_MEDIA_CACHE_PROVIDER_PATTERN = /(?:^|[-_])vllm(?:$|[-_])/i;
+const LOCAL_VLLM_BASE_URL_PATTERN = /^https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\])(?::\d+)?(?:\/|$)/i;
+const MIMO_MODEL_PATTERN = /(?:^|[-_])mimo(?:$|[-_])/i;
+const DISABLE_THINKING_PROVIDER_PATTERN = /(?:^|[-_])(?:mimo|deepseek)(?:$|[-_])/i;
+const DISABLE_THINKING_BASE_URL_PATTERN = /(?:xiaomimimo|deepseek)/i;
 const MAX_COMPUTER_USE_STEPS = 60;
 const MAX_COMPUTER_USE_HISTORY_STEPS = 20;
 const MAX_STEP_DEADLINE_MS = 300_000;
@@ -149,7 +151,7 @@ export async function runComputerUseLoop(
 ): Promise<ComputerUseStep[]> {
   const { modelProvider, computerTool, userGoal, allowedToolNames, approveAction, onStep, onProgress, signal } = options;
   const config = normalizeComputerUseLoopConfig(options.config);
-  const allowedToolNameSet = allowedToolNames?.length ? new Set(allowedToolNames) : undefined;
+  const allowedToolNameSet = allowedToolNames ? new Set(allowedToolNames) : undefined;
 
   const steps: ComputerUseStep[] = [];
   let correctionHint = "";
@@ -288,11 +290,12 @@ export async function runComputerUseLoop(
       });
     correctionHint = "";
     const prepareAutoCrop = () => {
-      if (!pendingAutoCrop && !nextScreenshot && i + 1 < config.maxSteps && screenshot && observation.screenshotVisionSource !== "crop") {
+      if (config.regionFocus.enabled && !pendingAutoCrop && !nextScreenshot && i + 1 < config.maxSteps && screenshot && observation.screenshotVisionSource !== "crop") {
         const autoCrop = selectAutoCropCandidate({
           userGoal,
           screenshot,
           localVision: observation.localVision,
+          config,
         });
         if (autoCrop) {
           if (trace.localVision) {
@@ -337,12 +340,7 @@ export async function runComputerUseLoop(
       noteScreenshotModelCall();
       rawResponse = await withHeartbeat(
         () => withTimeout(
-          modelProvider.complete(prompt, {
-            ...(screenshot ? { imageDataUrl: screenshot.dataUrl } : {}),
-            skipAgentMemory: true,
-            skipSkillContext: true,
-            timeoutMs: config.timeouts.modelMs,
-          }),
+          modelProvider.complete(prompt, buildComputerUseCompletionOptions(modelProvider, screenshot, config.timeouts.modelMs, config.mediaCache)),
           config.timeouts.modelMs,
           "Computer Use model call",
           stepController.signal,
@@ -370,12 +368,7 @@ export async function runComputerUseLoop(
           noteScreenshotModelCall();
           rawResponse = await withHeartbeat(
             () => withTimeout(
-              modelProvider.complete(minimalPrompt, {
-                ...(screenshot ? { imageDataUrl: screenshot.dataUrl } : {}),
-                skipAgentMemory: true,
-                skipSkillContext: true,
-                timeoutMs: config.timeouts.modelMs,
-              }),
+              modelProvider.complete(minimalPrompt, buildComputerUseCompletionOptions(modelProvider, screenshot, config.timeouts.modelMs, config.mediaCache)),
               config.timeouts.modelMs,
               "Computer Use model retry",
               stepController.signal,
@@ -409,21 +402,18 @@ export async function runComputerUseLoop(
 
     // 4. Parse response — retry once on JSON parse failure
     let action: ComputerUseAction | null;
+    let parsedResponseText = rawResponse.text;
     try {
-      action = parseModelAction(rawResponse.text);
+      action = parseModelAction(parsedResponseText);
     } catch {
       // Retry with explicit JSON instruction
       try {
-        const retryPrompt = prompt + "\n\nYour previous output was not valid JSON. Output valid JSON only — no markdown fences, no commentary.";
+        const retryPrompt = prompt +
+          "\n\nYour previous output was not valid JSON. Output exactly one JSON object and nothing else. Start with { and end with }. Do not include markdown fences, commentary, analysis, or chain-of-thought.";
         noteScreenshotModelCall();
         const retryResponse = await withHeartbeat(
           () => withTimeout(
-            modelProvider.complete(retryPrompt, {
-              ...(screenshot ? { imageDataUrl: screenshot.dataUrl } : {}),
-              skipAgentMemory: true,
-              skipSkillContext: true,
-              timeoutMs: config.timeouts.modelMs,
-            }),
+            modelProvider.complete(retryPrompt, buildComputerUseCompletionOptions(modelProvider, screenshot, config.timeouts.modelMs, config.mediaCache)),
             config.timeouts.modelMs,
             "Computer Use JSON retry",
             stepController.signal,
@@ -431,7 +421,8 @@ export async function runComputerUseLoop(
           () => emitProgress("waiting_model", "Still waiting for JSON retry"),
           config.heartbeatMs,
         );
-        action = parseModelAction(retryResponse.text);
+        parsedResponseText = retryResponse.text;
+        action = parseModelAction(parsedResponseText);
       } catch {
         // Second failure — record error step and continue
           const errorStep: ComputerUseStep = {
@@ -452,7 +443,7 @@ export async function runComputerUseLoop(
       }
     }
 
-    const rawOutput = tryParseOutput(rawResponse.text);
+    const rawOutput = tryParseOutput(parsedResponseText);
     // 5. Completion signal
     if (action === null) {
       pendingAutoCrop = undefined;
@@ -497,6 +488,23 @@ export async function runComputerUseLoop(
       : requestedAction;
     const strategyResult = preferStructuredAction(mappedAction, observation, rawOutput);
     const executedAction = strategyResult.action;
+    if (allowedToolNameSet && !allowedToolNameSet.has(executedAction.tool)) {
+      pendingAutoCrop = undefined;
+      const disabledToolStep: ComputerUseStep = {
+        stepIndex: i,
+        screenshotDataUrl: screenshot?.dataUrl ?? "",
+        observation: rawOutput?.observation ?? "",
+        action: executedAction,
+        target: rawOutput?.target ?? "",
+        confidence: rawOutput?.confidence ?? "low",
+        phase: "failed",
+        trace: finishTrace(trace, stepStartedAt),
+        error: `Computer Use tool is disabled: ${executedAction.tool}`,
+      };
+      recordStep(disabledToolStep);
+      correctionHint = `The tool ${executedAction.tool} is disabled. Choose one of the enabled tools: ${[...allowedToolNameSet].join(", ")}.`;
+      continue;
+    }
     const localVisionPreflightAction = isCoordinateAction(executedAction) ? requestedAction : executedAction;
     const actionRequiresFreshApproval = requiresFreshApprovalForCurrentAction(
       executedAction,
@@ -1080,6 +1088,54 @@ function removeVerificationOnlyParams(action: ComputerUseAction): ComputerUseAct
   return { tool: action.tool, params };
 }
 
+function buildComputerUseCompletionOptions(
+  modelProvider: ModelProvider,
+  screenshot: ComputerScreenshotResult | undefined,
+  timeoutMs: number,
+  mediaCache: ComputerUseLoopConfig["mediaCache"],
+): CompletionOptions {
+  const base: CompletionOptions = {
+    skipAgentMemory: true,
+    skipSkillContext: true,
+    timeoutMs,
+    disableThinking: shouldDisableThinkingForComputerUse(modelProvider),
+  };
+  if (!screenshot) return base;
+  const uuid = screenshot.cacheId ?? `screen:${stableStringHash(screenshot.dataUrl)}`;
+  const enableMediaUuid = shouldEnableMediaUuid(modelProvider, mediaCache);
+  return {
+    ...base,
+    imageDataUrl: screenshot.dataUrl,
+    media: [{ url: screenshot.dataUrl, uuid }],
+    enableMediaUuid,
+  };
+}
+
+function shouldEnableMediaUuid(
+  modelProvider: ModelProvider,
+  mediaCache: ComputerUseLoopConfig["mediaCache"],
+): boolean {
+  if (mediaCache.mode === "off") return false;
+  if (mediaCache.mode === "vllm") return true;
+  return supportsVllmMediaUuid(modelProvider);
+}
+
+function supportsVllmMediaUuid(modelProvider: ModelProvider): boolean {
+  const settings = modelProvider.settings;
+  if ([modelProvider.id, settings.provider, settings.baseUrl]
+    .some((value) => typeof value === "string" && VLLM_MEDIA_CACHE_PROVIDER_PATTERN.test(value))) {
+    return true;
+  }
+  return LOCAL_VLLM_BASE_URL_PATTERN.test(settings.baseUrl) && MIMO_MODEL_PATTERN.test(settings.model);
+}
+
+function shouldDisableThinkingForComputerUse(modelProvider: ModelProvider): boolean {
+  const settings = modelProvider.settings;
+  return [modelProvider.id, settings.provider, settings.model]
+    .some((value) => typeof value === "string" && DISABLE_THINKING_PROVIDER_PATTERN.test(value))
+    || DISABLE_THINKING_BASE_URL_PATTERN.test(settings.baseUrl);
+}
+
 /**
  * Build the full prompt string for the vision model.
  * Combines system prompt, goal, history, and any correction hints.
@@ -1105,6 +1161,12 @@ function buildPrompt(
     COMPUTER_USE_SYSTEM_PROMPT.en,
     `USER GOAL: ${sanitizePromptBlockText(userGoal, PROMPT_USER_GOAL_MAX_LENGTH)}`,
   ];
+
+  const history = formatStepHistory(steps, historySteps);
+  if (history) {
+    parts.push(history);
+  }
+
   if (screenshot.width !== undefined && screenshot.height !== undefined) {
     parts.push(
       `SCREENSHOT: ${screenshot.width}x${screenshot.height}. Coordinates start at (0,0) in the top-left corner; x increases right, y increases down.`,
@@ -1139,11 +1201,6 @@ function buildPrompt(
   const localVisionPromptContext = formatLocalVisionCandidates(screenshot.localVision);
   if (localVisionPromptContext) {
     parts.push(localVisionPromptContext);
-  }
-
-  const history = formatStepHistory(steps, historySteps);
-  if (history) {
-    parts.push(history);
   }
 
   if (correctionHint) {
@@ -1270,7 +1327,11 @@ async function observeComputerState(options: {
   const observationId = createObservationId(freshAt);
   const screenshotPromise = options.nextScreenshot
     ? Promise.resolve(options.nextScreenshot.screenshot)
-    : withTimeout(invokeTool(() => options.computerTool.screenshot({})), options.config.timeouts.screenshotMs, "computer.screenshot", options.signal);
+    : captureStableScreenshot({
+      computerTool: options.computerTool,
+      config: options.config,
+      signal: options.signal,
+    });
   const screenshotVisionSource: ScreenshotVisionSource = options.nextScreenshot?.source ?? "full";
   const windowPromise = withTimeout(
     invokeTool(() => options.computerTool.listWindows({})),
@@ -1449,7 +1510,13 @@ function normalizeComputerUseLoopConfig(
     ...DEFAULT_COMPUTER_USE_CONFIG.localVision,
     ...input?.localVision,
   };
+  const mergedRegionFocus = {
+    ...DEFAULT_COMPUTER_USE_CONFIG.regionFocus,
+    ...input?.regionFocus,
+  };
+  const mediaCache = normalizeMediaCacheConfig(input?.mediaCache);
   const timeouts = normalizeTimeouts(input?.timeouts);
+  const screenshotStabilization = normalizeScreenshotStabilization(input?.screenshotStabilization);
   return {
     ...DEFAULT_COMPUTER_USE_CONFIG,
     ...input,
@@ -1493,7 +1560,43 @@ function normalizeComputerUseLoopConfig(
     ),
     deniedWindowPatterns: normalizeDeniedWindowPatterns(input?.deniedWindowPatterns),
     timeouts,
+    screenshotStabilization,
+    regionFocus: normalizeRegionFocusConfig(mergedRegionFocus),
+    mediaCache,
     localVision: normalizeLocalVisionConfig(mergedLocalVision),
+  };
+}
+
+function normalizeScreenshotStabilization(
+  input: Partial<ComputerUseLoopConfig["screenshotStabilization"]> | undefined,
+): ComputerUseLoopConfig["screenshotStabilization"] {
+  const defaults = DEFAULT_COMPUTER_USE_CONFIG.screenshotStabilization;
+  return {
+    enabled: input?.enabled ?? defaults.enabled,
+    settleMs: clampInteger(input?.settleMs, 0, 1_000, defaults.settleMs),
+    maxAttempts: clampInteger(input?.maxAttempts, 0, 3, defaults.maxAttempts),
+  };
+}
+
+function normalizeRegionFocusConfig(
+  input: Partial<ComputerUseLoopConfig["regionFocus"]>,
+): ComputerUseLoopConfig["regionFocus"] {
+  const defaults = DEFAULT_COMPUTER_USE_CONFIG.regionFocus;
+  return {
+    enabled: input.enabled ?? defaults.enabled,
+    minScore: clampNumber(input.minScore, 0, 1, defaults.minScore),
+    paddingPx: clampInteger(input.paddingPx, 0, 256, defaults.paddingPx),
+    maxAreaRatio: clampNumber(input.maxAreaRatio, 0.05, 1, defaults.maxAreaRatio),
+    optionalWaitMs: clampInteger(input.optionalWaitMs, 1, 2_000, defaults.optionalWaitMs),
+  };
+}
+
+function normalizeMediaCacheConfig(
+  input: Partial<ComputerUseLoopConfig["mediaCache"]> | undefined,
+): ComputerUseLoopConfig["mediaCache"] {
+  const mode = input?.mode;
+  return {
+    mode: mode === "off" || mode === "vllm" ? mode : DEFAULT_COMPUTER_USE_CONFIG.mediaCache.mode,
   };
 }
 
@@ -1674,7 +1777,7 @@ function autoCropOptionalWaitMs(config: ComputerUseLoopConfig): number {
     Math.min(
       config.timeouts.screenshotMs,
       config.localVision.timeoutMs,
-      AUTO_CROP_OPTIONAL_WAIT_MAX_MS,
+      config.regionFocus.optionalWaitMs,
     ),
   );
 }
@@ -2305,9 +2408,11 @@ function selectAutoCropCandidate(options: {
   userGoal: string;
   screenshot: ComputerScreenshotResult;
   localVision: LocalVisionObservation | undefined;
+  config: ComputerUseLoopConfig;
 }): { candidate: LocalUiCandidate; region: ComputerScreenshotRegion; reason: string } | undefined {
   const localVision = options.localVision;
   if (
+    !options.config.regionFocus.enabled ||
     !localVision ||
     localVision.mode !== "prompt_hint" ||
     localVision.promptCandidates.length === 0
@@ -2318,14 +2423,14 @@ function selectAutoCropCandidate(options: {
   if (!goalText) return undefined;
   for (const candidate of localVision.promptCandidates) {
     const region = candidate.box
-      ? paddedScreenshotRegion(candidate.box, options.screenshot, AUTO_CROP_PADDING_PX)
+      ? paddedScreenshotRegion(candidate.box, options.screenshot, options.config.regionFocus.paddingPx)
       : undefined;
     if (
       !region ||
       candidate.riskHint === "high" ||
-      candidate.score < AUTO_CROP_MIN_SCORE ||
+      candidate.score < options.config.regionFocus.minScore ||
       !candidateMatchesGoal(candidate, goalText) ||
-      isOversizedCrop(region, options.screenshot, AUTO_CROP_MAX_AREA_RATIO)
+      isOversizedCrop(region, options.screenshot, options.config.regionFocus.maxAreaRatio)
     ) {
       continue;
     }
@@ -3023,6 +3128,74 @@ function invokeTool<T>(operation: () => Promise<T>): Promise<T> {
   } catch (error) {
     return Promise.reject(error);
   }
+}
+
+async function captureStableScreenshot(options: {
+  computerTool: ComputerTool;
+  config: ComputerUseLoopConfig;
+  signal: AbortSignal;
+}): Promise<ComputerScreenshotResult> {
+  const first = await withTimeout(
+    invokeTool(() => options.computerTool.screenshot({})),
+    options.config.timeouts.screenshotMs,
+    "computer.screenshot",
+    options.signal,
+  );
+  const stabilization = options.config.screenshotStabilization;
+  if (!stabilization.enabled || stabilization.maxAttempts <= 0 || !hasNativeScreenshotContentKey(first)) {
+    return first;
+  }
+  let previous = first;
+  for (let attempt = 0; attempt < stabilization.maxAttempts; attempt += 1) {
+    if (stabilization.settleMs > 0) {
+      await delay(stabilization.settleMs, options.signal);
+    }
+    const next = await withTimeout(
+      invokeTool(() => options.computerTool.screenshot({})),
+      options.config.timeouts.screenshotMs,
+      "computer.screenshot stabilization",
+      options.signal,
+    );
+    if (screenshotsHaveSameContent(previous, next)) {
+      return next;
+    }
+    previous = next;
+  }
+  return previous;
+}
+
+function screenshotsHaveSameContent(
+  left: ComputerScreenshotResult,
+  right: ComputerScreenshotResult,
+): boolean {
+  return screenshotContentKey(left) === screenshotContentKey(right);
+}
+
+function screenshotContentKey(screenshot: ComputerScreenshotResult): string {
+  return screenshot.cacheId ??
+    screenshot.contentHash ??
+    `${stableStringHash(screenshot.dataUrl)}:${screenshot.width}x${screenshot.height}`;
+}
+
+function hasNativeScreenshotContentKey(screenshot: ComputerScreenshotResult): boolean {
+  return Boolean(screenshot.cacheId || screenshot.contentHash);
+}
+
+async function delay(ms: number, signal: AbortSignal): Promise<void> {
+  if (ms <= 0) return;
+  throwIfAborted(signal);
+  await new Promise<void>((resolve, reject) => {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const abortHandler = () => {
+      if (timeoutId) clearTimeout(timeoutId);
+      reject(signal.reason instanceof Error ? signal.reason : new Error("Computer Use cancelled."));
+    };
+    timeoutId = setTimeout(() => {
+      signal.removeEventListener("abort", abortHandler);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", abortHandler, { once: true });
+  });
 }
 
 function resultErrorMessage(result: PromiseSettledResult<unknown>): string | undefined {

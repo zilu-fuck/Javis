@@ -94,11 +94,12 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Write approved text content to a target file.",
     capabilityTags: ["file_execute"],
     ownerAgentKinds: ["file", "doc-updater"],
+    requiredInputs: [{ name: "targetPath", type: "string", nonEmpty: true }],
   },
   {
     name: "shell.runReadOnlyCommand",
     permissionLevel: "read",
-    summary: "Run an allowlisted read-only shell command in the workspace.",
+    summary: "Run an allowlisted read-only shell command in the workspace. Requires toolInput.program and toolInput.args; use only exact safe read-only commands such as git status --short, git diff --stat, git diff --unified=1, git diff --check, node --version, pnpm --version, or cargo --version.",
     capabilityTags: ["shell_readonly"],
     ownerAgentKinds: [
       "shell",
@@ -112,6 +113,10 @@ export const initialToolDescriptors: ToolDescriptor[] = [
       "explorer",
       "perf-analyzer",
       "refactor",
+    ],
+    requiredInputs: [
+      { name: "program", type: "string", nonEmpty: true },
+      { name: "args", type: "string[]", nonEmpty: true },
     ],
   },
 
@@ -244,9 +249,10 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "trend.fetchHotList",
     permissionLevel: "read",
-    summary: "Fetch a structured public hot/trending list from a supported provider such as Weibo, with item count and freshness metadata.",
+    summary: "Fetch a structured public hot/trending list from a supported provider such as Weibo, with item count and freshness metadata. Requires toolInput.provider, for example {\"provider\":\"weibo\",\"limit\":20}.",
     capabilityTags: ["trend_fetch", "web_fetch"],
     ownerAgentKinds: ["research"],
+    requiredInputs: [{ name: "provider", type: "string", nonEmpty: true }],
   },
   {
     name: "memory.search",
@@ -288,7 +294,8 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   },
   {
     name: "computer.openPath",
-    permissionLevel: "read",
+    permissionLevel: "confirmed_write",
+    writeRiskLevel: "risky",
     summary: "Open a file or directory path in the native OS shell. Requires toolInput.path as a non-empty string.",
     capabilityTags: ["local_search"],
     ownerAgentKinds: ["computer"],

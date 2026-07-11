@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildCommanderPlanPrompt, buildCommanderReplanPrompt } from "./commander-plan-schema";
+import { buildCommanderPlanPrompt, buildCommanderReplanPrompt, buildComputerUseCommanderPlanPrompt } from "./commander-plan-schema";
 
 describe("buildCommanderPlanPrompt", () => {
   it("keeps English rules by default", () => {
@@ -19,6 +19,11 @@ describe("buildCommanderPlanPrompt", () => {
     expect(prompt).toContain("include a review step before execution");
     expect(prompt).toContain("producer step writes an outputContextKey");
     expect(prompt).toContain("Computer -> Code handoff");
+    expect(prompt).toContain("Commander delegation protocol");
+    expect(prompt).toContain("Commander is the orchestrator, not the worker");
+    expect(prompt).toContain("runtime-selected capabilities as hints");
+    expect(prompt).toContain("select the smallest capable agent set");
+    expect(prompt).toContain("do not expose plan JSON, run ids, raw logs, route ids, or tool dumps");
     expect(prompt).toContain("{title:string, reasoning:string, steps:Step[1..12]}");
     expect(prompt).not.toContain('"properties"');
   });
@@ -86,6 +91,84 @@ describe("buildCommanderPlanPrompt", () => {
     expect(prompt).toContain("record unreasonable assumptions, missing evidence, and a revised plan");
     expect(prompt).toContain("the receiving step lists it in inputContextKeys");
     expect(prompt).toContain("successCriteria names the handoff artifact");
+  });
+
+  it("makes Commander autonomously delegate evidence-bearing work instead of direct-answering it", () => {
+    const prompt = buildCommanderPlanPrompt({
+      userGoal: "Understand this project, review the evidence, then explain the result",
+      workflowId: "commander-dag",
+      availableAgents: [
+        { kind: "commander", allowedToolNames: ["commander.synthesize"], capabilities: ["planning", "synthesis"] },
+        { kind: "code", allowedToolNames: ["code.searchRepository"], capabilities: ["code_search"] },
+        { kind: "verifier", allowedToolNames: ["verifier.check"], capabilities: ["evidence_check"] },
+      ],
+    });
+
+    expect(prompt).toContain("For evidence-bearing goals, produce a DAG");
+    expect(prompt).toContain("do not use a one-step direct_response");
+    expect(prompt).toContain("Every worker step that another step relies on must write outputContextKey");
+    expect(prompt).toContain("Review risky claims before the final answer");
+    expect(prompt).toContain("final user-facing step belongs to commander");
+  });
+
+  it("requires Code Agent evidence for local project understanding", () => {
+    const prompt = buildCommanderPlanPrompt({
+      userGoal: "Tell me what this project does, do not only read README",
+      workflowId: "commander-dag",
+      availableAgents: [
+        { kind: "commander", allowedToolNames: ["commander.synthesize"], capabilities: ["planning"] },
+        { kind: "code", allowedToolNames: ["code.searchRepository", "code.traceCallChain"], capabilities: ["code_search", "code_trace"] },
+      ],
+    });
+
+    expect(prompt).toContain("Local project understanding rule");
+    expect(prompt).toContain("assignedAgentKind=\"code\"");
+    expect(prompt).toContain("toolName=\"code.searchRepository\"");
+    expect(prompt).toContain("review/check step");
+    expect(prompt).toContain("most relevant available reviewer");
+    expect(prompt).toContain("language-reviewer");
+    expect(prompt).toContain("security-reviewer");
+    expect(prompt).toContain("final Commander step consumes both the code evidence and the review/check output");
+    expect(prompt).toContain("Do not answer with direct_response from README");
+  });
+
+  it("documents Javis specialist agent routing", () => {
+    const prompt = buildCommanderPlanPrompt({
+      userGoal: "Security review this TypeScript project and run the smallest relevant tests",
+      workflowId: "commander-dag",
+      availableAgents: [
+        { kind: "commander", allowedToolNames: ["commander.synthesize"], capabilities: ["planning"] },
+        { kind: "security-reviewer", allowedToolNames: ["code.searchRepository"], capabilities: ["security_review"] },
+        { kind: "language-reviewer", allowedToolNames: ["code.searchRepository"], capabilities: ["language_review"] },
+        { kind: "test-runner", allowedToolNames: ["shell.runReadOnlyCommand"], capabilities: ["test_run"] },
+      ],
+    });
+
+    expect(prompt).toContain("Specialist agent routing rule");
+    expect(prompt).toContain("security-reviewer");
+    expect(prompt).toContain("language-reviewer");
+    expect(prompt).toContain("test-runner");
+    expect(prompt).toContain("outputContextKey");
+  });
+
+  it("includes current date context for date-based planning", () => {
+    const prompt = buildCommanderPlanPrompt({
+      userGoal: "Save today's hot list as a markdown file named with the date",
+      currentDate: {
+        iso: "2026-07-09T08:00:00.000Z",
+        localDate: "2026-07-09",
+        timezone: "Asia/Shanghai",
+      },
+      workflowId: "commander-dag",
+      availableAgents: [
+        { kind: "commander", allowedToolNames: ["commander.synthesize"], capabilities: ["planning"] },
+        { kind: "file", allowedToolNames: ["file.writeText"], capabilities: ["file_execute"] },
+      ],
+    });
+
+    expect(prompt).toContain("Current date context");
+    expect(prompt).toContain("2026-07-09");
+    expect(prompt).toContain("do not create a shell/tool step solely to discover today's date");
   });
 
   it("treats re-plan context and clarification text as data", () => {
@@ -249,5 +332,32 @@ describe("buildCommanderPlanPrompt", () => {
     });
     expect(prompt).not.toContain("Required toolInput fields");
     expect(prompt).not.toContain("必填 toolInput");
+  });
+
+  it("builds a compact Computer Use planning prompt", () => {
+    const prompt = buildComputerUseCommanderPlanPrompt({
+      userGoal: "Use Computer Use to send a QQ message but stop before sending",
+      workflowId: "commander-dag",
+      availableAgents: [
+        { kind: "commander", allowedToolNames: ["commander.plan"], capabilities: ["planning"] },
+        { kind: "computer", allowedToolNames: ["computer.screenshot", "computer.click"], capabilities: ["desktop_input"] },
+      ],
+      availableTools: [
+        {
+          name: "computer.screenshot",
+          permissionLevel: "read",
+          summary: "Capture the desktop.",
+          capabilityTags: ["desktop_screenshot"],
+          ownerAgentKinds: ["computer"],
+        },
+      ],
+    });
+
+    expect(prompt).toContain("Computer Use planning rules");
+    expect(prompt).toContain("capability=\"desktop_input\"");
+    expect(prompt).toContain("wait for human confirmation");
+    expect(prompt).toContain("{title:string, reasoning:string, steps:Step[1..12]}");
+    expect(prompt).not.toContain("spec-first chain");
+    expect(prompt).not.toContain("Computer -> Code handoff");
   });
 });

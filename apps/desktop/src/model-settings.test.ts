@@ -85,6 +85,23 @@ describe("model settings persistence", () => {
       baseUrl: "",
     });
   });
+
+  it("trusts custom provider key references over stale built-in provider ids", () => {
+    expect(
+      sanitizeModelSettings({
+        provider: "deepseek",
+        model: "deepseek-v4-flash",
+        apiKey: "",
+        apiKeyReference: "model.custom-s",
+        baseUrl: "http://101.251.162.103:8080/v1",
+      }),
+    ).toMatchObject({
+      provider: "custom-s",
+      model: "deepseek-v4-flash",
+      apiKeyReference: "model.custom-s",
+      baseUrl: "http://101.251.162.103:8080/v1",
+    });
+  });
 });
 
 describe("model profile connection normalization", () => {

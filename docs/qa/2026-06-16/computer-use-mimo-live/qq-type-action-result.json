@@ -1,0 +1,55 @@
+{
+  "ok": true,
+  "qqBefore": {
+    "handle": 460748,
+    "title": "QQ",
+    "className": "Chrome_WidgetWin_1",
+    "rect": {
+      "x": 752,
+      "y": 185,
+      "width": 1088,
+      "height": 721
+    },
+    "isVisible": true,
+    "isForeground": true
+  },
+  "typed": {
+    "typed": true,
+    "length": 25
+  },
+  "logs": [
+    {
+      "phase": "approved",
+      "toolName": "computer.type",
+      "approvalId": "qa-type-safe-message-001",
+      "request": {
+        "text": "Javis computer-use 测试，请忽略",
+        "delayMs": 35,
+        "clearBefore": false
+      }
+    },
+    {
+      "phase": "executed",
+      "cmd": "computer_type",
+      "approvalId": "qa-type-safe-message-001",
+      "result": {
+        "typed": true,
+        "length": 25
+      }
+    }
+  ],
+  "afterShotMeta": {
+    "width": 1088,
+    "height": 721,
+    "methodUsed": "printWindow",
+    "health": {
+      "sampledPixels": 4096,
+      "dominantColorRatio": 0.618896484375,
+      "darkPixelRatio": 0.0029296875,
+      "suspiciousBlank": false,
+      "reason": null
+    },
+    "dataUrlLength": 257874
+  },
+  "afterShotDataUrl": "[redacted data url length=257874]"
+}

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { WorkbenchLocale, WorkbenchTask } from "../types";
 import { formatDurationMs, getTaskStatusLabel, getTaskStatusProgress, translateWorkbenchText } from "../utils";
+import { getParticipatingAgents } from "./agent-visibility";
 
 interface AgentOrchestrationPanelProps {
   locale: WorkbenchLocale;
@@ -17,7 +18,7 @@ export function AgentOrchestrationPanel({
 }: AgentOrchestrationPanelProps) {
   const steps = task.plan ?? [];
   const shouldShow = steps.length > 0 && task.status !== "created";
-  const visibleAgents = getVisibleAgentsForSteps(task);
+  const visibleAgents = getParticipatingAgents(task);
   const [isCollapsed, setIsCollapsed] = useState(task.status === "completed");
   const completedCount = steps.filter((step) => step.status === "completed").length;
   const stepProgress = steps.length > 0 ? Math.round((completedCount / steps.length) * 100) : 0;
@@ -57,20 +58,8 @@ export function AgentOrchestrationPanel({
       </div>
       {!isCollapsed ? (
         <>
-          <ol className="javis-task-stepper">
-            {steps.map((step, index) => (
-              <li className={`javis-task-stepper-item status-${step.status}`} key={step.id}>
-                <span className="javis-task-stepper-node" aria-hidden="true">
-                  {getStepStatusIcon(step.status)}
-                </span>
-                <span>{translateWorkbenchText(step.title, locale)}</span>
-                {index < steps.length - 1 ? <span className="javis-task-stepper-line" /> : null}
-              </li>
-            ))}
-          </ol>
           {visibleAgents.length > 0 ? (
             <div className="javis-agent-run-stage">
-              <DispatchConnectorSvg agentCount={visibleAgents.length} />
               <div className="javis-agent-run-grid">
                 {visibleAgents.map((agent) => {
                   const agentProgress = getAgentProgress(agent.status, progress);
@@ -134,62 +123,6 @@ export function AgentOrchestrationPanel({
         </>
       ) : null}
     </section>
-  );
-}
-
-function getVisibleAgentsForSteps(task: WorkbenchTask) {
-  const steps = task.plan ?? [];
-  if (steps.length === 0) {
-    return [];
-  }
-  const stepAgentKinds = new Set(
-    steps
-      .map((step) => step.agentKind?.trim())
-      .filter((kind): kind is string => Boolean(kind)),
-  );
-  const stepAgentIds = new Set(
-    steps
-      .map((step) => step.agentId?.trim())
-      .filter((id): id is string => Boolean(id)),
-  );
-  if (stepAgentKinds.size === 0 && stepAgentIds.size === 0) {
-    return task.agents;
-  }
-  return task.agents.filter((agent) => {
-    if (stepAgentIds.has(agent.id)) {
-      return true;
-    }
-    const normalizedAgentId = agent.id.replace(/^agent-/, "");
-    if (stepAgentKinds.has(normalizedAgentId)) {
-      return true;
-    }
-    return agent.status !== "queued";
-  });
-}
-
-function DispatchConnectorSvg({ agentCount }: { agentCount: number }) {
-  if (agentCount <= 0) {
-    return null;
-  }
-
-  const paths = Array.from({ length: agentCount }, (_, index) => {
-    const targetX = agentCount === 1 ? 450 : 90 + (720 / Math.max(1, agentCount - 1)) * index;
-    const controlX = 450 + (targetX - 450) * 0.44;
-    return `M450 8 C${controlX.toFixed(0)} 28 ${targetX.toFixed(0)} 34 ${targetX.toFixed(0)} 54`;
-  });
-
-  return (
-    <svg
-      aria-hidden="true"
-      className="javis-dispatch-lines"
-      data-testid="dispatch-connector-svg"
-      preserveAspectRatio="none"
-      viewBox="0 0 900 60"
-    >
-      {paths.map((path, index) => (
-        <path d={path} key={`${path}-${index}`} />
-      ))}
-    </svg>
   );
 }
 

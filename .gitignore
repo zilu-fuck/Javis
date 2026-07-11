@@ -3,6 +3,8 @@ node_modules/
 dist/
 dist-ssr/
 target/
+artifacts/local-vision/
+.codex-run-logs/
 *.log
 *.local
 .DS_Store

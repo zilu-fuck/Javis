@@ -1,0 +1,36 @@
+{
+  "started": "2026-06-16T02:40:55.508Z",
+  "finished": "2026-06-16T02:41:00.883Z",
+  "raw": {
+    "text": "Okay, the user wants to send a test message in QQ to \"凤雏-大聪明\". The current screenshot shows the QQ window is already open and the chat with \"凤雏-大聪明\" is selected. I can see the text input area at the bottom, but it doesn't look focused yet since there's no cursor visible.\n\nThe goal is to type the message \"Javis computer-use 测试，请忽略\" and then send it. First, I need to make sure the text input is focused. The input area is around the middle-bottom part of the window. Since the window coordinates are given, I should calculate the click position within that.\n\nLooking at the QQ window rect: x=752, y=185, width=1088, height=721. The text input is likely near the bottom. To focus it, I'll click on the text input area. Then, once focused, I can type the message.\n\nSo the next action should be a click on the text input to focus it. I'll use computer.click with the coordinates. Let's say around (900, 600) which should be within the input area. After that, in the next step, I can",
+    "model": "mimo-v2.5",
+    "provider": "mimo",
+    "tokenUsage": {
+      "inputTokens": 1244,
+      "outputTokens": 256,
+      "totalTokens": 1500
+    }
+  },
+  "parsed": null,
+  "parseError": "SyntaxError: Unexpected token 'O', \"Okay, the \"... is not valid JSON",
+  "promptSummary": {
+    "providerId": "mimo",
+    "model": "mimo-v2.5",
+    "baseUrl": "https://token-plan-cn.xiaomimimo.com/v1",
+    "imageLength": 257642,
+    "qqWindow": {
+      "handle": 460748,
+      "title": "QQ",
+      "className": "Chrome_WidgetWin_1",
+      "rect": {
+        "x": 752,
+        "y": 185,
+        "width": 1088,
+        "height": 721
+      },
+      "isVisible": true,
+      "isForeground": true
+    },
+    "apiKey": "[redacted]"
+  }
+}

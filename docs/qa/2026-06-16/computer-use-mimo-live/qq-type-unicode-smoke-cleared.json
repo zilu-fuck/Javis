@@ -1,0 +1,73 @@
+{
+  "ok": true,
+  "qq": {
+    "handle": 460748,
+    "title": "QQ",
+    "className": "Chrome_WidgetWin_1",
+    "rect": {
+      "x": 752,
+      "y": 185,
+      "width": 1088,
+      "height": 721
+    },
+    "isVisible": true,
+    "isForeground": true
+  },
+  "logs": [
+    {
+      "phase": "approved",
+      "toolName": "computer.keyCombo",
+      "approvalId": "qa-select-qq-draft-001",
+      "request": {
+        "keys": [
+          "Ctrl",
+          "A"
+        ],
+        "pressDurationMs": 35
+      }
+    },
+    {
+      "phase": "executed",
+      "cmd": "computer_key_combo",
+      "approvalId": "qa-select-qq-draft-001",
+      "result": {
+        "combo": "Ctrl + A",
+        "executed": true
+      }
+    },
+    {
+      "phase": "approved",
+      "toolName": "computer.keyCombo",
+      "approvalId": "qa-delete-qq-draft-001",
+      "request": {
+        "keys": [
+          "Delete"
+        ],
+        "pressDurationMs": 35
+      }
+    },
+    {
+      "phase": "executed",
+      "cmd": "computer_key_combo",
+      "approvalId": "qa-delete-qq-draft-001",
+      "result": {
+        "combo": "Delete",
+        "executed": true
+      }
+    }
+  ],
+  "shotMeta": {
+    "width": 1088,
+    "height": 721,
+    "methodUsed": "printWindow",
+    "health": {
+      "sampledPixels": 4096,
+      "dominantColorRatio": 0.584228515625,
+      "darkPixelRatio": 0.008056640625,
+      "suspiciousBlank": false,
+      "reason": null
+    },
+    "dataUrlLength": 405050
+  },
+  "shotDataUrl": "[redacted data url length=405050]"
+}

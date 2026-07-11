@@ -14,11 +14,19 @@ export interface ProviderCapabilities {
   longContext: boolean;
 }
 
+export interface ModelMediaInput {
+  url: string;
+  uuid?: string;
+}
+
 export interface AdapterCompletionInput {
   prompt: string;
   imageDataUrl?: string;
   /** Multi-image support — passed alongside imageDataUrl for backward compat. */
   images?: string[];
+  media?: ModelMediaInput[];
+  enableMediaUuid?: boolean;
+  disableThinking?: boolean;
   model: string;
   providerId: string;
   baseUrl: string;
@@ -34,6 +42,9 @@ export interface AdapterRequestPayload {
   prompt: string;
   imageDataUrl?: string;
   images?: string[];
+  media?: ModelMediaInput[];
+  enableMediaUuid?: boolean;
+  disableThinking?: boolean;
   providerId: string;
   model: string;
   apiKeyReference: string;

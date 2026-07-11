@@ -70,6 +70,18 @@ describe("createJavisRuntime", () => {
     expect(normalizedAppRuntimeSource).toContain("notifyWorkspaceToolActivity(\n          \"files\",\n          \"file.scanMarkdownDocuments\"");
   });
 
+  it("triggers runtime event compaction after terminal events are stored", () => {
+    expect(normalizedAppRuntimeSource).toContain("await store.append(envelope);");
+    expect(normalizedAppRuntimeSource).toContain("kind === \"task.completed\" || kind === \"task.failed\"");
+    expect(normalizedAppRuntimeSource).toContain("await store.pruneByTaskId(envelope.taskId, true);");
+  });
+
+  it("wires the desktop local read-only workspace runtime into core runtime", () => {
+    expect(normalizedAppRuntimeSource).toContain("new LocalReadOnlyWorkspace({");
+    expect(normalizedAppRuntimeSource).toContain("root: getWorkspacePath");
+    expect(normalizedAppRuntimeSource).toContain("workspaceRuntime,");
+  });
+
   it("parses structured Goal verifier results and prevents low-confidence completion", async () => {
     const complete = vi.fn(() => Promise.resolve({
       text: JSON.stringify({

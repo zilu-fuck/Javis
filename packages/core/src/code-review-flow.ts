@@ -19,6 +19,11 @@ import { addModelUsage, createEmptyTokenUsageSummary } from "./token-usage";
 import type { ID, TaskSnapshot, TaskStep } from "./index";
 import { createScopedAgentTracker, setTrackedAgentStates } from "./flow-agent-utils";
 import { safeSynthesizeConclusion } from "./workflow-executor";
+import {
+  runWorkspaceCodeApplyOperation,
+  runWorkspaceReadOnlyCommand,
+} from "./workflow-step-helpers";
+import type { WorkspaceRuntime } from "./workspace-runtime";
 
 export interface CodeReviewFlowOptions {
   controller: FlowController;
@@ -27,6 +32,7 @@ export interface CodeReviewFlowOptions {
   codeTool: CodeTool;
   shellTool: ShellTool;
   commanderTool?: CommanderTool;
+  workspaceRuntime?: WorkspaceRuntime;
   setPendingPermissionHandler(
     requestId: string,
     handler: PendingPermissionHandler | undefined,
@@ -40,6 +46,7 @@ export async function runCodeReviewTask({
   codeTool,
   shellTool,
   commanderTool,
+  workspaceRuntime,
   setPendingPermissionHandler,
 }: CodeReviewFlowOptions) {
   let snapshot = controller.getSnapshot();
@@ -229,11 +236,11 @@ export async function runCodeReviewTask({
       });
 
       try {
-        const verification = await shellTool.runReadOnlyCommand({
+        const verification = await runWorkspaceReadOnlyCommand({
           program: "git",
           args: ["diff", "--check"],
           workspacePath: null,
-        });
+        }, shellTool, workspaceRuntime);
         const verificationStatus = verification.exitCode === 0 ? "completed" : "failed";
         const logs = appendLog(snapshot, {
           id: `${taskId}-done`,
@@ -566,9 +573,14 @@ export async function runCodeReviewTask({
           });
 
           try {
-            const applyResult = await codeTool.applyProposedEdit(proposedEdit, {
-              approvalId: resolvedApplyRequest.id,
-              taskId,
+            const applyResult = await runWorkspaceCodeApplyOperation({
+              workspaceRuntime,
+              edit: proposedEdit,
+              applyProposedEdit: codeTool.applyProposedEdit,
+              approval: {
+                approvalId: resolvedApplyRequest.id,
+                taskId,
+              },
             });
             const applySafetyError = validateCodeApplyResult(proposedEdit, applyResult);
             if (applySafetyError) {
@@ -599,11 +611,11 @@ export async function runCodeReviewTask({
               });
               return;
             }
-            const postApplyVerification = await shellTool.runReadOnlyCommand({
+            const postApplyVerification = await runWorkspaceReadOnlyCommand({
               program: "git",
               args: ["diff", "--check"],
               workspacePath: null,
-            });
+            }, shellTool, workspaceRuntime);
             const applyStatus =
               applyResult.applied && postApplyVerification.exitCode === 0 ? "completed" : "failed";
 

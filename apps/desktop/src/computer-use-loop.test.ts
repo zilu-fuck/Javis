@@ -126,6 +126,67 @@ describe("runComputerUseLoop", () => {
     expect(steps[1].confidence).toBe("high");
   });
 
+  it("treats an empty allowed tool list as fail-closed", async () => {
+    const modelProvider = createModelProvider(JSON.stringify({
+      observation: "A target button is visible",
+      action: { tool: "computer.click", params: { x: 100, y: 200 } },
+      target: "Click the target",
+      confidence: "high",
+    }));
+    const computerTool = createComputerTool();
+
+    const steps = await runComputerUseLoop({
+      modelProvider,
+      computerTool,
+      userGoal: "Click the target",
+      allowedToolNames: [],
+      config: { maxSteps: 1 },
+    });
+
+    expect(computerTool.click).not.toHaveBeenCalled();
+    expect(steps[0].phase).toBe("failed");
+    expect(steps[0].error).toContain("Computer Use tool is disabled: computer.click");
+  });
+
+  it("checks the actual structured action against the allowed tool list", async () => {
+    const modelProvider = createModelProvider(JSON.stringify({
+      observation: "The Save button is visible",
+      action: { tool: "computer.click", params: { x: 120, y: 80 } },
+      target: "Click Save",
+      confidence: "high",
+    }));
+    const computerTool = createComputerTool();
+    vi.mocked(computerTool.listWindows).mockResolvedValue({
+      windows: [{
+        handle: 42,
+        title: "Target App",
+        className: "TargetWindow",
+        rect: { x: 0, y: 0, width: 800, height: 600 },
+        isVisible: true,
+        isForeground: true,
+      }],
+    });
+    vi.mocked(computerTool.inspectUi).mockResolvedValue({
+      tree: "<Button automationId=\"saveButton\" name=\"Save\">",
+      nodeCount: 1,
+    });
+
+    const steps = await runComputerUseLoop({
+      modelProvider,
+      computerTool,
+      userGoal: "Click Save",
+      allowedToolNames: ["computer.click"],
+      approveAction: vi.fn(async () => ({ approvalId: "approval-1", taskId: "task-1" })),
+      config: { maxSteps: 1 },
+    });
+
+    expect(computerTool.click).not.toHaveBeenCalled();
+    expect(computerTool.invokeUi).not.toHaveBeenCalled();
+    expect(steps[0].phase).toBe("failed");
+    expect(steps[0].action.tool).toBe("computer.invokeUi");
+    expect(steps[0].error).toContain("Computer Use tool is disabled: computer.invokeUi");
+  });
+
   it("passes the current screenshot to approval when live previews are enabled", async () => {
     const modelProvider = createModelProvider(JSON.stringify({
       observation: "A target button is visible",
@@ -735,6 +796,32 @@ describe("runComputerUseLoop", () => {
     expect(modelProvider.complete).toHaveBeenCalledTimes(2);
     expect(computerTool.wait).toHaveBeenCalledWith({ ms: 25 });
     expect(steps[0].error).toBeUndefined();
+  });
+
+  it("records retry response metadata after invalid first output", async () => {
+    const modelProvider = createSequenceModelProvider([
+      "not json",
+      JSON.stringify({
+        observation: "Retry observation",
+        action: { tool: "computer.wait", params: { ms: 25 } },
+        target: "Retry target",
+        confidence: "medium",
+      }),
+    ]);
+    const computerTool = createComputerTool();
+
+    const steps = await runComputerUseLoop({
+      modelProvider,
+      computerTool,
+      userGoal: "Wait",
+      config: { maxSteps: 1 },
+    });
+
+    expect(steps[0]).toMatchObject({
+      observation: "Retry observation",
+      target: "Retry target",
+      confidence: "medium",
+    });
   });
 
   it("allows zero-duration waits to complete with normal IPC overhead", async () => {
@@ -8529,5 +8616,320 @@ describe("runComputerUseLoop", () => {
 
     expect(steps[0].phase).toBe("failed");
     expect(computerTool.type).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes stable screenshot media UUIDs for vLLM-compatible providers", async () => {
+    const modelProvider = createModelProvider(JSON.stringify({
+      observation: "Goal achieved",
+      action: { tool: "computer.wait", params: { ms: 0 } },
+      target: "done",
+      confidence: "high",
+      status: "complete",
+    }));
+    modelProvider.id = "vllm";
+    modelProvider.settings.provider = "vllm";
+    modelProvider.settings.model = "mimo-v2.5";
+    const computerTool = createComputerTool();
+    vi.mocked(computerTool.screenshot).mockResolvedValue({
+      dataUrl: "data:image/png;base64,SCREEN==",
+      contentHash: "abc123",
+      cacheId: "screen:abc123",
+      width: 1920,
+      height: 1080,
+      capturedAt: "2026-06-04T00:00:00.000Z",
+      methodUsed: "bitblt",
+    });
+
+    await runComputerUseLoop({
+      modelProvider,
+      computerTool,
+      userGoal: "Inspect screen",
+      config: {
+        maxSteps: 1,
+        screenshotStabilization: { enabled: false, settleMs: 0, maxAttempts: 0 },
+      },
+    });
+
+    expect(modelProvider.complete).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      imageDataUrl: "data:image/png;base64,SCREEN==",
+      media: [{ url: "data:image/png;base64,SCREEN==", uuid: "screen:abc123" }],
+      enableMediaUuid: true,
+    }));
+  });
+
+  it("enables media UUIDs for local custom vLLM serving mimo models", async () => {
+    const modelProvider = createModelProvider(JSON.stringify({
+      observation: "Goal achieved",
+      action: { tool: "computer.wait", params: { ms: 0 } },
+      target: "done",
+      confidence: "high",
+      status: "complete",
+    }));
+    modelProvider.id = "custom";
+    modelProvider.settings.provider = "openai-compatible";
+    modelProvider.settings.model = "mimo-v2.5";
+    modelProvider.settings.baseUrl = "http://127.0.0.1:8000/v1";
+    const computerTool = createComputerTool();
+    vi.mocked(computerTool.screenshot).mockResolvedValue({
+      dataUrl: "data:image/png;base64,SCREEN==",
+      contentHash: "abc123",
+      cacheId: "screen:abc123",
+      width: 1920,
+      height: 1080,
+      capturedAt: "2026-06-04T00:00:00.000Z",
+      methodUsed: "bitblt",
+    });
+
+    await runComputerUseLoop({
+      modelProvider,
+      computerTool,
+      userGoal: "Inspect screen",
+      config: {
+        maxSteps: 1,
+        screenshotStabilization: { enabled: false, settleMs: 0, maxAttempts: 0 },
+      },
+    });
+
+    expect(modelProvider.complete).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      media: [{ url: "data:image/png;base64,SCREEN==", uuid: "screen:abc123" }],
+      enableMediaUuid: true,
+      disableThinking: true,
+    }));
+  });
+
+  it("does not enable media UUIDs for the hosted mimo provider by default", async () => {
+    const modelProvider = createModelProvider(JSON.stringify({
+      observation: "Goal achieved",
+      action: { tool: "computer.wait", params: { ms: 0 } },
+      target: "done",
+      confidence: "high",
+      status: "complete",
+    }));
+    modelProvider.id = "mimo";
+    modelProvider.settings.provider = "mimo";
+    modelProvider.settings.model = "mimo-v2.5";
+    modelProvider.settings.baseUrl = "https://api.xiaomimimo.com/v1";
+    const computerTool = createComputerTool();
+    vi.mocked(computerTool.screenshot).mockResolvedValue({
+      dataUrl: "data:image/png;base64,SCREEN==",
+      contentHash: "abc123",
+      cacheId: "screen:abc123",
+      width: 1920,
+      height: 1080,
+      capturedAt: "2026-06-04T00:00:00.000Z",
+      methodUsed: "bitblt",
+    });
+
+    await runComputerUseLoop({
+      modelProvider,
+      computerTool,
+      userGoal: "Inspect screen",
+      config: {
+        maxSteps: 1,
+        screenshotStabilization: { enabled: false, settleMs: 0, maxAttempts: 0 },
+      },
+    });
+
+    expect(modelProvider.complete).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      enableMediaUuid: false,
+      disableThinking: true,
+    }));
+  });
+
+  it("respects media cache off mode even for vLLM-looking providers", async () => {
+    const modelProvider = createModelProvider(JSON.stringify({
+      observation: "Goal achieved",
+      action: { tool: "computer.wait", params: { ms: 0 } },
+      target: "done",
+      confidence: "high",
+      status: "complete",
+    }));
+    modelProvider.id = "vllm";
+    modelProvider.settings.provider = "vllm";
+    modelProvider.settings.model = "mimo-v2.5";
+    const computerTool = createComputerTool();
+    vi.mocked(computerTool.screenshot).mockResolvedValue({
+      dataUrl: "data:image/png;base64,SCREEN==",
+      contentHash: "abc123",
+      cacheId: "screen:abc123",
+      width: 1920,
+      height: 1080,
+      capturedAt: "2026-06-04T00:00:00.000Z",
+      methodUsed: "bitblt",
+    });
+
+    await runComputerUseLoop({
+      modelProvider,
+      computerTool,
+      userGoal: "Inspect screen",
+      config: {
+        maxSteps: 1,
+        mediaCache: { mode: "off" },
+        screenshotStabilization: { enabled: false, settleMs: 0, maxAttempts: 0 },
+      },
+    });
+
+    expect(modelProvider.complete).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      enableMediaUuid: false,
+    }));
+  });
+
+  it("allows explicit vLLM media cache mode for custom hosted settings", async () => {
+    const modelProvider = createModelProvider(JSON.stringify({
+      observation: "Goal achieved",
+      action: { tool: "computer.wait", params: { ms: 0 } },
+      target: "done",
+      confidence: "high",
+      status: "complete",
+    }));
+    modelProvider.id = "mimo";
+    modelProvider.settings.provider = "mimo";
+    modelProvider.settings.model = "mimo-v2.5";
+    modelProvider.settings.baseUrl = "https://api.xiaomimimo.com/v1";
+    const computerTool = createComputerTool();
+    vi.mocked(computerTool.screenshot).mockResolvedValue({
+      dataUrl: "data:image/png;base64,SCREEN==",
+      contentHash: "abc123",
+      cacheId: "screen:abc123",
+      width: 1920,
+      height: 1080,
+      capturedAt: "2026-06-04T00:00:00.000Z",
+      methodUsed: "bitblt",
+    });
+
+    await runComputerUseLoop({
+      modelProvider,
+      computerTool,
+      userGoal: "Inspect screen",
+      config: {
+        maxSteps: 1,
+        mediaCache: { mode: "vllm" },
+        screenshotStabilization: { enabled: false, settleMs: 0, maxAttempts: 0 },
+      },
+    });
+
+    expect(modelProvider.complete).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      enableMediaUuid: true,
+    }));
+  });
+
+  it("keeps current screenshot context after stable history in the prompt", async () => {
+    const modelProvider = createModelProvider(JSON.stringify({
+      observation: "Goal achieved",
+      action: { tool: "computer.wait", params: { ms: 0 } },
+      target: "done",
+      confidence: "high",
+      status: "complete",
+    }));
+    const computerTool = createComputerTool();
+
+    await runComputerUseLoop({
+      modelProvider,
+      computerTool,
+      userGoal: "Inspect screen",
+      config: { maxSteps: 1, screenshotStabilization: { enabled: false, settleMs: 0, maxAttempts: 0 } },
+    });
+
+    const prompt = vi.mocked(modelProvider.complete).mock.calls[0]?.[0] ?? "";
+    expect(prompt.indexOf("USER GOAL: Inspect screen")).toBeLessThan(prompt.indexOf("SCREENSHOT:"));
+    expect(prompt.indexOf("Analyze the screenshot")).toBeGreaterThan(prompt.indexOf("SCREENSHOT:"));
+  });
+
+  it("waits for a stable native screenshot when content hashes match", async () => {
+    vi.useFakeTimers();
+    const modelProvider = createModelProvider(JSON.stringify({
+      observation: "Goal achieved",
+      action: { tool: "computer.wait", params: { ms: 0 } },
+      target: "done",
+      confidence: "high",
+      status: "complete",
+    }));
+    const computerTool = createComputerTool();
+    vi.mocked(computerTool.screenshot)
+      .mockResolvedValueOnce({
+        dataUrl: "data:image/png;base64,FIRST==",
+        contentHash: "same",
+        cacheId: "screen:same",
+        width: 1920,
+        height: 1080,
+        capturedAt: "2026-06-04T00:00:00.000Z",
+        methodUsed: "bitblt",
+      })
+      .mockResolvedValueOnce({
+        dataUrl: "data:image/png;base64,SECOND==",
+        contentHash: "same",
+        cacheId: "screen:same",
+        width: 1920,
+        height: 1080,
+        capturedAt: "2026-06-04T00:00:00.120Z",
+        methodUsed: "bitblt",
+      });
+
+    const runPromise = runComputerUseLoop({
+      modelProvider,
+      computerTool,
+      userGoal: "Inspect screen",
+      config: {
+        maxSteps: 1,
+        screenshotStabilization: { enabled: true, settleMs: 120, maxAttempts: 1 },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(120);
+    await runPromise;
+    vi.useRealTimers();
+
+    expect(computerTool.screenshot).toHaveBeenCalledTimes(2);
+    expect(modelProvider.complete).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      imageDataUrl: "data:image/png;base64,SECOND==",
+    }));
+  });
+
+  it("uses the newest screenshot when stabilization does not reach an identical frame", async () => {
+    vi.useFakeTimers();
+    const modelProvider = createModelProvider(JSON.stringify({
+      observation: "Goal achieved",
+      action: { tool: "computer.wait", params: { ms: 0 } },
+      target: "done",
+      confidence: "high",
+      status: "complete",
+    }));
+    const computerTool = createComputerTool();
+    vi.mocked(computerTool.screenshot)
+      .mockResolvedValueOnce({
+        dataUrl: "data:image/png;base64,OLD==",
+        contentHash: "old",
+        cacheId: "screen:old",
+        width: 1920,
+        height: 1080,
+        capturedAt: "2026-06-04T00:00:00.000Z",
+        methodUsed: "bitblt",
+      })
+      .mockResolvedValueOnce({
+        dataUrl: "data:image/png;base64,NEW==",
+        contentHash: "new",
+        cacheId: "screen:new",
+        width: 1920,
+        height: 1080,
+        capturedAt: "2026-06-04T00:00:00.120Z",
+        methodUsed: "bitblt",
+      });
+
+    const runPromise = runComputerUseLoop({
+      modelProvider,
+      computerTool,
+      userGoal: "Inspect screen",
+      config: {
+        maxSteps: 1,
+        screenshotStabilization: { enabled: true, settleMs: 120, maxAttempts: 1 },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(120);
+    await runPromise;
+    vi.useRealTimers();
+
+    expect(computerTool.screenshot).toHaveBeenCalledTimes(2);
+    expect(modelProvider.complete).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+      imageDataUrl: "data:image/png;base64,NEW==",
+    }));
   });
 });

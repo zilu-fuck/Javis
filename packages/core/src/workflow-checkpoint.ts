@@ -1,5 +1,11 @@
 import type { WorkbenchWorkflow, WorkbenchWorkflowStep } from "./workflows";
-import type { ArtifactEnvelope } from "./artifact-envelope";
+import {
+  computeContentHash,
+  createArtifactEnvelope,
+  isArtifactEnvelope,
+  sanitizeArtifactForPersistence,
+  type ArtifactEnvelope,
+} from "./artifact-envelope";
 
 export interface WorkflowCheckpoint {
   taskId: string;
@@ -60,17 +66,19 @@ export function computePlanHash(steps: WorkbenchWorkflowStep[]): string {
   const normalized = steps
     .map((s) => ({
       id: s.id,
+      title: s.title,
+      input: s.input,
+      output: s.output,
       deps: [...(s.dependsOn ?? [])].sort(),
       agent: s.agentKind,
       cap: [...(s.requiredCapabilities ?? [])].sort(),
+      inputContextKeys: [...(s.inputContextKeys ?? [])].sort(),
+      outputContextKey: s.outputContextKey ?? "",
+      permissionLevel: s.permissionLevel,
+      canRunInParallel: s.canRunInParallel,
     }))
     .sort((a, b) => a.id.localeCompare(b.id));
-  const canonical = JSON.stringify(normalized);
-  let hash = 0;
-  for (let i = 0; i < canonical.length; i += 1) {
-    hash = ((hash << 5) - hash + canonical.charCodeAt(i)) | 0;
-  }
-  return `plan-${(hash >>> 0).toString(16).padStart(8, "0")}-${steps.length}`;
+  return `plan-sha256-${computeContentHash(normalized)}-${steps.length}`;
 }
 
 export function buildCheckpointFromDagState(input: {
@@ -93,10 +101,35 @@ export function buildCheckpointFromDagState(input: {
   );
 
   const contextSnapshot: Record<string, ArtifactEnvelope> = {};
+  for (const [key, value] of Object.entries(input.contextSnapshot)) {
+    if (isArtifactEnvelope(value)) {
+      contextSnapshot[key] = value;
+    }
+  }
   if (input.envelopes) {
     for (const [key, envelope] of Object.entries(input.envelopes)) {
-      contextSnapshot[key] = envelope;
+      contextSnapshot[key] = sanitizeArtifactForPersistence(envelope);
     }
+  }
+  for (const [key, value] of Object.entries(input.contextSnapshot)) {
+    if (value === undefined || contextSnapshot[key]) {
+      continue;
+    }
+    if (isArtifactEnvelope(value)) {
+      contextSnapshot[key] = sanitizeArtifactForPersistence(value);
+      continue;
+    }
+    const producerStep = input.workflow.steps.find((step) => step.outputContextKey === key);
+    contextSnapshot[key] = sanitizeArtifactForPersistence(createArtifactEnvelope(value, {
+      taskId: input.taskId,
+      runId: input.runId,
+      type: `sharedContext.${key}`,
+      producer: {
+        stepId: producerStep?.id ?? "checkpoint",
+        agentKind: producerStep?.agentKind,
+      },
+      sensitivity: "workspace",
+    }));
   }
 
   return {

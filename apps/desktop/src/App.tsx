@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   createGoalEvaluationFromDecision,
   createInitialTaskSnapshot,
@@ -16,6 +16,7 @@ import {
   type TaskSnapshot,
 } from "@javis/core";
 import { bridgeVisionIfNeeded } from "./vision-bridge";
+import { resolveVisionBridgeRuntimeMode } from "./submission-routing";
 import { buildRuntimeCapabilityVerification } from "./capability-verification";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -176,6 +177,7 @@ import {
   getDurableApprovalToolName,
   getDurableApprovalWorkspacePath,
   isDurableApprovalRequestTitle,
+  reconcileRestoredApprovalTaskToCheckpoint,
   runRestoredCodePatchVerification,
   runRestoredGitCreatePullRequest,
   runRestoredGitCommentPullRequest,
@@ -185,7 +187,7 @@ import {
   runRestoredPdfOrganization,
 } from "./restored-approval";
 import { useModelSettingsControls } from "./use-model-settings";
-import { normalizeModelConfigurationConnections } from "./model-settings";
+import { normalizeModelConfigurationConnections, type ModelSettings } from "./model-settings";
 import { createConfiguredModelProvider } from "./model-provider";
 import { fetchProviderModels } from "./provider-models";
 import { useModelProfiles, type ModelProfileRepositoryLike } from "./use-model-profiles";
@@ -307,11 +309,21 @@ import {
   createFileBackedTaskSessionJsonLineWriter,
 } from "./task-session-log";
 import {
+  createRuntimeEventStore,
   RUNTIME_EVENT_MIGRATIONS,
+  type RuntimeEventStore,
 } from "./runtime-event-store";
 import {
+  createWorkflowCheckpointStore,
   WORKFLOW_CHECKPOINT_MIGRATIONS,
+  type WorkflowCheckpointStore,
 } from "./workflow-checkpoint-store";
+import {
+  attachRestoredApprovalDurableResume,
+  advanceRestoredApprovalResumeSeed,
+  buildRestoredApprovalResumeStartRequest,
+  createRestoredApprovalResumeStore,
+} from "./restored-approval-resume";
 import {
   createUserPreferencesRepository,
   PENDING_USER_PREFERENCES_STORAGE_KEY,
@@ -653,48 +665,6 @@ function inferSubmitGoalIntent(input: {
   return "new_chat";
 }
 
-function shouldRouteAsDirectChat(
-  rawGoal: string,
-  composeMode: "chat" | "project",
-  submitIntent: WorkbenchSubmitGoalIntent,
-  imageDataUrls?: string[],
-): boolean {
-  return (
-    composeMode === "project" &&
-    (submitIntent === "new_chat" || submitIntent === "continue_history") &&
-    !imageDataUrls?.length &&
-    isLightweightChatGoal(rawGoal)
-  );
-}
-
-function isLightweightChatGoal(goal: string): boolean {
-  const normalized = goal.trim().replace(/[。！？!?~～\s]+$/g, "").toLowerCase();
-  if (!normalized) return false;
-  const exactGreetings = new Set([
-    "你好",
-    "您好",
-    "嗨",
-    "哈喽",
-    "在吗",
-    "你是谁",
-    "谢谢",
-    "多谢",
-    "hello",
-    "hi",
-    "hey",
-    "thanks",
-    "thank you",
-  ]);
-  if (exactGreetings.has(normalized)) {
-    return true;
-  }
-  return /^帮我解释一下.{0,80}$/.test(normalized) && !hasExecutionIntent(normalized);
-}
-
-function hasExecutionIntent(value: string): boolean {
-  return /修改|修复|创建|新建|删除|移动|运行|执行|测试|部署|提交|commit|push|pr|打开|点击|浏览器|文件|代码|项目|规划|计划|实现/.test(value);
-}
-
 function logNonFatalError(context: string, error: unknown) {
   console.warn(context, error);
 }
@@ -862,6 +832,23 @@ function allowsLocalModelWithoutKey(settings: { provider: string; baseUrl: strin
     || baseUrl.startsWith("http://::1");
 }
 
+function modelSettingsFromPrimaryProfile(
+  config: WorkbenchModelConfiguration,
+): ModelSettings | null {
+  const primary = config.profiles.find((profile) => profile.slot === "primary")
+    ?? config.profiles.find((profile) => profile.id === "primary");
+  if (!primary?.provider.trim() || !primary.model.trim()) {
+    return null;
+  }
+  return {
+    provider: primary.provider,
+    model: primary.model,
+    apiKey: primary.apiKey ?? "",
+    apiKeyReference: primary.apiKeyReference || `model.${primary.provider}`,
+    baseUrl: primary.baseUrl,
+  };
+}
+
 function isActiveComputerUseTaskSnapshot(task: TaskSnapshot, isTaskActive: boolean): boolean {
   if (!isTaskActive || !ACTIVE_COMPUTER_USE_STATUSES.has(task.status)) {
     return false;
@@ -910,6 +897,9 @@ function App() {
   const preferencesRepoRef = useRef<UserPreferencesRepository | null>(null);
   const currentGoalRepoRef = useRef<CurrentGoalRepository | null>(null);
   const goalTimelineRepoRef = useRef<GoalTimelineRepository | null>(null);
+  const runtimeEventStoreRef = useRef<RuntimeEventStore | null>(null);
+  const workflowCheckpointStoreRef = useRef<WorkflowCheckpointStore | null>(null);
+  const restoredApprovalResumeSeedRef = useRef(createRestoredApprovalResumeStore());
   const agentRegistryRef = useRef<AgentRegistry>(createDefaultAgentRegistry());
   const workflowRegistryRef = useRef<WorkflowRegistry>(createWorkflowRegistry(WORKBENCH_WORKFLOWS));
   const routeRegistryRef = useRef<RouteRegistry>(createRouteRegistry());
@@ -959,6 +949,15 @@ function App() {
     () => parseDisabledBuiltinToolNames(loadPreference(BUILTIN_TOOL_DISABLED_NAMES_PREFERENCE_KEY)),
   );
   const { modelSettings, updateModelSettings } = useModelSettingsControls(window.localStorage);
+  const syncLegacyModelSettingsFromConfiguration = useCallback(
+    async (config: WorkbenchModelConfiguration) => {
+      const nextSettings = modelSettingsFromPrimaryProfile(config);
+      if (!nextSettings) return;
+      await updateModelSettings(nextSettings, { persistApiKeySecret: false });
+      await modelSettingsRepoRef.current?.save(nextSettings);
+    },
+    [updateModelSettings],
+  );
   const [computerUseSettings, setComputerUseSettings] = useState(() =>
     loadComputerUseSettingsFromStorage(window.localStorage),
   );
@@ -1033,6 +1032,8 @@ function App() {
       action: request.action,
       previewHash: request.previewHash,
       selector: request.selector,
+      expressionPreview: request.expressionPreview,
+      scriptPreview: request.scriptPreview,
       byteCount: request.byteCount,
       scriptByteCount: request.scriptByteCount,
     });
@@ -1220,7 +1221,6 @@ function App() {
   currentGoalEventsRef.current = currentGoalEvents;
   const currentGoalEvaluationsRef = useRef<GoalEvaluation[]>(currentGoalEvaluations);
   currentGoalEvaluationsRef.current = currentGoalEvaluations;
-  const approvalRecordsInitialRef = useRef(approvalRecords);
   const approvalRecordsCurrentRef = useRef(approvalRecords);
   approvalRecordsCurrentRef.current = approvalRecords;
   const [areDurableApprovalRecordsReady, setDurableApprovalRecordsReady] = useState(false);
@@ -1440,7 +1440,10 @@ function App() {
     handleModelConfigurationChange,
   } = useModelProfiles({
     modelProfileRepoRef,
-    onSaved: () => runtime.clearProviderCache(),
+    onSaved: async (savedConfig) => {
+      await syncLegacyModelSettingsFromConfiguration(savedConfig);
+      runtime.clearProviderCache();
+    },
   });
   modelConfigRef.current = modelConfiguration;
 
@@ -2282,6 +2285,8 @@ function App() {
       const modelProfileRepo = createModelProfileRepository(database);
       const userProfileMemoryRepo = createUserProfileMemoryRepository(database);
       const vectorIndexRepo = createVectorIndexRepository(database);
+      const runtimeEventStore = createRuntimeEventStore(database);
+      const workflowCheckpointStore = createWorkflowCheckpointStore(database);
       const agentMemoryEmbeddingProvider = {
         get dimensions() {
           return runtimePreferencesRef.current.agentMemoryEmbeddingDimensions;
@@ -2331,13 +2336,27 @@ function App() {
       agentMemoryRepoRef.current = agentMemoryRepo;
       currentGoalRepoRef.current = currentGoalRepo;
       goalTimelineRepoRef.current = goalTimelineRepo;
+      runtimeEventStoreRef.current = runtimeEventStore;
+      workflowCheckpointStoreRef.current = workflowCheckpointStore;
 
       // Load saved model configuration so chat/commands work on first launch
       try {
         const savedConfig = await modelProfileRepo.load();
         if (savedConfig.profiles.length > 0) {
+          const profilesWithKeyStatus = await Promise.all(
+            savedConfig.profiles.map(async (p) => {
+              try {
+                const status = await invoke<{ exists: boolean }>("check_model_api_key_secret", {
+                  keyReference: p.apiKeyReference,
+                });
+                return { ...p, apiKey: "", hasStoredApiKey: status.exists };
+              } catch {
+                return { ...p, apiKey: "", hasStoredApiKey: false };
+              }
+            }),
+          );
           const uiConfig = {
-            profiles: savedConfig.profiles.map((p) => ({ ...p, apiKey: "", hasStoredApiKey: true })),
+            profiles: profilesWithKeyStatus,
             agentOverrides: savedConfig.agentOverrides,
           };
           setModelConfiguration(uiConfig as WorkbenchModelConfiguration);
@@ -2375,6 +2394,7 @@ function App() {
         window.localStorage,
       );
       const legacySettings = await modelSettingsRepo.importFromLocalStorage(window.localStorage);
+      await updateModelSettings(legacySettings, { persistApiKeySecret: false });
       const importedUserProfileMemory = await userProfileMemoryRepo.importFromLocalStorage(window.localStorage);
       let importedCurrentGoal = await currentGoalRepo.importFromLocalStorage(window.localStorage);
       currentGoalRef.current = importedCurrentGoal;
@@ -2449,9 +2469,7 @@ function App() {
       setHistory(importedHistory);
       replaceWorkspaceSession(importedWorkspaceSession);
       setUserProfileMemory(importedUserProfileMemory);
-      if (approvalRecordsCurrentRef.current === approvalRecordsInitialRef.current) {
-        setApprovalRecords(importedApprovalRecords);
-      }
+      setApprovalRecords(importedApprovalRecords);
       const importedScheduledTasks = await scheduledTasksRepo.importFromLocalStorage(window.localStorage);
       if (scheduledTasksCurrentRef.current === scheduledTasksInitialRef.current) {
         setScheduledTasks(clearStaleGuards(importedScheduledTasks));
@@ -2556,7 +2574,6 @@ function App() {
     if (didCheckRestoredApproval.current) {
       return;
     }
-    didCheckRestoredApproval.current = true;
     const pendingRecord = findRestorableApprovalRecord(approvalRecords);
     if (!pendingRecord) {
       return;
@@ -2565,13 +2582,55 @@ function App() {
       updateApprovalRecord(expireApprovalRecord(pendingRecord, new Date().toISOString()));
       return;
     }
+    const restoreTask = (createTask: () => TaskSnapshot) => {
+      didCheckRestoredApproval.current = true;
+      clearQueuedTaskSnapshots();
+      const restoredTask = createTask();
+      setTask(restoredTask);
+      const loadResumeSeed = (async () => {
+          const checkpoint = pendingRecord.runId
+            ? await workflowCheckpointStoreRef.current?.latestByRunId(pendingRecord.runId)
+            : undefined;
+        if (!checkpoint) {
+          restoredApprovalResumeSeedRef.current.delete(pendingRecord.approvalId);
+          return;
+        }
+        const runtimeEvents = await runtimeEventStoreRef.current?.replayByRunIdThroughSequence(
+          checkpoint.runId,
+          checkpoint.eventSequence,
+        );
+        const linkResult = reconcileRestoredApprovalTaskToCheckpoint(
+          restoredTask,
+          checkpoint,
+          runtimeEvents ?? [],
+        );
+        if (linkResult.status === "linked") {
+          restoredApprovalResumeSeedRef.current.set(pendingRecord.approvalId, {
+            checkpoint,
+            events: runtimeEvents ?? [],
+          });
+          setTask(linkResult.linkedTask);
+        } else if (linkResult.status === "blocked") {
+          restoredApprovalResumeSeedRef.current.delete(pendingRecord.approvalId);
+          setTask(linkResult.linkedTask);
+        } else {
+          restoredApprovalResumeSeedRef.current.delete(pendingRecord.approvalId);
+        }
+      })().catch((error) => {
+        restoredApprovalResumeSeedRef.current.delete(pendingRecord.approvalId);
+        console.warn("Failed to link restored approval to workflow checkpoint", error);
+      });
+      restoredApprovalResumeSeedRef.current.setLoading(
+        pendingRecord.approvalId,
+        loadResumeSeed,
+      );
+    };
     if (pendingRecord.toolName === CODE_PATCH_APPROVAL_TOOL_NAME) {
       if (!pendingRecord.codeProposedEdit) {
         updateApprovalRecord(expireApprovalRecord(pendingRecord, new Date().toISOString()));
         return;
       }
-      clearQueuedTaskSnapshots();
-      setTask(createRestoredCodePatchApprovalTask(pendingRecord));
+      restoreTask(() => createRestoredCodePatchApprovalTask(pendingRecord));
       return;
     }
     if (pendingRecord.toolName === GIT_PUSH_APPROVAL_TOOL_NAME) {
@@ -2579,8 +2638,7 @@ function App() {
         updateApprovalRecord(expireApprovalRecord(pendingRecord, new Date().toISOString()));
         return;
       }
-      clearQueuedTaskSnapshots();
-      setTask(createRestoredGitPushApprovalTask(pendingRecord));
+      restoreTask(() => createRestoredGitPushApprovalTask(pendingRecord));
       return;
     }
     if (pendingRecord.toolName === GIT_COMMIT_APPROVAL_TOOL_NAME) {
@@ -2588,8 +2646,7 @@ function App() {
         updateApprovalRecord(expireApprovalRecord(pendingRecord, new Date().toISOString()));
         return;
       }
-      clearQueuedTaskSnapshots();
-      setTask(createRestoredGitCommitApprovalTask(pendingRecord));
+      restoreTask(() => createRestoredGitCommitApprovalTask(pendingRecord));
       return;
     }
     if (pendingRecord.toolName === GIT_STAGE_APPROVAL_TOOL_NAME) {
@@ -2597,8 +2654,7 @@ function App() {
         updateApprovalRecord(expireApprovalRecord(pendingRecord, new Date().toISOString()));
         return;
       }
-      clearQueuedTaskSnapshots();
-      setTask(createRestoredGitStageApprovalTask(pendingRecord));
+      restoreTask(() => createRestoredGitStageApprovalTask(pendingRecord));
       return;
     }
     if (pendingRecord.toolName === GIT_CREATE_PR_APPROVAL_TOOL_NAME) {
@@ -2606,8 +2662,7 @@ function App() {
         updateApprovalRecord(expireApprovalRecord(pendingRecord, new Date().toISOString()));
         return;
       }
-      clearQueuedTaskSnapshots();
-      setTask(createRestoredGitCreatePullRequestApprovalTask(pendingRecord));
+      restoreTask(() => createRestoredGitCreatePullRequestApprovalTask(pendingRecord));
       return;
     }
     if (pendingRecord.toolName === GIT_COMMENT_PR_APPROVAL_TOOL_NAME) {
@@ -2615,12 +2670,10 @@ function App() {
         updateApprovalRecord(expireApprovalRecord(pendingRecord, new Date().toISOString()));
         return;
       }
-      clearQueuedTaskSnapshots();
-      setTask(createRestoredGitCommentPullRequestApprovalTask(pendingRecord));
+      restoreTask(() => createRestoredGitCommentPullRequestApprovalTask(pendingRecord));
       return;
     }
-    clearQueuedTaskSnapshots();
-    setTask(createRestoredPdfApprovalTask(pendingRecord));
+    restoreTask(() => createRestoredPdfApprovalTask(pendingRecord));
   }, [approvalRecords, areDurableApprovalRecordsReady]);
 
   function queueGoalSubmission(submission: PendingGoalSubmission): void {
@@ -3030,7 +3083,13 @@ function App() {
         });
         return;
       }
-      queuedContinuationTaskRef.current = null;
+      const shouldCarryInterruptedConversation =
+        (requestedSubmitIntent === "continue_history" || requestedSubmitIntent === "queued_continuation") &&
+        !goalOverride &&
+        !workspacePathOverride &&
+        !scheduledTaskId &&
+        task.id !== "task-idle";
+      queuedContinuationTaskRef.current = shouldCarryInterruptedConversation ? task : null;
       pendingGoalQueueRef.current = [];
       setQueuedGoalCount(0);
       runtime.stopTask();
@@ -3051,9 +3110,7 @@ function App() {
       );
       return;
     }
-    const effectiveComposeMode = shouldRouteAsDirectChat(rawGoal, requestedComposeMode, requestedSubmitIntent, imageDataUrls)
-      ? "chat"
-      : requestedComposeMode;
+    const effectiveComposeMode = requestedComposeMode;
     const historyComposeMode = requestedComposeMode;
     const canContinueHistory =
       requestedSubmitIntent === "continue_history" ||
@@ -3174,7 +3231,7 @@ function App() {
         }
         runtime.start(finalGoal, {
           ...startOptions,
-          mode: bridgeUsed ? "chat" : startMode,
+          mode: resolveVisionBridgeRuntimeMode(startMode, bridgeUsed),
           originMode: historyComposeMode,
           appendUserMessage,
           displayGoal: hasImages ? rawGoal : undefined,
@@ -3195,7 +3252,7 @@ function App() {
       }
       runtime.start(finalGoal, {
         ...startOptions,
-        mode: bridgeUsed ? "chat" : startMode,
+        mode: resolveVisionBridgeRuntimeMode(startMode, bridgeUsed),
         originMode: historyComposeMode,
         appendUserMessage,
         displayGoal: hasImages ? rawGoal : undefined,
@@ -3284,6 +3341,7 @@ function App() {
     }
     const record = createApprovalRecordFromPermissionRequest({
       taskId: nextTask.id,
+      runId: nextTask.runId,
       toolName,
       workspacePath: getDurableApprovalWorkspacePath(nextTask, request.title),
       permissionRequest: request,
@@ -3421,6 +3479,7 @@ function App() {
     if (!record) {
       return;
     }
+    await restoredApprovalResumeSeedRef.current.waitUntilReady(record.approvalId);
     if (record.toolName === CODE_PATCH_APPROVAL_TOOL_NAME) {
       await resolveRestoredCodePatchApproval(record, decision);
       return;
@@ -3458,6 +3517,9 @@ function App() {
     updateApprovalRecord(approvedRecord);
     try {
       const execution = await runRestoredPdfOrganization(approvedRecord);
+      if (await continueRestoredApprovalWorkflow(approvedRecord, execution)) {
+        return;
+      }
       archiveRestoredTask(createRestoredPdfApprovedTask(approvedRecord, execution));
     } catch (error) {
       archiveRestoredTask(createRestoredPdfFailedTask(approvedRecord, error));
@@ -3481,6 +3543,9 @@ function App() {
     try {
       const applyResult = await applyRestoredCodePatch(approvedRecord);
       const verification = await runRestoredCodePatchVerification(approvedRecord.workspacePath);
+      if (await continueRestoredApprovalWorkflow(approvedRecord, { applyResult, verification })) {
+        return;
+      }
       archiveRestoredTask(
         createRestoredCodePatchApprovedTask(approvedRecord, applyResult, verification),
       );
@@ -3505,6 +3570,9 @@ function App() {
     updateApprovalRecord(approvedRecord);
     try {
       const execution = await runRestoredGitPush(approvedRecord);
+      if (await continueRestoredApprovalWorkflow(approvedRecord, execution)) {
+        return;
+      }
       archiveRestoredTask(createRestoredGitPushApprovedTask(approvedRecord, execution));
     } catch (error) {
       archiveRestoredTask(createRestoredGitPushFailedTask(approvedRecord, error));
@@ -3527,6 +3595,9 @@ function App() {
     updateApprovalRecord(approvedRecord);
     try {
       const execution = await runRestoredGitCommit(approvedRecord);
+      if (await continueRestoredApprovalWorkflow(approvedRecord, execution)) {
+        return;
+      }
       archiveRestoredTask(createRestoredGitCommitApprovedTask(approvedRecord, execution));
     } catch (error) {
       archiveRestoredTask(createRestoredGitCommitFailedTask(approvedRecord, error));
@@ -3549,6 +3620,9 @@ function App() {
     updateApprovalRecord(approvedRecord);
     try {
       const execution = await runRestoredGitStage(approvedRecord);
+      if (await continueRestoredApprovalWorkflow(approvedRecord, execution)) {
+        return;
+      }
       archiveRestoredTask(createRestoredGitStageApprovedTask(approvedRecord, execution));
     } catch (error) {
       archiveRestoredTask(createRestoredGitStageFailedTask(approvedRecord, error));
@@ -3571,6 +3645,9 @@ function App() {
     updateApprovalRecord(approvedRecord);
     try {
       const execution = await runRestoredGitCreatePullRequest(approvedRecord);
+      if (await continueRestoredApprovalWorkflow(approvedRecord, execution)) {
+        return;
+      }
       archiveRestoredTask(createRestoredGitCreatePullRequestApprovedTask(approvedRecord, execution));
     } catch (error) {
       archiveRestoredTask(createRestoredGitCreatePullRequestFailedTask(approvedRecord, error));
@@ -3593,6 +3670,9 @@ function App() {
     updateApprovalRecord(approvedRecord);
     try {
       const execution = await runRestoredGitCommentPullRequest(approvedRecord);
+      if (await continueRestoredApprovalWorkflow(approvedRecord, execution)) {
+        return;
+      }
       archiveRestoredTask(createRestoredGitCommentPullRequestApprovedTask(approvedRecord, execution));
     } catch (error) {
       archiveRestoredTask(createRestoredGitCommentPullRequestFailedTask(approvedRecord, error));
@@ -3600,16 +3680,56 @@ function App() {
   }
 
   function archiveRestoredTask(restoredTask: TaskSnapshot) {
+    const approvalId = restoredTask.approvalOutcome?.approvalId ?? restoredTask.permissionRequest?.id;
+    const resumeSeed = approvalId
+      ? restoredApprovalResumeSeedRef.current.get(approvalId)
+      : undefined;
+    const taskWithResumeMetadata = attachRestoredApprovalDurableResume(restoredTask, resumeSeed);
+    if (approvalId) {
+      restoredApprovalResumeSeedRef.current.delete(approvalId);
+    }
     clearQueuedTaskSnapshots();
-    setTask(restoredTask);
+    setTask(taskWithResumeMetadata);
     setHistory((current) => {
-      const updated = upsertTaskHistory(current, restoredTask);
+      const updated = upsertTaskHistory(current, taskWithResumeMetadata);
       const repository = taskHistoryRepoRef.current;
       if (repository) {
-        void repository.upsert(restoredTask);
+        void repository.upsert(taskWithResumeMetadata);
       }
       return updated;
     });
+  }
+
+  async function continueRestoredApprovalWorkflow(
+    record: DurableApprovalRecord,
+    approvalStepOutput: unknown,
+  ): Promise<boolean> {
+    const seed = restoredApprovalResumeSeedRef.current.get(record.approvalId);
+    if (!seed) {
+      return false;
+    }
+    const advancedSeed = advanceRestoredApprovalResumeSeed(record, seed, approvalStepOutput);
+    if (!advancedSeed) {
+      return false;
+    }
+    restoredApprovalResumeSeedRef.current.delete(record.approvalId);
+    const resumedEvents = advancedSeed.events.filter((candidate) =>
+      !seed.events.some((existing) => existing.eventId === candidate.eventId)
+    );
+    if (runtimeEventStoreRef.current && resumedEvents.length > 0) {
+      try {
+        await runtimeEventStoreRef.current.appendBatch(resumedEvents);
+      } catch (error) {
+        console.warn("Failed to append restored approval resume event", error);
+      }
+    }
+    const startRequest = buildRestoredApprovalResumeStartRequest(record, advancedSeed, task.userGoal);
+    clearQueuedTaskSnapshots();
+    setActiveHistoryEntryId(record.taskId);
+    setIsTaskActive(true);
+    isTaskActiveRef.current = true;
+    runtime.start(startRequest.userGoal, startRequest.options);
+    return true;
   }
 
   function handlePermissionDecision(decision: WorkbenchPermissionDecision) {
@@ -4211,7 +4331,11 @@ function App() {
   const fileService = useMemo<WorkbenchFileService>(
     () => ({
       async list(session: WorkbenchAgentSessionContext, path?: string) {
-        return await invoke("list_directory", { path: path || session.workspaceRoot });
+        return await invoke("list_directory", {
+          path: path || session.workspaceRoot,
+          workspaceRoot: session.workspaceRoot,
+          allowedRootIds: null,
+        });
       },
       async search(session: WorkbenchAgentSessionContext, query: string) {
         return await invoke<WorkbenchFileSearchResult[]>("files_search", {
@@ -4691,6 +4815,7 @@ function App() {
           const permissionRequest = createGitPushPermissionRequest(plan);
           const approvalRecord = createApprovalRecordFromPermissionRequest({
             taskId: session.taskId ?? session.sessionId,
+            runId: task.runId,
             toolName: GIT_PUSH_AUDIT_TOOL_NAME,
             workspacePath: root,
             permissionRequest,
@@ -4768,6 +4893,7 @@ function App() {
           const permissionRequest = createGitStagePermissionRequest(plan);
           const approvalRecord = createApprovalRecordFromPermissionRequest({
             taskId: session.taskId ?? session.sessionId,
+            runId: task.runId,
             toolName: GIT_STAGE_AUDIT_TOOL_NAME,
             workspacePath: root,
             permissionRequest,
@@ -4840,6 +4966,7 @@ function App() {
           const permissionRequest = createGitCommitPermissionRequest(plan);
           const approvalRecord = createApprovalRecordFromPermissionRequest({
             taskId: session.taskId ?? session.sessionId,
+            runId: task.runId,
             toolName: GIT_COMMIT_APPROVAL_TOOL_NAME,
             workspacePath: root,
             permissionRequest,
@@ -4919,6 +5046,7 @@ function App() {
           const permissionRequest = createGitCreatePullRequestPermissionRequest(plan);
           const approvalRecord = createApprovalRecordFromPermissionRequest({
             taskId: session.taskId ?? session.sessionId,
+            runId: task.runId,
             toolName: GIT_CREATE_PR_AUDIT_TOOL_NAME,
             workspacePath: root,
             permissionRequest,
@@ -5003,6 +5131,7 @@ function App() {
           const permissionRequest = createGitCommentPullRequestPermissionRequest(plan);
           const approvalRecord = createApprovalRecordFromPermissionRequest({
             taskId: session.taskId ?? session.sessionId,
+            runId: task.runId,
             toolName: GIT_COMMENT_PR_APPROVAL_TOOL_NAME,
             workspacePath: root,
             permissionRequest,

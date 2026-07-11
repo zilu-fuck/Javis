@@ -4,6 +4,7 @@ import {
   buildCommanderPlanPrompt,
   buildCommanderPlanRepairPrompt,
   buildCommanderReplanPrompt,
+  buildComputerUseCommanderPlanPrompt,
   buildReActDecisionPrompt,
   CONTEXT_KEYS,
   createChineseReviewPrompt,
@@ -12,7 +13,9 @@ import {
   createSharedTaskContext,
   createTaskEventBus,
   DEFAULT_COMPUTER_USE_CONFIG,
+  filterPlanningScopeForGoal,
   getAdapter,
+  isComputerUseGoal,
   isValidCapabilityTag,
   normalizePromptLocale,
   parseChineseReviewResult,
@@ -28,6 +31,7 @@ import type {
   GoalDecision,
   GoalState,
   ReActDecisionRequest,
+  RuntimeEventEnvelope,
   RuntimeExecutionConfig,
   TaskSnapshot,
 } from "@javis/core";
@@ -166,6 +170,7 @@ import {
   saveWorkspaceDefinition,
   deleteWorkspaceDefinition,
 } from "./workspace-loader";
+import { LocalReadOnlyWorkspace } from "./workspace-runtime-adapter";
 import type { WorkspaceDefinition } from "@javis/core";
 import { runComputerUseLoop } from "./computer-use-loop";
 import { preprocessChineseInput, type PreprocessedInput } from "./input-preprocessor";
@@ -195,13 +200,37 @@ function normalizeAvailableToolDescriptors(
   return normalized;
 }
 
-function commanderPromptToolDescriptors(toolDescriptors: readonly ToolDescriptor[] | undefined) {
-  return limitMcpPromptToolDescriptors(normalizeAvailableToolDescriptors(toolDescriptors)).map((descriptor) => ({
+function mergeAvailableToolDescriptorSources(
+  ...sources: Array<readonly ToolDescriptor[] | undefined>
+): ToolDescriptor[] | undefined {
+  const merged: ToolDescriptor[] = [];
+  let sawSource = false;
+  for (const source of sources) {
+    if (!source) {
+      continue;
+    }
+    sawSource = true;
+    merged.push(...source);
+  }
+  return sawSource ? merged : undefined;
+}
+
+function commanderPromptToolDescriptors(
+  toolDescriptors: readonly ToolDescriptor[] | undefined,
+  userGoal?: string,
+) {
+  const normalized = normalizeAvailableToolDescriptors(toolDescriptors);
+  const scoped = filterPlanningScopeForGoal(userGoal, {
+    agents: createDefaultAgentRegistry().list().map((reg) => reg.agent.kind),
+    tools: normalized,
+  }).tools;
+  return limitMcpPromptToolDescriptors(scoped).map((descriptor) => ({
     name: descriptor.name,
     permissionLevel: descriptor.permissionLevel,
     summary: descriptor.summary,
     capabilityTags: descriptor.capabilityTags,
     ownerAgentKinds: descriptor.ownerAgentKinds,
+    ...(descriptor.requiredInputs ? { requiredInputs: descriptor.requiredInputs } : {}),
   }));
 }
 
@@ -396,6 +425,8 @@ export interface BrowserWriteApprovalRequest {
   action: BrowserWriteAction;
   previewHash: string;
   selector?: string;
+  expressionPreview?: string;
+  scriptPreview?: string;
   byteCount?: number;
   scriptByteCount?: number;
 }
@@ -1272,11 +1303,19 @@ function runtimePreferencesToExecutionConfig(
 
 function createRuntimeEventStoreRef(getDatabase?: () => DesktopDatabase | null) {
   return {
-    append: async (envelope: import("@javis/core").RuntimeEventEnvelope) => {
+    append: async (envelope: RuntimeEventEnvelope) => {
       const database = getDatabase?.();
       if (!database) return;
       const store = createRuntimeEventStore(database);
       await store.append(envelope);
+      const kind = (envelope.payload as { kind?: string })?.kind;
+      if (kind === "task.completed" || kind === "task.failed") {
+        try {
+          await store.pruneByTaskId(envelope.taskId, true);
+        } catch (error) {
+          console.warn("[RuntimeEvents] Terminal event compaction failed.", error);
+        }
+      }
     },
   };
 }
@@ -1357,6 +1396,14 @@ export function createJavisRuntime({
       },
     });
   };
+  const workspaceRuntime = new LocalReadOnlyWorkspace({
+    root: getWorkspacePath,
+    executeReadOnly: (request) => runReadOnlyCommand({
+      program: request.program,
+      args: request.args,
+      workspacePath: request.workspacePath,
+    }),
+  });
 
   function notifyWorkspaceToolActivity(
     tool: RuntimeWorkspaceToolAction,
@@ -1492,7 +1539,7 @@ export function createJavisRuntime({
   function browserWriteApprovalPreview(
     action: BrowserWriteAction,
     request: BrowserClickRequest | BrowserTypeRequest | BrowserEvaluateRequest | BrowserRunTestRequest,
-  ): Pick<BrowserWriteApprovalRequest, "selector" | "byteCount" | "scriptByteCount"> {
+  ): Pick<BrowserWriteApprovalRequest, "selector" | "expressionPreview" | "scriptPreview" | "byteCount" | "scriptByteCount"> {
     if (action === "click" && "selector" in request) {
       return { selector: request.selector };
     }
@@ -1500,12 +1547,23 @@ export function createJavisRuntime({
       return { selector: request.selector, byteCount: byteLength(request.text) };
     }
     if (action === "evaluate" && "expression" in request) {
-      return { byteCount: byteLength(request.expression) };
+      return {
+        byteCount: byteLength(request.expression),
+        expressionPreview: previewBrowserWriteText(request.expression),
+      };
     }
     if (action === "runTest" && "script" in request) {
-      return { scriptByteCount: byteLength(request.script) };
+      return {
+        scriptByteCount: byteLength(request.script),
+        scriptPreview: previewBrowserWriteText(request.script),
+      };
     }
     return {};
+  }
+
+  function previewBrowserWriteText(value: string): string {
+    const normalized = value.replace(/\s+/g, " ").trim();
+    return normalized.length > 500 ? `${normalized.slice(0, 500)}...` : normalized;
   }
 
   function byteLength(value: string): number {
@@ -1539,6 +1597,7 @@ export function createJavisRuntime({
   }
 
   const runtime = createFileScanTaskRuntime({
+    workspaceRuntime,
     getRuntimeConfig: () => runtimePreferencesToExecutionConfig(getRuntimePreferences?.()),
     getAvailableToolDescriptors: () => normalizeAvailableToolDescriptors(getAvailableToolDescriptors?.()),
     getCapabilityVerification,
@@ -1748,7 +1807,7 @@ export function createJavisRuntime({
         if (!path) {
           throw new Error("computer.listDirectory requires a path.");
         }
-        const entries = await listDirectory(path);
+        const entries = await listDirectory(path, { workspaceRoot: getWorkspacePath() });
         return entries.map((entry): ComputerFileCandidate => ({
           name: entry.name,
           path: entry.path,
@@ -2608,7 +2667,7 @@ export function createJavisRuntime({
       failureReason?: string,
     ): Promise<CommanderDagPlan> => {
       const registry = createDefaultAgentRegistry();
-      const availableTools = commanderPromptToolDescriptors(getAvailableToolDescriptors?.());
+      const availableTools = commanderPromptToolDescriptors(getAvailableToolDescriptors?.(), userGoal);
       const availableToolNames = new Set(availableTools.map((tool) => tool.name));
       const availableAgents = registry.list()
         .map((reg) => ({
@@ -3106,14 +3165,16 @@ async function planWithModelProviderStreaming(
   buildMemoryContext?: (request: CommanderPlanRequest) => Promise<string>,
   fallbackToolDescriptors?: ToolDescriptor[],
 ): Promise<CommanderPlanResult> {
+  const requestWithDate = withCommanderCurrentDateContext(request);
   // Enrich available agents with capability tags so the Commander can
   // plan by capability rather than hardcoded agent kind.
   const registry = createDefaultAgentRegistry();
   const effectiveTools = commanderPromptToolDescriptors(
-    request.availableTools ?? fallbackToolDescriptors,
+    mergeAvailableToolDescriptorSources(requestWithDate.availableTools, fallbackToolDescriptors),
+    requestWithDate.userGoal,
   );
   const effectiveToolNames = new Set(effectiveTools.map((tool) => tool.name));
-  const agentsWithCapabilities = request.availableAgents.map((a) => {
+  const agentsWithCapabilities = requestWithDate.availableAgents.map((a) => {
     const reg = registry.findByKind(a.kind);
     return {
       kind: a.kind,
@@ -3123,7 +3184,7 @@ async function planWithModelProviderStreaming(
     };
   });
   const validationRequest: CommanderPlanRequest = {
-    ...request,
+    ...requestWithDate,
     availableAgents: agentsWithCapabilities.map(({ kind, allowedToolNames }) => ({
       kind,
       allowedToolNames,
@@ -3131,27 +3192,37 @@ async function planWithModelProviderStreaming(
     availableTools: effectiveTools,
   };
 
-  const memoryContext = (await buildMemoryContext?.(request))?.trim() ?? "";
-  const promptSource = request.repairContext
+  const memoryContext = (await buildMemoryContext?.(requestWithDate))?.trim() ?? "";
+  const promptSource = requestWithDate.repairContext
     ? buildCommanderPlanRepairPrompt({
         locale: "zh-CN",
-        originalUserGoal: request.repairContext.originalUserGoal,
-        invalidPlan: request.repairContext.invalidPlan,
-        diagnostics: request.repairContext.diagnostics,
-        attempt: request.repairContext.attempt,
-        maxAttempts: request.repairContext.maxAttempts,
+        originalUserGoal: requestWithDate.repairContext.originalUserGoal,
+        currentDate: requestWithDate.currentDate,
+        invalidPlan: requestWithDate.repairContext.invalidPlan,
+        diagnostics: requestWithDate.repairContext.diagnostics,
+        attempt: requestWithDate.repairContext.attempt,
+        maxAttempts: requestWithDate.repairContext.maxAttempts,
         availableAgents: agentsWithCapabilities,
         availableTools: effectiveTools,
       })
-    : buildCommanderPlanPrompt({
-        userGoal: request.userGoal,
-        locale: "zh-CN",
-        priorMessages: request.priorMessages,
-        omittedPriorMessageCount: request.omittedPriorMessageCount,
-        workflowId: request.workflowId ?? "unknown",
-        availableAgents: agentsWithCapabilities,
-        availableTools: effectiveTools,
-      });
+    : isComputerUseGoal(requestWithDate.userGoal)
+      ? buildComputerUseCommanderPlanPrompt({
+          userGoal: requestWithDate.userGoal,
+          locale: "zh-CN",
+          workflowId: requestWithDate.workflowId ?? "unknown",
+          availableAgents: agentsWithCapabilities,
+          availableTools: effectiveTools,
+        })
+      : buildCommanderPlanPrompt({
+          userGoal: requestWithDate.userGoal,
+          currentDate: requestWithDate.currentDate,
+          locale: "zh-CN",
+          priorMessages: requestWithDate.priorMessages,
+          omittedPriorMessageCount: requestWithDate.omittedPriorMessageCount,
+          workflowId: requestWithDate.workflowId ?? "unknown",
+          availableAgents: agentsWithCapabilities,
+          availableTools: effectiveTools,
+        });
   const prompt = appendCommanderMemoryContext(
     promptSource,
     memoryContext,
@@ -3165,6 +3236,27 @@ async function planWithModelProviderStreaming(
     onChunk,
     (value) => normalizeCommanderPlan(value, validationRequest),
   );
+}
+
+function withCommanderCurrentDateContext(request: CommanderPlanRequest): CommanderPlanRequest {
+  if (request.currentDate?.iso && request.currentDate.localDate) {
+    return request;
+  }
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const localDate = [
+    now.getFullYear(),
+    pad(now.getMonth() + 1),
+    pad(now.getDate()),
+  ].join("-");
+  return {
+    ...request,
+    currentDate: {
+      iso: now.toISOString(),
+      localDate,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    },
+  };
 }
 
 function withPreprocessedCommanderGoal(

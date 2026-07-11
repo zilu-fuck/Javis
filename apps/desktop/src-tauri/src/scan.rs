@@ -1519,13 +1519,32 @@ pub(crate) fn scan_user_images(max_results: Option<usize>) -> Result<Vec<FileEnt
 }
 
 #[tauri::command]
-pub(crate) fn list_directory(path: String) -> Result<Vec<FileEntry>, String> {
+pub(crate) fn list_directory(
+    app_handle: AppHandle,
+    path: String,
+    workspace_root: Option<String>,
+    allowed_root_ids: Option<Vec<String>>,
+) -> Result<Vec<FileEntry>, String> {
+    let allowed_roots =
+        resolve_allowed_directory_roots(&app_handle, workspace_root, allowed_root_ids)?;
+    list_directory_with_allowed_roots(path, Some(allowed_roots))
+}
+
+fn list_directory_with_allowed_roots(
+    path: String,
+    allowed_roots: Option<Vec<String>>,
+) -> Result<Vec<FileEntry>, String> {
     let dir = PathBuf::from(&path);
+    let dir_metadata =
+        fs::symlink_metadata(&dir).map_err(|_| format!("Path not found: {}", path))?;
+    if dir_metadata.file_type().is_symlink() {
+        return Err("Refusing to list symlinked directories.".to_string());
+    }
+    if !dir_metadata.is_dir() {
+        return Err(format!("Path is not a directory: {}", path));
+    }
     if !dir.exists() {
         return Err(format!("Path not found: {}", path));
-    }
-    if !dir.is_dir() {
-        return Err(format!("Path is not a directory: {}", path));
     }
 
     // Canonicalize to resolve `..` and symlinks before security checks.
@@ -1534,24 +1553,10 @@ pub(crate) fn list_directory(path: String) -> Result<Vec<FileEntry>, String> {
     let real = dir
         .canonicalize()
         .map_err(|e| format!("Cannot resolve path: {}", e))?;
-    let real_lower = real.to_string_lossy().to_lowercase();
-
-    let blocked = [
-        "C:\\Windows",
-        "C:\\Program Files",
-        "C:\\Program Files (x86)",
-        "C:\\$Recycle.Bin",
-        "C:\\System Volume Information",
-    ];
-    for b in &blocked {
-        let blocked_canonical = PathBuf::from(b)
-            .canonicalize()
-            .unwrap_or_else(|_| PathBuf::from(b));
-        let blocked_lower = blocked_canonical.to_string_lossy().to_lowercase();
-        if real_lower == blocked_lower || real_lower.starts_with(&format!("{}\\", blocked_lower)) {
-            return Err(format!("Access denied: {}", path));
-        }
+    if is_sensitive_read_path(&real) {
+        return Err("Refusing to list sensitive local directories.".to_string());
     }
+    ensure_path_is_under_allowed_root(&real, allowed_roots.as_deref())?;
 
     let mut entries = Vec::new();
     let read_dir = fs::read_dir(&real).map_err(|e| format!("Cannot read directory: {}", e))?;
@@ -1562,8 +1567,14 @@ pub(crate) fn list_directory(path: String) -> Result<Vec<FileEntry>, String> {
             Err(_) => continue,
         };
         let entry_path = entry.path();
-        let metadata = fs::metadata(&entry_path).ok();
-        let is_dir = entry_path.is_dir();
+        let metadata = fs::symlink_metadata(&entry_path).ok();
+        if metadata
+            .as_ref()
+            .is_some_and(|item| item.file_type().is_symlink())
+        {
+            continue;
+        }
+        let is_dir = metadata.as_ref().is_some_and(|item| item.is_dir());
         let name = entry.file_name().to_string_lossy().to_string();
         let size_bytes = if is_dir {
             None
@@ -1662,6 +1673,44 @@ fn resolve_allowed_read_roots(
         );
     }
     Ok(roots)
+}
+
+fn resolve_allowed_directory_roots(
+    app: &AppHandle,
+    workspace_root: Option<String>,
+    allowed_root_ids: Option<Vec<String>>,
+) -> Result<Vec<String>, String> {
+    let has_explicit_root = workspace_root
+        .as_ref()
+        .is_some_and(|root| !root.trim().is_empty())
+        || allowed_root_ids
+            .as_ref()
+            .is_some_and(|ids| ids.iter().any(|id| !id.trim().is_empty()));
+    if has_explicit_root {
+        return resolve_allowed_read_roots(app, workspace_root, allowed_root_ids);
+    }
+
+    let roots = default_user_browse_roots();
+    if roots.is_empty() {
+        return Err(
+            "Listing local directories requires a selected workspace or scan root.".to_string(),
+        );
+    }
+    Ok(roots)
+}
+
+fn default_user_browse_roots() -> Vec<String> {
+    let home = user_home();
+    ["Desktop", "Documents", "Pictures", "Downloads"]
+        .iter()
+        .map(|name| home.join(name))
+        .filter_map(|path| {
+            if !path.is_dir() {
+                return None;
+            }
+            validate_workspace_read_root(&path.to_string_lossy()).ok()
+        })
+        .collect()
 }
 
 fn validate_workspace_read_root(path: &str) -> Result<String, String> {
@@ -1949,6 +1998,61 @@ mod tests {
         let result2 =
             collect_files_with_depth(&[tmp.path().to_path_buf()], &["txt"], 10, true, 2).unwrap();
         assert_eq!(result2.len(), 0);
+    }
+
+    #[test]
+    fn list_directory_requires_allowed_root() {
+        let allowed = local_tempdir();
+        let outside = local_tempdir();
+        std::fs::File::create(outside.path().join("secret.txt"))
+            .unwrap()
+            .write_all(b"secret")
+            .unwrap();
+
+        let result = list_directory_with_allowed_roots(
+            outside.path().to_string_lossy().to_string(),
+            allowed_root(allowed.path()),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn list_directory_lists_entries_inside_allowed_root() {
+        let tmp = local_tempdir();
+        let subdir = tmp.path().join("docs");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::File::create(tmp.path().join("notes.txt"))
+            .unwrap()
+            .write_all(b"notes")
+            .unwrap();
+
+        let result = list_directory_with_allowed_roots(
+            tmp.path().to_string_lossy().to_string(),
+            allowed_root(tmp.path()),
+        )
+        .unwrap();
+
+        assert!(result
+            .iter()
+            .any(|entry| entry.name == "docs" && entry.is_dir));
+        assert!(result
+            .iter()
+            .any(|entry| entry.name == "notes.txt" && !entry.is_dir));
+    }
+
+    #[test]
+    fn list_directory_rejects_sensitive_directories() {
+        let tmp = local_tempdir();
+        let ssh_dir = tmp.path().join(".ssh");
+        std::fs::create_dir_all(&ssh_dir).unwrap();
+
+        let result = list_directory_with_allowed_roots(
+            ssh_dir.to_string_lossy().to_string(),
+            allowed_root(tmp.path()),
+        );
+
+        assert!(result.is_err());
     }
 
     #[test]

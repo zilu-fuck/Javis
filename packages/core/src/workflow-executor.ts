@@ -20,13 +20,14 @@ import type {
   ToolDescriptor,
   TrendHotListResult,
   TrendTool,
+  VisionTool,
   WebSource,
   WebTool,
   VerifierCheckResult,
   VerifierTool,
   WorkspaceTool,
 } from "@javis/tools";
-import { decodeMcpToolServerName, initialToolDescriptors, isDisabledBrowserWriteToolName } from "@javis/tools";
+import { CommanderPlanResultShape, decodeMcpToolServerName, initialToolDescriptors, isDisabledBrowserWriteToolName } from "@javis/tools";
 import { summarizeMarkdownDocuments } from "@javis/tools";
 import {
   createDefaultAgentRegistry,
@@ -37,16 +38,23 @@ import {
   createRuntimeEventEnvelope,
   currentEnvelopeSequence,
   resetEnvelopeSequence,
+  seedEnvelopeSequence,
   type RuntimeEventEnvelope,
 } from "./runtime-event-envelope";
 import {
   buildCheckpointFromDagState,
+  computePlanHash,
   type WorkflowCheckpoint,
 } from "./workflow-checkpoint";
+import {
+  createWorkflowResumeStateFromReconciliation,
+  reconcileCheckpointWithEventLog,
+} from "./workflow-checkpoint-reconciliation";
 import { compileCommanderPlan, formatDiagnosticSummary } from "./planning/commander-plan-compiler";
 import {
   appendStepsToCompiledPlan,
   type CompiledCommanderPlan,
+  type PlanDiagnostic,
 } from "./planning/commander-plan-diagnostics";
 import { attemptPlanRepair } from "./planning/commander-plan-repair";
 import {
@@ -67,6 +75,12 @@ import {
   createRecoveryAttempt,
   type RecoveryAttemptRecord,
 } from "./recovery-report";
+import type { ReplanShapeInput } from "./progress-ledger";
+import {
+  filterDelegableToolDescriptors,
+  READ_PREVIEW_SUBAGENT_DELEGATION_POLICY,
+  type DelegationPolicy,
+} from "./delegation-policy";
 import { inferImagePath, isVisionGoal } from "./vision-utils";
 import { appendLog } from "./snapshot-utils";
 import {
@@ -92,7 +106,7 @@ import {
   isContextOverflowError,
   type ContextSummaryTool,
 } from "./context-recovery";
-import { executeWorkflow } from "./workflow-dag-executor";
+import { executeWorkflow, type WorkflowResumeState } from "./workflow-dag-executor";
 import {
   getWorkbenchWorkflow,
   type WorkbenchWorkflow,
@@ -100,17 +114,22 @@ import {
   type WorkbenchWorkflowStep,
 } from "./workflows";
 import {
+  canExecuteWorkspaceWrite,
   formatAgentDisplayName,
   markCurrentStepFailed,
   runProjectReadOnlyCommands,
+  runWorkspaceGitCommitCommand,
+  runWorkspaceGitStageCommand,
   safeInspectRepository,
   workflowStepToTaskStep,
 } from "./workflow-step-helpers";
+import type { WorkspaceRuntime } from "./workspace-runtime";
 import { extractUrls, isComputerUseGoal } from "./routing";
 import type { CommanderDagStep, CommanderDagPlan } from "./commander-plan-schema";
 import type { AgentCapabilityTag } from "./agent-capability";
 import {
   resolveStepInput,
+  writeStepArtifactOutput,
   writeStepOutput,
   type SharedTaskContext,
 } from "./shared-context";
@@ -145,19 +164,157 @@ function normalizeAvailableToolDescriptors(
   return normalized;
 }
 
+type RuntimeToolAvailability = Pick<
+  AllCapabilityTools,
+  | "browserTool"
+  | "codeTool"
+  | "commanderTool"
+  | "computerTool"
+  | "fileTool"
+  | "gitTool"
+  | "memoryTool"
+  | "mcpTool"
+  | "schedulerTool"
+  | "shellTool"
+  | "trendTool"
+  | "verifierTool"
+  | "visionTool"
+  | "webTool"
+  | "workspaceTool"
+>;
+
+function hasRuntimeFunction(tool: object | undefined, name: string): boolean {
+  return typeof (tool as Record<string, unknown> | undefined)?.[name] === "function";
+}
+
 function filterAvailableToolDescriptorsForRuntime(
   toolDescriptors: readonly ToolDescriptor[],
-  tools: { codeTool?: CodeTool; trendTool?: TrendTool },
+  tools: RuntimeToolAvailability,
+): ToolDescriptor[] {
+  return toolDescriptors.filter((descriptor) => {
+    if (descriptor.name.startsWith("mcp.")) {
+      return hasRuntimeFunction(tools.mcpTool, "call");
+    }
+    if (descriptor.name === "commander.plan") {
+      return hasRuntimeFunction(tools.commanderTool, "plan");
+    }
+    if (descriptor.name === "commander.synthesize" || descriptor.name === "commander.askUser") {
+      return Boolean(tools.commanderTool);
+    }
+    if (descriptor.name === "verifier.check") {
+      return hasRuntimeFunction(tools.verifierTool, "check");
+    }
+    if (descriptor.name === "file.scanMarkdownDocuments") {
+      return hasRuntimeFunction(tools.fileTool, "scanMarkdownDocuments");
+    }
+    if (descriptor.name === "file.scanUserDocuments") {
+      return hasRuntimeFunction(tools.fileTool, "scanUserDocuments");
+    }
+    if (descriptor.name === "file.classifyDocuments") {
+      return hasRuntimeFunction(tools.fileTool, "classifyDocuments");
+    }
+    if (descriptor.name === "file.planPdfOrganization") {
+      return hasRuntimeFunction(tools.fileTool, "planPdfOrganization");
+    }
+    if (descriptor.name === "file.executePdfOrganization") {
+      return hasRuntimeFunction(tools.fileTool, "planPdfOrganization") &&
+        hasRuntimeFunction(tools.fileTool, "executePdfOrganization");
+    }
+    if (descriptor.name === "file.scanUserImages") {
+      return hasRuntimeFunction(tools.fileTool, "scanUserImages");
+    }
+    if (descriptor.name === "file.scanInstalledApps") {
+      return hasRuntimeFunction(tools.fileTool, "scanInstalledApps");
+    }
+    if (descriptor.name === "code.searchRepository") {
+      return hasRuntimeFunction(tools.codeTool, "searchRepository");
+    }
+    if (descriptor.name === "code.inspectRepository") {
+      return hasRuntimeFunction(tools.codeTool, "inspectRepository");
+    }
+    if (descriptor.name === "code.traceCallChain") {
+      return hasRuntimeFunction(tools.codeTool, "traceCallChain");
+    }
+    if (descriptor.name === "code.proposeEdit") {
+      return hasRuntimeFunction(tools.codeTool, "proposeEdit");
+    }
+    if (descriptor.name === "code.applyProposedEdit") {
+      return hasRuntimeFunction(tools.codeTool, "proposeEdit") &&
+        hasRuntimeFunction(tools.codeTool, "applyProposedEdit");
+    }
+    if (descriptor.name === "git.stageFiles") {
+      return hasRuntimeFunction(tools.gitTool, "planStageFiles") &&
+        hasRuntimeFunction(tools.gitTool, "executeStageFiles");
+    }
+    if (descriptor.name === "git.createCommit") {
+      return hasRuntimeFunction(tools.gitTool, "planCommit") &&
+        hasRuntimeFunction(tools.gitTool, "executeCommit");
+    }
+    if (descriptor.name === "git.createPullRequest") {
+      return hasRuntimeFunction(tools.gitTool, "planCreatePullRequest") &&
+        hasRuntimeFunction(tools.gitTool, "executeCreatePullRequest");
+    }
+    if (descriptor.name === "git.commentPullRequest") {
+      return hasRuntimeFunction(tools.gitTool, "planCommentPullRequest") &&
+        hasRuntimeFunction(tools.gitTool, "executeCommentPullRequest");
+    }
+    if (descriptor.name === "web.search") {
+      return hasRuntimeFunction(tools.webTool, "searchWeb");
+    }
+    if (descriptor.name === "web.fetchSource") {
+      return hasRuntimeFunction(tools.webTool, "fetchWebSource");
+    }
+    if (descriptor.name === "trend.fetchHotList") {
+      return Boolean(tools.browserTool || hasRuntimeFunction(tools.trendTool, "fetchHotList"));
+    }
+    if (descriptor.name === "memory.search") {
+      return hasRuntimeFunction(tools.memoryTool, "search");
+    }
+    if (descriptor.name === "shell.runReadOnlyCommand") {
+      return hasRuntimeFunction(tools.shellTool, "runReadOnlyCommand");
+    }
+    if (descriptor.name.startsWith("computer.")) {
+      const actionName = descriptor.name.slice("computer.".length);
+      return hasRuntimeFunction(tools.computerTool, actionName);
+    }
+    if (descriptor.name === "scheduler.createTask") {
+      return hasRuntimeFunction(tools.schedulerTool, "createTask");
+    }
+    if (descriptor.name.startsWith("workspace.")) {
+      const actionName = descriptor.name.slice("workspace.".length);
+      return hasRuntimeFunction(tools.workspaceTool, actionName);
+    }
+    if (descriptor.name.startsWith("browser.")) {
+      const actionName = descriptor.name.slice("browser.".length);
+      return hasRuntimeFunction(tools.browserTool, actionName);
+    }
+    if (descriptor.name.startsWith("vision.")) {
+      const actionName = descriptor.name.slice("vision.".length);
+      return hasRuntimeFunction(tools.visionTool, actionName);
+    }
+    if (descriptor.name === "file.planWriteText") {
+      return Boolean(tools.fileTool?.planWriteText);
+    }
+    if (descriptor.name === "file.writeText") {
+      return Boolean(tools.fileTool?.planWriteText && tools.fileTool.writeText);
+    }
+    return true;
+  });
+}
+
+function filterAvailableToolDescriptorsForBlueprintWorkflow(
+  toolDescriptors: readonly ToolDescriptor[],
+  tools: { browserTool?: BrowserTool; codeTool?: CodeTool; trendTool?: TrendTool },
 ): ToolDescriptor[] {
   return toolDescriptors.filter((descriptor) => {
     if (descriptor.name === "code.searchRepository") {
-      return Boolean(tools.codeTool?.searchRepository);
+      return hasRuntimeFunction(tools.codeTool, "searchRepository");
     }
     if (descriptor.name === "code.traceCallChain") {
-      return Boolean(tools.codeTool?.traceCallChain);
+      return hasRuntimeFunction(tools.codeTool, "traceCallChain");
     }
     if (descriptor.name === "trend.fetchHotList") {
-      return Boolean(tools.trendTool?.fetchHotList);
+      return Boolean(tools.browserTool || hasRuntimeFunction(tools.trendTool, "fetchHotList"));
     }
     return true;
   });
@@ -174,10 +331,11 @@ interface ReadCurrentProjectWorkflowOptions {
   taskId: ID;
   userGoal: string;
   availableToolDescriptors?: ToolDescriptor[];
+  workspaceRuntime?: WorkspaceRuntime;
 }
 
 export function isReadCurrentProjectGoal(userGoal: string): boolean {
-  return /read current project|inspect this project|understand this project|理解.*项目|阅读.*项目|当前项目/i.test(userGoal);
+  return /read current project|inspect this project|understand this project|\u7406\u89e3.*\u9879\u76ee|\u9605\u8bfb.*\u9879\u76ee|\u5f53\u524d\u9879\u76ee|\u8fd9\u4e2a\u9879\u76ee.*(?:\u5e72\u561b|\u505a\u4ec0\u4e48|\u529f\u80fd|\u6e90\u7801|\u4ee3\u7801)|\u4e0d\u8981\u5149\u770b.*readme|\u522b\u53ea\u770b.*readme|\u7ed3\u5408\u5b9e\u9645\u4ee3\u7801|\u4ee3\u7801\u60c5\u51b5|\u6e90\u7801\u60c5\u51b5/i.test(userGoal);
 }
 
 export async function runReadCurrentProjectWorkflow({
@@ -191,6 +349,7 @@ export async function runReadCurrentProjectWorkflow({
   taskId,
   userGoal,
   availableToolDescriptors,
+  workspaceRuntime,
 }: ReadCurrentProjectWorkflowOptions) {
   const workflow = getWorkbenchWorkflow("read-current-project");
   if (!workflow) {
@@ -242,7 +401,7 @@ export async function runReadCurrentProjectWorkflow({
   await controller.wait();
 
   try {
-    const availableTools = filterAvailableToolDescriptorsForRuntime(
+    const availableTools = filterAvailableToolDescriptorsForBlueprintWorkflow(
       normalizeAvailableToolDescriptors(availableToolDescriptors),
       { codeTool },
     );
@@ -302,7 +461,7 @@ export async function runReadCurrentProjectWorkflow({
       })],
       ["shell_readonly", async () => runInspectProjectStep({
         availableToolNames,
-        agentTracker, controller, emit, emitEvent, projectTool, shellTool, taskId,
+        agentTracker, controller, emit, emitEvent, projectTool, shellTool, taskId, workspaceRuntime,
       })],
       ["git_inspect", async () => runAnalyzeCodeStep({
         availableToolNames,
@@ -404,7 +563,7 @@ export async function runReadCurrentProjectWorkflow({
             return {
               output: await runInspectProjectStep({
                 availableToolNames,
-                agentTracker, controller, emit, emitEvent, projectTool, shellTool, taskId,
+                agentTracker, controller, emit, emitEvent, projectTool, shellTool, taskId, workspaceRuntime,
               }),
             };
           case "analyze-code":
@@ -639,9 +798,9 @@ export async function runGenericWorkbenchWorkflow({
 
   const unsupportedStepIds = new Set<string>();
   try {
-    const availableTools = filterAvailableToolDescriptorsForRuntime(
+    const availableTools = filterAvailableToolDescriptorsForBlueprintWorkflow(
       normalizeAvailableToolDescriptors(availableToolDescriptors),
-      { codeTool },
+      { browserTool, codeTool, trendTool },
     );
     const availableToolNames = new Set(availableTools.map((descriptor) => descriptor.name));
     const commanderPlan = await safePlanWorkflow(commanderTool, userGoal, workflow.id, availableTools);
@@ -816,18 +975,30 @@ export async function runGenericWorkbenchWorkflow({
 
 export function getAvailableAgentsForPlanning(
   availableToolDescriptors?: readonly ToolDescriptor[],
+  userGoal?: string,
+  delegationPolicy?: DelegationPolicy,
 ): Array<{ kind: string; allowedToolNames: string[]; capabilities: string[] }> {
   const normalizedToolDescriptors = availableToolDescriptors
     ? normalizeAvailableToolDescriptors(availableToolDescriptors)
     : undefined;
+  const planningScope = filterPlanningScopeForGoal(userGoal, {
+    agents: createDefaultAgentRegistry().list().map((reg) => reg.agent.kind),
+    tools: normalizedToolDescriptors,
+  });
   const availableToolNames = normalizedToolDescriptors
-    ? new Set(normalizedToolDescriptors.map((descriptor) => descriptor.name))
+    ? new Set(planningScope.tools.map((descriptor) => descriptor.name))
     : undefined;
-  const tools = normalizedToolDescriptors ?? [];
-  return createDefaultAgentRegistry().list().map((reg) => {
+  const tools = delegationPolicy
+    ? filterDelegableToolDescriptors(planningScope.tools, delegationPolicy)
+    : planningScope.tools;
+  const delegableToolNames = new Set(tools.map((descriptor) => descriptor.name));
+  return createDefaultAgentRegistry().list()
+    .filter((reg) => planningScope.agentKinds.has(reg.agent.kind))
+    .map((reg) => {
     const allowedToolNames = normalizedToolDescriptors
-      ? getAllowedToolNamesForAgent(reg.agent.kind, normalizedToolDescriptors)
+      ? getAllowedToolNamesForAgent(reg.agent.kind, planningScope.tools)
           .filter((toolName) => availableToolNames?.has(toolName))
+          .filter((toolName) => !delegationPolicy || delegableToolNames.has(toolName))
       : reg.agent.allowedToolNames;
     const capabilities = deriveAgentCapabilities(reg.agent.kind, tools, allowedToolNames);
     return {
@@ -836,6 +1007,73 @@ export function getAvailableAgentsForPlanning(
       capabilities,
     };
   });
+}
+
+export function getDelegableSubAgentsForPlanning(
+  availableToolDescriptors?: readonly ToolDescriptor[],
+  userGoal?: string,
+  delegationPolicy?: DelegationPolicy,
+): Array<{ kind: string; allowedToolNames: string[]; capabilities: string[] }> {
+  return getAvailableAgentsForPlanning(
+    availableToolDescriptors,
+    userGoal,
+    delegationPolicy ?? READ_PREVIEW_SUBAGENT_DELEGATION_POLICY,
+  ).filter((agent) => agent.kind !== "commander");
+}
+
+export function filterPlanningScopeForGoal(
+  userGoal: string | undefined,
+  input: {
+    agents: readonly string[];
+    tools: readonly ToolDescriptor[] | undefined;
+  },
+): { agentKinds: Set<string>; tools: ToolDescriptor[] } {
+  const tools = input.tools ? [...input.tools] : [];
+  if (!userGoal || !isComputerUseGoal(userGoal)) {
+    return {
+      agentKinds: new Set(input.agents),
+      tools,
+    };
+  }
+
+  const agentKinds: Set<string> = new Set(
+    input.agents.filter((kind) =>
+      kind === "commander" ||
+      kind === "computer" ||
+      kind === "verifier" ||
+      kind === "vision"
+    ),
+  );
+  const scopedTools = tools.filter((descriptor) =>
+    descriptor.ownerAgentKinds.some((kind) => agentKinds.has(kind)) &&
+    (
+      descriptor.name.startsWith("commander.") ||
+      descriptor.name.startsWith("computer.") ||
+      descriptor.name.startsWith("vision.") ||
+      descriptor.name === "verifier.check" ||
+      descriptor.name === "file.scanInstalledApps" ||
+      descriptor.name === "file.scanUserImages" ||
+      descriptor.capabilityTags.some((tag) =>
+        tag === "evidence_check" ||
+        tag === "image_analyze" ||
+        tag === "image_describe" ||
+        tag === "image_ocr" ||
+        tag === "image_scan" ||
+        tag === "local_search" ||
+        tag === "desktop_screenshot" ||
+        tag === "desktop_list_windows" ||
+        tag === "desktop_ui_tree" ||
+        tag === "desktop_focus" ||
+        tag === "desktop_ui_input" ||
+        tag === "desktop_input"
+      )
+    )
+  );
+
+  return {
+    agentKinds,
+    tools: scopedTools,
+  };
 }
 
 function deriveAgentCapabilities(
@@ -880,6 +1118,7 @@ function toolDescriptorsForPlanner(
     summary: descriptor.summary,
     capabilityTags: descriptor.capabilityTags,
     ownerAgentKinds: descriptor.ownerAgentKinds,
+    ...(descriptor.requiredInputs ? { requiredInputs: descriptor.requiredInputs } : {}),
   }));
 }
 
@@ -941,11 +1180,18 @@ async function safePlanWorkflow(
   }
   try {
     const availableTools = normalizeAvailableToolDescriptors(availableToolDescriptors);
+    const planningScope = filterPlanningScopeForGoal(userGoal, {
+      agents: createDefaultAgentRegistry().list().map((reg) => reg.agent.kind),
+      tools: availableTools,
+    });
     return await commanderTool.plan({
       userGoal,
       workflowId,
-      availableAgents: getAvailableAgentsForPlanning(availableTools),
-      availableTools: toolDescriptorsForPlanner(availableTools),
+      availableAgents: getAvailableAgentsForPlanning(
+        planningScope.tools,
+        userGoal,
+      ),
+      availableTools: toolDescriptorsForPlanner(planningScope.tools),
     });
   } catch {
     return undefined;
@@ -1403,8 +1649,16 @@ async function executeConcreteGenericStep({
   }
 
   const stepKey = getWorkflowStepKey(step.id);
-  if (stepKey === "search-trends" && webTool?.searchWeb) {
+  if (stepKey === "search-trends") {
     const trendRequest = inferTrendHotListRequest(userGoal);
+    if (browserTool && trendRequest) {
+      const hotList = await fetchTrendHotListWithBrowser(browserTool, trendRequest);
+      const sources = trendHotListToSources(hotList);
+      return concreteOutput(workflow, step, `Browser Agent collected ${hotList.items.length}/${hotList.expectedCount} ${formatTrendProviderLabel(hotList.provider)} trend item(s).`, {
+        trendHotList: hotList,
+        sources,
+      });
+    }
     if (trendTool?.fetchHotList && trendRequest) {
       const hotList = await trendTool.fetchHotList(trendRequest);
       const sources = trendHotListToSources(hotList);
@@ -1413,17 +1667,10 @@ async function executeConcreteGenericStep({
         sources,
       });
     }
-    const sources = await webTool.searchWeb({ query: userGoal, maxResults: 5 });
-    return concreteOutput(workflow, step, `Search returned ${sources.length} source candidate(s).`, { sources });
-  }
-  const trendRequest = inferTrendHotListRequest(userGoal);
-  if (stepKey === "search-trends" && trendTool?.fetchHotList && trendRequest) {
-    const hotList = await trendTool.fetchHotList(trendRequest);
-    const sources = trendHotListToSources(hotList);
-    return concreteOutput(workflow, step, `Fetched ${hotList.items.length}/${hotList.expectedCount} ${formatTrendProviderLabel(hotList.provider)} trend item(s).`, {
-      trendHotList: hotList,
-      sources,
-    });
+    if (webTool?.searchWeb) {
+      const sources = await webTool.searchWeb({ query: userGoal, maxResults: 5 });
+      return concreteOutput(workflow, step, `Search returned ${sources.length} source candidate(s).`, { sources });
+    }
   }
   if (stepKey === "fetch-details" && webTool) {
     const candidates = getSourcesFromContext(contextSnapshot).slice(0, 5);
@@ -1678,7 +1925,7 @@ interface AllCapabilityTools {
   mcpTool?: McpTool;
   commanderTool?: CommanderTool;
   verifierTool?: VerifierTool;
-  visionTool?: import("@javis/tools").VisionTool;
+  visionTool?: VisionTool;
 }
 
 /** Find the first ToolDescriptor whose capabilityTags include the given tag. */
@@ -1912,14 +2159,14 @@ async function dispatchToolByName(
       return tools.webTool.fetchWebSource({ url: input.url as string });
     }
     case "trend.fetchHotList": {
-      if (!tools.trendTool?.fetchHotList) throw new Error("trend.fetchHotList tool not available");
-      return tools.trendTool.fetchHotList({
+      const request = {
         provider: parseTrendProvider(input.provider),
         fallbackProviders: Array.isArray(input.fallbackProviders)
           ? input.fallbackProviders.filter((provider): provider is string => typeof provider === "string" && provider.trim().length > 0)
           : undefined,
         limit: typeof input.limit === "number" ? input.limit : undefined,
-      });
+      };
+      return fetchTrendHotListWithFallback(tools, request);
     }
     case "memory.search": {
       if (!tools.memoryTool) throw new Error("memory.search tool not available");
@@ -2099,10 +2346,11 @@ async function dispatchToolByName(
     // 鈹€鈹€ Shell tools 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
     case "shell.runReadOnlyCommand": {
       if (!tools.shellTool) throw new Error("shell.runReadOnlyCommand tool not available");
+      assertRequiredShellReadOnlyInput(input);
       return tools.shellTool.runReadOnlyCommand({
-        program: input.program as string,
-        args: (input.args as string[] | undefined) ?? [],
-        workspacePath: input.workspacePath as string | null | undefined,
+        program: input.program,
+        args: input.args,
+        workspacePath: input.workspacePath,
       });
     }
     // ── Computer tools ────────────────────────────────────────────────────
@@ -2450,6 +2698,30 @@ function assertRequiredComputerPathInput(
   );
 }
 
+function assertRequiredShellReadOnlyInput(
+  input: Record<string, unknown>,
+): asserts input is Record<string, unknown> & {
+  program: string;
+  args: string[];
+  workspacePath?: string | null;
+} {
+  if (typeof input.program !== "string" || !input.program.trim()) {
+    throw new Error("shell.runReadOnlyCommand requires explicit toolInput.program: non-empty string.");
+  }
+  if (!Array.isArray(input.args) || input.args.length === 0 || input.args.some((arg) => typeof arg !== "string" || !arg.trim())) {
+    throw new Error("shell.runReadOnlyCommand requires explicit toolInput.args: non-empty string[].");
+  }
+  if (
+    input.workspacePath !== undefined &&
+    input.workspacePath !== null &&
+    typeof input.workspacePath !== "string"
+  ) {
+    throw new Error("shell.runReadOnlyCommand requires toolInput.workspacePath to be a string or null when provided.");
+  }
+  input.program = input.program.trim();
+  input.args = input.args.map((arg) => arg.trim());
+}
+
 function buildCodeProposalGoal(input: Record<string, unknown>): string {
   const baseGoal = String(input.userGoal ?? input.goal ?? input.query ?? "").trim();
   const handoffEntries = [
@@ -2499,6 +2771,7 @@ const GIT_STAGE_TOOL_NAME = "git.stageFiles";
 const GIT_COMMIT_TOOL_NAME = "git.createCommit";
 const GIT_CREATE_PR_TOOL_NAME = "git.createPullRequest";
 const GIT_COMMENT_PR_TOOL_NAME = "git.commentPullRequest";
+const FILE_WRITE_TEXT_TOOL_NAME = "file.writeText";
 
 /**
  * Closed allowlist of approval-gated tools that may enter the Commander DAG
@@ -2538,6 +2811,7 @@ export const SUPPORTED_APPROVAL_GATED_TOOLS = [
   GIT_COMMIT_TOOL_NAME,
   GIT_CREATE_PR_TOOL_NAME,
   GIT_COMMENT_PR_TOOL_NAME,
+  FILE_WRITE_TEXT_TOOL_NAME,
   ...COMPUTER_USE_APPROVAL_GATED_TOOLS,
 ] as const;
 
@@ -2563,6 +2837,10 @@ function isGitCommentPullRequestDagStep(step: CommanderDagStep, capability: stri
   return step.toolName === GIT_COMMENT_PR_TOOL_NAME ||
     capability === "git_pr_comment" ||
     step.requiredCapabilities?.includes("git_pr_comment") === true;
+}
+
+function isFileWriteTextDagStep(step: CommanderDagStep): boolean {
+  return step.toolName === FILE_WRITE_TEXT_TOOL_NAME;
 }
 
 function extractGitStagePaths(input: Record<string, unknown>): string[] {
@@ -2666,6 +2944,451 @@ function extractGitCommentPullRequestInput(input: Record<string, unknown>): {
   return { pullRequest, body };
 }
 
+const FILE_WRITE_TEXT_CONTENT_KEYS = ["content", "markdown", "text", "body"] as const;
+const FILE_WRITE_TEXT_CONTROL_INPUT_KEYS = new Set<string>([
+  "targetPath",
+  "path",
+  "filePath",
+  "approvalId",
+  "taskId",
+  "userGoal",
+  "goal",
+  "query",
+  ...FILE_WRITE_TEXT_CONTENT_KEYS,
+]);
+
+function extractWriteTextTargetPath(input: Record<string, unknown>): string {
+  const rawTargetPath = input.targetPath ?? input.path ?? input.filePath;
+  if (typeof rawTargetPath !== "string" || rawTargetPath.trim().length === 0) {
+    throw new Error("file.writeText requires explicit toolInput.targetPath: non-empty string.");
+  }
+  return rawTargetPath.trim();
+}
+
+function extractWriteTextContent(
+  input: Record<string, unknown>,
+  userGoal: string,
+  targetPath: string,
+): string {
+  for (const key of FILE_WRITE_TEXT_CONTENT_KEYS) {
+    const value = input[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value;
+    }
+  }
+
+  const evidenceEntries = Object.entries(input)
+    .filter(([key, value]) => !FILE_WRITE_TEXT_CONTROL_INPUT_KEYS.has(key) && value !== undefined && value !== null);
+  if (evidenceEntries.length === 0) {
+    throw new Error(
+      "file.writeText requires explicit content or inputContextKeys from evidence-producing steps.",
+    );
+  }
+
+  return buildMarkdownFromWriteEvidence(evidenceEntries, userGoal, targetPath);
+}
+
+function buildMarkdownFromWriteEvidence(
+  evidenceEntries: Array<[string, unknown]>,
+  userGoal: string,
+  targetPath: string,
+): string {
+  const title = inferWriteMarkdownTitle(targetPath, userGoal);
+  const sections = [
+    `# ${title}`,
+    "",
+    `> Source request: ${userGoal}`,
+    "",
+    ...evidenceEntries.flatMap(([key, value]) => formatWriteEvidenceSection(key, value)),
+  ];
+  return `${sections.join("\n").replace(/\n{3,}/g, "\n\n").trim()}\n`;
+}
+
+function inferWriteMarkdownTitle(targetPath: string, userGoal: string): string {
+  const filename = targetPath.split(/[\\/]/u).pop()?.trim();
+  const basename = filename?.replace(/\.[^.]+$/u, "").trim();
+  if (basename) return basename;
+  const clippedGoal = userGoal.replace(/\s+/g, " ").trim();
+  return clippedGoal.length > 80 ? `${clippedGoal.slice(0, 80)}...` : clippedGoal || "Javis output";
+}
+
+function formatWriteEvidenceSection(key: string, value: unknown): string[] {
+  if (isTrendHotListResult(value)) {
+    return formatTrendHotListMarkdownSection(value);
+  }
+  if (isGenericStepOutput(value)) {
+    return formatGenericStepOutputMarkdownSection(key, value);
+  }
+  if (Array.isArray(value) && value.every(isWebSource)) {
+    return formatWebSourcesMarkdownSection(humanizeContextKey(key), value);
+  }
+  if (typeof value === "string") {
+    return [`## ${humanizeContextKey(key)}`, "", value.trim(), ""];
+  }
+  return [
+    `## ${humanizeContextKey(key)}`,
+    "",
+    "```json",
+    safeMarkdownJson(value),
+    "```",
+    "",
+  ];
+}
+
+function formatGenericStepOutputMarkdownSection(key: string, output: GenericStepOutput): string[] {
+  const nestedTrendHotList = output.data ? getTrendHotListFromContext(output.data) : undefined;
+  if (nestedTrendHotList) {
+    return [
+      `## ${humanizeContextKey(key)}`,
+      "",
+      output.summary,
+      "",
+      ...formatTrendHotListMarkdownSection(nestedTrendHotList),
+    ];
+  }
+
+  const nestedSources = output.data ? getSourcesFromContext(output.data) : [];
+  if (nestedSources.length > 0) {
+    return [
+      `## ${humanizeContextKey(key)}`,
+      "",
+      output.summary,
+      "",
+      ...formatWebSourcesMarkdownSection("Sources", nestedSources),
+    ];
+  }
+
+  return [
+    `## ${humanizeContextKey(key)}`,
+    "",
+    output.summary,
+    "",
+    output.data ? "```json" : "",
+    output.data ? safeMarkdownJson(output.data) : "",
+    output.data ? "```" : "",
+    "",
+  ].filter((line) => line.length > 0);
+}
+
+function formatTrendHotListMarkdownSection(hotList: TrendHotListResult): string[] {
+  const providerLabel = formatTrendProviderLabel(hotList.provider);
+  const lines = [
+    `## ${providerLabel} Hot List Top ${hotList.expectedCount}`,
+    "",
+    `Fetched at: ${hotList.fetchedAt}`,
+    `Source: ${hotList.sourceUrl}`,
+    `Complete: ${hotList.complete ? "yes" : "no"} (${hotList.items.length}/${hotList.expectedCount})`,
+    "",
+  ];
+  if (hotList.warnings.length > 0) {
+    lines.push("Warnings:", ...hotList.warnings.map((warning) => `- ${warning}`), "");
+  }
+  lines.push("| Rank | Topic | Heat | Label | Source |");
+  lines.push("| ---: | --- | ---: | --- | --- |");
+  for (const item of hotList.items) {
+    lines.push([
+      item.rank,
+      escapeMarkdownTableCell(item.title),
+      typeof item.hotScore === "number" ? item.hotScore : "",
+      escapeMarkdownTableCell(item.label ?? item.category ?? ""),
+      escapeMarkdownTableCell(item.url ?? hotList.sourceUrl),
+    ].join(" | ").replace(/^/, "| ").replace(/$/, " |"));
+  }
+  lines.push("");
+  return lines;
+}
+
+function formatWebSourcesMarkdownSection(title: string, sources: WebSource[]): string[] {
+  return [
+    `## ${title}`,
+    "",
+    ...sources.map((source, index) => {
+      const sourceTitle = source.title || source.url;
+      const excerpt = source.excerpt ? ` - ${source.excerpt}` : "";
+      return `${index + 1}. ${sourceTitle} (${source.url})${excerpt}`;
+    }),
+    "",
+  ];
+}
+
+function humanizeContextKey(key: string): string {
+  const spaced = key
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_:-]+/g, " ")
+    .trim();
+  return spaced ? spaced.charAt(0).toUpperCase() + spaced.slice(1) : "Evidence";
+}
+
+function escapeMarkdownTableCell(value: unknown): string {
+  return String(value ?? "")
+    .replace(/\|/g, "\\|")
+    .replace(/\r?\n/g, " ")
+    .trim();
+}
+
+function safeMarkdownJson(value: unknown): string {
+  try {
+    const serialized = JSON.stringify(value, null, 2) ?? "null";
+    return serialized.length > 40_000 ? `${serialized.slice(0, 40_000)}\n...` : serialized;
+  } catch (error) {
+    return JSON.stringify({ error: "Unable to serialize evidence.", detail: summarizeToolError(error) }, null, 2);
+  }
+}
+
+async function executeFileWriteTextDagStep(options: {
+  dagStep: CommanderDagStep;
+  agentId: string;
+  taskId: string;
+  userGoal: string;
+  context: SharedTaskContext;
+  fileTool?: FileTool;
+  getSnapshot: () => TaskSnapshot;
+  emitSnapshot: (snapshot: TaskSnapshot) => void;
+  emitEvent: (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number];
+  agentTracker: ReturnType<typeof createAgentStateTracker>;
+  setPendingPermissionHandler?: (
+    requestId: string,
+    handler: ((decision: string) => void | Promise<void>) | undefined,
+  ) => void;
+  signal?: AbortSignal;
+  toolTimeoutMs: number;
+  userWaitTimeoutMs: number;
+}): Promise<unknown> {
+  const {
+    dagStep,
+    agentId,
+    taskId,
+    userGoal,
+    context,
+    fileTool,
+    getSnapshot,
+    emitSnapshot,
+    emitEvent,
+    agentTracker,
+    setPendingPermissionHandler,
+    signal,
+    toolTimeoutMs,
+    userWaitTimeoutMs,
+  } = options;
+
+  if (!fileTool?.planWriteText || !fileTool.writeText) {
+    throw new Error("file.writeText tool is not available.");
+  }
+  if (!setPendingPermissionHandler) {
+    throw new Error("file.writeText requires a permission handler for confirmed-write file updates.");
+  }
+
+  const input = mergeStepInput(dagStep, context);
+  const targetPath = extractWriteTextTargetPath(input);
+  const content = extractWriteTextContent(input, userGoal, targetPath);
+
+  if (agentTracker.getState(agentId)) {
+    agentTracker.setState(agentId, {
+      status: "running",
+      task: dagStep.title,
+      currentStepId: dagStep.id,
+    });
+  }
+  emitSnapshot({
+    ...getSnapshot(),
+    plan: markStep(getSnapshot().plan, dagStep.id, "running"),
+    agents: agentTracker.getSnapshots(),
+    logs: appendLog(getSnapshot(), emitEvent({
+      kind: "tool.planned",
+      taskId,
+      toolName: FILE_WRITE_TEXT_TOOL_NAME,
+      detail: `Step ${dagStep.id}: preparing text write preview for ${targetPath}.`,
+    })),
+  });
+
+  const plan = await withTaskTimeout(
+    () => fileTool.planWriteText!({ targetPath, content }, taskId),
+    {
+      label: `tool ${FILE_WRITE_TEXT_TOOL_NAME} plan`,
+      timeoutMs: toolTimeoutMs,
+      signal,
+    },
+  );
+
+  const permissionRequest = createPendingPermissionRequest({
+    id: plan.approvalId,
+    level: "confirmed_write",
+    writeRiskLevel: "safe",
+    title: "Approve text file write",
+    reason: "Writing text to a local file changes the filesystem, so Javis needs explicit approval.",
+    dryRun: plan.dryRun,
+    allowAlways: false,
+  });
+  let resolvedPermissionRequest = permissionRequest;
+
+  const approved = await withTaskTimeout(
+    new Promise<boolean>((resolve, reject) => {
+      if (agentTracker.getState(agentId)) {
+        agentTracker.setState(agentId, {
+          status: "waiting_permission",
+          task: `Waiting for text write approval for ${targetPath}`,
+          currentStepId: dagStep.id,
+        });
+      }
+      emitSnapshot({
+        ...getSnapshot(),
+        status: "waiting_permission",
+        commanderMessage: `Text file write needs approval for ${targetPath}.`,
+        permissionRequest,
+        agents: agentTracker.getSnapshots(),
+        logs: [
+          ...getSnapshot().logs,
+          emitEvent({
+            kind: "permission.requested",
+            taskId,
+            request: permissionRequest,
+          }),
+          emitEvent({
+            kind: "task.waiting",
+            taskId,
+            phase: "waiting_user",
+            label: `Text file write approval ${permissionRequest.id}`,
+            detail: `Waiting for permission decision for ${targetPath}.`,
+            stepId: dagStep.id,
+            agentKind: dagStep.assignedAgentKind as AgentKind,
+            toolName: FILE_WRITE_TEXT_TOOL_NAME,
+          }),
+        ],
+      });
+
+      setPendingPermissionHandler(permissionRequest.id, async (decision) => {
+        try {
+          resolvedPermissionRequest = resolvePermissionRequest(permissionRequest, decision as PermissionDecision);
+          setPendingPermissionHandler(permissionRequest.id, undefined);
+          emitSnapshot({
+            ...getSnapshot(),
+            permissionRequest: resolvedPermissionRequest,
+            logs: appendLog(getSnapshot(), emitEvent({
+              kind: "permission.resolved",
+              taskId,
+              requestId: permissionRequest.id,
+              decision: decision === "denied" ? "denied" : "approved",
+            })),
+          });
+          resolve(decision !== "denied");
+        } catch (error) {
+          setPendingPermissionHandler(permissionRequest.id, undefined);
+          reject(error);
+        }
+      });
+    }),
+    {
+      label: `Text file write approval ${permissionRequest.id}`,
+      timeoutMs: userWaitTimeoutMs,
+      signal,
+      onTimeout: () => {
+        setPendingPermissionHandler(permissionRequest.id, undefined);
+        emitSnapshot({
+          ...getSnapshot(),
+          permissionRequest: undefined,
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "task.timeout",
+            taskId,
+            phase: "waiting_user",
+            label: `Text file write approval ${permissionRequest.id}`,
+            timeoutMs: userWaitTimeoutMs,
+            detail: "Text file write approval timed out.",
+            stepId: dagStep.id,
+            agentKind: dagStep.assignedAgentKind as AgentKind,
+            toolName: FILE_WRITE_TEXT_TOOL_NAME,
+          })),
+        });
+      },
+      onAbort: () => {
+        setPendingPermissionHandler(permissionRequest.id, undefined);
+        emitSnapshot({
+          ...getSnapshot(),
+          permissionRequest: undefined,
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "task.cancelled",
+            taskId,
+            label: `Text file write approval ${permissionRequest.id}`,
+            detail: "Text file write approval cancelled.",
+            stepId: dagStep.id,
+            agentKind: dagStep.assignedAgentKind as AgentKind,
+          })),
+        });
+      },
+    },
+  );
+
+  if (!approved) {
+    const output = {
+      approvalId: plan.approvalId,
+      targetPath,
+      written: false,
+      byteCount: 0,
+      denied: true,
+    };
+    if (agentTracker.getState(agentId)) {
+      agentTracker.setState(agentId, {
+        status: "completed",
+        task: `Skipped: ${dagStep.title}`,
+      });
+    }
+    emitSnapshot({
+      ...getSnapshot(),
+      status: "running",
+      commanderMessage: `Text file write was denied for ${targetPath}; no file was written.`,
+      permissionRequest: resolvedPermissionRequest,
+      plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
+      agents: agentTracker.getSnapshots(),
+      verificationSummary: `verified: text file write denied by user; ${targetPath} was not written.`,
+      logs: appendLog(getSnapshot(), emitEvent({
+        kind: "tool.completed",
+        taskId,
+        toolName: FILE_WRITE_TEXT_TOOL_NAME,
+        detail: `Step ${dagStep.id}: text file write denied by user; no file written.`,
+      })),
+    });
+    return output;
+  }
+
+  if (agentTracker.getState(agentId)) {
+    agentTracker.setState(agentId, {
+      status: "running",
+      task: `Writing ${targetPath}`,
+      currentStepId: dagStep.id,
+    });
+  }
+  const execution = await withTaskTimeout(
+    () => fileTool.writeText!({ targetPath, content }, plan.approvalId, taskId),
+    {
+      label: `tool ${FILE_WRITE_TEXT_TOOL_NAME} execute`,
+      timeoutMs: toolTimeoutMs,
+      signal,
+    },
+  );
+  const summary = `File Agent wrote ${execution.targetPath}.`;
+  if (agentTracker.getState(agentId)) {
+    agentTracker.setState(agentId, {
+      status: "completed",
+      task: `Completed: ${dagStep.title}`,
+    });
+  }
+  emitSnapshot({
+    ...getSnapshot(),
+    status: "running",
+    commanderMessage: summary,
+    permissionRequest: resolvedPermissionRequest,
+    plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
+    agents: agentTracker.getSnapshots(),
+    verificationSummary: `verified: ${execution.targetPath} was written after confirmed_write approval.`,
+    logs: appendLog(getSnapshot(), emitEvent({
+      kind: "tool.completed",
+      taskId,
+      toolName: FILE_WRITE_TEXT_TOOL_NAME,
+      detail: `Step ${dagStep.id}: file.writeText wrote ${execution.byteCount} byte(s) to ${execution.targetPath}.`,
+    })),
+  });
+  return execution;
+}
+
 async function executeGitStageDagStep(options: {
   dagStep: CommanderDagStep;
   agentId: string;
@@ -2683,6 +3406,7 @@ async function executeGitStageDagStep(options: {
   signal?: AbortSignal;
   toolTimeoutMs: number;
   userWaitTimeoutMs: number;
+  workspaceRuntime?: WorkspaceRuntime;
 }): Promise<unknown> {
   const {
     dagStep,
@@ -2698,6 +3422,7 @@ async function executeGitStageDagStep(options: {
     signal,
     toolTimeoutMs,
     userWaitTimeoutMs,
+    workspaceRuntime,
   } = options;
 
   if (!gitTool?.planStageFiles || !gitTool.executeStageFiles) {
@@ -2883,11 +3608,13 @@ async function executeGitStageDagStep(options: {
     });
   }
   const execution = await withTaskTimeout(
-    () => gitTool.executeStageFiles!({
-      approvalId: plan.approvalId,
-      paths,
-      taskId,
-    }),
+    () => canExecuteWorkspaceWrite(workspaceRuntime)
+      ? runWorkspaceGitStageCommand({ runtime: workspaceRuntime, plan, paths })
+      : gitTool.executeStageFiles!({
+        approvalId: plan.approvalId,
+        paths,
+        taskId,
+      }),
     {
       label: `tool ${GIT_STAGE_TOOL_NAME} execute`,
       timeoutMs: toolTimeoutMs,
@@ -2936,6 +3663,7 @@ async function executeGitCommitDagStep(options: {
   signal?: AbortSignal;
   toolTimeoutMs: number;
   userWaitTimeoutMs: number;
+  workspaceRuntime?: WorkspaceRuntime;
 }): Promise<unknown> {
   const {
     dagStep,
@@ -2951,6 +3679,7 @@ async function executeGitCommitDagStep(options: {
     signal,
     toolTimeoutMs,
     userWaitTimeoutMs,
+    workspaceRuntime,
   } = options;
 
   if (!gitTool?.planCommit || !gitTool.executeCommit) {
@@ -3138,12 +3867,14 @@ async function executeGitCommitDagStep(options: {
     });
   }
   const execution = await withTaskTimeout(
-    () => gitTool.executeCommit!({
-      approvalId: plan.approvalId,
-      message,
-      paths,
-      taskId,
-    }),
+    () => canExecuteWorkspaceWrite(workspaceRuntime)
+      ? runWorkspaceGitCommitCommand({ runtime: workspaceRuntime, plan, message, paths })
+      : gitTool.executeCommit!({
+        approvalId: plan.approvalId,
+        message,
+        paths,
+        taskId,
+      }),
     {
       label: `tool ${GIT_COMMIT_TOOL_NAME} execute`,
       timeoutMs: toolTimeoutMs,
@@ -4091,11 +4822,63 @@ function createFallbackComputerUseDagPlan(
   };
 }
 
-function normalizeCommanderDagPlan(plan: CommanderPlanResult): CommanderDagPlan {
+class CommanderPlanShapeError extends Error {
+  readonly diagnostic: PlanDiagnostic;
+
+  constructor(diagnostic: PlanDiagnostic) {
+    super(diagnostic.message);
+    this.name = "CommanderPlanShapeError";
+    this.diagnostic = diagnostic;
+  }
+}
+
+function isCommanderPlanShapeError(error: unknown): error is CommanderPlanShapeError {
+  return error instanceof CommanderPlanShapeError;
+}
+
+function commanderPlanShapeDiagnostic(error: unknown): PlanDiagnostic {
+  if (isCommanderPlanShapeError(error)) {
+    return error.diagnostic;
+  }
   return {
-    title: plan.title,
-    reasoning: plan.reasoning,
-    steps: plan.steps.map((step) => ({
+    code: "INVALID_PLAN_SHAPE",
+    severity: "error",
+    message: error instanceof Error
+      ? error.message
+      : `Commander plan returned an invalid shape: ${String(error)}`,
+    suggestedFix:
+      "Return a JSON object with title, reasoning, and steps[] matching the Commander plan schema.",
+  };
+}
+
+function stringifyForPlanTrace(value: unknown): string | undefined {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeCommanderDagPlan(plan: CommanderPlanResult): CommanderDagPlan {
+  const parsed = CommanderPlanResultShape.safeParse(plan);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const path = issue?.path?.join(".");
+    throw new CommanderPlanShapeError({
+      code: "INVALID_PLAN_SHAPE",
+      severity: "error",
+      path,
+      message:
+        `Commander plan returned an invalid shape at ${path || "<root>"}: ${issue?.message ?? "unknown shape error"}.`,
+      suggestedFix:
+        "Return a JSON object with title, reasoning, and steps[] matching the Commander plan schema.",
+    });
+  }
+  const normalized = parsed.data;
+  return {
+    title: normalized.title,
+    reasoning: normalized.reasoning,
+    steps: normalized.steps.map((step) => ({
       ...step,
       capability: step.capability,
       requiredCapabilities: step.requiredCapabilities ?? [],
@@ -4371,16 +5154,24 @@ async function waitForAskUserAnswer(options: {
       onAnswered: async (resolved) => {
         context.set(`askUserAnswer:${stepId}`, resolved.answer);
         context.set("askUserQuestion", resolved.question);
+        const current = getSnapshot();
+        const respondedLog = emitEvent({
+          kind: "ask_user.responded",
+          taskId,
+          requestId: resolved.id,
+          answer: resolved.answer ?? "",
+        });
         emitSnapshot({
-          ...getSnapshot(),
+          ...current,
           askUserQuestion: undefined,
           conversationMessages: [
             ...(updateAskUserConversation(
-              getSnapshot().conversationMessages,
+              current.conversationMessages,
               resolved,
             ) ?? []),
             { role: "user", content: resolved.answer ?? "" },
           ],
+          logs: [...current.logs, respondedLog],
         });
         resolve(resolved.answer ?? "");
       },
@@ -4524,6 +5315,91 @@ function updateAskUserConversation(
 
 const COMMANDER_DAG_WORKFLOW_ID = "commander-dag";
 
+interface CommanderResumeBuildResult {
+  resumeState: WorkflowResumeState;
+  metadata: NonNullable<TaskSnapshot["durableResume"]>;
+}
+
+function buildCommanderResumeState({
+  resumeFromCheckpoint,
+  workflow,
+  emitEvent,
+  appendRuntimeLog,
+  taskId,
+}: {
+  resumeFromCheckpoint: CommanderDagTaskOptions["resumeFromCheckpoint"];
+  workflow: WorkbenchWorkflow;
+  emitEvent: (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number];
+  appendRuntimeLog: (log: TaskSnapshot["logs"][number]) => void;
+  taskId: string;
+}): CommanderResumeBuildResult | undefined {
+  if (!resumeFromCheckpoint) {
+    return undefined;
+  }
+  const { checkpoint, events } = resumeFromCheckpoint;
+  if (
+    checkpoint.workflowId !== workflow.id ||
+    checkpoint.planHash !== computePlanHash(workflow.steps)
+  ) {
+    emitEvent({
+      kind: "tool.completed",
+      taskId,
+      toolName: "workflow.resume.blocked",
+      detail: `Checkpoint ${checkpoint.runId} does not match the compiled Commander DAG plan.`,
+    });
+    throw new Error(`Checkpoint ${checkpoint.runId} does not match the compiled Commander DAG plan.`);
+  }
+
+  const reconciliation = reconcileCheckpointWithEventLog(checkpoint, events);
+  const resumeStateResult = createWorkflowResumeStateFromReconciliation(reconciliation);
+  if (resumeStateResult.status !== "ready") {
+    emitEvent({
+      kind: "tool.completed",
+      taskId,
+      toolName: "workflow.resume.blocked",
+      detail: `Checkpoint ${checkpoint.runId} cannot resume safely: ${resumeStateResult.reason}`,
+    });
+    throw new Error(
+      `Checkpoint ${checkpoint.runId} cannot resume safely: ${resumeStateResult.reason}`,
+    );
+  }
+
+  const resumeSource = resumeStateResult.source === "event-log"
+    ? "workflow.resume.rebuilt"
+    : "workflow.resume.ready";
+  const resumeDetail = resumeStateResult.source === "event-log"
+    ? `${resumeSource}: Checkpoint ${checkpoint.runId} was rebuilt from event log sequence ${reconciliation.latestEventSequence}; ` +
+      `${resumeStateResult.resumeState.completedStepIds?.length ?? 0} step(s) will be skipped and ` +
+      `${resumeStateResult.resumeState.retryStepIds?.length ?? 0} step(s) will retry.`
+    : `${resumeSource}: Checkpoint ${checkpoint.runId} is resumable at event sequence ${checkpoint.eventSequence}; ` +
+      `${resumeStateResult.resumeState.completedStepIds?.length ?? 0} step(s) will be skipped.`;
+  emitEvent({
+    kind: "tool.completed",
+    taskId,
+    toolName: resumeSource,
+    detail: resumeDetail,
+  });
+  appendRuntimeLog({
+    id: `${taskId}-${resumeSource}`,
+    kind: "tool",
+    title: resumeSource,
+    detail: resumeDetail,
+  });
+  return {
+    resumeState: resumeStateResult.resumeState,
+    metadata: {
+      runId: checkpoint.runId,
+      source: resumeStateResult.source,
+      checkpointEventSequence: checkpoint.eventSequence,
+      latestEventSequence: reconciliation.latestEventSequence,
+      completedStepIds: resumeStateResult.resumeState.completedStepIds ?? [],
+      retryStepIds: resumeStateResult.resumeState.retryStepIds ?? [],
+      approvalRequestIds: reconciliation.approvalRequestIds,
+      rebuilt: resumeStateResult.source === "event-log",
+    },
+  };
+}
+
 // ── Commander DAG Task Executor ────────────────────────────────────────────
 
 interface CommanderDagTaskOptions {
@@ -4540,7 +5416,7 @@ interface CommanderDagTaskOptions {
       handler: ((decision: string) => void | Promise<void>) | undefined,
     ): void;
   };
-  commanderTool: CommanderTool;
+  commanderTool?: CommanderTool;
   codeTool?: CodeTool;
   computerTool?: ComputerTool;
   fileTool?: FileTool;
@@ -4573,6 +5449,11 @@ interface CommanderDagTaskOptions {
   checkpointSink?: {
     save: (checkpoint: WorkflowCheckpoint) => void | Promise<void>;
   };
+  /** Optional safe resume seed derived from a prior durable checkpoint and its event log. */
+  resumeFromCheckpoint?: {
+    checkpoint: WorkflowCheckpoint;
+    events: RuntimeEventEnvelope[];
+  };
   /** LLM-based ReAct decision maker. Called each iteration of the ReAct loop. */
   reactDecideNext?: (
     request: ReActDecisionRequest,
@@ -4601,6 +5482,7 @@ interface CommanderDagTaskOptions {
     onProgress?: (step: unknown) => void;
     signal?: AbortSignal;
   }) => Promise<unknown[]>;
+  workspaceRuntime?: WorkspaceRuntime;
 }
 
 /**
@@ -4639,17 +5521,38 @@ export async function runCommanderDagTask({
   signal,
   runtimeEventSink,
   checkpointSink,
+  resumeFromCheckpoint,
   reactDecideNext,
   replanDag,
   computerUseLoopRunner,
+  workspaceRuntime,
 }: CommanderDagTaskOptions) {
   const { emit, getSnapshot, wait } = controller;
   const runtimeTimeouts = resolveCommanderTimeouts(runtimeConfig);
-  const runId = `run-${taskId}-${Date.now()}`;
+  const runId = resumeFromCheckpoint?.checkpoint.runId ?? `run-${taskId}-${Date.now()}`;
   resetEnvelopeSequence(runId);
+  if (resumeFromCheckpoint) {
+    seedEnvelopeSequence(runId, resumeFromCheckpoint.checkpoint.eventSequence);
+  }
   const availableTools = filterAvailableToolDescriptorsForRuntime(
     normalizeAvailableToolDescriptors(availableToolDescriptors),
-    { codeTool, trendTool },
+    {
+      browserTool,
+      codeTool,
+      commanderTool,
+      computerTool,
+      fileTool,
+      gitTool,
+      memoryTool,
+      mcpTool,
+      schedulerTool,
+      shellTool,
+      trendTool,
+      verifierTool,
+      visionTool,
+      webTool,
+      workspaceTool,
+    },
   );
   throwIfTaskAborted(signal, `Commander DAG task ${taskId}`);
   const context = createSharedTaskContext({ userGoal, taskId });
@@ -4671,10 +5574,26 @@ export async function runCommanderDagTask({
   taskEventBus.on((event) => { eventLogs.push(taskEventToLogEntry(event)); });
 
   let snapshot = getSnapshot();
-  function emitSnapshot(next: TaskSnapshot) { emit(next); snapshot = getSnapshot(); }
+  function emitSnapshot(next: TaskSnapshot) {
+    emit({
+      ...next,
+      runId,
+    });
+    snapshot = getSnapshot();
+  }
 
   let syntheticWorkflow: WorkbenchWorkflow | undefined;
   const abandonedStepIds = new Set<string>();
+  let durablePersistenceQueue = Promise.resolve();
+  function enqueueDurablePersistence(label: string, operation: () => void | Promise<void>): void {
+    durablePersistenceQueue = durablePersistenceQueue
+      .then(() => Promise.resolve(operation()))
+      .catch((error) => {
+        // Durable persistence failures must not crash the live task, but
+        // later writes should still run so the queue does not get poisoned.
+        console.error(`[${label}] failed:`, error);
+      });
+  }
   function buildCheckpointFromSnapshot(
     waitingReason?: WorkflowCheckpoint["waitingReason"],
   ): WorkflowCheckpoint {
@@ -4693,7 +5612,8 @@ export async function runCommanderDagTask({
       completedStepIds,
       abandonedStepIds: [...abandonedStepIds],
       runningStepIds,
-      contextSnapshot: context.envelopeSnapshot(),
+      contextSnapshot: context.snapshot(),
+      envelopes: context.envelopeSnapshot(),
       approvalRequestIds: permissionRequest?.id ? [permissionRequest.id] : [],
       waitingReason,
       eventSequence: currentEnvelopeSequence(runId),
@@ -4702,10 +5622,7 @@ export async function runCommanderDagTask({
   function saveCheckpoint(waitingReason?: WorkflowCheckpoint["waitingReason"]) {
     if (!checkpointSink || !syntheticWorkflow) return;
     const checkpoint = buildCheckpointFromSnapshot(waitingReason);
-    void Promise.resolve(checkpointSink.save(checkpoint)).catch((error) => {
-      // Durable checkpoint persistence must not crash the live task.
-      console.error("[checkpoint-sink] save failed:", error);
-    });
+    enqueueDurablePersistence("checkpoint-sink", () => checkpointSink.save(checkpoint));
   }
 
   function emitEvent(event: TaskRuntimeEvent) {
@@ -4716,10 +5633,7 @@ export async function runCommanderDagTask({
         runId,
         workflowId: COMMANDER_DAG_WORKFLOW_ID,
       });
-      void Promise.resolve(runtimeEventSink.append(envelope)).catch((error) => {
-        // Durable event persistence must not crash the live task.
-        console.error("[runtime-event-sink] append failed:", error);
-      });
+      enqueueDurablePersistence("runtime-event-sink", () => runtimeEventSink.append(envelope));
     }
     if (checkpointSink) {
       switch (event.kind) {
@@ -4745,6 +5659,10 @@ export async function runCommanderDagTask({
       }
     }
     return eventLogs[eventLogs.length - 1] as TaskSnapshot["logs"][number];
+  }
+
+  async function flushDurablePersistenceQueue(): Promise<void> {
+    await durablePersistenceQueue;
   }
 
   const taskStartedAt = Date.now();
@@ -4778,8 +5696,10 @@ export async function runCommanderDagTask({
   throwIfTaskAborted(signal, `Commander DAG task ${taskId}`);
 
   const recoveryAttempts: RecoveryAttemptRecord[] = [];
+  const recoveryReplanShapes: ReplanShapeInput[] = [];
   const planStages: PlanGenerationStageRecord[] = [];
   const planRecoveryCompiles: PlanRecoveryCompileRecord[] = [];
+  let durableResumeMetadata: TaskSnapshot["durableResume"] | undefined;
   // Captured once after the initial plan call returns and survives the
   // try/catch boundary, so the catch handler can still attach it to
   // the PlanGenerationTrace even when the failure happened later in
@@ -4789,8 +5709,13 @@ export async function runCommanderDagTask({
 
   try {
     // Phase 1: Commander generates DAG plan
-    const availableAgents = getAvailableAgentsForPlanning(availableTools);
-    const plannerAvailableTools = toolDescriptorsForPlanner(availableTools);
+    const availableAgents = getAvailableAgentsForPlanning(availableTools, userGoal);
+    const planningScope = filterPlanningScopeForGoal(userGoal, {
+      agents: availableAgents.map((agent) => agent.kind),
+      tools: availableTools,
+    });
+    const planningAvailableTools = planningScope.tools;
+    const plannerAvailableTools = toolDescriptorsForPlanner(planningAvailableTools);
     // `uncompiledPlan` is the raw post-normalize plan. After the compile
     // gate below, the validated `dagPlan: CompiledCommanderPlan` is the
     // only one used downstream. Keeping the uncompiled form as a
@@ -4799,62 +5724,99 @@ export async function runCommanderDagTask({
     // on knows the plan cleared the compile gate.
     let uncompiledPlan: CommanderDagPlan;
     try {
-      emitWaitingLog({
-        taskId,
-        phase: "waiting_model",
-        label: "commander.plan",
-        detail: "Waiting for Commander to generate a DAG plan.",
-        agentKind: "commander",
-        getSnapshot,
-        emitSnapshot,
-        emitEvent,
-      });
-      uncompiledPlan = normalizeCommanderDagPlan(await withTaskTimeout(
-        () => planCommanderDagWithContextRecovery({
-          commanderTool,
-          contextSummaryTool,
-          userGoal,
-          priorMessages,
-          fullPriorMessages: fullPriorMessages ?? priorMessages,
-          omittedPriorMessageCount,
-          availableAgents,
-          availableTools: plannerAvailableTools,
-          workflowId: COMMANDER_DAG_WORKFLOW_ID,
-          context,
-        }),
-        {
-          label: "commander.plan",
-          timeoutMs: runtimeTimeouts.modelTimeoutMs,
-          signal,
-          onTimeout: () => emitTimeoutLog({
+      if (!commanderTool && isComputerUseGoal(userGoal)) {
+        uncompiledPlan = createFallbackComputerUseDagPlan(userGoal, "commander tool unavailable");
+        emitSnapshot({
+          ...getSnapshot(),
+          commanderMessage: uncompiledPlan.reasoning,
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "tool.completed",
             taskId,
-            phase: "waiting_model",
+            toolName: "commander.plan.fallback",
+            detail: "Commander tool unavailable; using Computer Use fallback plan.",
+          })),
+        });
+      } else {
+        if (!commanderTool) {
+          throw new Error("Commander tool is not available.");
+        }
+        emitWaitingLog({
+          taskId,
+          phase: "waiting_model",
+          label: "commander.plan",
+          detail: "Waiting for Commander to generate a DAG plan.",
+          agentKind: "commander",
+          getSnapshot,
+          emitSnapshot,
+          emitEvent,
+        });
+        const rawPlan = await withTaskTimeout(
+          () => planCommanderDagWithContextRecovery({
+            commanderTool,
+            contextSummaryTool,
+            userGoal,
+            priorMessages,
+            fullPriorMessages: fullPriorMessages ?? priorMessages,
+            omittedPriorMessageCount,
+            availableAgents,
+            availableTools: plannerAvailableTools,
+            workflowId: COMMANDER_DAG_WORKFLOW_ID,
+            context,
+          }),
+          {
             label: "commander.plan",
             timeoutMs: runtimeTimeouts.modelTimeoutMs,
-            detail: "Commander plan timed out.",
-            agentKind: "commander",
-            getSnapshot,
-            emitSnapshot,
-            emitEvent,
-          }),
-          onAbort: () => emitCancelledLog({
-            taskId,
-            label: "commander.plan",
-            detail: "Commander plan cancelled.",
-            agentKind: "commander",
-            getSnapshot,
-            emitSnapshot,
-            emitEvent,
-          }),
-        },
-      ));
+            signal,
+            onTimeout: () => emitTimeoutLog({
+              taskId,
+              phase: "waiting_model",
+              label: "commander.plan",
+              timeoutMs: runtimeTimeouts.modelTimeoutMs,
+              detail: "Commander plan timed out.",
+              agentKind: "commander",
+              getSnapshot,
+              emitSnapshot,
+              emitEvent,
+            }),
+            onAbort: () => emitCancelledLog({
+              taskId,
+              label: "commander.plan",
+              detail: "Commander plan cancelled.",
+              agentKind: "commander",
+              getSnapshot,
+              emitSnapshot,
+              emitEvent,
+            }),
+          },
+        );
+        try {
+          uncompiledPlan = normalizeCommanderDagPlan(rawPlan);
+        } catch (shapeError) {
+          const diagnostic = commanderPlanShapeDiagnostic(shapeError);
+          initialExtractedJson = stringifyForPlanTrace(rawPlan);
+          planStages.push({
+            stage: "initial",
+            attempt: 1,
+            status: "failed_non_repairable",
+            diagnostics: [diagnostic],
+            stepIds: [],
+            detail: diagnostic.message,
+          });
+          throw shapeError;
+        }
+      }
     } catch (planError) {
       // Commander JSON parse failure fallback: only kick in when the goal
       // clearly looks like desktop automation. This regex-based check is
       // NOT the primary dispatch — Commander (LLM) normally selects the
       // sub-agent. This exists so a malformed JSON response doesn't kill
       // an obvious desktop-automation task.
-      if (isTaskCancelledError(planError) || planError instanceof TaskTimeoutError || !isComputerUseGoal(userGoal)) {
+      if (
+        isTaskCancelledError(planError) ||
+        planError instanceof TaskTimeoutError ||
+        isCommanderPlanShapeError(planError) ||
+        !isComputerUseGoal(userGoal)
+      ) {
         throw planError;
       }
       const detail = planError instanceof Error ? planError.message : String(planError);
@@ -4898,7 +5860,7 @@ export async function runCommanderDagTask({
     let compilationResult = compileCommanderPlan({
       plan: uncompiledPlan,
       availableAgents,
-      availableTools,
+      availableTools: planningAvailableTools,
       supportedApprovalGatedTools,
       preloadedContextKeys,
     });
@@ -4941,7 +5903,7 @@ export async function runCommanderDagTask({
         invalidPlan: uncompiledPlan,
         diagnostics: compilationResult.diagnostics,
         availableAgents,
-        availableTools,
+        availableTools: planningAvailableTools,
         supportedApprovalGatedTools,
         preloadedContextKeys,
         workflowId: COMMANDER_DAG_WORKFLOW_ID,
@@ -5014,6 +5976,76 @@ export async function runCommanderDagTask({
       });
     }
 
+    const workflowSteps = dagPlan.steps.map((step) => ({
+      id: step.id,
+      title: step.title,
+      agentKind: step.assignedAgentKind as WorkbenchWorkflowStep["agentKind"],
+      input: step.title,
+      output: step.successCriteria,
+      permissionLevel: getDagStepPermissionLevel(step, availableTools),
+      dependsOn: step.dependsOn ?? [],
+      canRunInParallel: true,
+      requiredCapabilities: step.requiredCapabilities as AgentCapabilityTag[] | undefined,
+      inputContextKeys: step.inputContextKeys,
+      outputContextKey: step.outputContextKey,
+    }));
+
+    syntheticWorkflow = {
+      id: COMMANDER_DAG_WORKFLOW_ID as WorkbenchWorkflowId,
+      title: dagPlan.title || "Commander DAG task",
+      triggerExamples: [],
+      goal: userGoal,
+      coordinatorAgentKind: "commander",
+      participatingAgentKinds: [...new Set(dagPlan.steps.map((s) => s.assignedAgentKind))] as AgentKind[],
+      currentSupport: "partial",
+      safetyNotes: [],
+      steps: workflowSteps,
+    };
+    const writeCommanderStepOutput = (
+      dagStep: CommanderDagStep,
+      output: unknown,
+      toolName?: string,
+    ) => {
+      writeStepArtifactOutput(
+        dagStep.outputContextKey ?? `step:${dagStep.id}`,
+        output,
+        context,
+        {
+          taskId,
+          runId,
+          stepId: dagStep.id,
+          agentKind: dagStep.assignedAgentKind,
+          agentId: `agent-${dagStep.assignedAgentKind}`,
+          toolName,
+        },
+      );
+    };
+    const resumeBuild = buildCommanderResumeState({
+      resumeFromCheckpoint,
+      workflow: syntheticWorkflow,
+      emitEvent,
+      appendRuntimeLog: (log) => {
+        emitSnapshot({
+          ...getSnapshot(),
+          logs: appendLog(getSnapshot(), log),
+        });
+      },
+      taskId,
+    });
+    const resumeState = resumeBuild?.resumeState;
+    durableResumeMetadata = resumeBuild?.metadata;
+    const resumedCompletedStepIds = new Set(resumeState?.completedStepIds ?? []);
+    const resumedAbandonedStepIds = new Set(resumeState?.abandonedStepIds ?? []);
+    if (resumeState?.contextSnapshot) {
+      for (const [key, value] of Object.entries(resumeState.contextSnapshot)) {
+        context.set(key, value);
+      }
+    }
+    const completedSteps = new Set<string>(resumeState?.completedStepIds ?? []);
+    for (const stepId of resumeState?.abandonedStepIds ?? []) {
+      abandonedStepIds.add(stepId);
+    }
+
     const plan: TaskStep[] = dagPlan.steps.map((step) => ({
       id: step.id,
       title: step.title,
@@ -5022,12 +6054,17 @@ export async function runCommanderDagTask({
       requiredCapabilities: step.requiredCapabilities,
       inputContextKeys: step.inputContextKeys,
       outputContextKey: step.outputContextKey,
-      status: "pending" as const,
+      status: resumedCompletedStepIds.has(step.id)
+        ? "completed" as const
+        : resumedAbandonedStepIds.has(step.id)
+          ? "failed" as const
+          : "pending" as const,
       successCriteria: step.successCriteria,
     }));
 
     context.set("commanderPlan", dagPlan);
 
+    await flushDurablePersistenceQueue();
     emitSnapshot({
       ...snapshot,
       title: dagPlan.title || "Commander DAG task",
@@ -5123,6 +6160,7 @@ export async function runCommanderDagTask({
           codeTool,
           computerTool,
           fileTool,
+          gitTool,
           shellTool,
           schedulerTool,
           workspaceTool,
@@ -5135,9 +6173,16 @@ export async function runCommanderDagTask({
           visionTool,
           taskId,
           userGoal: `${userGoal}\n\nUser clarification: ${askResult}`,
+          priorMessages,
+          omittedPriorMessageCount,
+          fullPriorMessages,
+          contextSummaryTool,
           runtimeConfig,
+          initialLogs,
           availableToolDescriptors: availableTools,
           signal,
+          runtimeEventSink,
+          checkpointSink,
           reactDecideNext,
           replanDag,
           computerUseLoopRunner,
@@ -5157,34 +6202,6 @@ export async function runCommanderDagTask({
       browserTool, codeTool, computerTool, fileTool, gitTool,
       shellTool, schedulerTool, workspaceTool, webTool, trendTool, memoryTool, mcpTool,
       commanderTool, verifierTool, visionTool,
-    };
-    const completedSteps = new Set<string>();
-
-    // Convert CommanderDagSteps to WorkbenchWorkflowSteps for the DAG executor
-    const workflowSteps = dagPlan.steps.map((step) => ({
-      id: step.id,
-      title: step.title,
-      agentKind: step.assignedAgentKind as WorkbenchWorkflowStep["agentKind"],
-      input: step.title,
-      output: step.successCriteria,
-      permissionLevel: getDagStepPermissionLevel(step, availableTools),
-      dependsOn: step.dependsOn ?? [],
-      canRunInParallel: true,
-      requiredCapabilities: step.requiredCapabilities as AgentCapabilityTag[] | undefined,
-      inputContextKeys: step.inputContextKeys,
-      outputContextKey: step.outputContextKey,
-    }));
-
-    syntheticWorkflow = {
-      id: COMMANDER_DAG_WORKFLOW_ID as WorkbenchWorkflowId,
-      title: dagPlan.title || "Commander DAG task",
-      triggerExamples: [],
-      goal: userGoal,
-      coordinatorAgentKind: "commander",
-      participatingAgentKinds: [...new Set(dagPlan.steps.map((s) => s.assignedAgentKind))] as AgentKind[],
-      currentSupport: "partial",
-      safetyNotes: [],
-      steps: workflowSteps,
     };
 
     /**
@@ -5292,13 +6309,10 @@ export async function runCommanderDagTask({
             signal,
             toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
             userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
+            workspaceRuntime,
           });
           completedSteps.add(dagStep.id);
-          writeStepOutput(
-            (dagStep.outputContextKey ?? `step:${dagStep.id}`),
-            output,
-            context,
-          );
+          writeCommanderStepOutput(dagStep, output, descriptor.name);
           return { output };
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : String(error);
@@ -5347,13 +6361,10 @@ export async function runCommanderDagTask({
             signal,
             toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
             userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
+            workspaceRuntime,
           });
           completedSteps.add(dagStep.id);
-          writeStepOutput(
-            (dagStep.outputContextKey ?? `step:${dagStep.id}`),
-            output,
-            context,
-          );
+          writeCommanderStepOutput(dagStep, output, GIT_COMMIT_TOOL_NAME);
           return { output };
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : String(error);
@@ -5404,11 +6415,7 @@ export async function runCommanderDagTask({
             userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
           });
           completedSteps.add(dagStep.id);
-          writeStepOutput(
-            (dagStep.outputContextKey ?? `step:${dagStep.id}`),
-            output,
-            context,
-          );
+          writeCommanderStepOutput(dagStep, output, GIT_CREATE_PR_TOOL_NAME);
           return { output };
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : String(error);
@@ -5449,6 +6456,58 @@ export async function runCommanderDagTask({
             taskId,
             context,
             gitTool,
+            getSnapshot,
+            emitSnapshot,
+            emitEvent,
+            agentTracker,
+            setPendingPermissionHandler: controller.setPendingPermissionHandler,
+            signal,
+            toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
+            userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
+          });
+          completedSteps.add(dagStep.id);
+          writeCommanderStepOutput(dagStep, output, `${dagStep.assignedAgentKind}.${dagStep.id}`);
+          return { output };
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          const redactedErrorMsg = redactImageDataUrlsForSummary(errorMsg);
+          if (agentTracker.getState(agentId)) {
+            agentTracker.setState(agentId, {
+              status: "failed",
+              task: `Failed: ${redactedErrorMsg}`,
+            });
+          }
+          emitSnapshot({
+            ...getSnapshot(),
+            permissionRequest: undefined,
+            plan: markStep(getSnapshot().plan, dagStep.id, "failed"),
+            agents: agentTracker.getSnapshots(),
+            logs: appendLog(getSnapshot(), emitEvent({
+              kind: "task.failed",
+              taskId,
+              error: redactedErrorMsg,
+            })),
+          });
+          throw error;
+        }
+      }
+
+      if (isFileWriteTextDagStep(dagStep)) {
+        const descriptor = findToolDescriptorByNameIn(availableTools, FILE_WRITE_TEXT_TOOL_NAME);
+        if (!descriptor) {
+          throw new Error("file.writeText tool is not available.");
+        }
+        if (!descriptor.ownerAgentKinds.includes(dagStep.assignedAgentKind)) {
+          throw new Error(`Tool file.writeText is not owned by agent ${dagStep.assignedAgentKind}.`);
+        }
+        try {
+          const output = await executeFileWriteTextDagStep({
+            dagStep,
+            agentId,
+            taskId,
+            userGoal,
+            context,
+            fileTool,
             getSnapshot,
             emitSnapshot,
             emitEvent,
@@ -5611,11 +6670,9 @@ export async function runCommanderDagTask({
           throw new Error(`Computer Use failed: ${redactImageDataUrlsForSummary(error)}`);
         }
 
+        const sanitizedSteps = steps.map((step) => sanitizeComputerUseStepForContext(step as ComputerUseStep));
         completedSteps.add(dagStep.id);
-        context.set(
-           (dagStep.outputContextKey ?? `step:${dagStep.id}`),
-          steps.map((step) => sanitizeComputerUseStepForContext(step as ComputerUseStep)),
-        );
+        writeCommanderStepOutput(dagStep, sanitizedSteps, "computer.useLoop");
         if (agentTracker.getState(agentId)) {
           agentTracker.setState(agentId, {
             status: "completed",
@@ -5634,7 +6691,7 @@ export async function runCommanderDagTask({
             detail: `步骤 ${dagStep.id}：桌面操作流程完成，共执行 ${steps.length} 步。`,
           })),
         });
-        return { output: steps };
+        return { output: sanitizedSteps };
       }
 
       if (agentTracker.getState(agentId)) {
@@ -5681,11 +6738,7 @@ export async function runCommanderDagTask({
                 signal,
               },
             );
-            writeStepOutput(
-              (dagStep.outputContextKey ?? `step:${dagStep.id}`),
-              output,
-              context,
-            );
+            writeCommanderStepOutput(dagStep, output, td.name);
             return output;
           },
         }));
@@ -5838,11 +6891,7 @@ export async function runCommanderDagTask({
           },
         );
         const output = synthesis?.message ?? dagStep.title;
-        writeStepOutput(
-           (dagStep.outputContextKey ?? `step:${dagStep.id}`),
-          output,
-          context,
-        );
+        writeCommanderStepOutput(dagStep, output, "commander.synthesize");
         completedSteps.add(dagStep.id);
 
         if (agentTracker.getState(agentId)) {
@@ -5940,6 +6989,7 @@ export async function runCommanderDagTask({
 
         emitSnapshot({
           ...getSnapshot(),
+          ...(deriveGenericWorkflowSnapshotData(context.snapshot())),
           ...(repoSearchReport ? { repoSearchReport } : {}),
           ...(repoTraceReport ? { repoTraceReport } : {}),
           plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
@@ -6111,6 +7161,14 @@ export async function runCommanderDagTask({
         const recoveryPlanNormalized = normalizeCommanderDagPlan(
           recoveryPlan as Parameters<typeof normalizeCommanderDagPlan>[0],
         );
+        recoveryReplanShapes.push({
+          steps: recoveryPlanNormalized.steps.map((step) => ({
+            agentKind: step.assignedAgentKind as WorkbenchWorkflowStep["agentKind"],
+            inputContextKeys: step.inputContextKeys,
+            outputContextKey: step.outputContextKey,
+            permissionLevel: getDagStepPermissionLevel(step, availableTools),
+          })),
+        });
         const recoveryExistingSteps = dagPlan.steps.map((s) => ({
           id: s.id,
           dependsOn: s.dependsOn ?? [],
@@ -6119,7 +7177,7 @@ export async function runCommanderDagTask({
         const recoveryCompile = compileCommanderPlan({
           plan: recoveryPlanNormalized,
           availableAgents,
-          availableTools,
+          availableTools: planningAvailableTools,
           supportedApprovalGatedTools: [...SUPPORTED_APPROVAL_GATED_TOOLS],
           preloadedContextKeys: [...DEFAULT_PRELOADED_CONTEXT_KEYS],
           existingSteps: recoveryExistingSteps,
@@ -6256,6 +7314,7 @@ export async function runCommanderDagTask({
     const execution = await executeWorkflow({
       workflow: syntheticWorkflow,
       context,
+      resumeFrom: resumeState,
       signal,
       stepTimeoutMs: runtimeTimeouts.toolTimeoutMs,
       maxStepRetries: runtimeTimeouts.maxStepRetries,
@@ -6289,8 +7348,18 @@ export async function runCommanderDagTask({
           })),
         });
       },
-      onStepFailed: (_step, _error, _ctx) => {
-        // Already handled in executeStepWithReAct above
+      onStepFailed: (step, error) => {
+        emitSnapshot({
+          ...getSnapshot(),
+          plan: markStep(getSnapshot().plan, step.id, "failed"),
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "step.failed",
+            taskId,
+            stepId: step.id,
+            error: redactImageDataUrlsForSummary(error),
+            agentKind: step.agentKind,
+          })),
+        });
       },
       onStepHeartbeat: (step, elapsedMs) => {
         emitSnapshot({
@@ -6438,6 +7507,9 @@ export async function runCommanderDagTask({
           generatedAt: new Date(now).toISOString(),
           abandonedStepIds: execution.abandonedStepIds,
           replannedStepIds: execution.replannedStepIds,
+          workflowSteps: syntheticWorkflow?.steps,
+          completedStepIds: execution.completedStepIds,
+          replanShapes: recoveryReplanShapes,
         })
       : undefined;
     const planGenerationTrace = buildPlanGenerationTrace({
@@ -6449,8 +7521,10 @@ export async function runCommanderDagTask({
       normalizedPlan: initialNormalizedPlan,
       promptVersion: COMMANDER_PLAN_PROMPT_VERSION,
     });
+    await flushDurablePersistenceQueue();
     emitSnapshot({
       ...getSnapshot(),
+      ...(deriveGenericWorkflowSnapshotData(context.snapshot())),
       title: dagPlan.title || "Task completed",
       status: finalCompleted ? "completed" : "failed",
       commanderMessage: conclusion,
@@ -6466,8 +7540,10 @@ export async function runCommanderDagTask({
         : finalCompleted
           ? `verified: ${execution.completedStepIds.length}/${execution.completedStepIds.length + (execution.abandonedStepIds?.length ?? 0)} steps completed via Commander DAG.`
           : `warn: ${execution.completedStepIds.length}/${execution.completedStepIds.length + (execution.abandonedStepIds?.length ?? 0)} steps completed.`,
+      ...(verifierCheck ? { verificationResult: verifierCheck } : {}),
       handoffReport,
       ...(recoveryReport ? { recoveryReport } : {}),
+      ...(durableResumeMetadata ? { durableResume: durableResumeMetadata } : {}),
       planGenerationTrace,
       executionTrace: trace ? {
         ...trace,
@@ -6487,6 +7563,7 @@ export async function runCommanderDagTask({
         ],
       } : undefined,
     });
+    await flushDurablePersistenceQueue();
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     const redactedErrorMsg = redactImageDataUrlsForSummary(errorMsg);
@@ -6503,6 +7580,11 @@ export async function runCommanderDagTask({
     const recoveryReport = recoveryAttempts.length > 0 && !cancelled
       ? buildRecoveryReport(recoveryAttempts, {
           generatedAt: new Date().toISOString(),
+          workflowSteps: syntheticWorkflow?.steps,
+          completedStepIds: getSnapshot().plan
+            .filter((step) => step.status === "completed")
+            .map((step) => step.id),
+          replanShapes: recoveryReplanShapes,
         })
       : undefined;
     const planGenerationTrace = buildPlanGenerationTrace({
@@ -6535,9 +7617,11 @@ export async function runCommanderDagTask({
       })),
       agents: agentTracker.getSnapshots(),
       ...(recoveryReport ? { recoveryReport } : {}),
+      ...(durableResumeMetadata ? { durableResume: durableResumeMetadata } : {}),
       planGenerationTrace,
       logs: appendLog(snapshot, emitEvent(completionEvent)),
     });
+    await flushDurablePersistenceQueue();
   }
 }
 
@@ -6642,17 +7726,416 @@ function getWorkflowStepKey(stepId: string): string {
   return stepId.includes(":") ? stepId.slice(stepId.lastIndexOf(":") + 1) : stepId;
 }
 
+type BrowserTrendSource = {
+  id: string;
+  url: string;
+  referrer?: string;
+};
+
+type TrendHotListRequestLike = Parameters<TrendTool["fetchHotList"]>[0];
+
+class BrowserTrendHotListError extends Error {
+  readonly diagnostics: TrendHotListResult["diagnostics"];
+
+  constructor(diagnostics: TrendHotListResult["diagnostics"]) {
+    super(`Browser trend hot list extraction failed: ${summarizeBrowserTrendDiagnostics(diagnostics)}`);
+    this.name = "BrowserTrendHotListError";
+    this.diagnostics = diagnostics;
+  }
+}
+
+const BROWSER_TREND_FETCH_TIMEOUT_MS = 20_000;
+const BROWSER_TREND_MAX_CONTENT_LENGTH = 250_000;
+
+const BROWSER_TREND_SOURCES: Record<string, BrowserTrendSource[]> = {
+  weibo: [
+    {
+      id: "weibo-side-hot-search",
+      url: "https://weibo.com/ajax/side/hotSearch",
+      referrer: "https://weibo.com/",
+    },
+    {
+      id: "weibo-hot-band",
+      url: "https://weibo.com/ajax/statuses/hot_band",
+      referrer: "https://weibo.com/",
+    },
+    {
+      id: "weibo-public-top-page",
+      url: "https://s.weibo.com/top/summary?cate=realtimehot",
+    },
+    {
+      id: "weibo-browser-mirror-60s",
+      url: "https://60s-api.viki.moe/v2/weibo",
+    },
+  ],
+};
+
+async function fetchTrendHotListWithBrowser(
+  browserTool: BrowserTool,
+  request: { provider: TrendProvider; limit?: number },
+): Promise<TrendHotListResult> {
+  const provider = request.provider;
+  const limit = clampTrendLimit(request.limit);
+  const sources = BROWSER_TREND_SOURCES[provider] ?? [];
+  if (sources.length === 0) {
+    throw new Error(`Browser trend collection does not support provider: ${provider}`);
+  }
+
+  const diagnostics: TrendHotListResult["diagnostics"] = [];
+  for (const source of sources) {
+    const startedAt = new Date().toISOString();
+    try {
+      const navigateResult = await browserTool.navigate({
+        url: source.url,
+        referrer: source.referrer,
+        timeoutMs: BROWSER_TREND_FETCH_TIMEOUT_MS,
+      });
+      const contentResult = await browserTool.getContent({
+        format: "text",
+        maxLength: BROWSER_TREND_MAX_CONTENT_LENGTH,
+      });
+      const finishedAt = new Date().toISOString();
+      const items = extractBrowserTrendItems(contentResult.content, provider)
+        .slice(0, limit);
+      if (items.length > 0) {
+        const sourceUrl = contentResult.url || navigateResult.url || source.url;
+        const warnings = items.length < limit
+          ? [`Expected ${limit} hot list item(s), but only ${items.length} were returned.`]
+          : [];
+        return {
+          provider,
+          fetchedAt: finishedAt,
+          sourceUrl,
+          items,
+          expectedCount: limit,
+          complete: items.length >= limit,
+          warnings,
+          diagnostics: [
+            ...diagnostics,
+            createBrowserTrendDiagnostic({
+              provider: `${provider}:browser:${source.id}`,
+              sourceUrl,
+              requestedLimit: limit,
+              startedAt,
+              finishedAt,
+              status: "completed",
+              httpStatus: navigateResult.status,
+              itemCount: items.length,
+            }),
+          ],
+        };
+      }
+      diagnostics.push(createBrowserTrendDiagnostic({
+        provider: `${provider}:browser:${source.id}`,
+        sourceUrl: contentResult.url || navigateResult.url || source.url,
+        requestedLimit: limit,
+        startedAt,
+        finishedAt,
+        status: "failed",
+        httpStatus: navigateResult.status,
+        errorKind: navigateResult.status >= 400 ? "http" : "parse",
+        error: `Browser page did not expose structured ${provider} trend items.`,
+      }));
+    } catch (error) {
+      const finishedAt = new Date().toISOString();
+      diagnostics.push(createBrowserTrendDiagnostic({
+        provider: `${provider}:browser:${source.id}`,
+        sourceUrl: source.url,
+        requestedLimit: limit,
+        startedAt,
+        finishedAt,
+        status: "failed",
+        errorKind: "network",
+        error: summarizeToolError(error),
+      }));
+    }
+  }
+
+  throw new BrowserTrendHotListError(diagnostics);
+}
+
+async function fetchTrendHotListWithFallback(
+  tools: { browserTool?: BrowserTool; trendTool?: TrendTool },
+  request: TrendHotListRequestLike,
+): Promise<TrendHotListResult> {
+  let browserFailure: BrowserTrendHotListError | undefined;
+  if (tools.browserTool) {
+    try {
+      return await fetchTrendHotListWithBrowser(tools.browserTool, request);
+    } catch (error) {
+      browserFailure = error instanceof BrowserTrendHotListError
+        ? error
+        : new BrowserTrendHotListError([createBrowserTrendDiagnostic({
+          provider: `${request.provider}:browser`,
+          sourceUrl: "",
+          requestedLimit: clampTrendLimit(request.limit),
+          startedAt: new Date().toISOString(),
+          finishedAt: new Date().toISOString(),
+          status: "failed",
+          errorKind: "network",
+          error: summarizeToolError(error),
+        })]);
+    }
+  }
+
+  if (tools.trendTool?.fetchHotList) {
+    try {
+      const result = await tools.trendTool.fetchHotList(request);
+      if (!browserFailure) {
+        return result;
+      }
+      return {
+        ...result,
+        warnings: [
+          `Browser hot-list extraction failed; direct trend provider fallback was used. ${summarizeBrowserTrendDiagnostics(browserFailure.diagnostics)}`,
+          ...(result.warnings ?? []),
+        ],
+        diagnostics: [
+          ...browserFailure.diagnostics,
+          ...(result.diagnostics ?? []),
+        ],
+      };
+    } catch (error) {
+      if (browserFailure) {
+        throw new Error(
+          `Browser trend hot list extraction failed and direct trend fallback also failed: ` +
+          `browser: ${summarizeBrowserTrendDiagnostics(browserFailure.diagnostics)}; direct: ${summarizeToolError(error)}`,
+        );
+      }
+      throw error;
+    }
+  }
+
+  if (browserFailure) {
+    throw browserFailure;
+  }
+  throw new Error("trend.fetchHotList tool not available");
+}
+
+function extractBrowserTrendItems(content: string, provider: TrendProvider): TrendHotListResult["items"] {
+  const json = parseJsonFromBrowserText(content);
+  if (json !== undefined) {
+    const jsonItems = extractTrendItemsFromJson(json, provider);
+    if (jsonItems.length > 0) {
+      return jsonItems;
+    }
+  }
+  return extractTrendItemsFromText(content, provider);
+}
+
+function extractTrendItemsFromJson(value: unknown, provider: TrendProvider): TrendHotListResult["items"] {
+  const arrays = collectTrendItemArrays(value);
+  for (const array of arrays) {
+    const items = array
+      .filter(isPlainRecord)
+      .map((item, index) => normalizeBrowserTrendItem(item, index, provider))
+      .filter((item): item is TrendHotListResult["items"][number] => Boolean(item));
+    if (items.length > 0) {
+      return items;
+    }
+  }
+  return [];
+}
+
+function collectTrendItemArrays(value: unknown): unknown[][] {
+  if (Array.isArray(value)) return [value];
+  if (!isPlainRecord(value)) return [];
+  const candidates: unknown[][] = [];
+  const directKeys = ["data", "items", "list", "hot", "hotList", "hot_list"];
+  for (const key of directKeys) {
+    const child = value[key];
+    if (Array.isArray(child)) candidates.push(child);
+  }
+  const data = value.data;
+  if (isPlainRecord(data)) {
+    for (const key of ["realtime", "band_list", "list", "items", "hot", "hotList", "hot_list"]) {
+      const child = data[key];
+      if (Array.isArray(child)) candidates.push(child);
+    }
+  }
+  return candidates;
+}
+
+function normalizeBrowserTrendItem(
+  item: Record<string, unknown>,
+  index: number,
+  provider: TrendProvider,
+): TrendHotListResult["items"][number] | undefined {
+  const rawTitle =
+    firstStringValue(item, ["note", "word", "title", "name", "word_scheme"]) ??
+    `item-${index + 1}`;
+  const title = cleanupTrendTitle(rawTitle);
+  if (!title) return undefined;
+  const url = firstStringValue(item, ["url", "link", "href"]) ?? buildTrendSearchUrl(provider, title);
+  return {
+    rank: firstNumberValue(item, ["rank", "realpos", "pos"]) ?? index + 1,
+    title,
+    url,
+    hotScore: firstNumberValue(item, ["raw_hot", "num", "hot_value", "hotValue", "hot", "score"]),
+    label: firstStringValue(item, ["label_name", "flag_desc", "icon_desc", "tag"]),
+    category: firstStringValue(item, ["category", "field_tag"]),
+    raw: sanitizeTrendRawItem(item),
+  };
+}
+
+function parseJsonFromBrowserText(content: string): unknown | undefined {
+  const trimmed = content.trim();
+  if (!trimmed) return undefined;
+  const direct = safeJsonParse(trimmed);
+  if (direct !== undefined) return direct;
+  const objectStart = trimmed.indexOf("{");
+  const objectEnd = trimmed.lastIndexOf("}");
+  if (objectStart >= 0 && objectEnd > objectStart) {
+    const parsed = safeJsonParse(trimmed.slice(objectStart, objectEnd + 1));
+    if (parsed !== undefined) return parsed;
+  }
+  const arrayStart = trimmed.indexOf("[");
+  const arrayEnd = trimmed.lastIndexOf("]");
+  if (arrayStart >= 0 && arrayEnd > arrayStart) {
+    return safeJsonParse(trimmed.slice(arrayStart, arrayEnd + 1));
+  }
+  return undefined;
+}
+
+function safeJsonParse(value: string): unknown | undefined {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function extractTrendItemsFromText(content: string, provider: TrendProvider): TrendHotListResult["items"] {
+  const seen = new Set<string>();
+  const items: TrendHotListResult["items"] = [];
+  for (const line of content.split(/\r?\n/u)) {
+    const normalized = line.trim().replace(/\s+/gu, " ");
+    if (!normalized || normalized.length < 2) continue;
+    const match = /^(?:\D{0,8})?(\d{1,2})[\s.、:：-]+(.{2,80}?)(?:\s+(\d{4,}))?$/u.exec(normalized);
+    if (!match) continue;
+    const title = cleanupTrendTitle(match[2] ?? "");
+    if (!title || seen.has(title)) continue;
+    seen.add(title);
+    items.push({
+      rank: Number.parseInt(match[1] ?? String(items.length + 1), 10),
+      title,
+      url: buildTrendSearchUrl(provider, title),
+      hotScore: match[3] ? Number.parseInt(match[3], 10) : undefined,
+    });
+  }
+  return items;
+}
+
+function cleanupTrendTitle(value: string): string {
+  return value
+    .replace(/^#+/u, "")
+    .replace(/#+$/u, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function buildTrendSearchUrl(provider: TrendProvider, query: string): string {
+  if (provider === "weibo") {
+    return `https://s.weibo.com/weibo?q=${encodeURIComponent(query)}`;
+  }
+  return `https://www.bing.com/search?q=${encodeURIComponent(`${provider} ${query}`)}`;
+}
+
+function firstStringValue(
+  item: Record<string, unknown>,
+  keys: readonly string[],
+): string | undefined {
+  for (const key of keys) {
+    const value = item[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function firstNumberValue(
+  item: Record<string, unknown>,
+  keys: readonly string[],
+): number | undefined {
+  for (const key of keys) {
+    const value = item[key];
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim()) {
+      const parsed = Number.parseFloat(value.replace(/,/gu, ""));
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  return undefined;
+}
+
+function sanitizeTrendRawItem(item: Record<string, unknown>): Record<string, unknown> {
+  const raw: Record<string, unknown> = {};
+  for (const key of [
+    "word", "word_scheme", "note", "title", "name", "url", "link",
+    "raw_hot", "num", "hot_value", "label_name", "flag_desc", "category",
+  ]) {
+    const value = item[key];
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      raw[key] = value;
+    }
+  }
+  return raw;
+}
+
+function clampTrendLimit(limit: number | undefined): number {
+  if (!Number.isFinite(limit)) return 20;
+  return Math.max(1, Math.min(50, Math.floor(limit as number)));
+}
+
+function createBrowserTrendDiagnostic(
+  diagnostic: Omit<TrendHotListResult["diagnostics"][number], "durationMs">,
+): TrendHotListResult["diagnostics"][number] {
+  return {
+    ...diagnostic,
+    durationMs: Math.max(0, Date.parse(diagnostic.finishedAt) - Date.parse(diagnostic.startedAt)),
+  };
+}
+
+function summarizeBrowserTrendDiagnostics(
+  diagnostics: TrendHotListResult["diagnostics"],
+): string {
+  if (diagnostics.length === 0) return "no browser sources were attempted";
+  return diagnostics
+    .map((diagnostic) => {
+      const status = diagnostic.httpStatus ? `HTTP ${diagnostic.httpStatus}` : diagnostic.errorKind ?? diagnostic.status;
+      return `${diagnostic.provider} ${status}: ${diagnostic.error ?? diagnostic.status}`;
+    })
+    .join("; ");
+}
+
+function summarizeToolError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.trim().replace(/\s+/gu, " ").slice(0, 240) || "Unknown tool error";
+}
+
 function getSourcesFromContext(contextSnapshot: Record<string, unknown>): WebSource[] {
   return Object.values(contextSnapshot)
-    .flatMap((value) => isGenericStepOutput(value) && Array.isArray(value.data?.sources)
-      ? value.data.sources
-      : [])
+    .flatMap((value) => {
+      if (isTrendHotListResult(value)) {
+        return trendHotListToSources(value);
+      }
+      if (isGenericStepOutput(value)) {
+        const sources = Array.isArray(value.data?.sources) ? value.data.sources : [];
+        const trendHotList = value.data?.trendHotList;
+        return isTrendHotListResult(trendHotList)
+          ? [...sources, ...trendHotListToSources(trendHotList)]
+          : sources;
+      }
+      return [];
+    })
     .filter(isWebSource);
 }
 
 function getTrendHotListFromContext(contextSnapshot: Record<string, unknown>): TrendHotListResult | undefined {
   return Object.values(contextSnapshot)
-    .map((value) => isGenericStepOutput(value) ? value.data?.trendHotList : undefined)
+    .map((value) => {
+      if (isTrendHotListResult(value)) return value;
+      return isGenericStepOutput(value) ? value.data?.trendHotList : undefined;
+    })
     .find(isTrendHotListResult);
 }
 
@@ -6829,11 +8312,12 @@ function deriveGenericWorkflowSnapshotData(contextSnapshot: Record<string, unkno
   const candidates = getCandidatesFromContext(contextSnapshot);
   const fileScan = contextSnapshot.fileScan as { documents?: MarkdownDocumentSummary[] } | undefined;
   const scannedDocuments = Array.isArray(fileScan?.documents) ? fileScan.documents : [];
+  const trendHotList = getTrendHotListFromContext(contextSnapshot);
   const researchReport = Object.values(contextSnapshot)
     .map((value) => isGenericStepOutput(value) ? value.data?.researchReport : undefined)
     .find((value): value is NonNullable<TaskSnapshot["researchReport"]> =>
       Boolean(value && typeof value === "object"),
-    );
+    ) ?? (trendHotList ? createTrendHotListResearchReport(trendHotList) : undefined);
   const codeReviewPreview = Object.values(contextSnapshot)
     .map((value) => isGenericStepOutput(value) ? value.data?.codeReviewPreview : undefined)
     .find((value): value is NonNullable<TaskSnapshot["codeReviewPreview"]> =>
@@ -7014,6 +8498,7 @@ async function runInspectProjectStep({
   projectTool,
   shellTool,
   taskId,
+  workspaceRuntime,
 }: {
   availableToolNames?: ReadonlySet<string>;
   agentTracker: ReadCurrentProjectAgentTracker;
@@ -7023,6 +8508,7 @@ async function runInspectProjectStep({
   projectTool: ProjectTool;
   shellTool: ShellTool;
   taskId: ID;
+  workspaceRuntime?: WorkspaceRuntime;
 }): Promise<ProjectInspectionStepOutput> {
   if (availableToolNames && !availableToolNames.has("shell.runReadOnlyCommand")) {
     throw new Error("Tool shell.runReadOnlyCommand is not available.");
@@ -7048,7 +8534,7 @@ async function runInspectProjectStep({
   });
 
   const project = await projectTool.inspectProject();
-  const commands = await runProjectReadOnlyCommands(shellTool);
+  const commands = await runProjectReadOnlyCommands(shellTool, workspaceRuntime);
 
   agentTracker.setState("agent-shell", {
     status: "completed",

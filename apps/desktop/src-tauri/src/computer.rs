@@ -42,6 +42,8 @@ pub struct ScreenRegion {
 #[serde(rename_all = "camelCase")]
 pub struct ComputerScreenshotResult {
     pub data_url: String,
+    pub content_hash: String,
+    pub cache_id: String,
     pub width: u32,
     pub height: u32,
     pub source_width: u32,
@@ -128,7 +130,10 @@ const LOCAL_VISION_WORKER_RELATIVE_PATHS: &[&str] = &[
 ];
 const LOCAL_VISION_DEFAULT_TIMEOUT_MS: u64 = 120;
 const LOCAL_VISION_MIN_TIMEOUT_MS: u64 = 20;
+#[cfg(not(test))]
 const LOCAL_VISION_MAX_TIMEOUT_MS: u64 = 2_000;
+#[cfg(test)]
+const LOCAL_VISION_MAX_TIMEOUT_MS: u64 = 10_000;
 const LOCAL_VISION_MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
 const LOCAL_VISION_MAX_IMAGE_BASE64_CHARS: usize = ((LOCAL_VISION_MAX_IMAGE_BYTES + 2) / 3) * 4;
 const LOCAL_VISION_MAX_WORKER_REQUEST_JSON_BYTES: usize = 512 * 1024;
@@ -1166,11 +1171,13 @@ pub(crate) fn capture_screenshot(
         let source_width = crop_w as u32;
         let source_height = crop_h as u32;
         let health = analyze_screenshot_health(source_width, source_height, &pixels);
-        let (data_url, final_w, final_h) =
+        let (data_url, content_hash, cache_id, final_w, final_h) =
             encode_rgba_png_data_url(source_width, source_height, pixels)?;
 
         Ok(ComputerScreenshotResult {
             data_url,
+            content_hash,
+            cache_id,
             width: final_w,
             height: final_h,
             source_width,
@@ -1298,7 +1305,7 @@ fn encode_rgba_png_data_url(
     width: u32,
     height: u32,
     pixels: Vec<u8>,
-) -> Result<(String, u32, u32), JavisError> {
+) -> Result<(String, String, String, u32, u32), JavisError> {
     use image::imageops::FilterType;
 
     let mut img = image::RgbaImage::from_raw(width, height, pixels)
@@ -1329,11 +1336,22 @@ fn encode_rgba_png_data_url(
     )
     .map_err(|e| JavisError::Internal(format!("PNG encode error: {e}")))?;
 
+    let content_hash = sha256_hex(&png_buf);
+    let cache_id = format!("screen:{content_hash}");
+
     Ok((
         format!("data:image/png;base64,{}", BASE64.encode(&png_buf)),
+        content_hash,
+        cache_id,
         img.width(),
         img.height(),
     ))
+}
+
+fn sha256_hex(content: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content);
+    format!("{:x}", hasher.finalize())
 }
 
 fn crop_rgba(
@@ -1486,11 +1504,13 @@ fn capture_window_printwindow(
         let source_width = crop_w as u32;
         let source_height = crop_h as u32;
         let health = analyze_screenshot_health(source_width, source_height, &cropped);
-        let (data_url, final_w, final_h) =
+        let (data_url, content_hash, cache_id, final_w, final_h) =
             encode_rgba_png_data_url(source_width, source_height, cropped)?;
 
         Ok(ComputerScreenshotResult {
             data_url,
+            content_hash,
+            cache_id,
             width: final_w,
             height: final_h,
             source_width,
@@ -3215,77 +3235,42 @@ pub(crate) fn type_text(request: &ComputerTypeRequest) -> Result<ComputerTypeRes
 }
 
 fn send_char(ch: char) -> Result<(), JavisError> {
-    if let Some(vk) = vk_scan_char(ch) {
-        // Simple ASCII — use VkKeyScanW
-        let vk_code = (vk & 0xFF) as u16;
-        let shift_needed = (vk >> 8) & 1 != 0;
-        let ctrl_needed = (vk >> 8) & 2 != 0;
-        let alt_needed = (vk >> 8) & 4 != 0;
-
-        if shift_needed {
-            press_key(VK_SHIFT)?;
-        }
-        if ctrl_needed {
-            press_key(VK_CONTROL)?;
-        }
-        if alt_needed {
-            press_key(VK_MENU)?;
-        }
-        press_key(vk_code)?;
-        release_key(vk_code)?;
-        if alt_needed {
-            release_key(VK_MENU)?;
-        }
-        if ctrl_needed {
-            release_key(VK_CONTROL)?;
-        }
-        if shift_needed {
-            release_key(VK_SHIFT)?;
-        }
-    } else {
-        // Unicode character — use KEYEVENTF_UNICODE
-        let mut code_units = [0u16; 2];
-        let encoded = ch.encode_utf16(&mut code_units);
-        for cu in encoded.iter() {
-            let inputs = [
-                INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: 0,
-                            wScan: *cu,
-                            dwFlags: KEYEVENTF_UNICODE,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                },
-                INPUT {
-                    r#type: INPUT_KEYBOARD,
-                    Anonymous: INPUT_0 {
-                        ki: KEYBDINPUT {
-                            wVk: 0,
-                            wScan: *cu,
-                            dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
-                            time: 0,
-                            dwExtraInfo: 0,
-                        },
-                    },
-                },
-            ];
-            send_input(&inputs)?;
-        }
-    }
-    Ok(())
+    send_unicode_char(ch)
 }
 
-fn vk_scan_char(ch: char) -> Option<i16> {
-    let vk = unsafe { VkKeyScanW(ch as u16) };
-    if vk == -1 {
-        None
-    } else {
-        Some(vk)
+fn send_unicode_char(ch: char) -> Result<(), JavisError> {
+    let mut code_units = [0u16; 2];
+    let encoded = ch.encode_utf16(&mut code_units);
+    for cu in encoded.iter() {
+        let inputs = [
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: 0,
+                        wScan: *cu,
+                        dwFlags: KEYEVENTF_UNICODE,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: 0,
+                        wScan: *cu,
+                        dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            },
+        ];
+        send_input(&inputs)?;
     }
+    Ok(())
 }
 
 fn send_input(events: &[INPUT]) -> Result<u32, JavisError> {
@@ -5993,11 +5978,10 @@ for await (const line of createInterface({ input: process.stdin, crlfDelay: Infi
     }
 
     #[test]
-    fn test_vk_scan_char_supports_ascii_punctuation() {
-        assert!(vk_scan_char('.').is_some());
-        assert!(vk_scan_char('@').is_some());
-        assert!(vk_scan_char('-').is_some());
-        assert!(vk_scan_char(' ').is_some());
+    fn test_typing_unicode_path_encodes_ascii_space_and_non_ascii() {
+        assert_eq!("A".encode_utf16().collect::<Vec<_>>(), vec![0x0041]);
+        assert_eq!(" ".encode_utf16().collect::<Vec<_>>(), vec![0x0020]);
+        assert_eq!("测".encode_utf16().collect::<Vec<_>>(), vec![0x6d4b]);
     }
 
     #[test]

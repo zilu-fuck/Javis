@@ -14,6 +14,9 @@ const labels = zhCNWorkbenchLocale.labels;
 describe("ModelSettings", () => {
   afterEach(() => {
     cleanup();
+    if (typeof window !== "undefined") {
+      window.localStorage.clear();
+    }
     vi.unstubAllGlobals();
   });
 
@@ -756,6 +759,7 @@ describe("ModelSettings", () => {
               apiKeyReference: "model.openrouter",
               baseUrl: "https://openrouter.ai/api/v1",
               apiKey: "",
+              hasStoredApiKey: true,
               capabilities: { vision: false, code: false, longContext: false },
             },
           ],
@@ -844,7 +848,7 @@ describe("ModelSettings", () => {
     const { container, getByText } = render(
       <ModelSettings
         labels={labels}
-        modelSettings={{ provider: "openai", model: "gpt-4.1", apiKey: "", apiKeyReference: "default", baseUrl: "https://api.openai.com/v1" }}
+        modelSettings={{ provider: "openai", model: "gpt-4.1", apiKey: "sk-test", apiKeyReference: "default", baseUrl: "https://api.openai.com/v1" }}
         onModelConfigurationChange={onModelConfigurationChange}
       />,
     );
@@ -863,6 +867,81 @@ describe("ModelSettings", () => {
       model: "gpt-4.1",
       apiKeyReference: "default",
       baseUrl: "https://api.openai.com/v1",
+    });
+  });
+
+  it("clears stale remote slots without stored keys instead of failing saves", async () => {
+    const onModelConfigurationChange = vi.fn();
+    const { container, getByText } = render(
+      <ModelSettings
+        labels={defaultWorkbenchLocale.labels}
+        modelSettings={{
+          provider: "deepseek",
+          model: "deepseek-v4-flash",
+          apiKey: "",
+          apiKeyReference: "model.deepseek",
+          baseUrl: "https://api.deepseek.com",
+        }}
+        modelConfiguration={{
+          profiles: [
+            {
+              id: "deepseek-deepseek-v4-pro",
+              slot: null,
+              displayName: "deepseek-v4-pro",
+              provider: "deepseek",
+              model: "deepseek-v4-pro",
+              apiKeyReference: "model.deepseek",
+              baseUrl: "https://api.deepseek.com",
+              apiKey: "",
+              hasStoredApiKey: true,
+              capabilities: { vision: false, code: true, longContext: true },
+            },
+            {
+              id: "primary",
+              slot: "primary",
+              displayName: "Primary",
+              provider: "deepseek",
+              model: "deepseek-v4-pro",
+              apiKeyReference: "model.deepseek",
+              baseUrl: "https://api.deepseek.com",
+              apiKey: "",
+              hasStoredApiKey: true,
+              capabilities: { vision: false, code: true, longContext: true },
+            },
+            {
+              id: "multimodal",
+              slot: "multimodal",
+              displayName: "Multimodal",
+              provider: "openai",
+              model: "gpt-4o",
+              apiKeyReference: "model.openai",
+              baseUrl: "https://api.openai.com/v1",
+              apiKey: "",
+              hasStoredApiKey: false,
+              capabilities: { vision: true, code: false, longContext: false },
+            },
+          ],
+          agentOverrides: {},
+        }}
+        onModelConfigurationChange={onModelConfigurationChange}
+      />,
+    );
+
+    fireEvent.click(container.querySelector(".javis-settings-trigger")!);
+    fireEvent.click(getByText(defaultWorkbenchLocale.labels.aiModeSettings));
+    fireEvent.click(document.body.querySelector(".javis-settings-save-btn")!);
+
+    await waitFor(() => expect(onModelConfigurationChange).toHaveBeenCalledOnce());
+    const savedConfig = onModelConfigurationChange.mock.calls[0][0];
+    expect(savedConfig.profiles.find((profile: { slot: string }) => profile.slot === "primary")).toMatchObject({
+      provider: "deepseek",
+      model: "deepseek-v4-pro",
+      apiKeyReference: "model.deepseek",
+    });
+    expect(savedConfig.profiles.find((profile: { slot: string }) => profile.slot === "multimodal")).toMatchObject({
+      provider: "",
+      model: "",
+      apiKeyReference: "model.multimodal",
     });
   });
 
@@ -942,6 +1021,7 @@ describe("ModelSettings", () => {
               apiKeyReference: "model.mimo",
               baseUrl: "https://token-plan-cn.xiaomimimo.com/v1",
               apiKey: "",
+              hasStoredApiKey: true,
               capabilities: { vision: true, code: true, longContext: true },
             },
             {
@@ -953,6 +1033,7 @@ describe("ModelSettings", () => {
               apiKeyReference: "default",
               baseUrl: "https://api.deepseek.com",
               apiKey: "",
+              hasStoredApiKey: true,
               capabilities: { vision: true, code: true, longContext: true },
             },
           ],
@@ -982,7 +1063,7 @@ describe("ModelSettings", () => {
     const { container, getByText } = render(
       <ModelSettings
         labels={labels}
-        modelSettings={{ provider: "deepseek", model: "deepseek-v4-pro", apiKey: "", apiKeyReference: "default", baseUrl: "https://api.deepseek.com" }}
+        modelSettings={{ provider: "deepseek", model: "deepseek-v4-pro", apiKey: "sk-test", apiKeyReference: "default", baseUrl: "https://api.deepseek.com" }}
         onModelConfigurationChange={onModelConfigurationChange}
         onFetchProviderModels={onFetchProviderModels}
       />,
@@ -1030,6 +1111,9 @@ describe("ModelSettings", () => {
     fireEvent.click(container.querySelector(".javis-settings-trigger")!);
     fireEvent.click(getByText(labels.aiModeSettings));
     fireEvent.click(getByText("OpenRouter"));
+    fireEvent.change(document.body.querySelector(`input[aria-label="${labels.modelApiKey}"]`)!, {
+      target: { value: "sk-openrouter" },
+    });
     fireEvent.click(getByText("获取模型"));
 
     await vi.waitFor(() => expect(onFetchProviderModels).toHaveBeenCalledOnce());
@@ -1037,11 +1121,174 @@ describe("ModelSettings", () => {
       expect.objectContaining({
         provider: "openrouter",
         baseUrl: "https://openrouter.ai/api/v1",
+        apiKey: "sk-openrouter",
         apiType: "openai-compatible",
         keyReference: "model.openrouter",
         modelListMode: "openai",
       }),
     );
+  });
+
+  it("does not change the active model settings when browsing providers", () => {
+    const onModelSettingsChange = vi.fn();
+    const { container, getByText } = render(
+      <ModelSettings
+        labels={defaultWorkbenchLocale.labels}
+        modelSettings={{
+          provider: "custom-s",
+          model: "deepseek-v4-flash",
+          apiKey: "",
+          apiKeyReference: "model.custom-s",
+          baseUrl: "http://101.251.162.103:8080/v1",
+        }}
+        onModelSettingsChange={onModelSettingsChange}
+      />,
+    );
+
+    fireEvent.click(container.querySelector(".javis-settings-trigger")!);
+    fireEvent.click(getByText(defaultWorkbenchLocale.labels.aiModeSettings));
+    fireEvent.click(getByText("OpenRouter"));
+
+    expect(onModelSettingsChange).not.toHaveBeenCalled();
+  });
+
+  it("adds an OpenAI-compatible custom API gateway provider", async () => {
+    const onModelConfigurationChange = vi.fn();
+    const onSaveProviderApiKey = vi.fn(async () => undefined);
+    const { container, getByText, getByLabelText, getAllByText } = render(
+      <ModelSettings
+        labels={defaultWorkbenchLocale.labels}
+        modelSettings={{ provider: "openai", model: "", apiKey: "", apiKeyReference: "default", baseUrl: "" }}
+        onModelConfigurationChange={onModelConfigurationChange}
+        onSaveProviderApiKey={onSaveProviderApiKey}
+      />,
+    );
+
+    fireEvent.click(container.querySelector(".javis-settings-trigger")!);
+    fireEvent.click(getByText(defaultWorkbenchLocale.labels.aiModeSettings));
+    fireEvent.click(getByText("Custom Gateway"));
+    fireEvent.change(getByLabelText("Custom provider display name"), {
+      target: { value: "Proxy Hub" },
+    });
+    fireEvent.change(getByLabelText("Custom provider Base URL"), {
+      target: { value: "https://proxy.example.test/v1/" },
+    });
+    fireEvent.click(getByText("Save Gateway"));
+
+    expect(getAllByText("Proxy Hub").length).toBeGreaterThan(0);
+    fireEvent.change(getByLabelText(defaultWorkbenchLocale.labels.modelApiKey ?? "API Key"), {
+      target: { value: "sk-proxy" },
+    });
+    fireEvent.click(getByText("Save Key"));
+    await waitFor(() => expect(onSaveProviderApiKey).toHaveBeenCalledWith("model.custom-proxy-hub", "sk-proxy"));
+    fireEvent.click(document.body.querySelector(".javis-ai-provider-model-trigger")!);
+    fireEvent.change(getByLabelText("Enter model ID"), {
+      target: { value: "deepseek-v4-pro" },
+    });
+    fireEvent.click(getByText("Add"));
+    fireEvent.click(document.body.querySelector(".javis-settings-save-btn")!);
+
+    expect(onModelConfigurationChange).toHaveBeenCalledOnce();
+    const savedConfig = onModelConfigurationChange.mock.calls[0][0];
+    expect(savedConfig.profiles).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          slot: null,
+          provider: "custom-proxy-hub",
+          model: "deepseek-v4-pro",
+          baseUrl: "https://proxy.example.test/v1",
+          apiKeyReference: "model.custom-proxy-hub",
+        }),
+      ]),
+    );
+    expect(savedConfig.profiles.find((profile: { slot: string }) => profile.slot === "primary")).toMatchObject({
+      provider: "custom-proxy-hub",
+      model: "deepseek-v4-pro",
+      baseUrl: "https://proxy.example.test/v1",
+      apiKeyReference: "model.custom-proxy-hub",
+    });
+  });
+
+  it("deletes custom API gateway providers and clears their model assignments", async () => {
+    window.localStorage.setItem("javis.customModelProviders.v1", JSON.stringify([{
+      id: "custom-proxy-hub",
+      label: "Proxy Hub",
+      defaultBaseUrl: "https://proxy.example.test/v1",
+      apiType: "openai-compatible",
+      modelListMode: "openai",
+    }]));
+    const onModelConfigurationChange = vi.fn();
+    const onModelSettingsChange = vi.fn();
+    const onSaveProviderApiKey = vi.fn(async () => undefined);
+    const { container, getByText, getByLabelText, queryByText } = render(
+      <ModelSettings
+        labels={defaultWorkbenchLocale.labels}
+        modelSettings={{
+          provider: "custom-proxy-hub",
+          model: "deepseek-v4-pro",
+          apiKey: "",
+          apiKeyReference: "model.custom-proxy-hub",
+          baseUrl: "https://proxy.example.test/v1",
+        }}
+        modelConfiguration={{
+          profiles: [
+            {
+              id: "custom-proxy-hub-deepseek-v4-pro",
+              slot: null,
+              displayName: "deepseek-v4-pro",
+              provider: "custom-proxy-hub",
+              model: "deepseek-v4-pro",
+              apiKeyReference: "model.custom-proxy-hub",
+              baseUrl: "https://proxy.example.test/v1",
+              apiKey: "",
+              hasStoredApiKey: true,
+              capabilities: { vision: false, code: true, longContext: true },
+            },
+            {
+              id: "primary",
+              slot: "primary",
+              displayName: "Primary",
+              provider: "custom-proxy-hub",
+              model: "deepseek-v4-pro",
+              apiKeyReference: "model.custom-proxy-hub",
+              baseUrl: "https://proxy.example.test/v1",
+              apiKey: "",
+              hasStoredApiKey: true,
+              capabilities: { vision: false, code: true, longContext: true },
+            },
+          ],
+          agentOverrides: {},
+        }}
+        onModelConfigurationChange={onModelConfigurationChange}
+        onModelSettingsChange={onModelSettingsChange}
+        onSaveProviderApiKey={onSaveProviderApiKey}
+      />,
+    );
+
+    fireEvent.click(container.querySelector(".javis-settings-trigger")!);
+    fireEvent.click(getByText(defaultWorkbenchLocale.labels.aiModeSettings));
+    fireEvent.click(getByLabelText("Delete provider Proxy Hub"));
+
+    await waitFor(() => expect(queryByText("Proxy Hub")).toBeNull());
+    expect(onSaveProviderApiKey).toHaveBeenCalledWith("model.custom-proxy-hub", "");
+    expect(onModelSettingsChange).toHaveBeenCalledWith(expect.objectContaining({
+      provider: "openai",
+      model: "",
+      apiKeyReference: "model.openai",
+    }));
+
+    fireEvent.click(document.body.querySelector(".javis-settings-save-btn")!);
+    await waitFor(() => expect(onModelConfigurationChange).toHaveBeenCalledOnce());
+    const savedConfig = onModelConfigurationChange.mock.calls[0][0];
+    expect(savedConfig.profiles).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ provider: "custom-proxy-hub" }),
+      ]),
+    );
+    expect(savedConfig.profiles.find((profile: { slot: string }) => profile.slot === "primary")).toMatchObject({
+      provider: "",
+      model: "",
+    });
   });
 
   it("does not call the provider API for providers without a supported model list endpoint", async () => {

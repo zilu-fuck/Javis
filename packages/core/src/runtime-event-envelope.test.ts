@@ -8,6 +8,7 @@ import {
   isStreamingEvent,
   nextEnvelopeSequence,
   resetEnvelopeSequence,
+  seedEnvelopeSequence,
   STRUCTURAL_EVENT_KINDS,
   STREAMING_EVENT_KINDS,
 } from "./runtime-event-envelope";
@@ -44,6 +45,17 @@ describe("runtime-event-envelope", () => {
       nextEnvelopeSequence(testRunId);
       resetEnvelopeSequence(testRunId);
       expect(nextEnvelopeSequence(testRunId)).toBe(1);
+    });
+
+    it("can seed a run sequence from a durable checkpoint", () => {
+      seedEnvelopeSequence(testRunId, 7);
+      expect(nextEnvelopeSequence(testRunId)).toBe(8);
+    });
+
+    it("does not move a seeded run sequence backwards", () => {
+      seedEnvelopeSequence(testRunId, 7);
+      seedEnvelopeSequence(testRunId, 3);
+      expect(nextEnvelopeSequence(testRunId)).toBe(8);
     });
   });
 
@@ -253,6 +265,7 @@ describe("runtime-event-envelope", () => {
       expect(isStructuralEvent("task.created")).toBe(true);
       expect(isStructuralEvent("task.completed")).toBe(true);
       expect(isStructuralEvent("task.failed")).toBe(true);
+      expect(isStructuralEvent("runtime.compacted")).toBe(true);
       expect(isStructuralEvent("step.started")).toBe(true);
       expect(isStructuralEvent("step.completed")).toBe(true);
       expect(isStructuralEvent("step.failed")).toBe(true);

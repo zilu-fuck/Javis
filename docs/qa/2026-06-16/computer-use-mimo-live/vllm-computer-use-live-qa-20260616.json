@@ -1,0 +1,175 @@
+﻿{
+    "qa":  "computer-use-mimo-vllm-live",
+    "timestamp":  "2026-06-16T17:30:23+08:00",
+    "result":  "blocked",
+    "requestedStack":  {
+                           "computerUse":  "Codex Computer Use plugin",
+                           "model":  "mimo-v2.5",
+                           "serving":  "vLLM OpenAI-compatible API"
+                       },
+    "screenshotArtifacts":  [
+                                {
+                                    "path":  "E:\\Javis\\docs\\qa\\2026-06-16\\computer-use-mimo-live\\vllm-blocked-desktop-state.png",
+                                    "note":  "Desktop state screenshot captured with PowerShell because Computer Use plugin failed before screenshot APIs were available."
+                                }
+                            ],
+    "checks":  {
+                   "keyFilePresent":  true,
+                   "keyFileUrlMarkers":  [
+                                             "https://token-plan-cn.xiaomimimo.com/v1"
+                                         ],
+                   "localVllmPortProbes":  [
+                                               {
+                                                   "port":  8000,
+                                                   "listening":  false,
+                                                   "processId":  null,
+                                                   "processName":  null,
+                                                   "endpoint":  "http://127.0.0.1:8000/v1/models",
+                                                   "ok":  false,
+                                                   "error":  "Not listening"
+                                               },
+                                               {
+                                                   "port":  8001,
+                                                   "listening":  false,
+                                                   "processId":  null,
+                                                   "processName":  null,
+                                                   "endpoint":  "http://127.0.0.1:8001/v1/models",
+                                                   "ok":  false,
+                                                   "error":  "Not listening"
+                                               },
+                                               {
+                                                   "port":  8080,
+                                                   "listening":  false,
+                                                   "processId":  null,
+                                                   "processName":  null,
+                                                   "endpoint":  "http://127.0.0.1:8080/v1/models",
+                                                   "ok":  false,
+                                                   "error":  "Not listening"
+                                               },
+                                               {
+                                                   "port":  11434,
+                                                   "listening":  false,
+                                                   "processId":  null,
+                                                   "processName":  null,
+                                                   "endpoint":  "http://127.0.0.1:11434/v1/models",
+                                                   "ok":  false,
+                                                   "error":  "Not listening"
+                                               }
+                                           ],
+                   "interestingProcesses":  [
+                                                {
+                                                    "ProcessName":  "node",
+                                                    "Id":  30792,
+                                                    "MainWindowTitle":  ""
+                                                },
+                                                {
+                                                    "ProcessName":  "node",
+                                                    "Id":  30932,
+                                                    "MainWindowTitle":  ""
+                                                },
+                                                {
+                                                    "ProcessName":  "node_repl",
+                                                    "Id":  24092,
+                                                    "MainWindowTitle":  ""
+                                                },
+                                                {
+                                                    "ProcessName":  "node_repl",
+                                                    "Id":  24980,
+                                                    "MainWindowTitle":  ""
+                                                },
+                                                {
+                                                    "ProcessName":  "QQ",
+                                                    "Id":  5964,
+                                                    "MainWindowTitle":  ""
+                                                },
+                                                {
+                                                    "ProcessName":  "QQ",
+                                                    "Id":  17096,
+                                                    "MainWindowTitle":  ""
+                                                },
+                                                {
+                                                    "ProcessName":  "QQ",
+                                                    "Id":  26628,
+                                                    "MainWindowTitle":  ""
+                                                },
+                                                {
+                                                    "ProcessName":  "QQ",
+                                                    "Id":  26824,
+                                                    "MainWindowTitle":  "QQ"
+                                                },
+                                                {
+                                                    "ProcessName":  "QQ",
+                                                    "Id":  27064,
+                                                    "MainWindowTitle":  ""
+                                                },
+                                                {
+                                                    "ProcessName":  "QQ",
+                                                    "Id":  28428,
+                                                    "MainWindowTitle":  ""
+                                                },
+                                                {
+                                                    "ProcessName":  "QQ",
+                                                    "Id":  28864,
+                                                    "MainWindowTitle":  ""
+                                                },
+                                                {
+                                                    "ProcessName":  "QQ",
+                                                    "Id":  31916,
+                                                    "MainWindowTitle":  ""
+                                                },
+                                                {
+                                                    "ProcessName":  "QQBrowser",
+                                                    "Id":  16028,
+                                                    "MainWindowTitle":  ""
+                                                },
+                                                {
+                                                    "ProcessName":  "QQEX",
+                                                    "Id":  4580,
+                                                    "MainWindowTitle":  ""
+                                                },
+                                                {
+                                                    "ProcessName":  "QQEX",
+                                                    "Id":  26740,
+                                                    "MainWindowTitle":  ""
+                                                },
+                                                {
+                                                    "ProcessName":  "QQEX",
+                                                    "Id":  27484,
+                                                    "MainWindowTitle":  ""
+                                                },
+                                                {
+                                                    "ProcessName":  "QQEX",
+                                                    "Id":  27812,
+                                                    "MainWindowTitle":  ""
+                                                },
+                                                {
+                                                    "ProcessName":  "QQEX",
+                                                    "Id":  29896,
+                                                    "MainWindowTitle":  ""
+                                                },
+                                                {
+                                                    "ProcessName":  "spacedeskServiceTray",
+                                                    "Id":  14148,
+                                                    "MainWindowTitle":  ""
+                                                }
+                                            ]
+               },
+    "errors":  [
+                   {
+                       "id":  "computer-use-plugin-bootstrap-failed",
+                       "severity":  "blocker",
+                       "message":  "Package subpath ./dist/project/cua/sky_js/src/targets/windows/internal/computer_use_client_base.js is not defined by exports in @oai/sky package.json.",
+                       "impact":  "Cannot call sky.list_apps(), get window state, or capture screenshots through the Computer Use plugin."
+                   },
+                   {
+                       "id":  "vllm-endpoint-not-running",
+                       "severity":  "blocker",
+                       "message":  "No listener found on 127.0.0.1 ports 8000, 8001, 8080, or 11434 for /v1/models.",
+                       "impact":  "Cannot verify real mimo-v2.5 served by vLLM; existing hosted MiMo artifacts are not counted as vLLM evidence."
+                   }
+               ],
+    "notes":  [
+                  "Existing artifacts in this folder from 10:03-11:41 used hosted MiMo endpoint markers, not a local vLLM endpoint.",
+                  "No message was sent during this blocked vLLM QA run."
+              ]
+}
