@@ -1,6 +1,6 @@
 import type {
-  CommanderTool,
   FileTool,
+  ModelUsage,
   PermissionRequest as ToolPermissionRequest,
   WebSearchResult,
   WebTool,
@@ -14,15 +14,25 @@ import {
 import type { FlowController } from "./flow-controller";
 import type { ID } from "./index";
 import { appendLog } from "./snapshot-utils";
-import { createEmptyTokenUsageSummary } from "./token-usage";
+import { isTaskCancelledError, throwIfTaskAborted, withTaskTimeout } from "./task-wait";
+import { addModelUsage, createEmptyTokenUsageSummary } from "./token-usage";
+
+interface TextContentGenerationTool {
+  complete(
+    prompt: string,
+    options?: { maxTokens?: number; temperature?: number; locale?: string },
+  ): Promise<{ text: string; tokenUsage?: ModelUsage }>;
+}
 
 interface TextWriteFlowOptions {
   controller: FlowController;
   fileTool: FileTool;
   webTool?: WebTool;
-  commanderTool?: CommanderTool;
+  chatTool?: TextContentGenerationTool;
   taskId: ID;
   userGoal: string;
+  signal?: AbortSignal;
+  taskTimeoutMs?: number;
   setPendingPermissionHandler(
     requestId: string,
     handler: PendingPermissionHandler | undefined,
@@ -45,8 +55,11 @@ export async function runTextWriteTask({
   controller,
   fileTool,
   webTool,
+  chatTool,
   taskId,
   userGoal,
+  signal,
+  taskTimeoutMs,
   setPendingPermissionHandler,
 }: TextWriteFlowOptions) {
   const agentTracker = createAgentStateTracker(
@@ -54,6 +67,7 @@ export async function runTextWriteTask({
   );
   let snapshot = controller.getSnapshot();
   function emit(nextSnapshot: Parameters<FlowController["emit"]>[0]) {
+    if (signal?.aborted) return;
     controller.emit(nextSnapshot);
     snapshot = controller.getSnapshot();
   }
@@ -95,11 +109,35 @@ export async function runTextWriteTask({
   });
 
   await controller.wait();
+  if (signal?.aborted) return;
 
+  let contentPrepared = false;
+  let tokenUsage = createEmptyTokenUsageSummary();
+  const recordModelCall = (usage?: ModelUsage) => {
+    tokenUsage = addModelUsage(
+      tokenUsage,
+      "commander",
+      usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+    );
+  };
   try {
     const targetPath = inferMarkdownTargetPath(userGoal);
-    const sources = await collectWriteSources(userGoal, webTool);
-    const content = createMarkdownContent(userGoal, sources);
+    const sources = await withTaskTimeout(
+      () => collectWriteSources(userGoal, webTool),
+      { label: "Text write source collection", timeoutMs: taskTimeoutMs, signal },
+    );
+    const generated = await generateTextContent(
+      userGoal,
+      targetPath,
+      sources,
+      chatTool,
+      recordModelCall,
+      signal,
+      taskTimeoutMs,
+    );
+    throwIfTaskAborted(signal, "Text write content generation");
+    const content = generated.content;
+    contentPrepared = true;
 
     agentTracker.setState("agent-commander", {
       status: "completed",
@@ -118,6 +156,7 @@ export async function runTextWriteTask({
       commanderMessage: `File Agent is preparing a dry-run for ${targetPath}. No file has been written.`,
       plan: markTextWriteStep(snapshot.plan, "step-prepare-text", "completed", "step-preview-write", "running"),
       agents: agentTracker.getSnapshots(),
+      tokenUsage,
       sources,
       logs: appendLog(snapshot, {
         id: `${taskId}-preview-started`,
@@ -127,7 +166,11 @@ export async function runTextWriteTask({
       }),
     });
 
-    const writePlan = await fileTool.planWriteText?.({ targetPath, content }, taskId);
+    const writePlan = await withTaskTimeout(
+      () => Promise.resolve(fileTool.planWriteText?.({ targetPath, content }, taskId)),
+      { label: "file.planWriteText", timeoutMs: taskTimeoutMs, signal },
+    );
+    throwIfTaskAborted(signal, "Text write preview");
     if (!writePlan) {
       throw new Error("Text write preview tool is not available.");
     }
@@ -141,9 +184,11 @@ export async function runTextWriteTask({
       },
       setPendingPermissionHandler,
       onDenied(resolvedRequest) {
+        if (signal?.aborted) return;
         emitDeniedTextWrite({ resolvedRequest, targetPath });
       },
       async onApproved(resolvedRequest) {
+        if (signal?.aborted) return;
         await emitApprovedTextWrite({ resolvedRequest, targetPath, content, approvalId: writePlan.approvalId });
       },
     });
@@ -178,12 +223,33 @@ export async function runTextWriteTask({
       }),
     });
   } catch (error) {
+    if (signal?.aborted || isTaskCancelledError(error)) return;
+    agentTracker.setState("agent-commander", {
+      status: contentPrepared ? "completed" : "failed",
+      task: contentPrepared ? "Markdown content prepared" : "Text content generation failed",
+    });
+    agentTracker.setState("agent-file", {
+      status: contentPrepared ? "failed" : "cancelled",
+      task: contentPrepared ? "Text write preview failed" : "No generated content to preview",
+    });
+    agentTracker.setState("agent-verifier", {
+      status: "cancelled",
+      task: "No file write result to verify",
+    });
     emit({
       ...snapshot,
+      title: contentPrepared ? "Text file write preparation failed" : "Text content generation failed",
       status: "failed",
-      commanderMessage: "Text file write preparation failed before any write approval was requested.",
-      plan: markTextWriteStep(snapshot.plan, "step-preview-write", "failed"),
+      commanderMessage: contentPrepared
+        ? "Text file write preparation failed before any write approval was requested."
+        : "Javis could not generate complete file content, so no write approval was requested and no file was written.",
+      plan: markTextWriteStep(
+        snapshot.plan,
+        contentPrepared ? "step-preview-write" : "step-prepare-text",
+        "failed",
+      ),
       agents: agentTracker.getSnapshots(),
+      tokenUsage,
       logs: appendLog(snapshot, {
         id: `${taskId}-failed`,
         kind: "verification",
@@ -200,6 +266,7 @@ export async function runTextWriteTask({
     resolvedRequest: ToolPermissionRequest;
     targetPath: string;
   }) {
+    if (signal?.aborted) return;
     agentTracker.setState("agent-commander", {
       status: "completed",
       task: "Permission decision recorded",
@@ -245,6 +312,7 @@ export async function runTextWriteTask({
     content: string;
     approvalId: string;
   }) {
+    if (signal?.aborted) return;
     agentTracker.setState("agent-commander", {
       status: "completed",
       task: "Permission decision recorded",
@@ -271,9 +339,12 @@ export async function runTextWriteTask({
     });
 
     try {
+      if (signal?.aborted) return;
       if (!fileTool.writeText) {
         throw new Error("Text write execution tool is not available.");
       }
+      // Native writes are the commit point: once started they cannot be safely
+      // cancelled, so await the real result and keep the UI aligned with disk.
       const result = await fileTool.writeText({ targetPath, content }, approvalId, taskId);
       agentTracker.setState("agent-file", {
         status: "completed",
@@ -301,6 +372,7 @@ export async function runTextWriteTask({
         verificationSummary: `verified: ${result.targetPath} was written after confirmed_write approval.`,
       });
     } catch (error) {
+      if (signal?.aborted) return;
       agentTracker.setState("agent-commander", {
         status: "completed",
         task: "Permission decision recorded",
@@ -362,22 +434,183 @@ async function collectWriteSources(
   return webTool.searchWeb({ query: stripTargetPath(userGoal), maxResults: 5 }).catch(() => []);
 }
 
-function createMarkdownContent(userGoal: string, sources: WebSearchResult[]): string {
-  const title = inferMarkdownTitle(userGoal);
-  const lines = [`# ${title}`, "", `> Generated from request: ${userGoal}`, ""];
-  if (sources.length > 0) {
-    lines.push("## Sources", "");
-    for (const source of sources) {
-      lines.push(`- [${escapeMarkdown(source.title || source.url)}](${source.url})`);
-      if (source.excerpt) {
-        lines.push(`  ${source.excerpt}`);
-      }
-    }
-    lines.push("");
-  } else {
-    lines.push("## Notes", "", stripTargetPath(userGoal), "");
+const TEXT_GENERATION_TOKENS_PER_CALL = 4096;
+const MAX_TEXT_GENERATION_CALLS = 8;
+const TEXT_GENERATION_CALL_BUFFER = 1;
+
+interface RequestedLength {
+  amount: number;
+  unit: "characters" | "words";
+}
+
+async function generateTextContent(
+  userGoal: string,
+  targetPath: string,
+  sources: WebSearchResult[],
+  chatTool?: TextContentGenerationTool,
+  recordModelCall: (usage?: ModelUsage) => void = () => undefined,
+  signal?: AbortSignal,
+  taskTimeoutMs?: number,
+): Promise<{ content: string }> {
+  if (!chatTool) {
+    throw new Error("A configured text-generation model is required before a file write can be previewed.");
   }
-  return `${lines.join("\n").trim()}\n`;
+
+  const requestedLength = inferRequestedLength(userGoal);
+  const locale = /[\u3400-\u9fff]/u.test(userGoal) ? "zh-CN" : "en";
+  const maxCalls = getTextGenerationCallLimit(requestedLength);
+  const complete = async (prompt: string, temperature: number): Promise<string> => {
+    let result: Awaited<ReturnType<TextContentGenerationTool["complete"]>>;
+    let modelCallStarted = false;
+    try {
+      result = await withTaskTimeout(
+        () => {
+          modelCallStarted = true;
+          return chatTool.complete(prompt, {
+            maxTokens: TEXT_GENERATION_TOKENS_PER_CALL,
+            temperature,
+            locale,
+          });
+        },
+        { label: "Text content generation", timeoutMs: taskTimeoutMs, signal },
+      );
+    } catch (error) {
+      if (modelCallStarted) recordModelCall();
+      throw error;
+    }
+    recordModelCall(result.tokenUsage);
+    throwIfTaskAborted(signal, "Text content generation");
+    return normalizeGeneratedContent(result.text);
+  };
+
+  let callCount = 1;
+  let content = await complete(
+    buildTextGenerationPrompt(userGoal, targetPath, sources, requestedLength),
+    /novel|story|poem|\u5c0f\u8bf4|\u6545\u4e8b|\u8bd7/i.test(userGoal) ? 0.7 : 0.3,
+  );
+
+  while (
+    requestedLength &&
+    callCount < maxCalls &&
+    measureGeneratedLength(content, requestedLength.unit) < requestedLength.amount
+  ) {
+    const currentLength = measureGeneratedLength(content, requestedLength.unit);
+    const continuation = await complete(
+      buildTextContinuationPrompt(
+        userGoal,
+        content,
+        requestedLength.amount - currentLength,
+        requestedLength.unit,
+      ),
+      0.7,
+    );
+    callCount += 1;
+    if (!continuation) break;
+    content = `${content.trimEnd()}\n\n${continuation}`;
+  }
+
+  validateGeneratedContent(content, requestedLength);
+  return { content: `${content.trim()}\n` };
+}
+
+function buildTextGenerationPrompt(
+  userGoal: string,
+  targetPath: string,
+  sources: WebSearchResult[],
+  requestedLength?: RequestedLength,
+): string {
+  const sourceText = sources.length > 0
+    ? sources.map((source, index) => [
+        `[${index + 1}] ${source.title || source.url}`,
+        source.url,
+        source.excerpt ?? "",
+      ].filter(Boolean).join("\n")).join("\n\n")
+    : "No external sources were collected.";
+  const lengthInstruction = requestedLength
+    ? `The complete document must contain at least ${requestedLength.amount} ${requestedLength.unit}.`
+    : "Use the length and level of detail requested by the user.";
+
+  return [
+    "You are generating the complete contents of a local Markdown file for the user.",
+    "Return ONLY the final file contents. Do not use an outer code fence.",
+    "Do not mention execution, approval, file paths, prompts, or internal process.",
+    "Do not repeat the request as a placeholder. Fully perform the requested writing task.",
+    "Write in the same language as the user's request unless the request says otherwise.",
+    lengthInstruction,
+    `Target file: ${targetPath}`,
+    `User request: ${userGoal}`,
+    `Available sources:\n${sourceText}`,
+  ].join("\n\n");
+}
+
+function buildTextContinuationPrompt(
+  userGoal: string,
+  content: string,
+  remaining: number,
+  unit: RequestedLength["unit"],
+): string {
+  return [
+    "Continue the document below from exactly where it ends.",
+    `Add at least ${remaining} more ${unit} so the original request is complete.`,
+    "Return ONLY new continuation text. Do not repeat the title, earlier sections, or these instructions.",
+    `Original request: ${userGoal}`,
+    `Current ending:\n${content.slice(-4000)}`,
+  ].join("\n\n");
+}
+
+function inferRequestedLength(userGoal: string): RequestedLength | undefined {
+  const match = userGoal.match(/(\d[\d,]{0,6})\s*(?:\u4e2a)?(\u5b57|\u6c49\u5b57|characters?|words?)/i);
+  if (!match) return undefined;
+  const amount = Number(match[1].replace(/,/g, ""));
+  if (!Number.isFinite(amount) || amount <= 0) return undefined;
+  return {
+    amount,
+    unit: /words?/i.test(match[2]) ? "words" : "characters",
+  };
+}
+
+function getTextGenerationCallLimit(requestedLength?: RequestedLength): number {
+  if (!requestedLength) return 1;
+  const multiplier = requestedLength.unit === "words" ? 1.8 : 1.5;
+  return Math.min(
+    MAX_TEXT_GENERATION_CALLS,
+    Math.max(
+      1,
+      Math.ceil((requestedLength.amount * multiplier) / TEXT_GENERATION_TOKENS_PER_CALL) +
+        TEXT_GENERATION_CALL_BUFFER,
+    ),
+  );
+}
+
+function normalizeGeneratedContent(content: string): string {
+  return content
+    .trim()
+    .replace(/^```(?:markdown|md)?\s*\r?\n/i, "")
+    .replace(/\r?\n```\s*$/i, "")
+    .trim();
+}
+
+function validateGeneratedContent(content: string, requestedLength?: RequestedLength): void {
+  if (!content.trim()) {
+    throw new Error("The text-generation model returned empty file content.");
+  }
+  if (/Generated from request:/i.test(content) && /## Notes/i.test(content)) {
+    throw new Error("The text-generation model returned a placeholder instead of complete file content.");
+  }
+  if (!requestedLength) return;
+  const actualLength = measureGeneratedLength(content, requestedLength.unit);
+  if (actualLength < requestedLength.amount) {
+    throw new Error(
+      `Generated content is incomplete: requested at least ${requestedLength.amount} ${requestedLength.unit}, received ${actualLength}.`,
+    );
+  }
+}
+
+function measureGeneratedLength(content: string, unit: RequestedLength["unit"]): number {
+  if (unit === "words") {
+    return content.match(/[\p{L}\p{N}]+(?:['\u2019-][\p{L}\p{N}]+)*/gu)?.length ?? 0;
+  }
+  return content.replace(/\s/gu, "").length;
 }
 
 function inferMarkdownTargetPath(userGoal: string): string {
@@ -387,18 +620,6 @@ function inferMarkdownTargetPath(userGoal: string): string {
   return path?.trim() || "javis-output.md";
 }
 
-function inferMarkdownTitle(userGoal: string): string {
-  const cleaned = stripTargetPath(userGoal)
-    .replace(/save|write|export|markdown|\.md|\u4fdd\u5b58|\u5199\u6210|\u5bfc\u51fa|md/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return cleaned.slice(0, 80) || "Javis Notes";
-}
-
 function stripTargetPath(userGoal: string): string {
   return userGoal.replace(/["'`]?([A-Za-z]:[\\/][^\s"'`]+\.md|(?:\.{1,2}[\\/])?[^\s"'`]+\.md)["'`]?/gi, "").trim();
-}
-
-function escapeMarkdown(value: string): string {
-  return value.replace(/[[\]]/g, "\\$&");
 }

@@ -1544,8 +1544,23 @@ export function createFileScanTaskRuntime({
     | undefined;
   let activeRouteLog: { taskId: ID; log: TaskLogEntry } | undefined;
   let activeAbortController: AbortController | undefined;
+  let runtime!: TaskRuntime;
+  let queuedStartSequence = 0;
+  let queuedStartAfterNativeWrite:
+    | { userGoal: string; options: NonNullable<Parameters<TaskRuntime["start"]>[1]> }
+    | undefined;
   function emit(nextSnapshot: TaskSnapshot) {
-    runtimeState.emit(attachConversationMessages(attachRouteLog(attachTaskMetadata(nextSnapshot))));
+    const emittedSnapshot = attachConversationMessages(attachRouteLog(attachTaskMetadata(nextSnapshot)));
+    runtimeState.emit(emittedSnapshot);
+    if (queuedStartAfterNativeWrite && isTerminalTaskStatus(emittedSnapshot.status)) {
+      const queuedStart = queuedStartAfterNativeWrite;
+      queuedStartAfterNativeWrite = undefined;
+      const scheduledSequence = ++queuedStartSequence;
+      queueMicrotask(() => {
+        if (scheduledSequence !== queuedStartSequence) return;
+        runtime.start(queuedStart.userGoal, queuedStart.options);
+      });
+    }
   }
   function emitForActiveTask(taskId: ID, nextSnapshot: TaskSnapshot) {
     if (nextSnapshot.id !== taskId || runtimeState.getSnapshot().id !== taskId) {
@@ -1638,13 +1653,37 @@ export function createFileScanTaskRuntime({
       if (queuedDecision) {
         queuedPermissionDecisions.delete(requestId);
         queuedLegacyPermissionDecision = undefined;
-        void handler(queuedDecision);
+        invokePermissionHandler(handler, queuedDecision);
         return;
       }
       permissionHandlers.set(requestId, handler);
       return;
     }
     permissionHandlers.delete(requestId);
+  }
+  function invokePermissionHandler(
+    handler: PendingPermissionHandler,
+    decision: "approved" | "approved_always" | "denied",
+  ) {
+    const taskId = runtimeState.getSnapshot().id;
+    void Promise.resolve()
+      .then(() => handler(decision))
+      .catch((error) => {
+        const current = runtimeState.getSnapshot();
+        if (current.id !== taskId || isTerminalTaskStatus(current.status)) return;
+        emit({
+          ...current,
+          title: "Permission handling failed",
+          status: "failed",
+          commanderMessage: "The permission decision could not be completed safely.",
+          logs: appendLog(current, {
+            id: `${current.id}-permission-handler-failed-${Date.now()}`,
+            kind: "permission",
+            title: "permission.failed",
+            detail: error instanceof Error ? error.message : String(error),
+          }),
+        });
+      });
   }
   function setPendingAskUserHandler(
     requestId: string,
@@ -1674,7 +1713,28 @@ export function createFileScanTaskRuntime({
     }
     askUserHandlers.delete(requestId);
   }
-  function stopActiveTask(reason = "Task cancelled.") {
+  function hasUninterruptibleNativeWrite(snapshot: TaskSnapshot): boolean {
+    return snapshot.status === "running" &&
+      snapshot.permissionRequest?.level === "confirmed_write" &&
+      snapshot.permissionRequest.status === "approved" &&
+      snapshot.plan.some((step) => step.id === "step-write-text" && step.status === "running");
+  }
+  function stopActiveTask(reason = "Task cancelled.", options?: { force?: boolean }): boolean {
+    const current = runtimeState.getSnapshot();
+    if (!options?.force && hasUninterruptibleNativeWrite(current)) {
+      emit({
+        ...current,
+        commanderMessage:
+          "The approved native file write is already executing and cannot be cancelled safely. Wait for its result before starting another task.",
+        logs: appendLog(current, {
+          id: `${current.id}-cancel-deferred-${Date.now()}`,
+          kind: "event",
+          title: "task.cancel_deferred",
+          detail: `${reason} Native file write is already past the confirmed-write commit point.`,
+        }),
+      });
+      return false;
+    }
     const controller = activeAbortController;
     activeAbortController = undefined;
     controller?.abort(new Error(reason));
@@ -1684,9 +1744,8 @@ export function createFileScanTaskRuntime({
     askUserHandlers.clear();
     queuedAskUserAnswers.clear();
 
-    const current = runtimeState.getSnapshot();
     if (isTerminalTaskStatus(current.status)) {
-      return;
+      return true;
     }
     emit({
       ...current,
@@ -1706,6 +1765,7 @@ export function createFileScanTaskRuntime({
         detail: reason,
       }),
     });
+    return true;
   }
   const wait = runtimeState.wait;
   function createTaskScopedController(taskId: ID) {
@@ -1831,13 +1891,18 @@ export function createFileScanTaskRuntime({
     );
   }
 
-  return {
+  runtime = {
     getSnapshot: () => runtimeState.getSnapshot(),
     subscribe(listener) {
       return runtimeState.subscribe(listener);
     },
     start(userGoal, options = {}) {
-      stopActiveTask("Task replaced by a new request.");
+      queuedStartSequence += 1;
+      if (!stopActiveTask("Task replaced by a new request.")) {
+        queuedStartAfterNativeWrite = { userGoal, options };
+        return;
+      }
+      queuedStartAfterNativeWrite = undefined;
       runtimeState.clearTimers();
       const taskAbortController = new AbortController();
       activeAbortController = taskAbortController;
@@ -2089,9 +2154,11 @@ export function createFileScanTaskRuntime({
             controller,
             fileTool: availableFileTool,
             webTool: availableWebTool,
+            chatTool,
             taskId,
             userGoal,
-            commanderTool,
+            signal,
+            taskTimeoutMs: effectiveRuntimeConfig?.taskTimeoutMs,
             setPendingPermissionHandler,
           });
           return;
@@ -2259,9 +2326,11 @@ export function createFileScanTaskRuntime({
           controller,
           fileTool: availableFileTool,
           webTool: availableWebTool,
+          chatTool,
           taskId,
           userGoal,
-          commanderTool,
+          signal,
+          taskTimeoutMs: effectiveRuntimeConfig?.taskTimeoutMs,
           setPendingPermissionHandler,
         });
         return;
@@ -2394,7 +2463,7 @@ export function createFileScanTaskRuntime({
         const handler = permissionHandlers.get(requestId);
         permissionHandlers.delete(requestId);
         if (handler) {
-          void handler(decision);
+          invokePermissionHandler(handler, decision);
         } else {
           queuedPermissionDecisions.set(requestId, decision);
         }
@@ -2408,7 +2477,7 @@ export function createFileScanTaskRuntime({
         permissionHandlers.size - 1
       ];
       permissionHandlers.delete(onlyRequestId);
-      void handler(decision);
+      invokePermissionHandler(handler, decision);
     },
     respondToAskUser(answer, requestId) {
       const resolvedId = requestId ?? (askUserHandlers.size > 0
@@ -2489,14 +2558,20 @@ export function createFileScanTaskRuntime({
       }
     },
     stopTask(reason = "Task cancelled.") {
-      stopActiveTask(reason);
+      queuedStartSequence += 1;
+      if (!stopActiveTask(reason)) {
+        queuedStartAfterNativeWrite = undefined;
+      }
     },
     dispose() {
-      stopActiveTask("Runtime disposed.");
+      queuedStartSequence += 1;
+      queuedStartAfterNativeWrite = undefined;
+      stopActiveTask("Runtime disposed.", { force: true });
       eventBusUnsubscribe?.();
       runtimeState.dispose();
     },
   };
+  return runtime;
 
   async function runChatTask(
     taskId: ID,

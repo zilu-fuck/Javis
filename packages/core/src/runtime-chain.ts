@@ -159,7 +159,10 @@ function inferSelectedCapabilities(input: RuntimeChainDecisionInput): string[] {
 function inferPreferredAgentKinds(input: RuntimeChainDecisionInput): string[] {
   const agents = new Set<string>();
 
-  if (input.hasCommanderTool && (input.routeDecision.level === "L3" || shouldCommanderPlanTextWrite(input))) {
+  if (
+    input.hasCommanderTool &&
+    ((input.routeDecision.level === "L3" && !input.isTextWriteGoal) || shouldCommanderPlanTextWrite(input))
+  ) {
     agents.add("commander");
   }
   if (input.isReadCurrentProjectGoal || input.isCodeReviewGoal || isCodebaseUnderstandingRequest(input.userGoal)) {
@@ -196,7 +199,6 @@ function shouldCommanderPlanTextWrite(input: RuntimeChainDecisionInput): boolean
     input.isProjectInspectionGoal ||
     input.isCodeReviewGoal ||
     input.isPdfOrganizationGoal ||
-    input.routeDecision.level === "L3" ||
     input.recommendedWorkflowIds.length > 0 ||
     isSpecialistAgentRequest(input.userGoal) ||
     isCodebaseUnderstandingRequest(input.userGoal),

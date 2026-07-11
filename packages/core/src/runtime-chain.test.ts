@@ -65,10 +65,38 @@ describe("decideRuntimeChain", () => {
     expect(decision.selectedCapabilities).toContain("file.writeText");
   });
 
+  it("does not treat L3 alone as evidence that a creative text write needs Commander", () => {
+    const decision = decideRuntimeChain(makeInput({
+      userGoal: "\u5199\u4e00\u7bc7\u4e00\u4e07\u5b57\u7684\u6210\u957f\u5c0f\u8bf4\uff0c\u4fdd\u5b58\u4e3a md \u6587\u4ef6",
+      startMode: "project",
+      routeDecision: {
+        level: "L3",
+        mode: "commander_dag",
+        score: 5,
+        reasons: ["complex_generation"],
+      },
+      hasKnownRouteIntent: true,
+      isTextWriteGoal: true,
+    }));
+
+    expect(decision.dispatch).toEqual({
+      kind: "single_agent_task",
+      reason: "text_write_requires_approval_flow",
+    });
+    expect(decision.preferredAgentKinds).not.toContain("commander");
+    expect(decision.preferredAgentKinds).toContain("file");
+  });
+
   it("routes evidence-backed file writes to Commander planning", () => {
     const decision = decideRuntimeChain(makeInput({
       userGoal: "\u5e2e\u6211\u62c9\u53d6\u5fae\u535a\u70ed\u641c\u524d20\u7684\u6570\u636e\uff0c\u4fdd\u5b58\u4e3amd\u6587\u4ef6",
       startMode: "project",
+      routeDecision: {
+        level: "L3",
+        mode: "commander_dag",
+        score: 5,
+        reasons: ["research_intent"],
+      },
       hasKnownRouteIntent: true,
       isTextWriteGoal: true,
       isResearchGoal: true,
