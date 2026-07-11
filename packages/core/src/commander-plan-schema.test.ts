@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildCommanderPlanPrompt, buildCommanderReplanPrompt } from "./commander-plan-schema";
+import { buildCommanderPlanPrompt, buildCommanderReplanPrompt, buildComputerUseCommanderPlanPrompt } from "./commander-plan-schema";
 
 describe("buildCommanderPlanPrompt", () => {
   it("keeps English rules by default", () => {
@@ -332,5 +332,32 @@ describe("buildCommanderPlanPrompt", () => {
     });
     expect(prompt).not.toContain("Required toolInput fields");
     expect(prompt).not.toContain("必填 toolInput");
+  });
+
+  it("builds a compact Computer Use planning prompt", () => {
+    const prompt = buildComputerUseCommanderPlanPrompt({
+      userGoal: "Use Computer Use to send a QQ message but stop before sending",
+      workflowId: "commander-dag",
+      availableAgents: [
+        { kind: "commander", allowedToolNames: ["commander.plan"], capabilities: ["planning"] },
+        { kind: "computer", allowedToolNames: ["computer.screenshot", "computer.click"], capabilities: ["desktop_input"] },
+      ],
+      availableTools: [
+        {
+          name: "computer.screenshot",
+          permissionLevel: "read",
+          summary: "Capture the desktop.",
+          capabilityTags: ["desktop_screenshot"],
+          ownerAgentKinds: ["computer"],
+        },
+      ],
+    });
+
+    expect(prompt).toContain("Computer Use planning rules");
+    expect(prompt).toContain("capability=\"desktop_input\"");
+    expect(prompt).toContain("wait for human confirmation");
+    expect(prompt).toContain("{title:string, reasoning:string, steps:Step[1..12]}");
+    expect(prompt).not.toContain("spec-first chain");
+    expect(prompt).not.toContain("Computer -> Code handoff");
   });
 });

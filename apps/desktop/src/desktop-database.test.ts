@@ -24,6 +24,26 @@ describe("desktop database migrations", () => {
     expect(database.bindValues[0]).toEqual(["next", expect.any(String)]);
   });
 
+  it("records duplicate-column tolerant migrations as applied", async () => {
+    const database = createMemoryDatabase([]);
+    database.failDuplicateColumnSql = "ALTER TABLE approval_records ADD COLUMN run_id TEXT";
+
+    await runDesktopDatabaseMigrations(database, [
+      {
+        id: "approval-records-v2-run-id",
+        sql: "ALTER TABLE approval_records ADD COLUMN run_id TEXT",
+        ignoreDuplicateColumn: true,
+      },
+    ]);
+
+    expect(database.executedSql).toEqual([
+      "CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
+      "ALTER TABLE approval_records ADD COLUMN run_id TEXT",
+      "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
+    ]);
+    expect(database.bindValues[0]).toEqual(["approval-records-v2-run-id", expect.any(String)]);
+  });
+
   it("uses the module invoke when Tauri internals are not ready", async () => {
     delete (window as any).__TAURI_INTERNALS__;
     const invoke = vi.fn(async (command: string) => {
@@ -59,12 +79,13 @@ describe("desktop database migrations", () => {
 
     await database.execute(
       `INSERT INTO approval_records
-        (approval_id, task_id, tool_name, workspace_path, permission_level, preview_hash, expires_at, status, created_at, resolved_at, decision, permission_request_json, code_proposed_edit_json, record_json, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (approval_id, task_id, run_id, tool_name, workspace_path, permission_level, preview_hash, expires_at, status, created_at, resolved_at, decision, permission_request_json, code_proposed_edit_json, record_json, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(approval_id) DO UPDATE SET record_json = excluded.record_json`,
       [
         "approval-1",
         "task-1",
+        "run-1",
         "file.writeText",
         "E:/Javis",
         "confirmed_write",
@@ -92,7 +113,7 @@ describe("desktop database migrations", () => {
     );
 
     expect(invoke).toHaveBeenNthCalledWith(1, "approval_records_upsert", expect.objectContaining({
-      request: expect.objectContaining({ approvalId: "approval-1", recordJson: JSON.stringify(record) }),
+      request: expect.objectContaining({ approvalId: "approval-1", runId: "run-1", recordJson: JSON.stringify(record) }),
     }));
     expect(invoke).toHaveBeenNthCalledWith(2, "approval_records_prune", { limit: 20 });
     expect(invoke).not.toHaveBeenCalledWith("db_execute", expect.anything());
@@ -184,11 +205,15 @@ function createMemoryDatabase(appliedIds: string[]) {
   const database: DesktopDatabase & {
     executedSql: string[];
     bindValues: DatabaseValue[][];
+    failDuplicateColumnSql?: string;
   } = {
     executedSql,
     bindValues,
     async execute(sql, values = []) {
       executedSql.push(sql);
+      if (sql === database.failDuplicateColumnSql) {
+        throw new Error("duplicate column name: run_id");
+      }
       if (values.length > 0) {
         bindValues.push(values);
       }

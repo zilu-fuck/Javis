@@ -4,6 +4,7 @@ import {
   buildCommanderPlanPrompt,
   buildCommanderPlanRepairPrompt,
   buildCommanderReplanPrompt,
+  buildComputerUseCommanderPlanPrompt,
   buildReActDecisionPrompt,
   CONTEXT_KEYS,
   createChineseReviewPrompt,
@@ -12,7 +13,9 @@ import {
   createSharedTaskContext,
   createTaskEventBus,
   DEFAULT_COMPUTER_USE_CONFIG,
+  filterPlanningScopeForGoal,
   getAdapter,
+  isComputerUseGoal,
   isValidCapabilityTag,
   normalizePromptLocale,
   parseChineseReviewResult,
@@ -28,6 +31,7 @@ import type {
   GoalDecision,
   GoalState,
   ReActDecisionRequest,
+  RuntimeEventEnvelope,
   RuntimeExecutionConfig,
   TaskSnapshot,
 } from "@javis/core";
@@ -166,6 +170,7 @@ import {
   saveWorkspaceDefinition,
   deleteWorkspaceDefinition,
 } from "./workspace-loader";
+import { LocalReadOnlyWorkspace } from "./workspace-runtime-adapter";
 import type { WorkspaceDefinition } from "@javis/core";
 import { runComputerUseLoop } from "./computer-use-loop";
 import { preprocessChineseInput, type PreprocessedInput } from "./input-preprocessor";
@@ -210,8 +215,16 @@ function mergeAvailableToolDescriptorSources(
   return sawSource ? merged : undefined;
 }
 
-function commanderPromptToolDescriptors(toolDescriptors: readonly ToolDescriptor[] | undefined) {
-  return limitMcpPromptToolDescriptors(normalizeAvailableToolDescriptors(toolDescriptors)).map((descriptor) => ({
+function commanderPromptToolDescriptors(
+  toolDescriptors: readonly ToolDescriptor[] | undefined,
+  userGoal?: string,
+) {
+  const normalized = normalizeAvailableToolDescriptors(toolDescriptors);
+  const scoped = filterPlanningScopeForGoal(userGoal, {
+    agents: createDefaultAgentRegistry().list().map((reg) => reg.agent.kind),
+    tools: normalized,
+  }).tools;
+  return limitMcpPromptToolDescriptors(scoped).map((descriptor) => ({
     name: descriptor.name,
     permissionLevel: descriptor.permissionLevel,
     summary: descriptor.summary,
@@ -1290,11 +1303,19 @@ function runtimePreferencesToExecutionConfig(
 
 function createRuntimeEventStoreRef(getDatabase?: () => DesktopDatabase | null) {
   return {
-    append: async (envelope: import("@javis/core").RuntimeEventEnvelope) => {
+    append: async (envelope: RuntimeEventEnvelope) => {
       const database = getDatabase?.();
       if (!database) return;
       const store = createRuntimeEventStore(database);
       await store.append(envelope);
+      const kind = (envelope.payload as { kind?: string })?.kind;
+      if (kind === "task.completed" || kind === "task.failed") {
+        try {
+          await store.pruneByTaskId(envelope.taskId, true);
+        } catch (error) {
+          console.warn("[RuntimeEvents] Terminal event compaction failed.", error);
+        }
+      }
     },
   };
 }
@@ -1375,6 +1396,14 @@ export function createJavisRuntime({
       },
     });
   };
+  const workspaceRuntime = new LocalReadOnlyWorkspace({
+    root: getWorkspacePath,
+    executeReadOnly: (request) => runReadOnlyCommand({
+      program: request.program,
+      args: request.args,
+      workspacePath: request.workspacePath,
+    }),
+  });
 
   function notifyWorkspaceToolActivity(
     tool: RuntimeWorkspaceToolAction,
@@ -1568,6 +1597,7 @@ export function createJavisRuntime({
   }
 
   const runtime = createFileScanTaskRuntime({
+    workspaceRuntime,
     getRuntimeConfig: () => runtimePreferencesToExecutionConfig(getRuntimePreferences?.()),
     getAvailableToolDescriptors: () => normalizeAvailableToolDescriptors(getAvailableToolDescriptors?.()),
     getCapabilityVerification,
@@ -2637,7 +2667,7 @@ export function createJavisRuntime({
       failureReason?: string,
     ): Promise<CommanderDagPlan> => {
       const registry = createDefaultAgentRegistry();
-      const availableTools = commanderPromptToolDescriptors(getAvailableToolDescriptors?.());
+      const availableTools = commanderPromptToolDescriptors(getAvailableToolDescriptors?.(), userGoal);
       const availableToolNames = new Set(availableTools.map((tool) => tool.name));
       const availableAgents = registry.list()
         .map((reg) => ({
@@ -3141,6 +3171,7 @@ async function planWithModelProviderStreaming(
   const registry = createDefaultAgentRegistry();
   const effectiveTools = commanderPromptToolDescriptors(
     mergeAvailableToolDescriptorSources(requestWithDate.availableTools, fallbackToolDescriptors),
+    requestWithDate.userGoal,
   );
   const effectiveToolNames = new Set(effectiveTools.map((tool) => tool.name));
   const agentsWithCapabilities = requestWithDate.availableAgents.map((a) => {
@@ -3174,16 +3205,24 @@ async function planWithModelProviderStreaming(
         availableAgents: agentsWithCapabilities,
         availableTools: effectiveTools,
       })
-    : buildCommanderPlanPrompt({
-        userGoal: requestWithDate.userGoal,
-        currentDate: requestWithDate.currentDate,
-        locale: "zh-CN",
-        priorMessages: requestWithDate.priorMessages,
-        omittedPriorMessageCount: requestWithDate.omittedPriorMessageCount,
-        workflowId: requestWithDate.workflowId ?? "unknown",
-        availableAgents: agentsWithCapabilities,
-        availableTools: effectiveTools,
-      });
+    : isComputerUseGoal(requestWithDate.userGoal)
+      ? buildComputerUseCommanderPlanPrompt({
+          userGoal: requestWithDate.userGoal,
+          locale: "zh-CN",
+          workflowId: requestWithDate.workflowId ?? "unknown",
+          availableAgents: agentsWithCapabilities,
+          availableTools: effectiveTools,
+        })
+      : buildCommanderPlanPrompt({
+          userGoal: requestWithDate.userGoal,
+          currentDate: requestWithDate.currentDate,
+          locale: "zh-CN",
+          priorMessages: requestWithDate.priorMessages,
+          omittedPriorMessageCount: requestWithDate.omittedPriorMessageCount,
+          workflowId: requestWithDate.workflowId ?? "unknown",
+          availableAgents: agentsWithCapabilities,
+          availableTools: effectiveTools,
+        });
   const prompt = appendCommanderMemoryContext(
     promptSource,
     memoryContext,

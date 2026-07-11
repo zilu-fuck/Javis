@@ -157,6 +157,61 @@ function getCommanderDelegationRules(): string[] {
   ];
 }
 
+export function buildComputerUseCommanderPlanPrompt(params: {
+  userGoal: string;
+  locale?: string;
+  workflowId: string;
+  availableAgents: Array<{
+    kind: string;
+    allowedToolNames: string[];
+    capabilities: readonly string[];
+  }>;
+  availableTools?: Array<{
+    name: string;
+    permissionLevel: string;
+    summary: string;
+    capabilityTags: string[];
+    ownerAgentKinds: string[];
+    requiredInputs?: Array<{
+      name: string;
+      type: "string" | "string[]";
+      nonEmpty?: boolean;
+    }>;
+  }>;
+}): string {
+  const locale = normalizePromptLocale(params.locale);
+  const rules = locale === "zhCN"
+    ? [
+        "Computer Use 专用规划规则:",
+        "- 只返回 JSON，不要 Markdown。",
+        "- 如果目标是桌面应用操作，优先输出一个 computer 步骤，capability=\"desktop_input\"。",
+        "- 该步骤应把 inputContextKeys 设为 [\"userGoal\"]，outputContextKey 设为 \"computerUseSteps\"。",
+        "- 如果用户明确要求发送前停止，把 successCriteria 写成停在发送/提交前并等待人工确认。",
+        "- 不要添加代码、文件、研究或文档步骤，除非用户目标明确要求。",
+      ]
+    : [
+        "Computer Use planning rules:",
+        "- Return JSON only; no markdown.",
+        "- For desktop app operation goals, prefer one computer step with capability=\"desktop_input\".",
+        "- Set inputContextKeys to [\"userGoal\"] and outputContextKey to \"computerUseSteps\".",
+        "- If the user asks to stop before sending/submitting, successCriteria must say to stop before send/submit and wait for human confirmation.",
+        "- Do not add code, file, research, or documentation steps unless explicitly requested.",
+      ];
+
+  return [
+    ...getCommanderPlanIntro(locale),
+    COMMANDER_PLAN_SCHEMA_PROMPT,
+    "",
+    ...rules,
+    ...formatRequiredToolInputsBlock(params.availableTools, locale),
+    "",
+    `${localizedLabel(locale, "User goal", "用户目标")}: ${params.userGoal}`,
+    `${localizedLabel(locale, "Workflow id", "工作流 id")}: ${params.workflowId}`,
+    `${localizedLabel(locale, "Available agents", "可用 Agent")}: ${JSON.stringify(params.availableAgents)}`,
+    `${localizedLabel(locale, "Available tools", "可用工具")}: ${JSON.stringify(params.availableTools ?? [])}`,
+  ].filter(Boolean).join("\n");
+}
+
 function formatConversationContext(
   priorMessages: Array<{ role: "user" | "assistant"; content: string }> | undefined,
   omittedPriorMessageCount = 0,

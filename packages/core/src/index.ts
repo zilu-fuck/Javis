@@ -24,6 +24,7 @@ import type {
   ShellTool,
   SchedulerTool,
   VerifierTool,
+  VerifierCheckResult,
   WebSource,
   WebTool,
   TrendTool,
@@ -66,7 +67,10 @@ import {
 import type { WorkbenchWorkflowId } from "./workflows";
 import {
   extractUrls,
+  isBrowserGoal,
   isCodeReviewGoal,
+  isComputerUseGoal,
+  isDocumentScanGoal,
   isPdfOrganizationGoal,
   isProjectInspectionGoal,
   isResearchGoal,
@@ -82,6 +86,7 @@ import {
 import type { TaskEventBus } from "./task-event-bus";
 import type { RuntimeEventEnvelope } from "./runtime-event-envelope";
 import type { WorkflowCheckpoint } from "./workflow-checkpoint";
+import type { WorkspaceRuntime } from "./workspace-runtime";
 import {
   createRouteLog,
   routeMessage,
@@ -270,6 +275,28 @@ export type {
   RecoveryReport,
 } from "./recovery-report";
 export {
+  buildProgressLedger,
+  buildTaskLedger,
+  createReplanShapeFingerprint,
+  createToolFailureFingerprint,
+  detectStuckSignals,
+  extractMissingContextKeys,
+} from "./progress-ledger";
+export type {
+  ActionFingerprint,
+  BlockedSummary,
+  FailureSummary,
+  MissingContextFailureInput,
+  ProgressLedger,
+  ReplanShapeInput,
+  StepSummary,
+  StuckSignal,
+  StuckSignalKind,
+  TaskLedger,
+  ToolFailureInput,
+  VerifierAttemptInput,
+} from "./progress-ledger";
+export {
   buildPlanGenerationTrace,
   classifyCompileStatus,
 } from "./planning/plan-generation-trace";
@@ -341,6 +368,7 @@ export {
   isStreamingEvent,
   nextEnvelopeSequence,
   resetEnvelopeSequence,
+  seedEnvelopeSequence,
   STRUCTURAL_EVENT_KINDS,
   STREAMING_EVENT_KINDS,
 } from "./runtime-event-envelope";
@@ -364,6 +392,37 @@ export type {
   EvidenceReference,
 } from "./artifact-envelope";
 export {
+  assertWorkspaceRuntimeCanWrite,
+  createWorkspaceSnapshot,
+  routeCodeToolThroughWorkspaceRuntime,
+  routeGitToolThroughWorkspaceRuntime,
+  routeShellToolThroughWorkspaceRuntime,
+  routeToolThroughWorkspaceRuntime,
+} from "./workspace-runtime";
+export type {
+  WorkspaceDiff,
+  WorkspaceDiffFile,
+  WorkspaceExecutionRequest,
+  WorkspaceExecutionResult,
+  WorkspaceFileEntry,
+  WorkspaceRuntime,
+  WorkspaceRuntimeKind,
+  WorkspaceRuntimeRoute,
+  WorkspaceRuntimeToolKind,
+  WorkspaceSnapshot,
+} from "./workspace-runtime";
+export {
+  READ_PREVIEW_SUBAGENT_DELEGATION_POLICY,
+  assertDelegatedToolIsReadOrPreview,
+  canDelegateToolToSubAgent,
+  filterAgentForDelegation,
+  filterDelegableToolDescriptors,
+} from "./delegation-policy";
+export type {
+  DelegationMode,
+  DelegationPolicy,
+} from "./delegation-policy";
+export {
   buildCheckpointFromDagState,
   computePlanHash,
   getResumableStepIds,
@@ -374,6 +433,15 @@ export type {
   WorkflowCheckpoint,
   CheckpointTrigger,
 } from "./workflow-checkpoint";
+export {
+  createWorkflowResumeStateFromReconciliation,
+  reconcileCheckpointWithEventLog,
+} from "./workflow-checkpoint-reconciliation";
+export type {
+  CheckpointReconciliationResult,
+  CheckpointReconciliationStatus,
+  WorkflowResumeStateBuildResult,
+} from "./workflow-checkpoint-reconciliation";
 export type {
   WorkbenchWorkflow,
   WorkbenchWorkflowId,
@@ -420,10 +488,15 @@ export type {
 export {
   COMMANDER_PLAN_SCHEMA_JSON,
   COMMANDER_PLAN_SCHEMA_PROMPT,
+  buildComputerUseCommanderPlanPrompt,
   buildCommanderPlanPrompt,
   buildCommanderPlanRepairPrompt,
   buildCommanderReplanPrompt,
 } from "./commander-plan-schema";
+export {
+  filterPlanningScopeForGoal,
+  getDelegableSubAgentsForPlanning,
+} from "./workflow-executor";
 export type {
   CommanderDagStep,
   CommanderDagPlan,
@@ -446,6 +519,7 @@ export type {
   AdapterCompletionInput,
   AdapterRequestPayload,
   AdapterCompletionResponse,
+  ModelMediaInput,
   ProviderAdapter,
 } from "./provider-adapter";
 
@@ -735,6 +809,23 @@ export interface TaskLogEntry {
   stepId?: ID;
 }
 
+export interface DurableResumeMetadata {
+  runId: ID;
+  source: "checkpoint" | "event-log";
+  checkpointEventSequence: number;
+  latestEventSequence: number;
+  completedStepIds: ID[];
+  retryStepIds: ID[];
+  approvalRequestIds: ID[];
+  rebuilt: boolean;
+}
+
+export interface ApprovalOutcome {
+  approvalId: ID;
+  status: Exclude<ToolPermissionRequest["status"], "pending">;
+  resolvedAt?: ISODateTime;
+}
+
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
@@ -759,6 +850,7 @@ export interface ConversationMessage extends ChatMessage {
 
 export interface TaskSnapshot {
   id: ID;
+  runId?: ID;
   title: string;
   userGoal: string;
   status: TaskStatus;
@@ -780,12 +872,14 @@ export interface TaskSnapshot {
   repoSearchReport?: CodeRepositorySearchResult;
   repoTraceReport?: CodeRepositoryTraceResult;
   permissionRequest?: ToolPermissionRequest;
+  approvalOutcome?: ApprovalOutcome;
   askUserQuestion?: AskUserQuestionRequest;
   project?: ProjectInspection;
   researchReport?: ResearchReport;
   sources?: WebSource[];
   tokenUsage?: TokenUsageSummary;
   verificationSummary?: string;
+  verificationResult?: VerifierCheckResult;
   conversationMessages?: ConversationMessage[];
   /** Accumulated partial text during streaming. Non-empty + isStreaming -> UI renders StreamingMessage. */
   streamingText?: string;
@@ -799,6 +893,8 @@ export interface TaskSnapshot {
   handoffReport?: HandoffReport;
   /** Serializable recovery audit generated when failed steps trigger alternate paths. */
   recoveryReport?: RecoveryReport;
+  /** Durable checkpoint/event-log resume audit persisted with completed task history. */
+  durableResume?: DurableResumeMetadata;
   /**
    * Structured audit of every Commander plan that flowed through the
    * executor: initial plan, repair attempts, and per-step recovery
@@ -872,6 +968,11 @@ export interface TaskRuntime {
       displayGoal?: string;
       /** Image data URLs for display in the user's message bubble. */
       displayAttachments?: string[];
+      /** Optional durable checkpoint seed used by Commander DAG resume. */
+      resumeFromCheckpoint?: {
+        checkpoint: WorkflowCheckpoint;
+        events: RuntimeEventEnvelope[];
+      };
     },
   ): void;
   resolvePermission(decision: "approved" | "approved_always" | "denied", requestId?: string): void;
@@ -907,6 +1008,7 @@ export interface FileScanRuntimeOptions {
   browserTool?: BrowserTool;
   visionTool?: VisionTool;
   workspaceTool?: WorkspaceTool;
+  workspaceRuntime?: WorkspaceRuntime;
   delayMs?: number;
   eventBus?: TaskEventBus;
   runtimeConfig?: RuntimeExecutionConfig;
@@ -1061,6 +1163,65 @@ function getVisionToolNameForGoal(userGoal: string): "vision.analyze" | "vision.
   if (mode === "ocr") return "vision.extractText";
   if (mode === "describe") return "vision.describe";
   return "vision.analyze";
+}
+
+function shouldRunVisionTaskDirectly(userGoal: string): boolean {
+  return isVisionGoal(userGoal) && !hasExplicitComputerUseIntent(userGoal);
+}
+
+function hasExplicitComputerUseIntent(userGoal: string): boolean {
+  if (isComputerUseGoal(userGoal)) {
+    return true;
+  }
+  const hasAutomationTerm =
+    /computer\s*use|computeruse|computer\s*agent|desktop\s*automation|control\s+(?:my\s*)?(?:computer|desktop)|\u684c\u9762\u81ea\u52a8\u5316|\u64cd\u63a7|\u64cd\u4f5c/i.test(userGoal);
+  const hasDesktopActionTarget =
+    /QQ|WeChat|DingTalk|Telegram|Discord|Chrome|Edge|Firefox|Notepad|Calculator|File\s*Explorer|\u5fae\u4fe1|\u8054\u7cfb\u4eba|\u804a\u5929|\u53d1\u9001|\u6d88\u606f|open|launch|click|type|find|send/i.test(userGoal);
+  return hasAutomationTerm && hasDesktopActionTarget;
+}
+
+function isChatModeInformationLookupGoal(userGoal: string): boolean {
+  return (
+    extractUrls(userGoal).length > 0 ||
+    isResearchGoal(userGoal) ||
+    isBrowserGoal(userGoal)
+  ) && !isChatModeBrowserWriteGoal(userGoal);
+}
+
+function isChatModeBrowserWriteGoal(userGoal: string): boolean {
+  return /click|type|fill|submit|interact|form|login|sign\s*in|upload|run\s+test|e2e|playwright.*test|browser.*test|test.*browser|\u70b9\u51fb|\u8f93\u5165|\u586b\u5199|\u63d0\u4ea4|\u4e0a\u4f20|\u767b\u5f55|\u6d4f\u89c8\u5668.*\u6d4b\u8bd5|\u81ea\u52a8\u5316\u6d4b\u8bd5/i.test(userGoal);
+}
+
+function isChatModeMessagingAutomationGoal(userGoal: string): boolean {
+  return /QQ|WeChat|微信|企业微信|钉钉|DingTalk|Telegram|Discord|飞书/i.test(userGoal) &&
+    /发消息|发送消息|发个消息|发\s*信|发送|聊天|联系|找.*联系人|给.*发|open|launch|send\s+message/i.test(userGoal);
+}
+
+function isChatModeFileWriteGoal(userGoal: string): boolean {
+  return /\b(save|export|write)\b.*\b(file|md|markdown|path|disk)\b|\bwrite\s+(?:to|into)\b|\.md\b|\.txt\b|\.docx\b|保存|导出|写入|写到|写成.*文件|生成.*(?:文件|\.md|\.txt|\.docx|路径|本地)/i.test(userGoal);
+}
+
+function isChatModeBlockedGoal(userGoal: string): boolean {
+  if (isChatModeMessagingAutomationGoal(userGoal)) {
+    return true;
+  }
+  if (isChatModeInformationLookupGoal(userGoal)) {
+    return false;
+  }
+  if (isChatModeFileWriteGoal(userGoal)) {
+    return true;
+  }
+  if (
+    isComputerUseGoal(userGoal) ||
+    isReadCurrentProjectGoal(userGoal) ||
+    isCodeReviewGoal(userGoal) ||
+    isPdfOrganizationGoal(userGoal) ||
+    isDocumentScanGoal(userGoal) ||
+    isVisionGoal(userGoal)
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function filterWebToolForAvailability(
@@ -1337,6 +1498,7 @@ export function createFileScanTaskRuntime({
   browserTool,
   visionTool,
   workspaceTool,
+  workspaceRuntime,
   delayMs = 250,
   eventBus,
   runtimeConfig,
@@ -1766,6 +1928,63 @@ export function createFileScanTaskRuntime({
         codeReviewGoal ||
         pdfOrganizationGoal
       );
+      if (startMode === "chat") {
+        if (isChatModeBlockedGoal(userGoal)) {
+          runChatModeBoundaryTask(taskId, userGoal);
+          return;
+        }
+        if (!isChatModeInformationLookupGoal(userGoal)) {
+          if (chatTool) {
+            void runDirectChatTask(
+              taskId,
+              userGoal,
+              chatTool,
+              priorMessages,
+              modelContext.messages,
+              modelContext.omittedCount,
+              options.displayGoal,
+              options.displayAttachments,
+              routeDecision,
+              routeLog,
+              effectiveRuntimeConfig,
+              signal,
+              appendUserMessage,
+            );
+            return;
+          }
+          runClarificationTask(taskId, userGoal);
+          return;
+        }
+        if (availableWebTool?.searchWeb && hasTool("web.search") && hasTool("web.fetchSource")) {
+          void runResearchSearchTask({ controller, taskId, userGoal, webTool: availableWebTool, commanderTool });
+          return;
+        }
+        if (availableWebTool?.fetchWebSource && urls.length > 0) {
+          void runResearchSourceTask({ controller, taskId, userGoal, webTool: availableWebTool, commanderTool });
+          return;
+        }
+        if (chatTool) {
+          void runDirectChatTask(
+            taskId,
+            userGoal,
+            chatTool,
+            priorMessages,
+            modelContext.messages,
+            modelContext.omittedCount,
+            options.displayGoal,
+            options.displayAttachments,
+            routeDecision,
+            routeLog,
+            effectiveRuntimeConfig,
+            signal,
+            appendUserMessage,
+          );
+          return;
+        }
+        runClarificationTask(taskId, userGoal);
+        return;
+      }
+
       const chainDecision = decideRuntimeChain({
         userGoal,
         startMode,
@@ -1814,7 +2033,7 @@ export function createFileScanTaskRuntime({
       // Commander uses the primary (non-vision) model and cannot handle
       // image analysis; the vision flow uses the multimodal slot.
       // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
-      if (chainDecision.dispatch.kind === "vision_task" && visionTool) {
+      if (chainDecision.dispatch.kind === "vision_task" && visionTool && !commanderTool) {
         void runVisionTask({
           controller,
           visionTool,
@@ -1832,7 +2051,10 @@ export function createFileScanTaskRuntime({
       // executed by the generic capability-based DAG executor.
       // Legacy branches below are fallbacks for when Commander is unavailable.
       // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
-      if (chainDecision.dispatch.kind === "single_agent_task") {
+      if (
+        chainDecision.dispatch.kind === "single_agent_task" &&
+        (textWriteGoal || !commanderTool)
+      ) {
         if (availableWebTool && hasTool("web.fetchSource") && urls.length > 0) {
           void runResearchSourceTask({ controller, taskId, userGoal, webTool: availableWebTool, commanderTool });
           return;
@@ -1847,7 +2069,7 @@ export function createFileScanTaskRuntime({
           void runReadCurrentProjectWorkflow({
             controller,
             fileTool: availableFileTool ?? fileTool,
-            commanderTool,
+            ...(commanderTool ? { commanderTool } : {}),
             projectTool,
             shellTool,
             codeTool: availableCodeTool,
@@ -1855,6 +2077,7 @@ export function createFileScanTaskRuntime({
             taskId,
             userGoal,
             availableToolDescriptors: effectiveToolDescriptors,
+            workspaceRuntime,
           });
           return;
         }
@@ -1890,6 +2113,7 @@ export function createFileScanTaskRuntime({
             shellTool,
             projectTool,
             commanderTool,
+            workspaceRuntime,
           );
           return;
         }
@@ -1907,6 +2131,7 @@ export function createFileScanTaskRuntime({
             codeTool: availableCodeTool,
             shellTool,
             commanderTool,
+            workspaceRuntime,
             setPendingPermissionHandler,
           });
           return;
@@ -1946,12 +2171,17 @@ export function createFileScanTaskRuntime({
       }
 
       if (
-        commanderTool &&
-        (chainDecision.dispatch.kind === "commander_task" || chainDecision.dispatch.kind === "single_agent_task")
+        (commanderTool &&
+          (
+            chainDecision.dispatch.kind === "commander_task" ||
+            chainDecision.dispatch.kind === "single_agent_task" ||
+            chainDecision.dispatch.kind === "vision_task"
+          )) ||
+        (!commanderTool && isComputerUseGoal(userGoal))
       ) {
         void runCommanderDagTask({
           controller,
-          commanderTool,
+          ...(commanderTool ? { commanderTool } : {}),
           codeTool: availableCodeTool,
           gitTool: availableGitTool,
           computerTool,
@@ -1977,6 +2207,7 @@ export function createFileScanTaskRuntime({
           availableToolDescriptors: effectiveToolDescriptors,
           runtimeEventSink,
           checkpointSink,
+          resumeFromCheckpoint: options.resumeFromCheckpoint,
           reactDecideNext,
           replanDag,
           computerUseLoopRunner,
@@ -1985,15 +2216,13 @@ export function createFileScanTaskRuntime({
         return;
       }
 
-      // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
-      // LEGACY FALLBACKS 鈥?only reached when commanderTool is not provided.
+      // Legacy fallbacks: only reached when commanderTool is not provided.
       // These use regex-based goal detection (routing.ts) instead of LLM.
       // Purpose:
       //   1. Offline/degraded mode (no API key configured)
       //   2. Unit testing without LLM mocks
       //   3. Backward compatibility with workspace definitions lacking commander
       // Do NOT add new features here. New goal types -> Commander DAG path above.
-      // 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺?
 
       if (availableWebTool && hasTool("web.fetchSource") && extractUrls(userGoal).length > 0) {
         void runResearchSourceTask({ controller, taskId, userGoal, webTool: availableWebTool, commanderTool });
@@ -2010,7 +2239,7 @@ export function createFileScanTaskRuntime({
         void runReadCurrentProjectWorkflow({
           controller,
           fileTool: availableFileTool ?? fileTool,
-          commanderTool,
+          ...(commanderTool ? { commanderTool } : {}),
           projectTool,
           shellTool,
           codeTool: availableCodeTool,
@@ -2018,6 +2247,7 @@ export function createFileScanTaskRuntime({
           taskId,
           userGoal,
           availableToolDescriptors: effectiveToolDescriptors,
+          workspaceRuntime,
         });
         return;
       }
@@ -2038,7 +2268,7 @@ export function createFileScanTaskRuntime({
       }
       if (
         visionTool &&
-        isVisionGoal(userGoal) &&
+        shouldRunVisionTaskDirectly(userGoal) &&
         !userGoal.includes("<vision-context>") &&
         hasTool(getVisionToolNameForGoal(userGoal))
       ) {
@@ -2075,7 +2305,7 @@ export function createFileScanTaskRuntime({
         } else {
           void runGenericWorkbenchWorkflow({
             controller,
-            commanderTool,
+            ...(commanderTool ? { commanderTool } : {}),
             codeTool: availableCodeTool,
             computerTool,
             fileTool,
@@ -2101,6 +2331,7 @@ export function createFileScanTaskRuntime({
           shellTool,
           projectTool,
           commanderTool,
+          workspaceRuntime,
         );
         return;
       }
@@ -2118,6 +2349,7 @@ export function createFileScanTaskRuntime({
           codeTool: availableCodeTool,
           shellTool,
           commanderTool,
+          workspaceRuntime,
           setPendingPermissionHandler,
         });
         return;
@@ -2658,6 +2890,47 @@ export function createFileScanTaskRuntime({
           detail: error
             ? `General chat fallback failed: ${error instanceof Error ? error.message : String(error)}`
             : "User input did not match any known task intent.",
+        },
+      ],
+    });
+  }
+
+  function runChatModeBoundaryTask(taskId: ID, userGoal: string) {
+    const isChinese = /[\u3400-\u9fff]/u.test(userGoal);
+    emit({
+      id: taskId,
+      title: isChinese ? "已拦截" : "Blocked",
+      userGoal,
+      status: "completed",
+      commanderMessage: isChinese
+        ? "当前是聊天模式，只用于聊天、写内容、讨论方案和用浏览器查信息。这个请求需要项目 / Agent 模式执行，请切换到项目或 Agent 模式后再运行。"
+        : "Chat mode is only for chatting, writing, planning, and looking up information in the browser. This request needs Project / Agent mode, so please switch modes and run it there.",
+      plan: [
+        {
+          id: "chat-mode-boundary",
+          title: isChinese ? "拦截需要 Agent 模式的请求" : "Block Agent-mode request",
+          assignedAgentKind: "commander",
+          status: "completed",
+        },
+      ],
+      agents: createRuntimeAgentSnapshots((agent) => ({
+        status: agent.kind === "commander" ? "completed" : "queued",
+        task:
+          agent.kind === "commander"
+            ? isChinese
+              ? "聊天模式边界已生效"
+              : "Chat mode boundary enforced"
+            : isChinese
+              ? "没有工作流任务"
+              : "No workflow task",
+      })),
+      tokenUsage: createEmptyTokenUsageSummary(),
+      logs: [
+        {
+          id: `${taskId}-created`,
+          kind: "event",
+          title: "task.created",
+          detail: "Chat mode boundary intercepted a non-chat request.",
         },
       ],
     });

@@ -1,0 +1,29 @@
+[
+    {
+        "promptContains":  "CommanderDagPlan",
+        "response":  {
+                         "text":  "{\"title\":\"Agent runtime durability QA\",\"reasoning\":\"Use a stable QA plan for restart-resume proof.\",\"steps\":[{\"id\":\"collect-evidence\",\"title\":\"Collect durable upstream evidence\",\"assignedAgentKind\":\"code\",\"toolName\":\"code.searchRepository\",\"requiredCapabilities\":[\"code_search\"],\"dependsOn\":[],\"toolInput\":{\"query\":\"agent runtime durability\"},\"outputContextKey\":\"repoEvidence\",\"successCriteria\":\"Upstream repo evidence is available.\"},{\"id\":\"apply-approved-patch\",\"title\":\"Apply approved patch\",\"assignedAgentKind\":\"code\",\"toolName\":\"code.applyProposedEdit\",\"requiredCapabilities\":[\"code_edit\"],\"dependsOn\":[\"collect-evidence\"],\"inputContextKeys\":[\"repoEvidence\"],\"outputContextKey\":\"patchResult\",\"successCriteria\":\"The approved patch is applied exactly once.\"},{\"id\":\"summarize-resume\",\"title\":\"Summarize resume proof\",\"assignedAgentKind\":\"commander\",\"toolName\":\"commander.synthesize\",\"requiredCapabilities\":[\"synthesis\"],\"dependsOn\":[\"apply-approved-patch\"],\"inputContextKeys\":[\"patchResult\"],\"outputContextKey\":\"resumeSummary\",\"executionMode\":\"direct_response\",\"successCriteria\":\"The final summary states downstream resumed.\"}]}",
+                         "model":  "javis-qa-fixture",
+                         "provider":  "fixture",
+                         "tokenUsage":  null
+                     }
+    },
+    {
+        "promptContains":  "Return only one JSON object",
+        "response":  {
+                         "text":  "{\"title\":\"Downstream resumed\",\"summary\":\"downstream resumed after restored approval\",\"details\":[\"workflow.checkpoint.linked\",\"upstream not rerun\",\"artifact context restored\"],\"confidence\":\"high\"}",
+                         "model":  "javis-qa-fixture",
+                         "provider":  "fixture",
+                         "tokenUsage":  null
+                     }
+    },
+    {
+        "promptContains":  "Javis Verifier Agent",
+        "response":  {
+                         "text":  "{\"status\":\"pass\",\"summary\":\"verified\",\"detail\":\"fixture verifier\"}",
+                         "model":  "javis-qa-fixture",
+                         "provider":  "fixture",
+                         "tokenUsage":  null
+                     }
+    }
+]

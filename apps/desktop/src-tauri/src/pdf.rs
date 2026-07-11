@@ -87,6 +87,12 @@ pub(crate) struct PdfOrganizationApprovalState {
 pub(crate) struct PendingPdfOrganizationApproval {
     pub(crate) binding: NativeApprovalBinding,
     pub(crate) operations: Vec<PlannedPathOperation>,
+    pub(crate) source_hashes: Vec<PdfSourceHash>,
+}
+
+pub(crate) struct PdfSourceHash {
+    pub(crate) source: String,
+    pub(crate) hash: String,
 }
 
 #[tauri::command]
@@ -243,6 +249,7 @@ pub(crate) fn replace_pending_pdf_approval(
 ) -> Result<(), String> {
     require_approved_pdf_operations(downloads, operations)?;
     let preview_hash = create_pdf_operations_preview_hash(operations);
+    let source_hashes = create_pdf_source_hashes(operations)?;
     let mut state = approval_state
         .lock()
         .map_err(|_| "PDF approval state could not be locked.".to_string())?;
@@ -255,6 +262,7 @@ pub(crate) fn replace_pending_pdf_approval(
             false,
         ),
         operations: operations.to_vec(),
+        source_hashes,
     });
     Ok(())
 }
@@ -312,6 +320,38 @@ pub(crate) fn require_approved_pdf_operations(
     Ok(())
 }
 
+fn create_pdf_source_hashes(
+    operations: &[PlannedPathOperation],
+) -> Result<Vec<PdfSourceHash>, String> {
+    operations
+        .iter()
+        .map(|operation| {
+            let source = operation.source.clone();
+            let content = fs::read(&operation.source)
+                .map_err(|error| format!("Approved PDF source cannot be read: {error}"))?;
+            Ok(PdfSourceHash {
+                source,
+                hash: create_fnv1a_hash(&content),
+            })
+        })
+        .collect()
+}
+
+fn require_pdf_sources_match_approval(
+    pending: &PendingPdfOrganizationApproval,
+) -> Result<(), String> {
+    let current = create_pdf_source_hashes(&pending.operations)?;
+    if current.len() != pending.source_hashes.len() {
+        return Err("Approved PDF source set changed before execution.".to_string());
+    }
+    for (approved, current) in pending.source_hashes.iter().zip(current.iter()) {
+        if approved.source != current.source || approved.hash != current.hash {
+            return Err("Approved PDF sources changed before execution.".to_string());
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn approve_pending_pdf_organization(
     approval_state: &Mutex<PdfOrganizationApprovalState>,
     approval_id: &str,
@@ -358,6 +398,7 @@ pub(crate) fn take_approved_pdf_operations(
             "Approved PDF organization operations do not match the current dry-run.".to_string(),
         );
     }
+    require_pdf_sources_match_approval(pending)?;
     let operations = request.operations;
     state.pending = None;
     Ok(operations)

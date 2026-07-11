@@ -3,12 +3,14 @@ import {
   buildHandoffReport,
   CONTEXT_KEYS,
   createHandoffReportArtifacts,
+  writeStepArtifactOutput,
   createSharedTaskContext,
   formatHandoffReportMarkdown,
   formatStepInputValidationError,
   validateContextValue,
   validateStepInputContext,
 } from "./shared-context";
+import { createArtifactEnvelope } from "./artifact-envelope";
 
 describe("createSharedTaskContext", () => {
   it("stores typed values and exposes a serializable snapshot", () => {
@@ -232,5 +234,50 @@ describe("buildHandoffReport", () => {
       status: "invalid_schema",
       schemaError: "expected object { diff: string, changedFiles: string[] }",
     });
+  });
+});
+
+describe("artifact output helpers", () => {
+  it("stores artifact envelopes while keeping payload access stable", () => {
+    const context = createSharedTaskContext();
+    writeStepArtifactOutput(
+      "verificationResult",
+      { status: "pass", summary: "ok" },
+      context,
+      {
+        taskId: "task-1",
+        runId: "run-1",
+        stepId: "step-1",
+        agentKind: "verifier",
+      },
+    );
+
+    expect(context.get("verificationResult")).toEqual({ status: "pass", summary: "ok" });
+    expect(context.getEnvelope("verificationResult")).toMatchObject({
+      type: "verificationResult",
+      producer: { stepId: "step-1", agentKind: "verifier" },
+    });
+  });
+
+  it("keeps provided artifact envelopes intact", () => {
+    const context = createSharedTaskContext();
+    const envelope = createArtifactEnvelope(
+      { diff: "x" },
+      {
+        taskId: "task-1",
+        runId: "run-1",
+        type: "diffPreview",
+        producer: { stepId: "step-2", agentKind: "code" },
+      },
+    );
+
+    writeStepArtifactOutput("diffPreview", envelope, context, {
+      taskId: "task-1",
+      runId: "run-1",
+      stepId: "step-2",
+      agentKind: "code",
+    });
+
+    expect(context.getEnvelope("diffPreview")).toBe(envelope);
   });
 });

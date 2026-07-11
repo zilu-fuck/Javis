@@ -11,6 +11,7 @@ export type DatabaseValue = string | number | boolean | null;
 export interface DesktopDatabaseMigration {
   id: string;
   sql: string;
+  ignoreDuplicateColumn?: boolean;
 }
 
 interface TauriInternals {
@@ -88,8 +89,8 @@ function approvalRecordWriteCommand(
     normalized.startsWith("insert into approval_records") &&
     normalized.includes("on conflict(approval_id) do update set")
   ) {
-    if (bindValues.length !== 15) {
-      throw new Error("Approval record upsert expected 15 bind values.");
+    if (bindValues.length !== 16) {
+      throw new Error("Approval record upsert expected 16 bind values.");
     }
     return {
       command: "approval_records_upsert",
@@ -97,19 +98,20 @@ function approvalRecordWriteCommand(
         request: {
           approvalId: String(bindValues[0] ?? ""),
           taskId: String(bindValues[1] ?? ""),
-          toolName: String(bindValues[2] ?? ""),
-          workspacePath: String(bindValues[3] ?? ""),
-          permissionLevel: String(bindValues[4] ?? ""),
-          previewHash: String(bindValues[5] ?? ""),
-          expiresAt: String(bindValues[6] ?? ""),
-          status: String(bindValues[7] ?? ""),
-          createdAt: String(bindValues[8] ?? ""),
-          resolvedAt: bindValues[9] === null ? null : String(bindValues[9] ?? ""),
-          decision: bindValues[10] === null ? null : String(bindValues[10] ?? ""),
-          permissionRequestJson: String(bindValues[11] ?? ""),
-          codeProposedEditJson: bindValues[12] === null ? null : String(bindValues[12] ?? ""),
-          recordJson: String(bindValues[13] ?? ""),
-          updatedAt: String(bindValues[14] ?? ""),
+          runId: bindValues[2] === null ? null : String(bindValues[2] ?? ""),
+          toolName: String(bindValues[3] ?? ""),
+          workspacePath: String(bindValues[4] ?? ""),
+          permissionLevel: String(bindValues[5] ?? ""),
+          previewHash: String(bindValues[6] ?? ""),
+          expiresAt: String(bindValues[7] ?? ""),
+          status: String(bindValues[8] ?? ""),
+          createdAt: String(bindValues[9] ?? ""),
+          resolvedAt: bindValues[10] === null ? null : String(bindValues[10] ?? ""),
+          decision: bindValues[11] === null ? null : String(bindValues[11] ?? ""),
+          permissionRequestJson: String(bindValues[12] ?? ""),
+          codeProposedEditJson: bindValues[13] === null ? null : String(bindValues[13] ?? ""),
+          recordJson: String(bindValues[14] ?? ""),
+          updatedAt: String(bindValues[15] ?? ""),
         },
       },
     };
@@ -226,10 +228,21 @@ export async function runDesktopDatabaseMigrations(
     if (appliedIds.has(migration.id)) {
       continue;
     }
-    await database.execute(migration.sql);
+    try {
+      await database.execute(migration.sql);
+    } catch (error) {
+      if (!migration.ignoreDuplicateColumn || !isDuplicateColumnError(error)) {
+        throw error;
+      }
+    }
     await database.execute(
       "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
       [migration.id, new Date().toISOString()],
     );
   }
+}
+
+function isDuplicateColumnError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /duplicate column name/i.test(message);
 }

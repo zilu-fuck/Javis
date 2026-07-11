@@ -1,0 +1,199 @@
+{
+  "windows": [
+    {
+      "handle": 28772426,
+      "title": "Javis",
+      "className": "Tauri Window",
+      "rect": {
+        "x": 52,
+        "y": 52,
+        "width": 1296,
+        "height": 829
+      },
+      "isVisible": true,
+      "isForeground": true
+    },
+    {
+      "handle": 263798,
+      "title": "Codex",
+      "className": "Chrome_WidgetWin_1",
+      "rect": {
+        "x": -8,
+        "y": -8,
+        "width": 1936,
+        "height": 1048
+      },
+      "isVisible": true,
+      "isForeground": false
+    },
+    {
+      "handle": 132476,
+      "title": "Clash for Windows",
+      "className": "Chrome_WidgetWin_1",
+      "rect": {
+        "x": 634,
+        "y": 274,
+        "width": 850,
+        "height": 603
+      },
+      "isVisible": true,
+      "isForeground": false
+    },
+    {
+      "handle": 264546,
+      "title": "Javis - 文件资源管理器",
+      "className": "CabinetWClass",
+      "rect": {
+        "x": 531,
+        "y": 106,
+        "width": 1340,
+        "height": 846
+      },
+      "isVisible": true,
+      "isForeground": false
+    },
+    {
+      "handle": 460748,
+      "title": "QQ",
+      "className": "Chrome_WidgetWin_1",
+      "rect": {
+        "x": 752,
+        "y": 185,
+        "width": 1088,
+        "height": 721
+      },
+      "isVisible": true,
+      "isForeground": false
+    },
+    {
+      "handle": 1377922,
+      "title": "文件 - 文件资源管理器",
+      "className": "CabinetWClass",
+      "rect": {
+        "x": -32000,
+        "y": -32000,
+        "width": 160,
+        "height": 28
+      },
+      "isVisible": true,
+      "isForeground": false
+    },
+    {
+      "handle": 657420,
+      "title": "com.ccswitch.desktop-siw",
+      "className": "com.ccswitch.desktop-sic",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 16,
+        "height": 16
+      },
+      "isVisible": true,
+      "isForeground": false
+    },
+    {
+      "handle": 198562,
+      "title": "设置",
+      "className": "Windows.UI.Core.CoreWindow",
+      "rect": {
+        "x": 0,
+        "y": 1,
+        "width": 1200,
+        "height": 908
+      },
+      "isVisible": true,
+      "isForeground": false
+    },
+    {
+      "handle": 197122,
+      "title": "设置",
+      "className": "ApplicationFrameWindow",
+      "rect": {
+        "x": 436,
+        "y": 59,
+        "width": 1216,
+        "height": 917
+      },
+      "isVisible": true,
+      "isForeground": false
+    },
+    {
+      "handle": 67380,
+      "title": "Windows 输入体验",
+      "className": "Windows.UI.Core.CoreWindow",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1920,
+        "height": 1080
+      },
+      "isVisible": true,
+      "isForeground": false
+    },
+    {
+      "handle": 66146,
+      "title": "NVIDIA GeForce Overlay",
+      "className": "CEF-OSC-WIDGET",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1919,
+        "height": 1080
+      },
+      "isVisible": true,
+      "isForeground": false
+    },
+    {
+      "handle": 1509254,
+      "title": "CC Switch",
+      "className": "Tauri Window",
+      "rect": {
+        "x": -32000,
+        "y": -32000,
+        "width": 160,
+        "height": 28
+      },
+      "isVisible": true,
+      "isForeground": false
+    },
+    {
+      "handle": 526870,
+      "title": "仪表盘 - 聪明AI - Google Chrome",
+      "className": "Chrome_WidgetWin_1",
+      "rect": {
+        "x": -32000,
+        "y": -32000,
+        "width": 160,
+        "height": 28
+      },
+      "isVisible": true,
+      "isForeground": false
+    },
+    {
+      "handle": 2558112,
+      "title": "Xiaomi MiMo 开放平台 - 个人 - Microsoft​ Edge",
+      "className": "Chrome_WidgetWin_1",
+      "rect": {
+        "x": -32000,
+        "y": -32000,
+        "width": 160,
+        "height": 28
+      },
+      "isVisible": true,
+      "isForeground": false
+    },
+    {
+      "handle": 66270,
+      "title": "Program Manager",
+      "className": "Progman",
+      "rect": {
+        "x": 0,
+        "y": 0,
+        "width": 1920,
+        "height": 1080
+      },
+      "isVisible": true,
+      "isForeground": false
+    }
+  ]
+}

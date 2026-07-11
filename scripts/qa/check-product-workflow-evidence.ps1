@@ -635,6 +635,25 @@ $scenarios = @(
     )
   }
   [ordered]@{
+    Id = "agent-runtime-durability-restart-resume"
+    Title = "Agent runtime durability restart-resume"
+    KnownBlocker = $true
+    Requirements = @(
+      New-FileRequirement "Restored approval is linked to checkpoint" @("46-agent-runtime-restored-approval-linked.png")
+      New-FileRequirement "Downstream step resumes after approval" @("47-agent-runtime-resumed-downstream.png")
+      New-FileRequirement "Agent runtime durability restart QA output" @("agent-runtime-durability-restart-qa-output.txt")
+      New-PackagedQaOutputRequirements @("agent-runtime-durability-restart-qa-output.txt")
+      New-JsonPassFieldsRequirement "Agent runtime durability output JSON status fields pass" @("agent-runtime-durability-restart-qa-output.txt") @("runtimeEventsPersisted", "checkpointPersisted", "restoredApprovalLinked", "approvalStepAdvancedOnce", "upstreamNotRerun", "downstreamResumed", "artifactContextRestored")
+      New-TextRequirement "Runtime events are persisted" 'runtime[-_ ]?events[-_ ]?persisted\s*:\s*PASS|"runtimeEventsPersisted"\s*:\s*"pass"' @("agent-runtime-durability-restart-qa-output.txt")
+      New-TextRequirement "Workflow checkpoint is persisted" 'checkpoint[-_ ]?persisted\s*:\s*PASS|"checkpointPersisted"\s*:\s*"pass"' @("agent-runtime-durability-restart-qa-output.txt")
+      New-TextRequirement "Restored approval links to checkpoint" 'restored[-_ ]?approval[-_ ]?linked\s*:\s*PASS|"restoredApprovalLinked"\s*:\s*"pass"|workflow\.checkpoint\.linked' @("agent-runtime-durability-restart-qa-output.txt")
+      New-TextRequirement "Approval step advances once" 'approval[-_ ]?step[-_ ]?advanced[-_ ]?once\s*:\s*PASS|"approvalStepAdvancedOnce"\s*:\s*"pass"' @("agent-runtime-durability-restart-qa-output.txt")
+      New-TextRequirement "Completed upstream steps are not rerun" 'upstream[-_ ]?not[-_ ]?rerun\s*:\s*PASS|"upstreamNotRerun"\s*:\s*"pass"' @("agent-runtime-durability-restart-qa-output.txt")
+      New-TextRequirement "Downstream work resumes" 'downstream[-_ ]?resumed\s*:\s*PASS|"downstreamResumed"\s*:\s*"pass"' @("agent-runtime-durability-restart-qa-output.txt")
+      New-TextRequirement "Artifact context is restored" 'artifact[-_ ]?context[-_ ]?restored\s*:\s*PASS|"artifactContextRestored"\s*:\s*"pass"' @("agent-runtime-durability-restart-qa-output.txt")
+    )
+  }
+  [ordered]@{
     Id = "browser-terminal-approvals"
     Title = "Browser and Terminal confirmed-write approval workflows"
     KnownBlocker = $true

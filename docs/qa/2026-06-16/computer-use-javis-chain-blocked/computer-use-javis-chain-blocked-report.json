@@ -1,0 +1,66 @@
+﻿{
+    "qa":  "computer-use-javis-chain-blocked",
+    "timestamp":  "2026-06-16T18:42:44+08:00",
+    "result":  "blocked",
+    "chain":  "Codex Computer Use -\u003e Javis Computer Use -\u003e QQ send",
+    "targetApp":  "Javis then QQ",
+    "targetContact":  "凤雏-大聪明",
+    "intendedMessage":  "test message",
+    "sent":  false,
+    "screenshot":  "desktop-state-after-bootstrap-failure.png",
+    "processSnapshot":  [
+                            {
+                                "ProcessName":  "QQ",
+                                "Id":  17096,
+                                "MainWindowTitle":  ""
+                            },
+                            {
+                                "ProcessName":  "QQ",
+                                "Id":  26628,
+                                "MainWindowTitle":  ""
+                            },
+                            {
+                                "ProcessName":  "QQ",
+                                "Id":  26824,
+                                "MainWindowTitle":  "QQ"
+                            },
+                            {
+                                "ProcessName":  "QQ",
+                                "Id":  27064,
+                                "MainWindowTitle":  ""
+                            },
+                            {
+                                "ProcessName":  "QQ",
+                                "Id":  27860,
+                                "MainWindowTitle":  ""
+                            },
+                            {
+                                "ProcessName":  "QQ",
+                                "Id":  28428,
+                                "MainWindowTitle":  ""
+                            },
+                            {
+                                "ProcessName":  "QQ",
+                                "Id":  28864,
+                                "MainWindowTitle":  ""
+                            },
+                            {
+                                "ProcessName":  "QQ",
+                                "Id":  34228,
+                                "MainWindowTitle":  ""
+                            }
+                        ],
+    "errors":  [
+                   {
+                       "id":  "computer-use-runtime-bootstrap-failed",
+                       "severity":  "blocker",
+                       "message":  "Package subpath ./dist/project/cua/sky_js/src/targets/windows/internal/computer_use_client_base.js is not defined by exports in @oai/sky package.json",
+                       "impact":  "Could not connect to the Windows Computer Use helper, so Javis could not be controlled and no QQ message was sent."
+                   }
+               ],
+    "notes":  [
+                  "This attempt was blocked before any Javis-side Computer Use action could begin.",
+                  "Desktop screenshot was captured as failure evidence only; it is not a Computer Use plugin screenshot.",
+                  "No QQ text was typed and no message was sent."
+              ]
+}

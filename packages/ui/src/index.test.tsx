@@ -2175,6 +2175,15 @@ describe("JavisWorkbench permission cards", () => {
         unrecoveredCount: 0,
         abandonedStepIds: ["collect-evidence"],
         replannedStepIds: ["recover-with-partial-evidence"],
+        stuckSignals: [{
+          kind: "repeated_tool_failure",
+          fingerprint: "tool:search",
+          count: 2,
+          severity: "blocked",
+          hint: "switch tool",
+          evidence: ["collect-evidence: Repository search failed twice."],
+        }],
+        commanderGuidance: ["switch tool"],
         attempts: [{
           failedStepId: "collect-evidence",
           failedStepTitle: "Collect evidence",
@@ -2203,6 +2212,11 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).toContain("1/1 recovered");
     expect(html).toContain("Abandoned: collect-evidence");
     expect(html).toContain("Recovery steps: recover-with-partial-evidence");
+    expect(html).toContain("Guidance: switch tool");
+    expect(html).toContain("Stuck signals");
+    expect(html).toContain("repeated_tool_failure");
+    expect(html).toContain("blocked");
+    expect(html).toContain("collect-evidence: Repository search failed twice.");
     expect(html).toContain("Collect evidence");
     expect(html).toContain("network");
     expect(html).toContain("HTTP 503 from repository search provider");

@@ -1,0 +1,65 @@
+{
+  "ok": true,
+  "qq": {
+    "handle": 460748,
+    "title": "QQ",
+    "className": "Chrome_WidgetWin_1",
+    "rect": {
+      "x": 752,
+      "y": 185,
+      "width": 1088,
+      "height": 721
+    },
+    "isVisible": true,
+    "isForeground": true
+  },
+  "clickReq": {
+    "x": 1769,
+    "y": 875,
+    "button": "left",
+    "clickCount": 1
+  },
+  "clicked": {
+    "x": 1769,
+    "y": 875,
+    "clicked": true
+  },
+  "logs": [
+    {
+      "phase": "approved",
+      "toolName": "computer.click",
+      "approvalId": "qa-click-send-safe-message-001",
+      "request": {
+        "x": 1769,
+        "y": 875,
+        "button": "left",
+        "clickCount": 1
+      },
+      "riskLevel": "commit"
+    },
+    {
+      "phase": "executed",
+      "cmd": "computer_click",
+      "approvalId": "qa-click-send-safe-message-001",
+      "result": {
+        "x": 1769,
+        "y": 875,
+        "clicked": true
+      }
+    }
+  ],
+  "shotMeta": {
+    "width": 1088,
+    "height": 721,
+    "methodUsed": "printWindow",
+    "health": {
+      "sampledPixels": 4096,
+      "dominantColorRatio": 0.626220703125,
+      "darkPixelRatio": 0.004638671875,
+      "suspiciousBlank": false,
+      "reason": null
+    },
+    "dataUrlLength": 230842
+  },
+  "shotDataUrl": "[redacted data url length=230842]"
+}

@@ -4,6 +4,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 import { invoke } from "@tauri-apps/api/core";
 import { createDryRunBindingHash } from "@javis/core";
+import type { RuntimeEventEnvelope, WorkflowCheckpoint } from "@javis/core";
 import type { DryRunSummary, PermissionRequest } from "@javis/tools";
 import type { DurableApprovalRecord } from "./approval-records";
 import {
@@ -21,14 +22,19 @@ import {
   GIT_STAGE_APPROVAL_TOOL_NAME,
   PDF_APPROVAL_TOOL_NAME,
   PDF_APPROVAL_TITLE,
+  createRestoredGitCommitApprovedTask,
   createRestoredGitCommentPullRequestApprovalTask,
   createRestoredGitCreatePullRequestApprovalTask,
   createRestoredGitCommitApprovalTask,
+  createRestoredGitPushFailedTask,
   createRestoredGitPushApprovalTask,
   createRestoredGitStageApprovalTask,
+  createRestoredGitStageDeniedTask,
   findRestorableApprovalRecord,
   getDurableApprovalToolName,
   isDurableApprovalRequestTitle,
+  linkRestoredApprovalTaskToCheckpoint,
+  reconcileRestoredApprovalTaskToCheckpoint,
   runRestoredGitCommentPullRequest,
   runRestoredGitCreatePullRequest,
 } from "./restored-approval";
@@ -92,6 +98,41 @@ describe("restored approval filters", () => {
     const restoredTask = createRestoredGitStageApprovalTask(gitStageRecord);
     expect(restoredTask.permissionRequest?.title).toBe(GIT_STAGE_APPROVAL_TITLE);
     expect(restoredTask.verificationSummary).toContain("1 selected file(s) ready to stage");
+  });
+
+  it("records approval outcomes on restored approval final tasks", () => {
+    const deniedTask = createRestoredGitStageDeniedTask(createGitStageRecord());
+    const approvedTask = createRestoredGitCommitApprovedTask(createGitCommitRecord(), {
+      workspacePath: "E:/Javis",
+      branch: "main",
+      commitHash: "0123456789abcdef",
+      subject: "Add review UI",
+      fileCount: 1,
+      committed: true,
+      output: "Committed.",
+    });
+
+    expect(deniedTask.approvalOutcome).toMatchObject({
+      approvalId: "git-stage-approval",
+      status: "denied",
+    });
+    expect(approvedTask.approvalOutcome).toMatchObject({
+      approvalId: "git-commit-approval",
+      status: "approved",
+    });
+  });
+
+  it("records verifier results on restored approval failure tasks", () => {
+    const failedTask = createRestoredGitPushFailedTask(
+      createGitPushRecord(),
+      new Error("remote rejected"),
+    );
+
+    expect(failedTask.verificationSummary).toContain("failed: restored Git push failed");
+    expect(failedTask.verificationResult).toMatchObject({
+      status: "fail",
+      summary: expect.stringContaining("remote rejected"),
+    });
   });
 
   it("restores Git pull request records with persisted PR plans", () => {
@@ -180,6 +221,144 @@ describe("restored approval filters", () => {
   });
 });
 
+describe("restored approval checkpoint linking", () => {
+  it("links a restored approval to a checkpoint that names its approval request", () => {
+    const record = createGitCommitRecord();
+    const task = createRestoredGitCommitApprovalTask(record);
+    const checkpoint = createCheckpoint(record, {
+      approvalRequestIds: [record.approvalId],
+      completedStepIds: ["inspect", "plan"],
+      pendingStepIds: ["execute"],
+      eventSequence: 7,
+    });
+
+    const linked = linkRestoredApprovalTaskToCheckpoint(task, checkpoint, [
+      createRuntimeEvent(record, checkpoint.runId, 5, {
+        kind: "step.completed",
+        stepId: "inspect",
+      }),
+      createRuntimeEvent(record, checkpoint.runId, 6, {
+        kind: "step.completed",
+        stepId: "plan",
+      }),
+      createRuntimeEvent(record, checkpoint.runId, 7, {
+        kind: "permission.requested",
+        request: record.permissionRequest,
+      }),
+    ]);
+
+    expect(linked.logs[linked.logs.length - 1]?.title).toBe("workflow.checkpoint.linked");
+    expect(linked.verificationSummary).toContain("durable run run-git-commit-approval");
+    expect(linked.verificationSummary).toContain("2 step(s) completed");
+  });
+
+  it("links a restored approval when the event log contains the permission request", () => {
+    const record = createGitStageRecord();
+    const task = createRestoredGitStageApprovalTask(record);
+    const checkpoint = createCheckpoint(record, {
+      approvalRequestIds: [],
+      eventSequence: 5,
+    });
+    const events = [
+      createRuntimeEvent(record, checkpoint.runId, 5, {
+        kind: "permission.requested",
+        request: record.permissionRequest,
+      }),
+    ];
+
+    const linked = linkRestoredApprovalTaskToCheckpoint(task, checkpoint, events);
+
+    expect(linked.logs[linked.logs.length - 1]?.title).toBe("workflow.checkpoint.linked");
+  });
+
+  it("links a restored approval when permission evidence uses a flat approvalId", () => {
+    const record = createGitStageRecord();
+    const task = createRestoredGitStageApprovalTask(record);
+    const checkpoint = createCheckpoint(record, {
+      approvalRequestIds: [],
+      eventSequence: 5,
+    });
+    const events = [
+      createRuntimeEvent(record, checkpoint.runId, 5, {
+        kind: "permission.requested",
+        approvalId: record.approvalId,
+      }),
+    ];
+
+    const linked = linkRestoredApprovalTaskToCheckpoint(task, checkpoint, events);
+
+    expect(linked.logs[linked.logs.length - 1]?.title).toBe("workflow.checkpoint.linked");
+  });
+
+  it("does not link when event evidence conflicts with the checkpoint run", () => {
+    const record = createGitPushRecord();
+    const task = createRestoredGitPushApprovalTask(record);
+    const checkpoint = createCheckpoint(record, {
+      approvalRequestIds: [record.approvalId],
+      eventSequence: 5,
+    });
+    const events = [
+      createRuntimeEvent(record, "run-other", 5, {
+        kind: "permission.requested",
+        request: record.permissionRequest,
+      }),
+    ];
+
+    const result = reconcileRestoredApprovalTaskToCheckpoint(task, checkpoint, events);
+    const linked = linkRestoredApprovalTaskToCheckpoint(task, checkpoint, events);
+
+    expect(result.status).toBe("blocked");
+    expect(linked.logs[linked.logs.length - 1]?.title).toBe("workflow.checkpoint.reconciliation_blocked");
+  });
+
+  it("does not link when event replay does not cover the checkpoint sequence", () => {
+    const record = createGitCreatePullRequestRecord();
+    const task = createRestoredGitCreatePullRequestApprovalTask(record);
+    const checkpoint = createCheckpoint(record, {
+      approvalRequestIds: [record.approvalId],
+      eventSequence: 9,
+    });
+    const events = [
+      createRuntimeEvent(record, checkpoint.runId, 8, {
+        kind: "permission.requested",
+        request: record.permissionRequest,
+      }),
+    ];
+
+    const result = reconcileRestoredApprovalTaskToCheckpoint(task, checkpoint, events);
+    const linked = linkRestoredApprovalTaskToCheckpoint(task, checkpoint, events);
+
+    expect(result.status).toBe("blocked");
+    expect(linked.logs[linked.logs.length - 1]?.title).toBe("workflow.checkpoint.reconciliation_blocked");
+  });
+
+  it("surfaces blocked reconciliation for crash-after-confirmed-write checkpoints", () => {
+    const record = createGitStageRecord();
+    const task = createRestoredGitStageApprovalTask(record);
+    const checkpoint = createCheckpoint(record, {
+      approvalRequestIds: [record.approvalId],
+      completedStepIds: ["inspect", "plan"],
+      pendingStepIds: [],
+      runningStepIds: ["execute"],
+      eventSequence: 4,
+    });
+    const events = [
+      createRuntimeEvent(record, checkpoint.runId, 1, { kind: "step.started", stepId: "inspect" }),
+      createRuntimeEvent(record, checkpoint.runId, 2, { kind: "step.completed", stepId: "inspect" }),
+      createRuntimeEvent(record, checkpoint.runId, 3, { kind: "step.completed", stepId: "plan" }),
+      createRuntimeEvent(record, checkpoint.runId, 4, { kind: "step.started", stepId: "execute" }),
+    ];
+
+    const result = reconcileRestoredApprovalTaskToCheckpoint(task, checkpoint, events);
+
+    expect(result.status).toBe("blocked");
+    expect(result.reason).toContain("confirmed-write");
+    expect(result.linkedTask.logs[result.linkedTask.logs.length - 1]?.title)
+      .toBe("workflow.checkpoint.reconciliation_blocked");
+    expect(result.linkedTask.verificationSummary).toContain("blocked: restored approval cannot auto-resume");
+  });
+});
+
 function createPdfRecord(): DurableApprovalRecord {
   const dryRun: DryRunSummary = {
     operation: "Organize PDF files by filename topic",
@@ -194,6 +373,91 @@ function createPdfRecord(): DurableApprovalRecord {
     reversible: true,
   };
   return createRecord("pdf-approval", PDF_APPROVAL_TOOL_NAME, PDF_APPROVAL_TITLE, dryRun);
+}
+
+function createCheckpoint(
+  record: DurableApprovalRecord,
+  overrides: Partial<WorkflowCheckpoint> = {},
+): WorkflowCheckpoint {
+  return {
+    taskId: record.taskId,
+    runId: `run-${record.approvalId}`,
+    workflowId: "commander-dag",
+    workflowVersion: 1,
+    planHash: "plan-test",
+    workflowSnapshot: {
+      id: "read-current-project",
+      title: "Commander DAG",
+      triggerExamples: [],
+      goal: "test workflow",
+      coordinatorAgentKind: "commander",
+      participatingAgentKinds: ["commander", "file", "code"],
+      currentSupport: "partial",
+      safetyNotes: [],
+      steps: [
+        {
+          id: "inspect",
+          title: "Inspect",
+          agentKind: "file",
+          input: "workspace",
+          output: "files",
+          permissionLevel: "read",
+          dependsOn: [],
+          canRunInParallel: false,
+        },
+        {
+          id: "plan",
+          title: "Plan",
+          agentKind: "commander",
+          input: "files",
+          output: "plan",
+          permissionLevel: "read",
+          dependsOn: ["inspect"],
+          canRunInParallel: false,
+        },
+        {
+          id: "execute",
+          title: "Execute",
+          agentKind: "code",
+          input: "plan",
+          output: "result",
+          permissionLevel: "confirmed_write",
+          dependsOn: ["plan"],
+          canRunInParallel: false,
+        },
+      ],
+    },
+    completedStepIds: [],
+    abandonedStepIds: [],
+    pendingStepIds: ["inspect", "plan", "execute"],
+    runningStepIds: [],
+    contextSnapshot: {},
+    approvalRequestIds: [],
+    waitingReason: "human_approval",
+    eventSequence: 1,
+    createdAt: "2026-05-24T00:05:00.000Z",
+    ...overrides,
+  };
+}
+
+function createRuntimeEvent(
+  record: DurableApprovalRecord,
+  runId: string,
+  sequence: number,
+  payload: unknown,
+): RuntimeEventEnvelope {
+  return {
+    eventId: `evt-${runId}-${sequence}`,
+    eventVersion: 1,
+    sequence,
+    taskId: record.taskId,
+    runId,
+    workflowId: "commander-dag",
+    correlationId: `corr-${runId}`,
+    occurredAt: "2026-05-24T00:05:00.000Z",
+    recordedAt: "2026-05-24T00:05:00.001Z",
+    payload,
+  };
 }
 
 function createTextWriteRecord(): DurableApprovalRecord {

@@ -50,6 +50,11 @@ const PERSISTED_TEXT_MAX_LENGTH = 20_000;
 const PERSISTED_ARRAY_MAX_ITEMS = 200;
 const PERSISTED_OBJECT_MAX_ENTRIES = 120;
 
+type PersistedRecoveryReport = Omit<
+  NonNullable<TaskSnapshot["recoveryReport"]>,
+  "stuckSignals" | "commanderGuidance"
+> & Partial<Pick<NonNullable<TaskSnapshot["recoveryReport"]>, "stuckSignals" | "commanderGuidance">>;
+
 export function isArchivableTask(task: TaskSnapshot): boolean {
   return task.id !== "task-idle" && ARCHIVABLE_STATUSES.has(task.status);
 }
@@ -412,6 +417,10 @@ export function sanitizeTaskSnapshot(value: unknown): TaskSnapshot | null {
   if (permissionRequest) {
     snapshot.permissionRequest = permissionRequest;
   }
+  const approvalOutcome = sanitizeApprovalOutcome(value.approvalOutcome);
+  if (approvalOutcome) {
+    snapshot.approvalOutcome = approvalOutcome;
+  }
   const askUserQuestion = sanitizeAskUserQuestion(value.askUserQuestion);
   if (askUserQuestion) {
     snapshot.askUserQuestion = askUserQuestion;
@@ -429,10 +438,16 @@ export function sanitizeTaskSnapshot(value: unknown): TaskSnapshot | null {
     snapshot.handoffReport = normalizeHandoffReport(value.handoffReport);
   }
   if (isRecoveryReport(value.recoveryReport)) {
-    snapshot.recoveryReport = value.recoveryReport;
+    snapshot.recoveryReport = normalizeRecoveryReport(value.recoveryReport);
+  }
+  if (isDurableResumeMetadata(value.durableResume)) {
+    snapshot.durableResume = value.durableResume;
   }
   if (isString(value.verificationSummary)) {
     snapshot.verificationSummary = value.verificationSummary;
+  }
+  if (isVerifierCheckResult(value.verificationResult)) {
+    snapshot.verificationResult = value.verificationResult;
   }
   if (isChatMessageArray(value.conversationMessages)) {
     snapshot.conversationMessages = value.conversationMessages;
@@ -921,6 +936,25 @@ function sanitizeResolvedPermissionRequest(
   };
 }
 
+function sanitizeApprovalOutcome(
+  value: unknown,
+): TaskSnapshot["approvalOutcome"] | undefined {
+  if (
+    !isRecord(value) ||
+    !isString(value.approvalId) ||
+    !isResolvedPermissionStatus(value.status) ||
+    ("resolvedAt" in value && !isString(value.resolvedAt))
+  ) {
+    return undefined;
+  }
+
+  return {
+    approvalId: value.approvalId,
+    status: value.status,
+    ...("resolvedAt" in value && isString(value.resolvedAt) ? { resolvedAt: value.resolvedAt } : {}),
+  };
+}
+
 function sanitizeAskUserQuestion(
   value: unknown,
 ): TaskSnapshot["askUserQuestion"] | undefined {
@@ -1181,7 +1215,7 @@ function isHandoffValueType(
   );
 }
 
-function isRecoveryReport(value: unknown): value is NonNullable<TaskSnapshot["recoveryReport"]> {
+function isRecoveryReport(value: unknown): value is PersistedRecoveryReport {
   return (
     isRecord(value) &&
     isString(value.generatedAt) &&
@@ -1191,6 +1225,9 @@ function isRecoveryReport(value: unknown): value is NonNullable<TaskSnapshot["re
     isNumber(value.unrecoveredCount) &&
     isStringArray(value.abandonedStepIds) &&
     isStringArray(value.replannedStepIds) &&
+    (!("progressLedger" in value) || isProgressLedger(value.progressLedger)) &&
+    (!("stuckSignals" in value) || isStuckSignalArray(value.stuckSignals)) &&
+    (!("commanderGuidance" in value) || isStringArray(value.commanderGuidance)) &&
     isRecoveryAttemptArray(value.attempts)
   );
 }
@@ -1199,6 +1236,39 @@ function isRecoveryReportStatus(
   value: unknown,
 ): value is NonNullable<TaskSnapshot["recoveryReport"]>["status"] {
   return value === "not_needed" || value === "recovered" || value === "needs_attention";
+}
+
+function normalizeRecoveryReport(
+  report: PersistedRecoveryReport,
+): NonNullable<TaskSnapshot["recoveryReport"]> {
+  return {
+    ...report,
+    stuckSignals: report.stuckSignals ?? [],
+    commanderGuidance: report.commanderGuidance ?? [],
+  };
+}
+
+function isDurableResumeMetadata(value: unknown): value is NonNullable<TaskSnapshot["durableResume"]> {
+  return (
+    isRecord(value) &&
+    isString(value.runId) &&
+    (value.source === "checkpoint" || value.source === "event-log") &&
+    isNumber(value.checkpointEventSequence) &&
+    isNumber(value.latestEventSequence) &&
+    isStringArray(value.completedStepIds) &&
+    isStringArray(value.retryStepIds) &&
+    isStringArray(value.approvalRequestIds) &&
+    typeof value.rebuilt === "boolean"
+  );
+}
+
+function isVerifierCheckResult(value: unknown): value is NonNullable<TaskSnapshot["verificationResult"]> {
+  return (
+    isRecord(value) &&
+    (value.status === "pass" || value.status === "warn" || value.status === "fail") &&
+    isString(value.summary) &&
+    isString(value.detail)
+  );
 }
 
 function isRecoveryAttemptArray(
@@ -1224,12 +1294,74 @@ function isRecoveryAttemptArray(
   );
 }
 
+function isStuckSignalArray(
+  value: unknown,
+): value is NonNullable<TaskSnapshot["recoveryReport"]>["stuckSignals"] {
+  return (
+    Array.isArray(value) &&
+    value.every((signal) =>
+      isRecord(signal) &&
+      isString(signal.kind) &&
+      isString(signal.fingerprint) &&
+      isNumber(signal.count) &&
+      (signal.severity === "warn" || signal.severity === "blocked") &&
+      isString(signal.hint) &&
+      isStringArray(signal.evidence),
+    )
+  );
+}
+
+function isProgressLedger(
+  value: unknown,
+): value is NonNullable<NonNullable<TaskSnapshot["recoveryReport"]>["progressLedger"]> {
+  return (
+    isRecord(value) &&
+    Array.isArray(value.completed) &&
+    value.completed.every((item) =>
+      isRecord(item) &&
+      isString(item.stepId) &&
+      (!("title" in item) || isString(item.title)) &&
+      (!("agentKind" in item) || isString(item.agentKind)) &&
+      (!("outputContextKey" in item) || isString(item.outputContextKey)),
+    ) &&
+    Array.isArray(value.failed) &&
+    value.failed.every((item) =>
+      isRecord(item) &&
+      isString(item.stepId) &&
+      isString(item.errorSummary) &&
+      (!("title" in item) || isString(item.title)) &&
+      (!("agentKind" in item) || isString(item.agentKind)) &&
+      (!("toolName" in item) || isString(item.toolName)) &&
+      (!("inputFingerprint" in item) || isString(item.inputFingerprint)) &&
+      (!("missingContextKeys" in item) || isStringArray(item.missingContextKeys)),
+    ) &&
+    Array.isArray(value.blocked) &&
+    value.blocked.every((item) =>
+      isRecord(item) &&
+      isString(item.reason) &&
+      (!("stepId" in item) || isString(item.stepId)) &&
+      (!("missingContextKeys" in item) || isStringArray(item.missingContextKeys)),
+    ) &&
+    (!("currentHypothesis" in value) || isString(value.currentHypothesis)) &&
+    Array.isArray(value.repeatedActions) &&
+    value.repeatedActions.every((item) =>
+      isRecord(item) &&
+      (item.kind === "tool" || item.kind === "replan" || item.kind === "verifier" || item.kind === "handoff") &&
+      isString(item.fingerprint) &&
+      isNumber(item.count) &&
+      (!("lastStepId" in item) || isString(item.lastStepId)),
+    ) &&
+    isStringArray(value.remainingWork)
+  );
+}
+
 function isRecoveryFailureKind(
   value: unknown,
 ): value is NonNullable<TaskSnapshot["recoveryReport"]>["attempts"][number]["failureKind"] {
   return (
     value === "timeout" ||
     value === "permission_denied" ||
+    value === "handoff" ||
     value === "unavailable" ||
     value === "network" ||
     value === "validation" ||

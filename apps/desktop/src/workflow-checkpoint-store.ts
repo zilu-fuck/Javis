@@ -1,4 +1,4 @@
-import type { WorkflowCheckpoint } from "@javis/core";
+import { sanitizeArtifactForPersistence, type WorkflowCheckpoint } from "@javis/core";
 import type { DesktopDatabase, DesktopDatabaseMigration } from "./desktop-database";
 
 export const WORKFLOW_CHECKPOINTS_TABLE_NAME = "workflow_checkpoints";
@@ -57,6 +57,7 @@ export function createWorkflowCheckpointStore(database: DesktopDatabase): Workfl
   return {
     async save(checkpoint) {
       const checkpointId = `ckpt-${checkpoint.runId}-${checkpoint.eventSequence}`;
+      const persistedCheckpoint = sanitizeCheckpointForPersistence(checkpoint);
       await database.execute(
         `INSERT INTO workflow_checkpoints (checkpoint_id, task_id, run_id, workflow_id, workflow_version, plan_hash, event_sequence, created_at, workflow_json, checkpoint_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(checkpoint_id) DO UPDATE SET task_id = excluded.task_id, run_id = excluded.run_id, workflow_id = excluded.workflow_id, workflow_version = excluded.workflow_version, plan_hash = excluded.plan_hash, event_sequence = excluded.event_sequence, created_at = excluded.created_at, workflow_json = excluded.workflow_json, checkpoint_json = excluded.checkpoint_json`,
         [
@@ -69,7 +70,7 @@ export function createWorkflowCheckpointStore(database: DesktopDatabase): Workfl
           checkpoint.eventSequence,
           checkpoint.createdAt,
           JSON.stringify(checkpoint.workflowSnapshot),
-          JSON.stringify(checkpoint),
+          JSON.stringify(persistedCheckpoint),
         ],
       );
     },
@@ -115,6 +116,17 @@ export function createWorkflowCheckpointStore(database: DesktopDatabase): Workfl
       }
       return toRemove.length;
     },
+  };
+}
+
+function sanitizeCheckpointForPersistence(checkpoint: WorkflowCheckpoint): WorkflowCheckpoint {
+  const contextSnapshot: WorkflowCheckpoint["contextSnapshot"] = {};
+  for (const [key, envelope] of Object.entries(checkpoint.contextSnapshot)) {
+    contextSnapshot[key] = sanitizeArtifactForPersistence(envelope);
+  }
+  return {
+    ...checkpoint,
+    contextSnapshot,
   };
 }
 

@@ -97,6 +97,21 @@ export const DEFAULT_COMPUTER_USE_CONFIG: ComputerUseLoopConfig = {
   },
   heartbeatMs: 400,
   uiCacheMs: 600,
+  screenshotStabilization: {
+    enabled: true,
+    settleMs: 120,
+    maxAttempts: 1,
+  },
+  regionFocus: {
+    enabled: true,
+    minScore: 0.88,
+    paddingPx: 24,
+    maxAreaRatio: 0.45,
+    optionalWaitMs: 160,
+  },
+  mediaCache: {
+    mode: "auto",
+  },
   mouseSpeed: "instant",
   mouseDurationMs: 200,
   typeDelayMs: 50,

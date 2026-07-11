@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { encodeMcpToolServerName, initialToolDescriptors, type BrowserTool, type CodeTool, type CommanderTool, type ComputerTool, type FileTool, type GitTool, type McpTool, type MemoryTool, type ProjectTool, type SchedulerTool, type ShellTool, type ToolDescriptor, type TrendTool, type VerifierTool, type WorkspaceTool } from "@javis/tools";
-import { createInitialTaskSnapshot, type TaskSnapshot } from "./index";
+import { createArtifactEnvelope, computePlanHash, createInitialTaskSnapshot, type RuntimeEventEnvelope, type TaskSnapshot, type WorkflowCheckpoint } from "./index";
 import { createSharedTaskContext } from "./shared-context";
 import { executeCapabilityStep, isReadCurrentProjectGoal, runCommanderDagTask, runGenericWorkbenchWorkflow, runReadCurrentProjectWorkflow, SUPPORTED_APPROVAL_GATED_TOOLS } from "./workflow-executor";
 import type { ReActDecisionRequest } from "./agent-react-decider";
+import type { WorkspaceRuntime } from "./workspace-runtime";
 
 function createTestController(options: { withPermissionHandler?: boolean } = {}) {
   let snapshot = createInitialTaskSnapshot();
@@ -75,6 +76,49 @@ describe("isReadCurrentProjectGoal", () => {
   });
 });
 
+function createTestWorkspaceRuntime(
+  overrides: Partial<WorkspaceRuntime> = {},
+): WorkspaceRuntime {
+  const root = "E:/Javis/.codex-tmp/javis-sandboxes/task-1";
+  return {
+    kind: "sandbox",
+    root,
+    readFile: vi.fn(),
+    listFiles: vi.fn(),
+    execute: vi.fn(async (request) => ({
+      command: [request.program, ...request.args].join(" "),
+      cwd: root,
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    })),
+    createSnapshot: vi.fn(),
+    diff: vi.fn(),
+    dispose: vi.fn(),
+    ...overrides,
+  };
+}
+
+function createRuntimeEventEnvelopeForTest(
+  taskId: string,
+  runId: string,
+  sequence: number,
+  payload: unknown,
+): RuntimeEventEnvelope {
+  return {
+    eventId: `evt-${runId}-${sequence}`,
+    eventVersion: 1,
+    sequence,
+    taskId,
+    runId,
+    workflowId: "commander-dag",
+    correlationId: `corr-${runId}`,
+    occurredAt: "2026-06-16T00:00:00.000Z",
+    recordedAt: "2026-06-16T00:00:00.001Z",
+    payload,
+  };
+}
+
 describe("runCommanderDagTask observability", () => {
   it("emits an explicit sub-agent dispatch snapshot after Commander planning", async () => {
     const commanderTool: CommanderTool = {
@@ -114,6 +158,39 @@ describe("runCommanderDagTask observability", () => {
     );
     expect(dispatchSnapshot).toBeDefined();
     expect(dispatchSnapshot?.agents.find((agent) => agent.id === "agent-file")?.status).toBe("queued");
+  });
+
+  it("propagates the durable run id onto emitted Commander snapshots", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "Scan files",
+        reasoning: "Commander will delegate file scanning.",
+        steps: [{
+          id: "scan-files",
+          title: "Scan project documents",
+          assignedAgentKind: "file",
+          capability: "file_scan",
+          requiredCapabilities: ["file_scan"],
+          dependsOn: [],
+          successCriteria: "Documents are scanned.",
+        }],
+      })),
+    };
+    const fileTool: FileTool = {
+      scanMarkdownDocuments: vi.fn(async () => []),
+    };
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      fileTool,
+      taskId: "task-run-id",
+      userGoal: "scan the project documents",
+    });
+
+    expect(emitted.length).toBeGreaterThan(0);
+    expect(emitted.some((snapshot) => snapshot.runId?.startsWith("run-task-run-id-"))).toBe(true);
   });
 
   it("forwards runtime events and checkpoints to durable sinks", async () => {
@@ -166,6 +243,217 @@ describe("runCommanderDagTask observability", () => {
     const finalCheckpoint = savedCheckpoints[savedCheckpoints.length - 1];
     expect(finalCheckpoint.taskId).toBe("task-durable-sinks");
     expect(finalCheckpoint.workflowSnapshot.steps.some((s) => s.id === "scan-files")).toBe(true);
+  });
+
+  it("waits for runtime event persistence before checkpoint persistence", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "Serialize persistence",
+        reasoning: "Commander will emit a single durable event.",
+        steps: [{
+          id: "scan-files",
+          title: "Scan project documents",
+          assignedAgentKind: "file",
+          capability: "file_scan",
+          requiredCapabilities: ["file_scan"],
+          dependsOn: [],
+          successCriteria: "Documents are scanned.",
+        }],
+      })),
+    };
+    const fileTool: FileTool = {
+      scanMarkdownDocuments: vi.fn(async () => []),
+    };
+    const { controller } = createTestController();
+    const order: string[] = [];
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      fileTool,
+      taskId: "task-durable-order",
+      userGoal: "scan the project documents",
+      runtimeEventSink: {
+        append: async () => {
+          order.push("event");
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        },
+      },
+      checkpointSink: {
+        save: async () => {
+          order.push("checkpoint");
+        },
+      },
+    });
+
+    expect(order.indexOf("event")).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf("checkpoint")).toBeGreaterThan(order.indexOf("event"));
+  });
+
+  it("continues resumed runtime events on the checkpoint runId and sequence", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn<CommanderTool["plan"]>(async () => ({
+        title: "Resume sequence task",
+        reasoning: "Commander will resume from a durable checkpoint.",
+        steps: [{
+          id: "summarize-evidence",
+          title: "Summarize evidence",
+          assignedAgentKind: "commander",
+          executionMode: "direct_response" as const,
+          requiredCapabilities: ["synthesis"],
+          dependsOn: [],
+          outputContextKey: "summary",
+          successCriteria: "Summary is written.",
+        }],
+      })),
+      synthesize: vi.fn<NonNullable<CommanderTool["synthesize"]>>(async () => ({
+        message: "Resumed cleanly.",
+      })),
+    };
+    const checkpoint: WorkflowCheckpoint = {
+      taskId: "task-resume-sequence",
+      runId: "run-task-resume-sequence-old",
+      workflowId: "commander-dag",
+      workflowVersion: 1,
+      planHash: "plan-sha256-seed",
+      workflowSnapshot: {
+        id: "commander-dag" as never,
+        title: "Resume sequence task",
+        triggerExamples: [],
+        goal: "resume sequence",
+        coordinatorAgentKind: "commander",
+        participatingAgentKinds: ["commander"],
+        currentSupport: "partial",
+        safetyNotes: [],
+        steps: [{
+          id: "summarize-evidence",
+          title: "Summarize evidence",
+          agentKind: "commander" as const,
+          input: "Summarize evidence",
+          output: "Summary is written.",
+          permissionLevel: "read" as const,
+          dependsOn: [],
+          canRunInParallel: true,
+          requiredCapabilities: ["synthesis" as const],
+          outputContextKey: "summary",
+        }],
+      },
+      completedStepIds: [],
+      abandonedStepIds: [],
+      pendingStepIds: ["summarize-evidence"],
+      runningStepIds: [],
+      contextSnapshot: {},
+      approvalRequestIds: [],
+      eventSequence: 2,
+      createdAt: "2026-06-16T00:00:00.000Z",
+    };
+    checkpoint.planHash = computePlanHash(checkpoint.workflowSnapshot.steps);
+    const events: RuntimeEventEnvelope[] = [
+      createRuntimeEventEnvelopeForTest("task-resume-sequence", checkpoint.runId, 1, {
+        kind: "task.created",
+        taskId: "task-resume-sequence",
+      }),
+      createRuntimeEventEnvelopeForTest("task-resume-sequence", checkpoint.runId, 2, {
+        kind: "task.waiting",
+        taskId: "task-resume-sequence",
+      }),
+    ];
+    const appendedEnvelopes: RuntimeEventEnvelope[] = [];
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      taskId: "task-resume-sequence",
+      userGoal: "resume sequence",
+      runtimeEventSink: {
+        append: async (envelope) => {
+          appendedEnvelopes.push(envelope);
+        },
+      },
+      resumeFromCheckpoint: { checkpoint, events },
+    });
+
+    expect(emitted[0]?.runId).toBe(checkpoint.runId);
+    expect(appendedEnvelopes.length).toBeGreaterThan(0);
+    expect(appendedEnvelopes[0]?.runId).toBe(checkpoint.runId);
+    expect(appendedEnvelopes[0]?.sequence).toBe(3);
+    expect(appendedEnvelopes.every((envelope) => envelope.runId === checkpoint.runId)).toBe(true);
+    expect(appendedEnvelopes.every((envelope, index) => envelope.sequence === index + 3)).toBe(true);
+  });
+
+  it("fails closed when a regenerated Commander plan does not match the checkpoint", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn<CommanderTool["plan"]>(async () => ({
+        title: "Changed resume task",
+        reasoning: "The regenerated plan changed after restart.",
+        steps: [{
+          id: "changed-step",
+          title: "Changed step",
+          assignedAgentKind: "commander",
+          executionMode: "direct_response" as const,
+          requiredCapabilities: ["synthesis"],
+          dependsOn: [],
+          successCriteria: "Changed output is written.",
+        }],
+      })),
+      synthesize: vi.fn<NonNullable<CommanderTool["synthesize"]>>(async () => ({
+        message: "This must not execute.",
+      })),
+    };
+    const checkpointSteps = [{
+      id: "original-step",
+      title: "Original step",
+      agentKind: "commander" as const,
+      input: "Original step",
+      output: "Original output is written.",
+      permissionLevel: "read" as const,
+      dependsOn: [],
+      canRunInParallel: true,
+      requiredCapabilities: ["synthesis" as const],
+    }];
+    const checkpoint: WorkflowCheckpoint = {
+      taskId: "task-resume-mismatch",
+      runId: "run-task-resume-mismatch-old",
+      workflowId: "commander-dag",
+      workflowVersion: 1,
+      planHash: computePlanHash(checkpointSteps),
+      workflowSnapshot: {
+        id: "commander-dag" as never,
+        title: "Original resume task",
+        triggerExamples: [],
+        goal: "resume mismatch",
+        coordinatorAgentKind: "commander",
+        participatingAgentKinds: ["commander"],
+        currentSupport: "partial",
+        safetyNotes: [],
+        steps: checkpointSteps,
+      },
+      completedStepIds: [],
+      abandonedStepIds: [],
+      pendingStepIds: ["original-step"],
+      runningStepIds: [],
+      contextSnapshot: {},
+      approvalRequestIds: [],
+      eventSequence: 0,
+      createdAt: "2026-06-16T00:00:00.000Z",
+    };
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      taskId: checkpoint.taskId,
+      userGoal: "resume mismatch",
+      resumeFromCheckpoint: { checkpoint, events: [] },
+    });
+
+    expect(commanderTool.synthesize).not.toHaveBeenCalled();
+    const finalSnapshot = emitted[emitted.length - 1];
+    expect(finalSnapshot?.status).toBe("failed");
+    expect(finalSnapshot?.logs.some((log) =>
+      log.detail.includes("does not match the compiled Commander DAG plan")
+    )).toBe(true);
   });
 
   it("filters code.searchRepository out of Commander planning when the code tool omits it", async () => {
@@ -590,6 +878,295 @@ describe("runCommanderDagTask observability", () => {
     ]);
   });
 
+  it("resumes a Commander DAG from checkpoint without rerunning completed upstream steps", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn<CommanderTool["plan"]>(async () => ({
+        title: "Resume task",
+        reasoning: "Commander will reuse durable repository evidence.",
+        steps: [{
+          id: "collect-evidence",
+          title: "Collect evidence",
+          assignedAgentKind: "code",
+          toolName: "code.searchRepository",
+          toolInput: { goal: "find launch code" },
+          requiredCapabilities: ["code_search"],
+          dependsOn: [],
+          outputContextKey: "repoEvidence",
+          successCriteria: "Repository evidence is collected.",
+        }, {
+          id: "summarize-evidence",
+          title: "Summarize evidence",
+          assignedAgentKind: "commander",
+          executionMode: "direct_response" as const,
+          requiredCapabilities: ["synthesis"],
+          dependsOn: ["collect-evidence"],
+          inputContextKeys: ["repoEvidence"],
+          outputContextKey: "summary",
+          successCriteria: "Summary uses repository evidence.",
+        }],
+      })),
+      synthesize: vi.fn<NonNullable<CommanderTool["synthesize"]>>(async () => ({
+        message: "Evidence summarized from checkpoint.",
+      })),
+    };
+    const codeTool: CodeTool = {
+      inspectRepository: vi.fn(async () => ({
+        workspacePath: "E:/Javis",
+        changedFiles: [],
+        diffStat: "0 files changed",
+        diff: "",
+      })),
+      searchRepository: vi.fn(async () => {
+        throw new Error("completed upstream step should not rerun");
+      }),
+    };
+    const checkpointWorkflowSteps = [
+      {
+        id: "collect-evidence",
+        title: "Collect evidence",
+        agentKind: "code" as const,
+        input: "Collect evidence",
+        output: "Repository evidence is collected.",
+        permissionLevel: "read" as const,
+        dependsOn: [],
+        canRunInParallel: true,
+        requiredCapabilities: ["code_search" as const],
+        outputContextKey: "repoEvidence",
+      },
+      {
+        id: "summarize-evidence",
+        title: "Summarize evidence",
+        agentKind: "commander" as const,
+        input: "Summarize evidence",
+        output: "Summary uses repository evidence.",
+        permissionLevel: "read" as const,
+        dependsOn: ["collect-evidence"],
+        canRunInParallel: true,
+        requiredCapabilities: ["synthesis" as const],
+        inputContextKeys: ["repoEvidence"],
+        outputContextKey: "summary",
+      },
+    ];
+    const checkpoint: WorkflowCheckpoint = {
+      taskId: "task-resume-commander",
+      runId: "run-task-resume-commander-old",
+      workflowId: "commander-dag",
+      workflowVersion: 1,
+      planHash: computePlanHash(checkpointWorkflowSteps),
+      workflowSnapshot: {
+        id: "commander-dag" as never,
+        title: "Resume task",
+        triggerExamples: [],
+        goal: "summarize launch code",
+        coordinatorAgentKind: "commander",
+        participatingAgentKinds: ["code", "commander"],
+        currentSupport: "partial",
+        safetyNotes: [],
+        steps: checkpointWorkflowSteps,
+      },
+      completedStepIds: ["collect-evidence"],
+      abandonedStepIds: [],
+      pendingStepIds: ["summarize-evidence"],
+      runningStepIds: [],
+      contextSnapshot: {
+        repoEvidence: createArtifactEnvelope(
+          {
+            keyFiles: ["packages/core/src/index.ts"],
+            actualFound: [],
+            inferred: [],
+            needsConfirmation: [],
+            relatedTestFiles: [],
+            testFileCandidates: [],
+            clusters: [],
+            attempts: [],
+          },
+          {
+            taskId: "task-resume-commander",
+            runId: "run-task-resume-commander-old",
+            type: "repoEvidence",
+            producer: { stepId: "collect-evidence", agentKind: "code" },
+          },
+        ),
+      },
+      approvalRequestIds: [],
+      eventSequence: 2,
+      createdAt: "2026-06-16T00:00:00.000Z",
+    };
+    const events: RuntimeEventEnvelope[] = [
+      createRuntimeEventEnvelopeForTest("task-resume-commander", checkpoint.runId, 1, {
+        kind: "step.started",
+        taskId: "task-resume-commander",
+        stepId: "collect-evidence",
+      }),
+      createRuntimeEventEnvelopeForTest("task-resume-commander", checkpoint.runId, 2, {
+        kind: "step.completed",
+        taskId: "task-resume-commander",
+        stepId: "collect-evidence",
+      }),
+    ];
+    const { controller, emitted } = createTestController({ withPermissionHandler: true });
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      codeTool,
+      taskId: "task-resume-commander",
+      userGoal: "summarize launch code",
+      resumeFromCheckpoint: { checkpoint, events },
+    });
+
+    expect(codeTool.searchRepository).not.toHaveBeenCalled();
+    expect(commanderTool.synthesize).toHaveBeenCalled();
+    const finalSnapshot = emitted[emitted.length - 1];
+    expect(finalSnapshot?.status).toBe("completed");
+    expect(finalSnapshot?.plan.find((step) => step.id === "collect-evidence")?.status).toBe("completed");
+    expect(finalSnapshot?.plan.find((step) => step.id === "summarize-evidence")?.status).toBe("completed");
+  });
+
+  it("rebuilds Commander DAG resume state from event log when checkpoint step state conflicts", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn<CommanderTool["plan"]>(async () => ({
+        title: "Rebuild resume task",
+        reasoning: "Commander will rebuild checkpoint state from event log.",
+        steps: [{
+          id: "collect-evidence",
+          title: "Collect evidence",
+          assignedAgentKind: "code",
+          toolName: "code.searchRepository",
+          toolInput: { goal: "find launch code" },
+          requiredCapabilities: ["code_search"],
+          dependsOn: [],
+          outputContextKey: "repoEvidence",
+          successCriteria: "Repository evidence is collected.",
+        }, {
+          id: "summarize-evidence",
+          title: "Summarize evidence",
+          assignedAgentKind: "commander",
+          executionMode: "direct_response" as const,
+          requiredCapabilities: ["synthesis"],
+          dependsOn: ["collect-evidence"],
+          inputContextKeys: ["repoEvidence"],
+          outputContextKey: "summary",
+          successCriteria: "Summary uses repository evidence.",
+        }],
+      })),
+      synthesize: vi.fn<NonNullable<CommanderTool["synthesize"]>>(async () => ({
+        message: "Evidence summarized after rebuild.",
+      })),
+    };
+    const codeTool: CodeTool = {
+      inspectRepository: vi.fn(async () => ({
+        workspacePath: "E:/Javis",
+        changedFiles: [],
+        diffStat: "0 files changed",
+        diff: "",
+      })),
+      searchRepository: vi.fn(async () => ({
+        keyFiles: ["packages/core/src/index.ts"],
+        actualFound: [],
+        inferred: [],
+        needsConfirmation: [],
+        relatedTestFiles: [],
+        testFileCandidates: [],
+        clusters: [],
+        attempts: [],
+      })),
+    };
+    const checkpointWorkflowSteps = [
+      {
+        id: "collect-evidence",
+        title: "Collect evidence",
+        agentKind: "code" as const,
+        input: "Collect evidence",
+        output: "Repository evidence is collected.",
+        permissionLevel: "read" as const,
+        dependsOn: [],
+        canRunInParallel: true,
+        requiredCapabilities: ["code_search" as const],
+        outputContextKey: "repoEvidence",
+      },
+      {
+        id: "summarize-evidence",
+        title: "Summarize evidence",
+        agentKind: "commander" as const,
+        input: "Summarize evidence",
+        output: "Summary uses repository evidence.",
+        permissionLevel: "read" as const,
+        dependsOn: ["collect-evidence"],
+        canRunInParallel: true,
+        requiredCapabilities: ["synthesis" as const],
+        inputContextKeys: ["repoEvidence"],
+        outputContextKey: "summary",
+      },
+    ];
+    const checkpoint: WorkflowCheckpoint = {
+      taskId: "task-rebuild-resume-commander",
+      runId: "run-task-rebuild-resume-commander-old",
+      workflowId: "commander-dag",
+      workflowVersion: 1,
+      planHash: computePlanHash(checkpointWorkflowSteps),
+      workflowSnapshot: {
+        id: "commander-dag" as never,
+        title: "Rebuild resume task",
+        triggerExamples: [],
+        goal: "summarize launch code",
+        coordinatorAgentKind: "commander",
+        participatingAgentKinds: ["code", "commander"],
+        currentSupport: "partial",
+        safetyNotes: [],
+        steps: checkpointWorkflowSteps,
+      },
+      completedStepIds: ["collect-evidence"],
+      abandonedStepIds: [],
+      pendingStepIds: ["summarize-evidence"],
+      runningStepIds: [],
+      contextSnapshot: {},
+      approvalRequestIds: [],
+      eventSequence: 2,
+      createdAt: "2026-06-16T00:00:00.000Z",
+    };
+    const events: RuntimeEventEnvelope[] = [
+      createRuntimeEventEnvelopeForTest("task-rebuild-resume-commander", checkpoint.runId, 1, {
+        kind: "step.started",
+        taskId: "task-rebuild-resume-commander",
+        stepId: "collect-evidence",
+      }),
+      createRuntimeEventEnvelopeForTest("task-rebuild-resume-commander", checkpoint.runId, 2, {
+        kind: "step.failed",
+        taskId: "task-rebuild-resume-commander",
+        stepId: "collect-evidence",
+        error: "search failed before restart",
+      }),
+    ];
+    const { controller, emitted } = createTestController({ withPermissionHandler: true });
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      codeTool,
+      taskId: "task-rebuild-resume-commander",
+      userGoal: "summarize launch code",
+      resumeFromCheckpoint: { checkpoint, events },
+    });
+
+    expect(codeTool.searchRepository).toHaveBeenCalledTimes(1);
+    const finalSnapshot = emitted[emitted.length - 1];
+    expect(finalSnapshot?.status).toBe("completed");
+    expect(emitted.some((snapshot) =>
+      snapshot.logs.some((log) => log.detail.includes("workflow.resume.rebuilt")),
+    )).toBe(true);
+    expect(finalSnapshot?.durableResume).toMatchObject({
+      runId: checkpoint.runId,
+      source: "event-log",
+      checkpointEventSequence: 2,
+      latestEventSequence: 2,
+      completedStepIds: [],
+      retryStepIds: ["collect-evidence"],
+      approvalRequestIds: [],
+      rebuilt: true,
+    });
+  });
+
   it("attaches a recovery report when Commander replans after a step failure", async () => {
     const commanderTool: CommanderTool = {
       plan: vi.fn<CommanderTool["plan"]>(async () => ({
@@ -743,6 +1320,52 @@ describe("runCommanderDagTask observability", () => {
     // diagnostic code surfaced by compileCommanderPlan.
     expect(report?.attempts[0].detail).toContain("recovery plan failed compile gate");
     expect(report?.attempts[0].detail).toContain("UNKNOWN_AGENT");
+  });
+
+  it("emits a durable step.failed event when a DAG step fails", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "Failing plan",
+        reasoning: "Commander will execute a step that fails.",
+        steps: [{
+          id: "collect-evidence",
+          title: "Collect evidence",
+          assignedAgentKind: "code",
+          toolName: "code.searchRepository",
+          toolInput: { goal: "find launch code" },
+          requiredCapabilities: ["code_search"],
+          dependsOn: [],
+          outputContextKey: "repoEvidence",
+          successCriteria: "Repository evidence is collected.",
+        }],
+      })),
+    };
+    const codeTool: CodeTool = {
+      inspectRepository: vi.fn(async () => ({
+        workspacePath: "E:/Javis",
+        changedFiles: [],
+        diffStat: "0 files changed",
+        diff: "",
+      })),
+      searchRepository: vi.fn(async () => {
+        throw new Error("repository search failed");
+      }),
+    };
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      codeTool,
+      taskId: "task-step-failed",
+      userGoal: "summarize launch code",
+    });
+
+    expect(emitted.some((snapshot) =>
+      snapshot.logs.some((log) =>
+        log.title === "step.failed" && log.detail.includes("repository search failed"),
+      ),
+    )).toBe(true);
   });
 
   it("attaches a PlanGenerationTrace with initial + recovery compile records", async () => {
@@ -1546,6 +2169,67 @@ describe("runCommanderDagTask Git stage dispatch", () => {
     expect(JSON.stringify(emitted)).toContain("Staged 1 file(s): README.md.");
   });
 
+  it("runs approved Git stage through WorkspaceRuntime when a write-capable runtime is provided", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "Stage selected files",
+        reasoning: "Commander will ask Code Agent to stage selected files.",
+        steps: [{
+          id: "stage-selected",
+          title: "Stage selected files",
+          assignedAgentKind: "code",
+          toolName: "git.stageFiles",
+          toolInput: { paths: ["README.md"] },
+          requiredCapabilities: ["git_stage"],
+          dependsOn: [],
+          successCriteria: "Selected files staged after approval.",
+        }],
+      })),
+    };
+    const planStageFiles = vi.fn<NonNullable<GitTool["planStageFiles"]>>(async () => ({
+      approvalId: "approval-stage-runtime",
+      preview: {
+        workspaceRoot: "E:/Javis/.codex-tmp/javis-sandboxes/task-1",
+        files: [],
+        diffStat: "",
+        diff: "",
+        dryRun: {
+          operation: "git.stageFiles",
+          affectedPaths: [{ source: "README.md", target: "Git index", action: "stage" }],
+          riskSummary: "Stages selected files in the Git index.",
+          reversible: true,
+        },
+      },
+    }));
+    const executeStageFiles = vi.fn<NonNullable<GitTool["executeStageFiles"]>>(async () => {
+      throw new Error("executeStageFiles should not be called when runtime is write-capable");
+    });
+    const workspaceRuntime = createTestWorkspaceRuntime();
+    const { controller, emitted, permissionHandlers } = createTestController({ withPermissionHandler: true });
+
+    const runPromise = runCommanderDagTask({
+      controller,
+      commanderTool,
+      gitTool: { planStageFiles, executeStageFiles },
+      workspaceRuntime,
+      taskId: "task-git-stage-runtime",
+      userGoal: "stage README.md",
+    });
+
+    const [, handler] = await waitForPermissionHandler(permissionHandlers);
+    await handler("approved");
+    await runPromise;
+
+    expect(executeStageFiles).not.toHaveBeenCalled();
+    expect(workspaceRuntime.execute).toHaveBeenCalledWith({
+      program: "git",
+      args: ["add", "--", "README.md"],
+      cwd: workspaceRuntime.root,
+      permissionLevel: "confirmed_write",
+    });
+    expect(emitted[emitted.length - 1]?.status).toBe("completed");
+  });
+
   it("completes as a no-op when Git stage approval is denied", async () => {
     const commanderTool: CommanderTool = {
       plan: vi.fn(async () => ({
@@ -1692,6 +2376,86 @@ describe("runCommanderDagTask Git commit dispatch", () => {
     });
     expect(emitted[emitted.length - 1]?.status).toBe("completed");
     expect(JSON.stringify(emitted)).toContain("Created commit 1234567890ab for 1 file(s): Commit README update.");
+  });
+
+  it("runs approved Git commit through WorkspaceRuntime when a write-capable runtime is provided", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "Commit selected files",
+        reasoning: "Commander will ask Code Agent to commit selected files.",
+        steps: [{
+          id: "commit-selected",
+          title: "Commit selected files",
+          assignedAgentKind: "code",
+          toolName: "git.createCommit",
+          toolInput: {
+            message: "Commit README update",
+            paths: ["README.md"],
+          },
+          requiredCapabilities: ["git_commit"],
+          dependsOn: [],
+          successCriteria: "Selected files committed after approval.",
+        }],
+      })),
+    };
+    const planCommit = vi.fn<NonNullable<GitTool["planCommit"]>>(async () => ({
+      approvalId: "approval-commit-runtime",
+      preview: {
+        workspaceRoot: "E:/Javis/.codex-tmp/javis-sandboxes/task-1",
+        branch: "feature/test",
+        message: "Commit README update",
+        files: [{ path: "README.md", indexStatus: " ", worktreeStatus: "M", action: "modify", contentHash: "hash-1" }],
+        diffStat: "",
+        diff: "",
+        dryRun: {
+          operation: "git.createCommit",
+          affectedPaths: [{ source: "README.md", target: "README.md", action: "modify" }],
+          riskSummary: "Creates a local Git commit for selected paths.",
+          reversible: false,
+        },
+      },
+    }));
+    const executeCommit = vi.fn<NonNullable<GitTool["executeCommit"]>>(async () => {
+      throw new Error("executeCommit should not be called when runtime is write-capable");
+    });
+    const workspaceRuntime = createTestWorkspaceRuntime({
+      execute: vi.fn(async (request) => ({
+        command: [request.program, ...request.args].join(" "),
+        cwd: "E:/Javis/.codex-tmp/javis-sandboxes/task-1",
+        exitCode: 0,
+        stdout: request.args[0] === "commit" ? "[feature/test abc1234] Commit README update" : "",
+        stderr: "",
+      })),
+    });
+    const { controller, emitted, permissionHandlers } = createTestController({ withPermissionHandler: true });
+
+    const runPromise = runCommanderDagTask({
+      controller,
+      commanderTool,
+      gitTool: { planCommit, executeCommit },
+      workspaceRuntime,
+      taskId: "task-git-commit-runtime",
+      userGoal: "commit README.md",
+    });
+
+    const [, handler] = await waitForPermissionHandler(permissionHandlers);
+    await handler("approved");
+    await runPromise;
+
+    expect(executeCommit).not.toHaveBeenCalled();
+    expect(workspaceRuntime.execute).toHaveBeenNthCalledWith(1, {
+      program: "git",
+      args: ["add", "--", "README.md"],
+      cwd: workspaceRuntime.root,
+      permissionLevel: "confirmed_write",
+    });
+    expect(workspaceRuntime.execute).toHaveBeenNthCalledWith(2, {
+      program: "git",
+      args: ["commit", "-m", "Commit README update"],
+      cwd: workspaceRuntime.root,
+      permissionLevel: "confirmed_write",
+    });
+    expect(JSON.stringify(emitted)).toContain("Created commit abc1234 for 1 file(s): Commit README update.");
   });
 });
 
@@ -3184,6 +3948,59 @@ describe("executeCapabilityStep permissions", () => {
     expect(emitted[emitted.length - 1]?.status).toBe("failed");
     const failedLog = emitted[emitted.length - 1]?.logs.find((log) => log.title === "task.failed");
     expect(failedLog?.detail).toContain('Unknown tool "memory.search"');
+  });
+
+  it("keeps Commander planning scoped to desktop tools for Computer Use goals", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async (request) => {
+        const toolNames = new Set(request.availableTools?.map((tool: { name: string }) => tool.name));
+        expect(toolNames.has("computer.screenshot")).toBe(true);
+        expect(toolNames.has("computer.click")).toBe(true);
+        expect(toolNames.has("computer.type")).toBe(true);
+        expect(toolNames.has("code.searchRepository")).toBe(false);
+        expect(toolNames.has("file.writeText")).toBe(false);
+        expect(request.availableAgents.map((agent: { kind: string }) => agent.kind)).toEqual([
+          "commander",
+          "computer",
+          "verifier",
+          "vision",
+        ]);
+        return {
+          title: "Desktop automation",
+          reasoning: "Delegate to the Computer Agent.",
+          steps: [{
+            id: "computer-use-loop",
+            title: "Use the desktop",
+            assignedAgentKind: "computer",
+            capability: "desktop_input",
+            requiredCapabilities: ["desktop_screenshot", "desktop_input"],
+            dependsOn: [],
+            inputContextKeys: ["userGoal"],
+            successCriteria: "The desktop task is attempted.",
+          }],
+        };
+      }),
+    };
+    const computerUseLoopRunner = vi.fn(async () => []);
+    const { controller, emitted } = createTestController({ withPermissionHandler: true });
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      computerTool: {
+        screenshot: vi.fn(async () => ({ dataUrl: "", width: 0, height: 0, capturedAt: "" })),
+        click: vi.fn(async () => ({ x: 0, y: 0, clicked: true })),
+        type: vi.fn(async () => ({ typed: true, length: 0 })),
+      } as unknown as ComputerTool,
+      computerUseLoopRunner,
+      taskId: "task-computer-use-planning-scope",
+      userGoal: "用 computerUse 操控 QQ 给联系人发送消息",
+      availableToolDescriptors: initialToolDescriptors,
+    });
+
+    expect(commanderTool.plan).toHaveBeenCalledTimes(1);
+    expect(computerUseLoopRunner).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(emitted)).toContain("computer-use.loop");
   });
 
   it("does not let read-current-project bypass a disabled file scan descriptor", async () => {

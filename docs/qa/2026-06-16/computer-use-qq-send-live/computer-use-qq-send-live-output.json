@@ -1,0 +1,65 @@
+﻿{
+    "qa":  "computer-use-qq-send-live",
+    "timestamp":  "2026-06-16T18:40:23+08:00",
+    "result":  "blocked",
+    "targetApp":  "QQ",
+    "targetContact":  "凤雏-大聪明",
+    "intendedMessage":  "Javis computer-use 测试消息，请忽略",
+    "sent":  false,
+    "screenshot":  "01-computer-use-connect-failed-desktop.png",
+    "processSnapshot":  [
+                            {
+                                "ProcessName":  "QQ",
+                                "Id":  5308,
+                                "MainWindowTitle":  ""
+                            },
+                            {
+                                "ProcessName":  "QQ",
+                                "Id":  17096,
+                                "MainWindowTitle":  ""
+                            },
+                            {
+                                "ProcessName":  "QQ",
+                                "Id":  26628,
+                                "MainWindowTitle":  ""
+                            },
+                            {
+                                "ProcessName":  "QQ",
+                                "Id":  26824,
+                                "MainWindowTitle":  "QQ"
+                            },
+                            {
+                                "ProcessName":  "QQ",
+                                "Id":  27064,
+                                "MainWindowTitle":  ""
+                            },
+                            {
+                                "ProcessName":  "QQ",
+                                "Id":  28428,
+                                "MainWindowTitle":  ""
+                            },
+                            {
+                                "ProcessName":  "QQ",
+                                "Id":  28864,
+                                "MainWindowTitle":  ""
+                            },
+                            {
+                                "ProcessName":  "QQ",
+                                "Id":  34228,
+                                "MainWindowTitle":  ""
+                            }
+                        ],
+    "errors":  [
+                   {
+                       "id":  "computer-use-runtime-bootstrap-failed",
+                       "severity":  "blocker",
+                       "message":  "Package subpath ./dist/project/cua/sky_js/src/targets/windows/internal/computer_use_client_base.js is not defined by exports in @oai/sky package.json",
+                       "impact":  "Could not list apps or control QQ through the required Computer Use API. No message was typed or sent."
+                   }
+               ],
+    "notes":  [
+                  "User allowed arbitrary test message text.",
+                  "Representational communication through QQ still requires action-time confirmation immediately before final Send, but the run did not reach draft entry because Computer Use failed to connect.",
+                  "Desktop screenshot was captured as failure evidence only; it is not a Computer Use plugin screenshot."
+              ]
+}

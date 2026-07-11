@@ -874,6 +874,51 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
+  it("keeps auto-mode L2 goals on Commander DAG when Commander is available", async () => {
+    const commanderPlan = vi.fn(async () => ({
+      title: "Commander planned text write",
+      reasoning: "Commander decides which agent handles the write request.",
+      steps: [{
+        id: "commander-summarize",
+        title: "Summarize requested write",
+        assignedAgentKind: "commander",
+        toolName: "commander.synthesize",
+        requiredCapabilities: [],
+        dependsOn: [] as string[],
+        successCriteria: "The request has a user-facing response.",
+      }],
+    }));
+    const synthesize = vi.fn(async () => ({ message: "Commander handled this request." }));
+    const planWriteText = vi.fn(async () => createTextWritePlan("reports/search.md"));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      commanderTool: {
+        plan: commanderPlan,
+        synthesize,
+      },
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => []),
+        planWriteText,
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("write the AI news summary to reports/search.md");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(commanderPlan).toHaveBeenCalledWith(expect.objectContaining({
+      workflowId: "commander-dag",
+      userGoal: "write the AI news summary to reports/search.md",
+    }));
+    expect(planWriteText).not.toHaveBeenCalled();
+    expect(synthesize).toHaveBeenCalled();
+    expect(finalSnapshot.title).toBe("Commander planned text write");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
   it("routes Computer Use DAG steps through the loop with confirmed-write approval", async () => {
     const approveAction = vi.fn(async (_action, approvalId: string, taskId: string) => ({
       approvalId,
@@ -1005,6 +1050,127 @@ describe("createFileScanTaskRuntime", () => {
     expect(computerUseLoopRunner).toHaveBeenCalledOnce();
     expect(finalSnapshot.title).toBeTruthy();
     expect(finalSnapshot.plan.map((step) => step.id)).toEqual(["computer-use-loop"]);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("does not route Computer Use goals with screenshot evidence text to Vision", async () => {
+    const computerUseLoopRunner = vi.fn(async () => [{
+      stepIndex: 0,
+      observation: "QQ is visible.",
+      action: { tool: "computer.wait", params: { ms: 0 } },
+      target: "message prepared",
+      confidence: "high",
+    }]);
+    const commanderPlan = vi.fn(async () => ({
+      title: "Prepare QQ message",
+      reasoning: "Commander delegates desktop interaction to Computer Agent.",
+      steps: [{
+        id: "prepare-qq-message",
+        title: "Prepare QQ message",
+        assignedAgentKind: "computer",
+        capability: "desktop_input" as const,
+        requiredCapabilities: ["desktop_input"],
+        dependsOn: [] as string[],
+        successCriteria: "The QQ message is prepared before sending.",
+      }],
+    }));
+    const visionAnalyze = vi.fn(async () => ({ description: "", objects: [] }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      commanderTool: {
+        plan: commanderPlan,
+      },
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => []),
+      },
+      visionTool: {
+        analyze: visionAnalyze,
+        describe: vi.fn(async () => ({ description: "" })),
+        extractText: vi.fn(async () => ({ text: "", confidence: 0 })),
+      },
+      computerTool: {
+        searchLocalDocuments: vi.fn(async () => []),
+        listDirectory: vi.fn(async () => []),
+        screenshot: vi.fn(async () => ({ dataUrl: "", width: 0, height: 0, capturedAt: "" })),
+        listWindows: vi.fn(async () => ({ windows: [] })),
+        inspectUi: vi.fn(async () => ({ tree: "", nodeCount: 0 })),
+        focusWindow: vi.fn(async () => ({ focused: true, title: "" })),
+        moveMouse: vi.fn(async () => ({ x: 0, y: 0 })),
+        click: vi.fn(async () => ({ x: 0, y: 0, clicked: true })),
+        type: vi.fn(async () => ({ typed: true, length: 0 })),
+        keyCombo: vi.fn(async () => ({ combo: "", executed: true })),
+        scroll: vi.fn(async () => ({ x: 0, y: 0, delta: 0 })),
+        invokeUi: vi.fn(async () => ({ invoked: true, matchedName: "", matchedAutomationId: "" })),
+        setUiValue: vi.fn(async () => ({ set: true, matchedName: "", matchedAutomationId: "" })),
+        wait: vi.fn(async () => ({ waited: 0 })),
+        openPath: vi.fn(async () => ({ opened: true })),
+        approveAction: vi.fn(async (_action, approvalId: string, taskId: string) => ({ approvalId, taskId })),
+      },
+      computerUseLoopRunner,
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("用 Javis 的 computerUse 操控 QQ，找到联系人“凤雏-大聪明”，在聊天输入框输入消息“你好”，截图记录过程。", { mode: "project" });
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(commanderPlan).toHaveBeenCalledOnce();
+    expect(visionAnalyze).not.toHaveBeenCalled();
+    expect(computerUseLoopRunner).toHaveBeenCalledOnce();
+    expect(finalSnapshot.title).toBe("Prepare QQ message");
+    expect(finalSnapshot.plan.map((step) => step.id)).toEqual(["prepare-qq-message"]);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("blocks explicit Computer Use goals from chat mode", async () => {
+    const computerUseLoopRunner = vi.fn(async () => [{
+      stepIndex: 0,
+      observation: "QQ is visible.",
+      action: { tool: "computer.wait", params: { ms: 0 } },
+      target: "message prepared",
+      confidence: "high",
+    }]);
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => []),
+      },
+      computerTool: {
+        searchLocalDocuments: vi.fn(async () => []),
+        listDirectory: vi.fn(async () => []),
+        screenshot: vi.fn(async () => ({ dataUrl: "", width: 0, height: 0, capturedAt: "" })),
+        listWindows: vi.fn(async () => ({ windows: [] })),
+        inspectUi: vi.fn(async () => ({ tree: "", nodeCount: 0 })),
+        focusWindow: vi.fn(async () => ({ focused: true, title: "" })),
+        moveMouse: vi.fn(async () => ({ x: 0, y: 0 })),
+        click: vi.fn(async () => ({ x: 0, y: 0, clicked: true })),
+        type: vi.fn(async () => ({ typed: true, length: 0 })),
+        keyCombo: vi.fn(async () => ({ combo: "", executed: true })),
+        scroll: vi.fn(async () => ({ x: 0, y: 0, delta: 0 })),
+        invokeUi: vi.fn(async () => ({ invoked: true, matchedName: "", matchedAutomationId: "" })),
+        setUiValue: vi.fn(async () => ({ set: true, matchedName: "", matchedAutomationId: "" })),
+        wait: vi.fn(async () => ({ waited: 0 })),
+        openPath: vi.fn(async () => ({ opened: true })),
+        approveAction: vi.fn(async (_action, approvalId: string, taskId: string) => ({ approvalId, taskId })),
+      },
+      computerUseLoopRunner,
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start(
+      "\u7528\u684c\u9762\u81ea\u52a8\u5316\u6253\u5f00 QQ\uff0c\u627e\u5230 \u51e4\u96cf-\u5927\u806a\u660e\uff0c\u5e76\u51c6\u5907\u53d1\u9001\u6d88\u606f\uff1a sb",
+      { mode: "chat" },
+    );
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(computerUseLoopRunner).not.toHaveBeenCalled();
+    expect(finalSnapshot.title).toBe("已拦截");
+    expect(finalSnapshot.commanderMessage).toContain("聊天模式");
+    expect(finalSnapshot.commanderMessage).toContain("Agent 模式");
+    expect(finalSnapshot.plan.map((step) => step.id)).toEqual(["chat-mode-boundary"]);
 
     unsubscribe();
     runtime.dispose();
@@ -1530,6 +1696,66 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
+  it("routes code review read-only verification through WorkspaceRuntime when provided", async () => {
+    const preview = {
+      workspacePath: "E:/Javis",
+      changedFiles: ["packages/core/src/index.ts"],
+      diffStat: "1 file changed, 1 insertion(+)",
+      diff: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts",
+    };
+    const shellRunReadOnlyCommand = vi.fn(async () => {
+      throw new Error("shell fallback should not run when workspaceRuntime is provided");
+    });
+    const workspaceExecute = vi.fn(async (request) => ({
+      command: [request.program, ...request.args].join(" "),
+      cwd: "E:/Javis/.codex-tmp/javis-sandboxes/task-runtime",
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+      },
+      codeTool: {
+        inspectRepository: vi.fn(async () => preview),
+      },
+      shellTool: {
+        runReadOnlyCommand: shellRunReadOnlyCommand,
+      },
+      workspaceRuntime: {
+        kind: "sandbox",
+        root: "E:/Javis/.codex-tmp/javis-sandboxes/task-runtime",
+        execute: workspaceExecute,
+        readFile: vi.fn(),
+        listFiles: vi.fn(),
+        createSnapshot: vi.fn(),
+        diff: vi.fn(),
+        dispose: vi.fn(),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("Review code changes");
+    await waitForStatus(snapshots, "waiting_permission");
+    runtime.resolvePermission("approved");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(finalSnapshot.commands?.[0]?.cwd).toBe("E:/Javis/.codex-tmp/javis-sandboxes/task-runtime");
+    expect(workspaceExecute).toHaveBeenCalledWith({
+      program: "git",
+      args: ["diff", "--check"],
+      cwd: undefined,
+      permissionLevel: "read",
+    });
+    expect(shellRunReadOnlyCommand).not.toHaveBeenCalled();
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
   it("requires confirmed-write approval before applying a proposed Code Agent patch", async () => {
     const preview = {
       workspacePath: "E:/Javis",
@@ -1613,6 +1839,100 @@ describe("createFileScanTaskRuntime", () => {
     });
     expect(finalSnapshot.commands).toHaveLength(2);
     expect(finalSnapshot.verificationSummary).toContain("approved Code Agent patch applied");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("audits approved Code Agent patch effects through WorkspaceRuntime when provided", async () => {
+    const preview = {
+      workspacePath: "E:/Javis",
+      changedFiles: ["packages/core/src/index.ts"],
+      diffStat: "1 file changed, 2 insertions(+)",
+      diff: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts",
+    };
+    const proposedEdit = {
+      proposalId: "proposal-1",
+      workspacePath: "E:/Javis",
+      summary: "Tighten the code review completion message.",
+      changedFiles: ["packages/core/src/index.ts"],
+      patch: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts",
+      patchHash: "fnv1a-19fcfa54",
+    };
+    const createSnapshot = vi.fn(async () => ({
+      runtimeKind: "sandbox" as const,
+      root: "E:/Javis/.codex-tmp/javis-sandboxes/task-runtime",
+      snapshotId: "snapshot-1",
+      createdAt: "2026-06-17T00:00:00.000Z",
+    }));
+    const diff = vi.fn(async () => ({
+      root: "E:/Javis/.codex-tmp/javis-sandboxes/task-runtime",
+      unifiedDiff: "",
+      changedFiles: [{ path: "packages/core/src/index.ts", change: "modified" as const }],
+    }));
+    const applyProposedEdit = vi.fn(async () => ({
+      applied: true,
+      workspacePath: proposedEdit.workspacePath,
+      changedFiles: proposedEdit.changedFiles,
+      message: "Applied patch in test.",
+    }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+      },
+      codeTool: {
+        inspectRepository: vi.fn(async () => preview),
+        proposeEdit: vi.fn(async () => proposedEdit),
+        applyProposedEdit,
+      },
+      shellTool: {
+        runReadOnlyCommand: vi.fn(async (request: ShellCommandRequest) => ({
+          command: [request.program, ...request.args].join(" "),
+          cwd: "E:/Javis",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        })),
+      },
+      workspaceRuntime: {
+        kind: "sandbox",
+        root: "E:/Javis/.codex-tmp/javis-sandboxes/task-runtime",
+        execute: vi.fn(async (request) => ({
+          command: [request.program, ...request.args].join(" "),
+          cwd: "E:/Javis/.codex-tmp/javis-sandboxes/task-runtime",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+        })),
+        readFile: vi.fn(),
+        listFiles: vi.fn(),
+        createSnapshot,
+        diff,
+        dispose: vi.fn(),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("Review code changes");
+    await waitForStatus(snapshots, "waiting_permission");
+    runtime.resolvePermission("approved");
+    await vi.waitFor(() => {
+      expect(snapshots[snapshots.length - 1]?.permissionRequest?.title).toBe(
+        "Approve Code Agent patch application",
+      );
+    });
+    runtime.resolvePermission("approved");
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(finalSnapshot.codeApplyResult?.applied).toBe(true);
+    expect(createSnapshot).toHaveBeenCalledOnce();
+    expect(diff).toHaveBeenCalledWith(expect.objectContaining({ snapshotId: "snapshot-1" }));
+    expect(applyProposedEdit).toHaveBeenCalledWith(proposedEdit, {
+      approvalId: expect.stringMatching(/^task-\d+-apply-permission$/),
+      taskId: expect.stringMatching(/^task-\d+$/),
+    });
 
     unsubscribe();
     runtime.dispose();
@@ -2402,14 +2722,24 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
-  it("routes vision goals directly to runVisionTask before Commander DAG", async () => {
+  it("routes vision goals through Commander DAG when Commander is available", async () => {
     const describe = vi.fn(async () => ({
       description: "A sunset over mountains.",
     }));
     const plan = vi.fn(async () => ({
-      title: "Should not be called",
-      reasoning: "",
-      steps: [],
+      title: "Analyze image",
+      reasoning: "Commander delegates image analysis to Vision Agent.",
+      steps: [{
+        id: "describe-image",
+        title: "Describe image",
+        assignedAgentKind: "vision",
+        toolName: "vision.describe",
+        toolInput: { imagePath: "data:image/png;base64,abcd", detail: "detailed" },
+        capability: "image_describe",
+        requiredCapabilities: ["image_describe"],
+        dependsOn: [],
+        successCriteria: "The image is described.",
+      }],
     }));
     const runtime = createFileScanTaskRuntime({
       delayMs: 0,
@@ -2431,12 +2761,15 @@ describe("createFileScanTaskRuntime", () => {
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     // Vision goal is intercepted BEFORE Commander DAG 鈥?plan never called.
-    expect(plan).not.toHaveBeenCalled();
+    expect(plan).toHaveBeenCalledWith(expect.objectContaining({
+      workflowId: "commander-dag",
+      userGoal: "describe this image data:image/png;base64,abcd",
+    }));
     expect(describe).toHaveBeenCalledWith(
       expect.objectContaining({ imagePath: "data:image/png;base64,abcd" }),
     );
     expect(finalSnapshot.status).toBe("completed");
-    expect(finalSnapshot.title).toBe("Image described");
+    expect(finalSnapshot.title).toBe("Analyze image");
 
     unsubscribe();
     runtime.dispose();
@@ -2610,7 +2943,7 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
-  it("forces general chat mode even when the goal looks like project work", async () => {
+  it("blocks project workflow requests from chat mode", async () => {
     const scanMarkdownDocuments = vi.fn(async () => []);
     const complete = vi.fn(async () => ({ text: "Answering as chat" }));
     const inspectProject = vi.fn(async () => ({
@@ -2639,9 +2972,80 @@ describe("createFileScanTaskRuntime", () => {
 
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
-    expect(complete).toHaveBeenCalled();
+    expect(complete).not.toHaveBeenCalled();
     expect(inspectProject).not.toHaveBeenCalled();
-    expect(finalSnapshot.title).toBe("Answered");
+    expect(finalSnapshot.title).toBe("Blocked");
+    expect(finalSnapshot.commanderMessage).toContain("Project / Agent mode");
+    expect(finalSnapshot.plan.map((step) => step.id)).toEqual(["chat-mode-boundary"]);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("allows planning discussion in chat mode", async () => {
+    const scanMarkdownDocuments = vi.fn(async () => []);
+    const complete = vi.fn(async () => ({ text: "Let's discuss the plan." }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments },
+      chatTool: { complete },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("帮我讨论一下这个项目方案的利弊", { mode: "chat" });
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(complete).toHaveBeenCalled();
+    expect(scanMarkdownDocuments).not.toHaveBeenCalled();
+    expect(finalSnapshot.title).toBe("已回答");
+    expect(finalSnapshot.commanderMessage).toBe("Let's discuss the plan.");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("allows browser-backed information lookup from chat mode", async () => {
+    const searchWeb = vi.fn(async () => [
+      {
+        url: "https://example.test/source",
+        title: "Source",
+        excerpt: "Search evidence.",
+        fetchedAt: "2026-06-16T00:00:00.000Z",
+        provider: "fixture",
+      },
+    ]);
+    const fetchWebSource = vi.fn(async ({ url }: { url: string }) => ({
+      url,
+      title: "Fetched source",
+      excerpt: "Fetched evidence.",
+      fetchedAt: "2026-06-16T00:01:00.000Z",
+      provider: "fixture",
+    }));
+    const complete = vi.fn(async () => ({ text: "chat fallback" }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      chatTool: { complete },
+      webTool: {
+        searchWeb,
+        fetchWebSource,
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("用浏览器查信息：Javis 最新资料", { mode: "chat" });
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(complete).not.toHaveBeenCalled();
+    expect(searchWeb).toHaveBeenCalledWith({
+      query: "用浏览器查信息：Javis 最新资料",
+      maxResults: 3,
+    });
+    expect(fetchWebSource).toHaveBeenCalledWith({ url: "https://example.test/source" });
+    expect(finalSnapshot.plan.map((step) => step.id)).not.toEqual(["chat-mode-boundary"]);
+    expect(finalSnapshot.researchReport?.rows[0]?.sourceUrl).toBe("https://example.test/source");
 
     unsubscribe();
     runtime.dispose();

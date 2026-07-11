@@ -1,0 +1,104 @@
+﻿{
+    "qa":  "computer-use-mimo-yolo-live",
+    "timestamp":  "2026-06-16T17:38:10+08:00",
+    "result":  "PARTIAL PASS",
+    "model":  {
+                  "provider":  "mimo",
+                  "model":  "mimo-v2.5",
+                  "baseUrl":  "https://token-plan-cn.xiaomimimo.com/v1"
+              },
+    "artifacts":  {
+                      "screenshot":  "mimo-yolo-live-screen.png",
+                      "yoloSmoke":  "mimo-yolo-local-vision-smoke.json",
+                      "firstMimoSummary":  "mimo-yolo-vlm-summary.json",
+                      "firstMimoRaw":  "mimo-yolo-vlm-response.json",
+                      "retryMimoSummary":  "mimo-yolo-vlm-summary-retry.json",
+                      "retryMimoRaw":  "mimo-yolo-vlm-response-retry.json"
+                  },
+    "yolo":  {
+                 "passed":  true,
+                 "model":  "yolo26n-ui.onnx",
+                 "runtime":  "onnxruntime",
+                 "latencyMs":  669,
+                 "detections":  20,
+                 "diagnostics":  {
+                                     "adapter":  "onnxruntime",
+                                     "outputDims":  [
+                                                        1,
+                                                        16,
+                                                        8400
+                                                    ],
+                                     "outputElementCount":  134400,
+                                     "outputLayout":  "channel_major",
+                                     "inputSize":  640,
+                                     "rawRowCount":  8400,
+                                     "decodedCount":  1464,
+                                     "filteredCount":  6936,
+                                     "minConfidence":  0.05,
+                                     "inputName":  "images",
+                                     "inputDims":  [
+                                                       1,
+                                                       3,
+                                                       640,
+                                                       640
+                                                   ],
+                                     "requestedInputSize":  640,
+                                     "inputSizeSource":  "model",
+                                     "outputName":  "output0",
+                                     "sessionCacheHit":  false,
+                                     "rawDetectionCount":  1464,
+                                     "adaptedDetectionCount":  20
+                                 }
+             },
+    "mimo":  {
+                 "first":  {
+                               "ok":  true,
+                               "elapsedMs":  16484,
+                               "parsedJson":  true,
+                               "contentEmpty":  true,
+                               "usage":  {
+                                             "completion_tokens":  900,
+                                             "prompt_tokens":  4412,
+                                             "total_tokens":  5312,
+                                             "completion_tokens_details":  {
+                                                                               "reasoning_tokens":  899
+                                                                           },
+                                             "prompt_tokens_details":  {
+                                                                           "image_tokens":  2040
+                                                                       }
+                                         }
+                           },
+                 "retry":  {
+                               "ok":  true,
+                               "elapsedMs":  3975,
+                               "finishReason":  "stop",
+                               "reasoningContentChars":  0,
+                               "parsedJson":  false,
+                               "semanticActionDetected":  true,
+                               "content":  "```json\n{\n  \"observation\": \"Javis chat interface is open with input field ready.\",\n  \"yolo_used\": true,\n  \"yolo_candidate_count\": 5,\n  \"action\": {\n    \"tool\": \"click\",\n    \"x\": 485,\n    \"y\": 540,\n    \"text\": null,\n    \"reason\": \"Click the chat input field to focus it for typing.\"\n  },\n  \"risks\": [\"None\"]\n}\n```",
+                               "usage":  {
+                                             "completion_tokens":  103,
+                                             "prompt_tokens":  2626,
+                                             "total_tokens":  2729,
+                                             "completion_tokens_details":  {
+                                                                               "reasoning_tokens":  0
+                                                                           },
+                                             "prompt_tokens_details":  {
+                                                                           "image_tokens":  2040
+                                                                       }
+                                         }
+                           }
+             },
+    "errors":  [
+                   {
+                       "id":  "mimo-first-pass-empty-content",
+                       "severity":  "major",
+                       "detail":  "First MiMo call consumed the 900 token budget as reasoning_content and returned empty content with finish_reason=length."
+                   },
+                   {
+                       "id":  "mimo-markdown-wrapped-json",
+                       "severity":  "major",
+                       "detail":  "Retry returned a semantically valid action but wrapped JSON in a Markdown fenced code block, so strict JSON parsing failed."
+                   }
+               ]
+}

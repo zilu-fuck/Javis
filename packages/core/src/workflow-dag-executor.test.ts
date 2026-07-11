@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createArtifactEnvelope } from "./artifact-envelope";
 import { createSharedTaskContext } from "./shared-context";
 import { executeWorkflow } from "./workflow-dag-executor";
 import type { AgentCapabilityTag } from "./agent-capability";
@@ -460,6 +461,122 @@ describe("executeWorkflow", () => {
     expect(result.completedStepIds).toEqual(["fallback-scan"]);
     expect(result.abandonedStepIds).toEqual(["scan-files"]);
     expect(result.replannedStepIds).toBeUndefined();
+  });
+
+  it("resumes from completed checkpoint steps without rerunning upstream work", async () => {
+    const executed: string[] = [];
+    const workflow = createWorkflow([
+      {
+        ...step("scan-files", [], false),
+        outputContextKey: "diffPreview",
+      },
+      {
+        ...step("verify", ["scan-files"], false),
+        inputContextKeys: ["diffPreview"],
+      },
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      resumeFrom: {
+        completedStepIds: ["scan-files"],
+        contextSnapshot: {
+          "step:scan-files": { scanned: true },
+          diffPreview: {
+            diff: "diff --git a/src/app.ts b/src/app.ts",
+            changedFiles: ["src/app.ts"],
+          },
+        },
+      },
+      executeStep: async (workflowStep, context) => {
+        executed.push(workflowStep.id);
+        expect(context.get("diffPreview")).toEqual({
+          diff: "diff --git a/src/app.ts b/src/app.ts",
+          changedFiles: ["src/app.ts"],
+        });
+        return { output: workflowStep.id };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(executed).toEqual(["verify"]);
+    expect(result.completedStepIds).toEqual(["scan-files", "verify"]);
+    expect(result.results.get("scan-files")).toEqual({ scanned: true });
+  });
+
+  it("restores artifact envelopes from resume checkpoints", async () => {
+    const workflow = createWorkflow([
+      {
+        ...step("scan-files", [], false),
+        outputContextKey: "diffPreview",
+      },
+      {
+        ...step("verify", ["scan-files"], false),
+        inputContextKeys: ["diffPreview"],
+      },
+    ]);
+    const envelope = createArtifactEnvelope(
+      { diff: "diff --git a/src/app.ts b/src/app.ts", changedFiles: ["src/app.ts"] },
+      {
+        taskId: "task-1",
+        runId: "run-1",
+        type: "diffPreview",
+        producer: { stepId: "scan-files", agentKind: "file" },
+      },
+    );
+
+    const result = await executeWorkflow({
+      workflow,
+      context: createSharedTaskContext({ taskId: "task-1" }),
+      resumeFrom: {
+        completedStepIds: ["scan-files"],
+        contextSnapshot: {
+          diffPreview: envelope,
+          "step:scan-files": envelope.payload,
+        },
+      },
+      executeStep: async (workflowStep, context) => {
+        if (workflowStep.id === "verify") {
+          expect(context.get("diffPreview")).toEqual({
+            diff: "diff --git a/src/app.ts b/src/app.ts",
+            changedFiles: ["src/app.ts"],
+          });
+          expect(context.getEnvelope("diffPreview")).toBe(envelope);
+        }
+        return { output: workflowStep.id };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.completedStepIds).toEqual(["scan-files", "verify"]);
+  });
+
+  it("treats checkpoint running steps as retryable pending work", async () => {
+    const executed: string[] = [];
+    const workflow = createWorkflow([
+      step("scan-files", [], false),
+      step("preview-write", ["scan-files"], false),
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      resumeFrom: {
+        completedStepIds: ["scan-files"],
+        retryStepIds: ["preview-write"],
+        contextSnapshot: {
+          "step:scan-files": { scanned: true },
+        },
+      },
+      executeStep: async (workflowStep) => {
+        executed.push(workflowStep.id);
+        return { output: { retried: workflowStep.id } };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(executed).toEqual(["preview-write"]);
+    expect(result.completedStepIds).toEqual(["scan-files", "preview-write"]);
+    expect(result.contextSnapshot["step:preview-write"]).toEqual({ retried: "preview-write" });
   });
 });
 

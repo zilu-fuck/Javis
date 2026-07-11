@@ -11,6 +11,7 @@ export const APPROVAL_RECORDS_CREATE_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS approval_records (
   approval_id TEXT PRIMARY KEY NOT NULL,
   task_id TEXT NOT NULL,
+  run_id TEXT,
   tool_name TEXT NOT NULL,
   workspace_path TEXT NOT NULL,
   permission_level TEXT NOT NULL CHECK (permission_level IN ('preview', 'confirmed_write')),
@@ -31,10 +32,17 @@ ON approval_records (status, tool_name, created_at DESC)`.trim();
 export const APPROVAL_RECORDS_CREATE_EXPIRATION_INDEX_SQL = `
 CREATE INDEX IF NOT EXISTS approval_records_expiration_idx
 ON approval_records (expires_at)`.trim();
+export const APPROVAL_RECORDS_ADD_RUN_ID_SQL = `
+ALTER TABLE approval_records ADD COLUMN run_id TEXT`.trim();
 export const APPROVAL_RECORDS_MIGRATIONS: DesktopDatabaseMigration[] = [
   {
     id: "approval-records-v1-table",
     sql: APPROVAL_RECORDS_CREATE_TABLE_SQL,
+  },
+  {
+    id: "approval-records-v2-run-id",
+    sql: APPROVAL_RECORDS_ADD_RUN_ID_SQL,
+    ignoreDuplicateColumn: true,
   },
   {
     id: "approval-records-v1-status-index",
@@ -71,6 +79,7 @@ const UPSERT_APPROVAL_RECORD_SQL = `
 INSERT INTO ${APPROVAL_RECORDS_TABLE_NAME} (
   approval_id,
   task_id,
+  run_id,
   tool_name,
   workspace_path,
   permission_level,
@@ -84,9 +93,10 @@ INSERT INTO ${APPROVAL_RECORDS_TABLE_NAME} (
   code_proposed_edit_json,
   record_json,
   updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(approval_id) DO UPDATE SET
   task_id = excluded.task_id,
+  run_id = excluded.run_id,
   tool_name = excluded.tool_name,
   workspace_path = excluded.workspace_path,
   permission_level = excluded.permission_level,
@@ -223,6 +233,7 @@ function bindApprovalRecord(
   return [
     record.approvalId,
     record.taskId,
+    record.runId ?? null,
     record.toolName,
     record.workspacePath,
     record.permissionLevel,

@@ -1,0 +1,94 @@
+{
+  "ok": true,
+  "qq": {
+    "handle": 460748,
+    "title": "QQ",
+    "className": "Chrome_WidgetWin_1",
+    "rect": {
+      "x": 752,
+      "y": 185,
+      "width": 1088,
+      "height": 721
+    },
+    "isVisible": true,
+    "isForeground": true
+  },
+  "logs": [
+    {
+      "phase": "approved",
+      "toolName": "computer.keyCombo",
+      "approvalId": "qa-clear-select-001",
+      "request": {
+        "keys": [
+          "Ctrl",
+          "A"
+        ],
+        "pressDurationMs": 35
+      }
+    },
+    {
+      "phase": "executed",
+      "cmd": "computer_key_combo",
+      "approvalId": "qa-clear-select-001",
+      "result": {
+        "combo": "Ctrl + A",
+        "executed": true
+      }
+    },
+    {
+      "phase": "approved",
+      "toolName": "computer.keyCombo",
+      "approvalId": "qa-clear-delete-001",
+      "request": {
+        "keys": [
+          "Delete"
+        ],
+        "pressDurationMs": 35
+      }
+    },
+    {
+      "phase": "executed",
+      "cmd": "computer_key_combo",
+      "approvalId": "qa-clear-delete-001",
+      "result": {
+        "combo": "Delete",
+        "executed": true
+      }
+    },
+    {
+      "phase": "approved",
+      "toolName": "computer.keyCombo",
+      "approvalId": "qa-paste-safe-message-001",
+      "request": {
+        "keys": [
+          "Ctrl",
+          "V"
+        ],
+        "pressDurationMs": 35
+      }
+    },
+    {
+      "phase": "executed",
+      "cmd": "computer_key_combo",
+      "approvalId": "qa-paste-safe-message-001",
+      "result": {
+        "combo": "Ctrl + V",
+        "executed": true
+      }
+    }
+  ],
+  "shotMeta": {
+    "width": 1088,
+    "height": 721,
+    "methodUsed": "printWindow",
+    "health": {
+      "sampledPixels": 4096,
+      "dominantColorRatio": 0.636474609375,
+      "darkPixelRatio": 0.004150390625,
+      "suspiciousBlank": false,
+      "reason": null
+    },
+    "dataUrlLength": 240606
+  },
+  "shotDataUrl": "[redacted data url length=240606]"
+}

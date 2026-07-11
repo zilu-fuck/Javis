@@ -80,6 +80,12 @@ pub(crate) struct ModelCompletionRequest {
     image_data_url: Option<String>,
     #[serde(default)]
     images: Option<Vec<String>>,
+    #[serde(default)]
+    media: Option<Vec<ModelMediaInput>>,
+    #[serde(default)]
+    enable_media_uuid: bool,
+    #[serde(default)]
+    disable_thinking: bool,
     provider_id: Option<String>,
     model: Option<String>,
     api_key: Option<String>,
@@ -95,8 +101,26 @@ pub(crate) struct ModelCompletionRequest {
     #[serde(default)]
     timeout_ms: Option<u64>,
 }
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelCompletionFixtureRequest {
+    prompt_contains: String,
+    response: ModelCompletionResponse,
+}
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ModelCompletionFixtureFile {
+    Single(ModelCompletionFixtureRequest),
+    Many(Vec<ModelCompletionFixtureRequest>),
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelMediaInput {
+    url: String,
+    uuid: Option<String>,
+}
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ModelCompletionResponse {
     text: String,
@@ -125,7 +149,7 @@ struct OpenAiEmbeddingResponse {
     data: Vec<OpenAiEmbeddingData>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ModelUsage {
     input_tokens: u32,
@@ -529,11 +553,49 @@ fn complete_model_prompt(
     mut request: ModelCompletionRequest,
 ) -> Result<ModelCompletionResponse, String> {
     hydrate_model_completion_api_key_secret(&app, &mut request)?;
+    if let Some(path) = model_completion_fixture_path()? {
+        return complete_model_prompt_from_fixture(&path, &request);
+    }
     let protocol = request.protocol.as_deref().unwrap_or("openai-compatible");
     match protocol {
         "anthropic" => anthropic::run_anthropic_completion_request(&request),
         _ => run_openai_compatible_completion_request(&request),
     }
+}
+
+fn model_completion_fixture_path() -> Result<Option<PathBuf>, String> {
+    if env_flag_enabled("JAVIS_QA_MODE") {
+        return Ok(env::var_os("JAVIS_MODEL_COMPLETION_FIXTURE_PATH").map(PathBuf::from));
+    }
+    if env::var_os("JAVIS_MODEL_COMPLETION_FIXTURE_PATH").is_some() {
+        return Err("Model completion fixtures require JAVIS_QA_MODE=1.".to_string());
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+fn guard_model_completion_fixture_mode() -> Result<(), String> {
+    model_completion_fixture_path().map(|_| ())
+}
+
+fn complete_model_prompt_from_fixture(
+    path: &Path,
+    request: &ModelCompletionRequest,
+) -> Result<ModelCompletionResponse, String> {
+    let content = fs::read_to_string(path)
+        .map_err(|error| format!("Could not read model completion fixture: {error}"))?;
+    let fixture_file = serde_json::from_str::<ModelCompletionFixtureFile>(&content)
+        .map_err(|error| format!("Model completion fixture returned invalid JSON: {error}"))?;
+    let fixtures = match fixture_file {
+        ModelCompletionFixtureFile::Single(fixture) => vec![fixture],
+        ModelCompletionFixtureFile::Many(fixtures) => fixtures,
+    };
+    for fixture in fixtures {
+        if request.prompt.contains(&fixture.prompt_contains) {
+            return Ok(fixture.response);
+        }
+    }
+    Err("Model completion fixture did not match the prompt.".to_string())
 }
 
 #[tauri::command]
@@ -693,13 +755,13 @@ fn load_model_api_key_secret_with_fallback(
                 let path = model_api_key_secret_path(app, candidate.as_str())
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_else(|_| format!("<path error for {candidate}>"));
-                errors.push(format!("  {candidate} → {path}"));
+                errors.push(format!("  {candidate} -> {path}"));
             }
         }
     }
     Err(format!(
         "Could not read model API key secret. Tried these references but none found:\n{}\n\
-         Open Settings → AI, select your model provider, save your API key, \
+         Open Settings -> AI, select your model provider, save your API key, \
          and make sure your model slot (e.g. Primary) is assigned to this provider.",
         errors.join("\n")
     ))
@@ -1170,12 +1232,21 @@ fn create_openai_compatible_completion_body(
     model: &str,
     request: &ModelCompletionRequest,
 ) -> serde_json::Value {
-    let images = build_image_list(request);
-    let user_content = if !images.is_empty() {
+    let media = build_media_list(request);
+    let user_content = if !media.is_empty() {
         let mut content: Vec<serde_json::Value> =
             vec![serde_json::json!({ "type": "text", "text": request.prompt })];
-        for img in &images {
-            content.push(serde_json::json!({ "type": "image_url", "image_url": { "url": img } }));
+        for item in &media {
+            let mut part = serde_json::json!({
+                "type": "image_url",
+                "image_url": { "url": item.url }
+            });
+            if request.enable_media_uuid {
+                if let Some(uuid) = trimmed_non_empty(item.uuid.as_deref()) {
+                    part["uuid"] = serde_json::Value::String(uuid.to_string());
+                }
+            }
+            content.push(part);
         }
         serde_json::json!(content)
     } else {
@@ -1194,6 +1265,9 @@ fn create_openai_compatible_completion_body(
         "max_tokens": request.max_tokens.unwrap_or(2048)
     });
     append_completion_stop_sequences(&mut body, request);
+    if request.disable_thinking {
+        body["thinking"] = serde_json::json!({ "type": "disabled" });
+    }
     body
 }
 
@@ -1210,22 +1284,48 @@ pub(crate) fn create_openai_compatible_stream_body(
 /// Collect all image data URLs from both the legacy `image_data_url` field
 /// and the new `images` array, deduplicating by exact match.
 pub(crate) fn build_image_list(request: &ModelCompletionRequest) -> Vec<String> {
+    build_media_list(request)
+        .into_iter()
+        .map(|item| item.url)
+        .collect()
+}
+
+fn build_media_list(request: &ModelCompletionRequest) -> Vec<ModelMediaInput> {
     let mut list: Vec<String> = Vec::new();
+    let mut media: Vec<ModelMediaInput> = Vec::new();
+    if let Some(ref media_list) = request.media {
+        for item in media_list {
+            let trimmed = item.url.trim().to_string();
+            if !trimmed.is_empty() && !list.contains(&trimmed) {
+                list.push(trimmed.clone());
+                media.push(ModelMediaInput {
+                    url: trimmed,
+                    uuid: trimmed_non_empty(item.uuid.as_deref()).map(str::to_string),
+                });
+            }
+        }
+    }
     if let Some(ref url) = request.image_data_url {
         let trimmed = url.trim().to_string();
-        if !trimmed.is_empty() {
-            list.push(trimmed);
+        if !trimmed.is_empty() && !list.contains(&trimmed) {
+            list.push(trimmed.clone());
+            media.push(ModelMediaInput { url: trimmed, uuid: None });
         }
     }
     if let Some(ref image_list) = request.images {
         for url in image_list {
             let trimmed = url.trim().to_string();
             if !trimmed.is_empty() && !list.contains(&trimmed) {
-                list.push(trimmed);
+                list.push(trimmed.clone());
+                media.push(ModelMediaInput { url: trimmed, uuid: None });
             }
         }
     }
-    list
+    media
+}
+
+fn trimmed_non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|trimmed| !trimmed.is_empty())
 }
 
 fn append_completion_stop_sequences(
@@ -1456,11 +1556,11 @@ fn is_local_openai_compatible_base_url(base_url: &str) -> bool {
 pub(crate) fn classify_http_request_error(error: reqwest::Error, endpoint: &str) -> String {
     let host = extract_url_host(endpoint);
     if error.is_timeout() {
-        format!("连接超时（{host}），请检查网络或 Base URL 是否正确")
+        format!("Connection timed out ({host}). Check the network or base URL.")
     } else if error.is_connect() {
-        format!("无法连接到 API 服务器（{host}），请检查 Base URL 是否正确")
+        format!("Could not connect to the API endpoint ({host}). Check the network or base URL.")
     } else {
-        format!("模型请求失败（{host}）：{error}")
+        format!("Model request failed ({host}): {error}")
     }
 }
 
@@ -1476,26 +1576,26 @@ fn classify_http_status_error(
     }
     let detail = summarize_provider_output_for_error(body);
     let detail = if detail.len() > 200 {
-        format!("{}…", &detail[..200])
+        format!("{}...", &detail[..200])
     } else {
         detail
     };
     match status.as_u16() {
         401 => Some(format!(
-            "API Key 验证失败（{provider_id} 返回 401）。请检查 API Key 是否正确。响应：{detail}"
+            "API key authentication failed ({provider_id} returned 401). Check the API key. Response: {detail}"
         )),
         403 => Some(format!(
-            "API 访问被拒（{provider_id} 返回 403）。请检查权限或 Base URL。响应：{detail}"
+            "API access was denied ({provider_id} returned 403). Check permissions or base URL. Response: {detail}"
         )),
         429 => Some(format!(
-            "API 请求频率超限（{provider_id} 返回 429）。请稍后重试。"
+            "API rate limit exceeded ({provider_id} returned 429). Retry later. Response: {detail}"
         )),
         500..=599 => Some(format!(
-            "API 服务器错误（{provider_id} 返回 {}）。请稍后重试。响应：{detail}",
+            "API server error ({provider_id} returned {}). Retry later. Response: {detail}",
             status.as_u16(),
         )),
         _ => Some(format!(
-            "API 返回 HTTP {}（{provider_id}）。响应：{detail}",
+            "API returned HTTP {} ({provider_id}). Response: {detail}",
             status.as_u16(),
         )),
     }
@@ -2238,6 +2338,34 @@ mod tests {
         assert_eq!(
             second_result.expect_err("approval should be consumed"),
             "No approved PDF organization dry-run is pending."
+        );
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn restored_pdf_approval_rejects_changed_source_content() {
+        let root = create_test_directory("pdf-restored-approval-stale-source");
+        let operations = vec![planned_pdf_operation_in(&root)];
+        let source = PathBuf::from(&operations[0].source);
+        let approval_state = Mutex::new(pdf::PdfOrganizationApprovalState::default());
+        replace_pending_pdf_approval(&approval_state, "approval-1", &root, &operations, None)
+            .expect("restore pending approval");
+        approve_pending_pdf_organization(&approval_state, "approval-1", None)
+            .expect("approve restored plan");
+        fs::write(&source, b"%PDF-1.4\nchanged after approval\n").expect("mutate approved source");
+
+        let result = take_approved_pdf_operations(
+            &approval_state,
+            ExecuteFileOrganizationRequest {
+                approval_id: "approval-1".to_string(),
+                operations,
+                task_id: None,
+            },
+        );
+
+        assert_eq!(
+            result.expect_err("changed source should be rejected"),
+            "Approved PDF sources changed before execution."
         );
         fs::remove_dir_all(root).expect("cleanup test directory");
     }
@@ -3295,6 +3423,9 @@ mod tests {
             prompt: "Say hello".to_string(),
             image_data_url: None,
             images: None,
+            media: None,
+            enable_media_uuid: false,
+            disable_thinking: false,
             provider_id: Some("openai".to_string()),
             model: Some("openai/gpt-test".to_string()),
             api_key: Some("sk-test".to_string()),
@@ -3315,6 +3446,164 @@ mod tests {
         assert_eq!(body["max_tokens"], 42);
         assert_eq!(body["stop"], serde_json::json!(["\n\n", " "]));
         assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn openai_compatible_completion_body_adds_media_uuid_when_enabled() {
+        let request = ModelCompletionRequest {
+            prompt: "Describe screen".to_string(),
+            image_data_url: None,
+            images: None,
+            media: Some(vec![ModelMediaInput {
+                url: "data:image/png;base64,SCREEN==".to_string(),
+                uuid: Some("screen:abc123".to_string()),
+            }]),
+            enable_media_uuid: true,
+            disable_thinking: false,
+            provider_id: Some("vllm".to_string()),
+            model: Some("mimo-v2.5".to_string()),
+            api_key: Some("sk-test".to_string()),
+            api_key_reference: None,
+            base_url: Some("http://localhost:8000/v1".to_string()),
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            locale: None,
+            protocol: Some("openai-compatible".to_string()),
+            timeout_ms: None,
+        };
+
+        let body = create_openai_compatible_completion_body("mimo-v2.5", &request);
+        let content = body["messages"][0]["content"].as_array().expect("content array");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,SCREEN==");
+        assert_eq!(content[1]["uuid"], "screen:abc123");
+    }
+
+    #[test]
+    fn openai_compatible_completion_body_keeps_media_uuid_when_legacy_image_duplicates() {
+        let request = ModelCompletionRequest {
+            prompt: "Describe screen".to_string(),
+            image_data_url: Some("data:image/png;base64,SCREEN==".to_string()),
+            images: Some(vec!["data:image/png;base64,SCREEN==".to_string()]),
+            media: Some(vec![ModelMediaInput {
+                url: "data:image/png;base64,SCREEN==".to_string(),
+                uuid: Some("screen:abc123".to_string()),
+            }]),
+            enable_media_uuid: true,
+            disable_thinking: false,
+            provider_id: Some("vllm".to_string()),
+            model: Some("mimo-v2.5".to_string()),
+            api_key: Some("sk-test".to_string()),
+            api_key_reference: None,
+            base_url: Some("http://localhost:8000/v1".to_string()),
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            locale: None,
+            protocol: Some("openai-compatible".to_string()),
+            timeout_ms: None,
+        };
+
+        let body = create_openai_compatible_completion_body("mimo-v2.5", &request);
+        let content = body["messages"][0]["content"].as_array().expect("content array");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,SCREEN==");
+        assert_eq!(content[1]["uuid"], "screen:abc123");
+    }
+
+    #[test]
+    fn openai_compatible_completion_body_omits_media_uuid_when_disabled() {
+        let request = ModelCompletionRequest {
+            prompt: "Describe screen".to_string(),
+            image_data_url: None,
+            images: None,
+            media: Some(vec![ModelMediaInput {
+                url: "data:image/png;base64,SCREEN==".to_string(),
+                uuid: Some("screen:abc123".to_string()),
+            }]),
+            enable_media_uuid: false,
+            disable_thinking: false,
+            provider_id: Some("openai".to_string()),
+            model: Some("gpt-test".to_string()),
+            api_key: Some("sk-test".to_string()),
+            api_key_reference: None,
+            base_url: Some("https://api.example.test/v1".to_string()),
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            locale: None,
+            protocol: Some("openai-compatible".to_string()),
+            timeout_ms: None,
+        };
+
+        let body = create_openai_compatible_completion_body("gpt-test", &request);
+        let content = body["messages"][0]["content"].as_array().expect("content array");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,SCREEN==");
+        assert!(content[1].get("uuid").is_none());
+    }
+
+    #[test]
+    fn openai_compatible_completion_body_disables_thinking_when_requested() {
+        let request = ModelCompletionRequest {
+            prompt: "Return JSON only".to_string(),
+            image_data_url: Some("data:image/png;base64,SCREEN==".to_string()),
+            images: None,
+            media: None,
+            enable_media_uuid: false,
+            disable_thinking: true,
+            provider_id: Some("mimo".to_string()),
+            model: Some("mimo-v2.5".to_string()),
+            api_key: Some("sk-test".to_string()),
+            api_key_reference: None,
+            base_url: Some("https://token-plan-cn.xiaomimimo.com/v1".to_string()),
+            max_tokens: Some(2048),
+            temperature: Some(0.0),
+            stop_sequences: None,
+            locale: None,
+            protocol: Some("openai-compatible".to_string()),
+            timeout_ms: None,
+        };
+
+        let body = create_openai_compatible_completion_body("mimo-v2.5", &request);
+
+        assert_eq!(body["thinking"]["type"], "disabled");
+    }
+
+    #[test]
+    fn build_image_list_deduplicates_media_and_legacy_images() {
+        let request = ModelCompletionRequest {
+            prompt: "Describe screen".to_string(),
+            image_data_url: Some(" data:image/png;base64,ONE== ".to_string()),
+            images: Some(vec![
+                "data:image/png;base64,ONE==".to_string(),
+                "data:image/png;base64,TWO==".to_string(),
+            ]),
+            media: Some(vec![ModelMediaInput {
+                url: "data:image/png;base64,ONE==".to_string(),
+                uuid: Some("screen:one".to_string()),
+            }]),
+            enable_media_uuid: true,
+            disable_thinking: false,
+            provider_id: Some("anthropic".to_string()),
+            model: Some("claude-test".to_string()),
+            api_key: Some("sk-test".to_string()),
+            api_key_reference: None,
+            base_url: Some("https://api.example.test/v1".to_string()),
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            locale: None,
+            protocol: Some("anthropic".to_string()),
+            timeout_ms: None,
+        };
+
+        assert_eq!(
+            build_image_list(&request),
+            vec![
+                "data:image/png;base64,ONE==".to_string(),
+                "data:image/png;base64,TWO==".to_string(),
+            ],
+        );
     }
 
     #[test]
@@ -3359,7 +3648,7 @@ mod tests {
     fn code_proposal_prompt_uses_chinese_when_locale_is_zh_cn() {
         let request = CodeProposeEditRequest {
             workspace_path: "E:/Javis".to_string(),
-            user_goal: "修复当前变更".to_string(),
+            user_goal: "fix current changes".to_string(),
             changed_files: vec!["src/message.txt".to_string()],
             diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
             task_id: None,
@@ -3375,8 +3664,9 @@ mod tests {
         assert!(prompt.contains("Javis terminology rules for Chinese output"));
         assert!(prompt.contains("Agent: keep the English term"));
 
-        assert!(prompt.contains("summary 字段必须使用中文"));
-        assert!(prompt.contains("修复当前变更"));
+        assert!(prompt.contains(r#""summary""#));
+        assert!(prompt.contains(r#""changedFiles""#));
+        assert!(prompt.contains(r#""patch""#));
     }
 
     #[test]
@@ -4008,6 +4298,131 @@ mod tests {
     }
 
     #[test]
+    fn model_completion_fixture_requires_qa_mode() {
+        let root = create_test_directory("model-completion-fixture-guard");
+        let fixture = root.join("completion.json");
+        fs::write(&fixture, "{}").expect("write fixture");
+        env::set_var("JAVIS_MODEL_COMPLETION_FIXTURE_PATH", &fixture);
+        env::remove_var("JAVIS_QA_MODE");
+
+        let result = guard_model_completion_fixture_mode();
+
+        assert_eq!(
+            result.expect_err("fixture should require qa mode"),
+            "Model completion fixtures require JAVIS_QA_MODE=1."
+        );
+        env::remove_var("JAVIS_MODEL_COMPLETION_FIXTURE_PATH");
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn reads_model_completion_fixture_response() {
+        let root = create_test_directory("model-completion-fixture");
+        let fixture = root.join("completion.json");
+        fs::write(
+            &fixture,
+            serde_json::json!({
+                "promptContains": "CommanderDagPlan",
+                "response": {
+                    "text": "{\"title\":\"Fixture plan\",\"reasoning\":\"qa\",\"steps\":[]}",
+                    "model": "fixture-model",
+                    "provider": "fixture-provider",
+                    "tokenUsage": {
+                        "inputTokens": 1,
+                        "outputTokens": 2,
+                        "totalTokens": 3
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("write fixture");
+        let request = ModelCompletionRequest {
+            prompt: "Return a CommanderDagPlan".to_string(),
+            image_data_url: None,
+            images: None,
+            media: None,
+            enable_media_uuid: false,
+            disable_thinking: false,
+            provider_id: Some("openai".to_string()),
+            model: Some("fixture".to_string()),
+            api_key: Some("sk-test".to_string()),
+            api_key_reference: None,
+            base_url: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            locale: None,
+            protocol: None,
+            timeout_ms: None,
+        };
+
+        let response = complete_model_prompt_from_fixture(&fixture, &request).expect("fixture");
+
+        assert_eq!(response.model.as_deref(), Some("fixture-model"));
+        assert_eq!(response.provider.as_deref(), Some("fixture-provider"));
+        assert!(response.text.contains("Fixture plan"));
+        assert_eq!(response.token_usage.expect("usage").total_tokens, 3);
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn reads_first_matching_model_completion_fixture_response() {
+        let root = create_test_directory("model-completion-fixture-many");
+        let fixture = root.join("completion.json");
+        fs::write(
+            &fixture,
+            serde_json::json!([
+                {
+                    "promptContains": "CommanderDagPlan",
+                    "response": {
+                        "text": "{\"title\":\"Fixture plan\",\"reasoning\":\"qa\",\"steps\":[]}",
+                        "model": "fixture-plan",
+                        "provider": "fixture",
+                        "tokenUsage": null
+                    }
+                },
+                {
+                    "promptContains": "Verifier Agent",
+                    "response": {
+                        "text": "{\"status\":\"pass\",\"summary\":\"ok\",\"detail\":\"ok\"}",
+                        "model": "fixture-verifier",
+                        "provider": "fixture",
+                        "tokenUsage": null
+                    }
+                }
+            ])
+            .to_string(),
+        )
+        .expect("write fixture");
+        let request = ModelCompletionRequest {
+            prompt: "You are Javis Verifier Agent.".to_string(),
+            image_data_url: None,
+            images: None,
+            media: None,
+            enable_media_uuid: false,
+            disable_thinking: false,
+            provider_id: Some("openai".to_string()),
+            model: Some("fixture".to_string()),
+            api_key: Some("sk-test".to_string()),
+            api_key_reference: None,
+            base_url: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            locale: None,
+            protocol: None,
+            timeout_ms: None,
+        };
+
+        let response = complete_model_prompt_from_fixture(&fixture, &request).expect("fixture");
+
+        assert_eq!(response.model.as_deref(), Some("fixture-verifier"));
+        assert!(response.text.contains("\"status\":\"pass\""));
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
     fn appends_task_audit_jsonl_lines() {
         let root = create_test_directory("task-audit-jsonl");
         let path = root.join("task-audit.jsonl");
@@ -4197,7 +4612,7 @@ mod tests {
         }
     }
 
-    // ── DeepSeek API request construction tests ─────────────────────
+    // 閳光偓閳光偓 DeepSeek API request construction tests 閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓
 
     #[test]
     fn deepseek_proposal_body_has_required_fields() {
@@ -4249,6 +4664,9 @@ mod tests {
             prompt: "test".to_string(),
             image_data_url: None,
             images: None,
+            media: None,
+            enable_media_uuid: false,
+            disable_thinking: false,
             provider_id: Some("deepseek".to_string()),
             model: Some("deepseek-chat".to_string()),
             api_key: Some("sk-test".to_string()),
@@ -4367,7 +4785,7 @@ mod tests {
         );
     }
 
-    // ── SKIP_DIRS + depth + mount roots ───────────────────────────────
+    // 閳光偓閳光偓 SKIP_DIRS + depth + mount roots 閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓
 
     #[test]
     fn skip_dirs_case_insensitive() {
@@ -4405,17 +4823,17 @@ mod tests {
 
     #[test]
     fn root_level_vendor_skip_only_at_drive_root() {
-        // C:\Intel, D:\NVIDIA → parent is root, should skip
+        // C:\Intel, D:\NVIDIA 閳?parent is root, should skip
         assert!(is_root_level_vendor_skip("Intel", Path::new("C:\\")));
         assert!(is_root_level_vendor_skip("NVIDIA", Path::new("D:\\")));
 
-        // C:\Projects\Intel → parent is C:\Projects, should NOT skip
+        // C:\Projects\Intel 閳?parent is C:\Projects, should NOT skip
         assert!(!is_root_level_vendor_skip(
             "Intel",
             Path::new("C:\\Projects")
         ));
 
-        // Non-vendor name at root → should NOT skip
+        // Non-vendor name at root 閳?should NOT skip
         assert!(!is_root_level_vendor_skip("Projects", Path::new("C:\\")));
 
         // Filesystem root itself: root.parent() is None

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createArtifactEnvelope } from "./artifact-envelope";
-import { buildCheckpointFromDagState } from "./workflow-checkpoint";
+import { buildCheckpointFromDagState, computePlanHash } from "./workflow-checkpoint";
 import type { WorkbenchWorkflow } from "./workflows";
 
 const workflow: WorkbenchWorkflow = {
@@ -78,5 +78,146 @@ describe("buildCheckpointFromDagState", () => {
     expect(checkpoint.contextSnapshot.repoEvidence.payload).toEqual({
       files: ["README.md"],
     });
+  });
+});
+
+function testWorkflow(): WorkbenchWorkflow {
+  return {
+    id: "read-current-project",
+    title: "Test workflow",
+    triggerExamples: [],
+    goal: "Test durable checkpoints",
+    coordinatorAgentKind: "commander",
+    participatingAgentKinds: ["commander", "code"],
+    currentSupport: "partial",
+    safetyNotes: [],
+    steps: [
+      {
+        id: "inspect",
+        title: "Inspect",
+        agentKind: "code",
+        input: "workspace",
+        output: "diff preview",
+        permissionLevel: "read",
+        dependsOn: [],
+        canRunInParallel: false,
+      },
+    ],
+  };
+}
+
+describe("buildCheckpointFromDagState", () => {
+  it("builds a stable plan hash for semantically identical step orderings", () => {
+    const stepsA = testWorkflow().steps;
+    const stepsB = [
+      { ...stepsA[0], dependsOn: [...(stepsA[0]?.dependsOn ?? [])] },
+    ];
+
+    expect(computePlanHash(stepsA)).toBe(computePlanHash(stepsB));
+  });
+
+  it("changes the plan hash when execution-significant fields change", () => {
+    const [baseStep] = testWorkflow().steps;
+    const baseHash = computePlanHash([{
+      ...baseStep,
+      outputContextKey: "repoEvidence",
+      inputContextKeys: ["workspacePath"],
+      permissionLevel: "read",
+      canRunInParallel: false,
+    }]);
+
+    expect(computePlanHash([{
+      ...baseStep,
+      outputContextKey: "diffPreview",
+      inputContextKeys: ["workspacePath"],
+      permissionLevel: "read",
+      canRunInParallel: false,
+    }])).not.toBe(baseHash);
+    expect(computePlanHash([{
+      ...baseStep,
+      outputContextKey: "repoEvidence",
+      inputContextKeys: ["workspacePath"],
+      permissionLevel: "confirmed_write",
+      canRunInParallel: false,
+    }])).not.toBe(baseHash);
+    expect(computePlanHash([{
+      ...baseStep,
+      outputContextKey: "repoEvidence",
+      inputContextKeys: ["diffPreview"],
+      permissionLevel: "read",
+      canRunInParallel: false,
+    }])).not.toBe(baseHash);
+    expect(computePlanHash([{
+      ...baseStep,
+      outputContextKey: "repoEvidence",
+      inputContextKeys: ["workspacePath"],
+      permissionLevel: "read",
+      canRunInParallel: true,
+    }])).not.toBe(baseHash);
+  });
+
+  it("preserves artifact envelopes supplied through contextSnapshot", () => {
+    const envelope = createArtifactEnvelope(
+      { changedFiles: ["src/a.ts"], diff: "patch" },
+      {
+        taskId: "task-1",
+        runId: "run-1",
+        type: "diffPreview",
+        producer: { stepId: "inspect", agentKind: "code" },
+        sensitivity: "workspace",
+      },
+    );
+
+    const checkpoint = buildCheckpointFromDagState({
+      taskId: "task-1",
+      runId: "run-1",
+      workflow: testWorkflow(),
+      completedStepIds: ["inspect"],
+      abandonedStepIds: [],
+      runningStepIds: [],
+      contextSnapshot: {
+        diffPreview: envelope,
+        legacyRawValue: { omitted: true },
+      },
+      eventSequence: 5,
+    });
+
+    expect(checkpoint.contextSnapshot.diffPreview).toBe(envelope);
+    expect(checkpoint.contextSnapshot.legacyRawValue?.payload).toEqual({ omitted: true });
+  });
+
+  it("lets explicit envelopes override matching contextSnapshot envelopes", () => {
+    const original = createArtifactEnvelope(
+      { diff: "old" },
+      {
+        taskId: "task-1",
+        runId: "run-1",
+        type: "diffPreview",
+        producer: { stepId: "inspect" },
+      },
+    );
+    const replacement = createArtifactEnvelope(
+      { diff: "new" },
+      {
+        taskId: "task-1",
+        runId: "run-1",
+        type: "diffPreview",
+        producer: { stepId: "inspect-retry" },
+      },
+    );
+
+    const checkpoint = buildCheckpointFromDagState({
+      taskId: "task-1",
+      runId: "run-1",
+      workflow: testWorkflow(),
+      completedStepIds: ["inspect"],
+      abandonedStepIds: [],
+      runningStepIds: [],
+      contextSnapshot: { diffPreview: original },
+      envelopes: { diffPreview: replacement },
+      eventSequence: 6,
+    });
+
+    expect(checkpoint.contextSnapshot.diffPreview).toEqual(replacement);
   });
 });

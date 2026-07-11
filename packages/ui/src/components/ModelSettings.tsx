@@ -1632,11 +1632,11 @@ export function ModelSettings({
                           <span>
                             {labels.modelApiKey}
                             {providerKeySaved[selectedProvider] ? (
-                              <span style={{ color: "#22c55e", fontSize: "0.75rem", marginLeft: "0.5rem" }}>
+                              <span style={{ color: "var(--color-status-success, #22c55e)", fontSize: "0.75rem", marginLeft: "0.5rem" }}>
                                 ✓ {isZh ? "已存储" : "Stored"}
                               </span>
                             ) : providerApiKeys[selectedProvider]?.trim() ? (
-                              <span style={{ color: "#f59e0b", fontSize: "0.75rem", marginLeft: "0.5rem" }}>
+                              <span style={{ color: "var(--color-status-pending, #f59e0b)", fontSize: "0.75rem", marginLeft: "0.5rem" }}>
                                 {isZh ? "点击保存" : "Click to save"}
                               </span>
                             ) : null}

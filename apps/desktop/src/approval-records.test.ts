@@ -133,13 +133,14 @@ describe("durable approval records", () => {
     const record = createApprovalRecord();
     const created = createApprovalRecordFromPermissionRequest({
       taskId: "task-1",
+      runId: "run-1",
       toolName: "file.executePdfOrganization",
       workspacePath: "C:/Users/example/Downloads",
       permissionRequest: record.permissionRequest,
       now: "2026-05-24T00:00:00.000Z",
     });
 
-    expect(created).toEqual(record);
+    expect(created).toEqual({ ...record, runId: "run-1" });
     expect(createApprovalRecordFromPermissionRequest({
       taskId: "task-1",
       toolName: "file.executePdfOrganization",
@@ -178,6 +179,56 @@ describe("durable approval records", () => {
     expect(created?.permissionRequest.dryRun.affectedPaths[0]?.action).toBe("modify");
     expect(created?.codeProposedEdit?.proposalId).toBe("proposal-1");
     expect(created?.codeProposedEdit?.patch).toContain("diff --git");
+  });
+
+  it("preserves durable approval run ids when provided", () => {
+    const record = createApprovalRecord();
+    const created = createApprovalRecordFromPermissionRequest({
+      taskId: "task-1",
+      runId: "run-1",
+      toolName: "file.executePdfOrganization",
+      workspacePath: "C:/Users/example/Downloads",
+      permissionRequest: record.permissionRequest,
+      now: "2026-05-24T00:00:00.000Z",
+    });
+
+    expect(created?.runId).toBe("run-1");
+  });
+
+  it("restores Code Agent patch records with base git head", () => {
+    const codeProposedEdit = {
+      ...createCodeProposedEdit(),
+      baseGitHead: "19d30afd50a4b012f4a007c257d1d99a0774e6ad",
+    };
+    codeProposedEdit.patchHash = "fnv1a-9295efa4";
+    const dryRun = createCodeApplyDryRun(codeProposedEdit);
+    const record = {
+      approvalId: "task-code-apply-permission",
+      taskId: "task-code",
+      toolName: "code.applyProposedEdit",
+      workspacePath: codeProposedEdit.workspacePath,
+      permissionLevel: "confirmed_write",
+      previewHash: createDryRunBindingHash(dryRun),
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      status: "pending",
+      createdAt: "2026-05-24T00:00:00.000Z",
+      permissionRequest: {
+        id: "task-code-apply-permission",
+        level: "confirmed_write",
+        title: "Approve Code Agent patch application",
+        reason: "Applying the proposed patch changes local project files.",
+        bindingHash: createDryRunBindingHash(dryRun),
+        status: "pending",
+        createdAt: "2026-05-24T00:00:00.000Z",
+        dryRun,
+      },
+      codeProposedEdit,
+    } satisfies DurableApprovalRecord;
+
+    const restored = sanitizeApprovalRecord(JSON.parse(JSON.stringify(record)));
+
+    expect(restored?.codeProposedEdit?.baseGitHead).toBe(codeProposedEdit.baseGitHead);
+    expect(restored?.permissionRequest.dryRun.operation).toContain("Base commit: 19d30af.");
   });
 
   it("creates durable records for Git push approvals", () => {

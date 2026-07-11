@@ -8,6 +8,8 @@ import { createRecommendedCommandRequest } from "./routing";
 import { appendLog } from "./snapshot-utils";
 import { createEmptyTokenUsageSummary } from "./token-usage";
 import { safeSynthesizeConclusion } from "./workflow-executor";
+import { runWorkspaceReadOnlyCommand } from "./workflow-step-helpers";
+import type { WorkspaceRuntime } from "./workspace-runtime";
 
 export async function runProjectInspectionTask(
   controller: FlowController,
@@ -16,6 +18,7 @@ export async function runProjectInspectionTask(
   activeShellTool: ShellTool,
   activeProjectTool: ProjectTool,
   commanderTool?: CommanderTool,
+  workspaceRuntime?: WorkspaceRuntime,
 ) {
   const plan = createProjectInspectionPlan();
   const agentTracker = createAgentStateTracker(
@@ -135,7 +138,8 @@ export async function runProjectInspectionTask(
     });
 
     const commands = await Promise.all(
-      commandRequests.map((request) => activeShellTool.runReadOnlyCommand(request)),
+      commandRequests.map((request) =>
+        runWorkspaceReadOnlyCommand(request, activeShellTool, workspaceRuntime)),
     );
 
     agentTracker.setState("agent-commander", {

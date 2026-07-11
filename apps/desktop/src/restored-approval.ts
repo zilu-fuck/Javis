@@ -1,11 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import {
   createInitialTaskSnapshot,
+  reconcileCheckpointWithEventLog,
+  type RuntimeEventEnvelope,
   validateCodeApplyResult,
   validateCodeProposal,
   type TaskSnapshot,
+  type WorkflowCheckpoint,
 } from "@javis/core";
 import type { CodeApplyResult, FileOrganizationExecution, ShellCommandOutput } from "@javis/tools";
+import type { VerifierCheckResult } from "@javis/tools";
 import type {
   GitCommitExecutionQuickResult,
   GitCommentPullRequestExecutionQuickResult,
@@ -107,6 +111,160 @@ export function getDurableApprovalWorkspacePath(
     return task.codeProposedEdit?.workspacePath ?? task.codeReviewPreview?.workspacePath ?? "";
   }
   return "";
+}
+
+export type RestoredApprovalCheckpointLinkStatus =
+  | "linked"
+  | "blocked"
+  | "unlinked";
+
+export interface RestoredApprovalCheckpointLinkResult {
+  status: RestoredApprovalCheckpointLinkStatus;
+  linkedTask: TaskSnapshot;
+  reason?: string;
+}
+
+export function reconcileRestoredApprovalTaskToCheckpoint(
+  task: TaskSnapshot,
+  checkpoint: WorkflowCheckpoint | undefined,
+  runtimeEvents: RuntimeEventEnvelope[] = [],
+): RestoredApprovalCheckpointLinkResult {
+  const approvalId = task.permissionRequest?.id;
+  if (!approvalId || !checkpoint) {
+    return { status: "unlinked", linkedTask: task };
+  }
+
+  const reconciliation = reconcileCheckpointWithEventLog(checkpoint, runtimeEvents);
+  if (reconciliation.status === "blocked") {
+    return {
+      status: "blocked",
+      reason: reconciliation.reason,
+      linkedTask: {
+        ...task,
+        logs: [
+          ...task.logs,
+          {
+            id: `${task.id}-workflow-checkpoint-reconciliation-blocked-${checkpoint.runId}`,
+            kind: "event",
+            title: "workflow.checkpoint.reconciliation_blocked",
+            detail: `Restored approval ${approvalId} cannot auto-resume from run ${checkpoint.runId}: ${reconciliation.reason}`,
+          },
+        ],
+        verificationSummary: appendVerificationSummaryLine(
+          task.verificationSummary,
+          `blocked: restored approval cannot auto-resume from durable run ${checkpoint.runId}; ${reconciliation.reason}`,
+        ),
+      },
+    };
+  }
+
+  if (reconciliation.status !== "resumable" || !hasApprovalEvidence(approvalId, checkpoint, runtimeEvents)) {
+    return { status: "unlinked", linkedTask: task };
+  }
+
+  const completedCount = reconciliation.completedStepIds.length;
+  const pendingCount = reconciliation.pendingStepIds.length + reconciliation.retryStepIds.length;
+  return {
+    status: "linked",
+    linkedTask: {
+      ...task,
+      logs: [
+        ...task.logs,
+        {
+          id: `${task.id}-workflow-checkpoint-linked-${checkpoint.runId}`,
+          kind: "event",
+          title: "workflow.checkpoint.linked",
+          detail:
+            `Restored approval ${approvalId} is linked to run ${checkpoint.runId} ` +
+            `at event sequence ${checkpoint.eventSequence}.`,
+        },
+      ],
+      verificationSummary: appendVerificationSummaryLine(
+        task.verificationSummary,
+        `pending: restored approval is linked to durable run ${checkpoint.runId}; ${completedCount} step(s) completed and ${pendingCount} step(s) resumable after approval.`,
+      ),
+    },
+  };
+}
+
+export function linkRestoredApprovalTaskToCheckpoint(
+  task: TaskSnapshot,
+  checkpoint: WorkflowCheckpoint | undefined,
+  runtimeEvents: RuntimeEventEnvelope[] = [],
+): TaskSnapshot {
+  return reconcileRestoredApprovalTaskToCheckpoint(task, checkpoint, runtimeEvents).linkedTask;
+}
+
+function hasApprovalEvidence(
+  approvalId: string,
+  checkpoint: WorkflowCheckpoint,
+  runtimeEvents: RuntimeEventEnvelope[],
+): boolean {
+  const checkpointNamesApproval = checkpoint.approvalRequestIds.includes(approvalId);
+  return checkpointNamesApproval || runtimeEvents.some((event) => permissionRequestIdFromEvent(event) === approvalId);
+}
+
+function permissionRequestIdFromEvent(event: RuntimeEventEnvelope): string | undefined {
+  const payload = event.payload;
+  if (!isRecord(payload) || payload.kind !== "permission.requested") {
+    return undefined;
+  }
+  if (typeof payload.approvalId === "string") {
+    return payload.approvalId;
+  }
+  const request = payload.request;
+  if (!isRecord(request) || typeof request.id !== "string") {
+    return undefined;
+  }
+  return request.id;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function appendVerificationSummaryLine(
+  current: string | undefined,
+  line: string,
+): string {
+  if (!current) {
+    return line;
+  }
+  return `${current}\n${line}`;
+}
+
+function createRestoredApprovalOutcome(
+  record: DurableApprovalRecord,
+  status: NonNullable<TaskSnapshot["approvalOutcome"]>["status"],
+): NonNullable<TaskSnapshot["approvalOutcome"]> {
+  return {
+    approvalId: record.approvalId,
+    status,
+    ...(record.permissionRequest.resolvedAt ? { resolvedAt: record.permissionRequest.resolvedAt } : {}),
+  };
+}
+
+function createRestoredVerificationResult(summary: string): VerifierCheckResult {
+  const status = summary.startsWith("verified:")
+    ? "pass"
+    : summary.startsWith("failed:")
+      ? "fail"
+      : "warn";
+  return {
+    status,
+    summary,
+    detail: summary,
+  };
+}
+
+function withRestoredVerificationResult(task: TaskSnapshot): TaskSnapshot {
+  if (!task.verificationSummary) {
+    return task;
+  }
+  return {
+    ...task,
+    verificationResult: createRestoredVerificationResult(task.verificationSummary),
+  };
 }
 
 export function createRestoredPdfApprovalTask(record: DurableApprovalRecord): TaskSnapshot {
@@ -357,44 +515,48 @@ export function createRestoredGitCommentPullRequestApprovalTask(record: DurableA
 }
 
 export function createRestoredPdfDeniedTask(record: DurableApprovalRecord): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredPdfApprovalTask(record),
     id: `restored-approval-denied-${record.taskId}`,
     title: "PDF organization denied",
     status: "completed",
     commanderMessage: "Permission was denied after restore. Javis did not move or modify files.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "denied"),
     verificationSummary: "verified: restored permission denied; no write operation was executed.",
-  };
+  });
 }
 
 export function createRestoredPdfApprovedTask(
   record: DurableApprovalRecord,
   execution: FileOrganizationExecution,
 ): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredPdfApprovalTask(record),
     id: `restored-approval-approved-${record.taskId}`,
     title: execution.failedCount === 0 ? "PDF organization completed" : "PDF organization completed with failures",
     status: execution.failedCount === 0 ? "completed" : "failed",
     commanderMessage: "Restored permission was approved and the PDF organization dry-run executed.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "approved"),
     fileOrganizationExecution: execution,
     verificationSummary: `${execution.failedCount === 0 ? "verified" : "failed"}: ${execution.movedCount}/${execution.attemptedCount} PDF move(s) completed, ${execution.skippedCount} skipped, ${execution.failedCount} failed.`,
-  };
+  });
 }
 
 export function createRestoredPdfFailedTask(
   record: DurableApprovalRecord,
   error: unknown,
 ): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredPdfApprovalTask(record),
     id: `restored-approval-failed-${record.taskId}`,
     title: "PDF organization execution failed",
     status: "failed",
     commanderMessage: "Restored permission was approved, but native execution failed.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "approved"),
+    verificationSummary: `failed: restored PDF organization failed before completion; ${error instanceof Error ? error.message : String(error)}`,
     logs: [
       ...createRestoredPdfApprovalTask(record).logs,
       {
@@ -404,7 +566,7 @@ export function createRestoredPdfFailedTask(
         detail: error instanceof Error ? error.message : String(error),
       },
     ],
-  };
+  });
 }
 
 export async function runRestoredPdfOrganization(
@@ -494,42 +656,45 @@ export function runRestoredCodePatchVerification(
 export function createRestoredCodePatchDeniedTask(
   record: DurableApprovalRecord,
 ): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredCodePatchApprovalTask(record),
     id: `restored-approval-denied-${record.taskId}`,
     title: "Code Agent patch denied",
     status: "completed",
     commanderMessage: "Permission was denied after restore. Javis did not apply the patch.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "denied"),
     verificationSummary: "verified: restored Code Agent patch was denied and no write operation was executed.",
-  };
+  });
 }
 
 export function createRestoredGitPushDeniedTask(
   record: DurableApprovalRecord,
 ): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredGitPushApprovalTask(record),
     id: `restored-approval-denied-${record.taskId}`,
     title: "Git push denied",
     status: "completed",
     commanderMessage: "Permission was denied after restore. Javis did not push to the remote.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "denied"),
     verificationSummary: "verified: restored Git push was denied and no remote operation was executed.",
-  };
+  });
 }
 
 export function createRestoredGitPushApprovedTask(
   record: DurableApprovalRecord,
   execution: GitPushExecutionQuickResult,
 ): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredGitPushApprovalTask(record),
     id: `restored-approval-approved-${record.taskId}`,
     title: execution.pushed ? "Git push completed" : "Git push did not run",
     status: execution.pushed ? "completed" : "failed",
     commanderMessage: "Restored permission was approved and the Git push executed.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "approved"),
     verificationSummary: `${execution.pushed ? "verified" : "failed"}: pushed ${execution.commitCount} commit(s) to ${execution.remoteName}/${execution.remoteBranch}.`,
     logs: [
       ...createRestoredGitPushApprovalTask(record).logs,
@@ -540,20 +705,22 @@ export function createRestoredGitPushApprovedTask(
         detail: execution.output || `Pushed ${execution.commitCount} commit(s) to ${execution.upstream}.`,
       },
     ],
-  };
+  });
 }
 
 export function createRestoredGitPushFailedTask(
   record: DurableApprovalRecord,
   error: unknown,
 ): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredGitPushApprovalTask(record),
     id: `restored-approval-failed-${record.taskId}`,
     title: "Git push failed",
     status: "failed",
     commanderMessage: "Restored permission was approved, but native Git push execution failed.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "approved"),
+    verificationSummary: `failed: restored Git push failed before completion; ${error instanceof Error ? error.message : String(error)}`,
     logs: [
       ...createRestoredGitPushApprovalTask(record).logs,
       {
@@ -563,34 +730,36 @@ export function createRestoredGitPushFailedTask(
         detail: error instanceof Error ? error.message : String(error),
       },
     ],
-  };
+  });
 }
 
 export function createRestoredGitCommitDeniedTask(
   record: DurableApprovalRecord,
 ): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredGitCommitApprovalTask(record),
     id: `restored-approval-denied-${record.taskId}`,
     title: "Git commit denied",
     status: "completed",
     commanderMessage: "Permission was denied after restore. Javis did not create a commit.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "denied"),
     verificationSummary: "verified: restored Git commit was denied and no local commit was created.",
-  };
+  });
 }
 
 export function createRestoredGitCommitApprovedTask(
   record: DurableApprovalRecord,
   execution: GitCommitExecutionQuickResult,
 ): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredGitCommitApprovalTask(record),
     id: `restored-approval-approved-${record.taskId}`,
     title: execution.committed ? "Git commit completed" : "Git commit did not run",
     status: execution.committed ? "completed" : "failed",
     commanderMessage: "Restored permission was approved and the Git commit executed.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "approved"),
     verificationSummary: `${execution.committed ? "verified" : "failed"}: created commit ${execution.commitHash.slice(0, 12)} for ${execution.fileCount} file(s).`,
     logs: [
       ...createRestoredGitCommitApprovalTask(record).logs,
@@ -601,20 +770,22 @@ export function createRestoredGitCommitApprovedTask(
         detail: execution.output || `Created commit ${execution.commitHash}.`,
       },
     ],
-  };
+  });
 }
 
 export function createRestoredGitCommitFailedTask(
   record: DurableApprovalRecord,
   error: unknown,
 ): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredGitCommitApprovalTask(record),
     id: `restored-approval-failed-${record.taskId}`,
     title: "Git commit failed",
     status: "failed",
     commanderMessage: "Restored permission was approved, but native Git commit execution failed.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "approved"),
+    verificationSummary: `failed: restored Git commit failed before completion; ${error instanceof Error ? error.message : String(error)}`,
     logs: [
       ...createRestoredGitCommitApprovalTask(record).logs,
       {
@@ -624,34 +795,36 @@ export function createRestoredGitCommitFailedTask(
         detail: error instanceof Error ? error.message : String(error),
       },
     ],
-  };
+  });
 }
 
 export function createRestoredGitStageDeniedTask(
   record: DurableApprovalRecord,
 ): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredGitStageApprovalTask(record),
     id: `restored-approval-denied-${record.taskId}`,
     title: "Git stage denied",
     status: "completed",
     commanderMessage: "Permission was denied after restore. Javis did not update the Git index.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "denied"),
     verificationSummary: "verified: restored Git stage was denied and no local index update was executed.",
-  };
+  });
 }
 
 export function createRestoredGitStageApprovedTask(
   record: DurableApprovalRecord,
   execution: GitStageExecutionQuickResult,
 ): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredGitStageApprovalTask(record),
     id: `restored-approval-approved-${record.taskId}`,
     title: execution.staged ? "Git stage completed" : "Git stage did not run",
     status: execution.staged ? "completed" : "failed",
     commanderMessage: "Restored permission was approved and the Git stage executed.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "approved"),
     verificationSummary: `${execution.staged ? "verified" : "failed"}: staged ${execution.fileCount} selected file(s).`,
     logs: [
       ...createRestoredGitStageApprovalTask(record).logs,
@@ -662,20 +835,22 @@ export function createRestoredGitStageApprovedTask(
         detail: execution.output || `Staged ${execution.fileCount} selected file(s).`,
       },
     ],
-  };
+  });
 }
 
 export function createRestoredGitStageFailedTask(
   record: DurableApprovalRecord,
   error: unknown,
 ): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredGitStageApprovalTask(record),
     id: `restored-approval-failed-${record.taskId}`,
     title: "Git stage failed",
     status: "failed",
     commanderMessage: "Restored permission was approved, but native Git stage execution failed.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "approved"),
+    verificationSummary: `failed: restored Git stage failed before completion; ${error instanceof Error ? error.message : String(error)}`,
     logs: [
       ...createRestoredGitStageApprovalTask(record).logs,
       {
@@ -685,34 +860,36 @@ export function createRestoredGitStageFailedTask(
         detail: error instanceof Error ? error.message : String(error),
       },
     ],
-  };
+  });
 }
 
 export function createRestoredGitCreatePullRequestDeniedTask(
   record: DurableApprovalRecord,
 ): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredGitCreatePullRequestApprovalTask(record),
     id: `restored-approval-denied-${record.taskId}`,
     title: "Git pull request denied",
     status: "completed",
     commanderMessage: "Permission was denied after restore. Javis did not create a pull request.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "denied"),
     verificationSummary: "verified: restored Git pull request creation was denied and no remote PR was created.",
-  };
+  });
 }
 
 export function createRestoredGitCreatePullRequestApprovedTask(
   record: DurableApprovalRecord,
   execution: GitCreatePullRequestExecutionQuickResult,
 ): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredGitCreatePullRequestApprovalTask(record),
     id: `restored-approval-approved-${record.taskId}`,
     title: execution.created ? "Git pull request created" : "Git pull request did not run",
     status: execution.created ? "completed" : "failed",
     commanderMessage: "Restored permission was approved and the Git pull request was created.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "approved"),
     verificationSummary: `${execution.created ? "verified" : "failed"}: created ${execution.draft ? "draft " : ""}pull request ${execution.url}.`,
     logs: [
       ...createRestoredGitCreatePullRequestApprovalTask(record).logs,
@@ -723,20 +900,22 @@ export function createRestoredGitCreatePullRequestApprovedTask(
         detail: execution.output || `Created pull request ${execution.url}.`,
       },
     ],
-  };
+  });
 }
 
 export function createRestoredGitCreatePullRequestFailedTask(
   record: DurableApprovalRecord,
   error: unknown,
 ): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredGitCreatePullRequestApprovalTask(record),
     id: `restored-approval-failed-${record.taskId}`,
     title: "Git pull request creation failed",
     status: "failed",
     commanderMessage: "Restored permission was approved, but native Git pull request creation failed.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "approved"),
+    verificationSummary: `failed: restored Git pull request creation failed before completion; ${error instanceof Error ? error.message : String(error)}`,
     logs: [
       ...createRestoredGitCreatePullRequestApprovalTask(record).logs,
       {
@@ -746,34 +925,36 @@ export function createRestoredGitCreatePullRequestFailedTask(
         detail: error instanceof Error ? error.message : String(error),
       },
     ],
-  };
+  });
 }
 
 export function createRestoredGitCommentPullRequestDeniedTask(
   record: DurableApprovalRecord,
 ): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredGitCommentPullRequestApprovalTask(record),
     id: `restored-approval-denied-${record.taskId}`,
     title: "Git pull request comment denied",
     status: "completed",
     commanderMessage: "Permission was denied after restore. Javis did not post a pull request comment.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "denied"),
     verificationSummary: "verified: restored Git pull request comment was denied and no remote comment was posted.",
-  };
+  });
 }
 
 export function createRestoredGitCommentPullRequestApprovedTask(
   record: DurableApprovalRecord,
   execution: GitCommentPullRequestExecutionQuickResult,
 ): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredGitCommentPullRequestApprovalTask(record),
     id: `restored-approval-approved-${record.taskId}`,
     title: execution.commented ? "Git pull request comment posted" : "Git pull request comment did not run",
     status: execution.commented ? "completed" : "failed",
     commanderMessage: "Restored permission was approved and the Git pull request comment was posted.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "approved"),
     verificationSummary: `${execution.commented ? "verified" : "failed"}: posted pull request comment on ${execution.pullRequest}.`,
     logs: [
       ...createRestoredGitCommentPullRequestApprovalTask(record).logs,
@@ -784,20 +965,22 @@ export function createRestoredGitCommentPullRequestApprovedTask(
         detail: execution.output || `Posted pull request comment on ${execution.pullRequest}.`,
       },
     ],
-  };
+  });
 }
 
 export function createRestoredGitCommentPullRequestFailedTask(
   record: DurableApprovalRecord,
   error: unknown,
 ): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredGitCommentPullRequestApprovalTask(record),
     id: `restored-approval-failed-${record.taskId}`,
     title: "Git pull request comment failed",
     status: "failed",
     commanderMessage: "Restored permission was approved, but native Git pull request commenting failed.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "approved"),
+    verificationSummary: `failed: restored Git pull request comment failed before completion; ${error instanceof Error ? error.message : String(error)}`,
     logs: [
       ...createRestoredGitCommentPullRequestApprovalTask(record).logs,
       {
@@ -807,7 +990,7 @@ export function createRestoredGitCommentPullRequestFailedTask(
         detail: error instanceof Error ? error.message : String(error),
       },
     ],
-  };
+  });
 }
 
 export async function runRestoredGitPush(
@@ -1063,7 +1246,7 @@ export function createRestoredCodePatchApprovedTask(
   verification: ShellCommandOutput,
 ): TaskSnapshot {
   const applyStatus = applyResult.applied && verification.exitCode === 0 ? "completed" : "failed";
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredCodePatchApprovalTask(record),
     id: `restored-approval-approved-${record.taskId}`,
     title:
@@ -1076,26 +1259,29 @@ export function createRestoredCodePatchApprovedTask(
         ? "Restored permission was approved, the patch was applied, and post-apply verification passed."
         : "Restored permission was approved, but post-apply verification did not pass.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "approved"),
     codeApplyResult: applyResult,
     commands: [verification],
     verificationSummary:
       applyStatus === "completed"
         ? `verified: restored Code Agent patch applied to ${applyResult.changedFiles.length} file(s), and post-apply git diff --check passed.`
         : `failed: restored Code Agent patch apply result was ${applyResult.applied ? "applied" : "not applied"} and post-apply git diff --check returned exit code ${verification.exitCode ?? "unknown"}.`,
-  };
+  });
 }
 
 export function createRestoredCodePatchFailedTask(
   record: DurableApprovalRecord,
   error: unknown,
 ): TaskSnapshot {
-  return {
+  return withRestoredVerificationResult({
     ...createRestoredCodePatchApprovalTask(record),
     id: `restored-approval-failed-${record.taskId}`,
     title: "Code Agent patch application failed",
     status: "failed",
     commanderMessage: "Restored permission was approved, but native patch application failed.",
     permissionRequest: record.permissionRequest,
+    approvalOutcome: createRestoredApprovalOutcome(record, "approved"),
+    verificationSummary: `failed: restored Code Agent patch application failed before verification; ${error instanceof Error ? error.message : String(error)}`,
     logs: [
       ...createRestoredCodePatchApprovalTask(record).logs,
       {
@@ -1105,5 +1291,5 @@ export function createRestoredCodePatchFailedTask(
         detail: error instanceof Error ? error.message : String(error),
       },
     ],
-  };
+  });
 }

@@ -1070,6 +1070,8 @@ export interface ComputerScreenshotRequest {
 
 export interface ComputerScreenshotResult {
   dataUrl: string;
+  contentHash?: string;
+  cacheId?: string;
   width: number;
   height: number;
   sourceWidth?: number;

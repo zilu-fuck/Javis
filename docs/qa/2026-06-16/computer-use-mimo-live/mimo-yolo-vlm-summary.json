@@ -1,0 +1,32 @@
+﻿{
+    "ok":  true,
+    "timestamp":  "2026-06-16T17:36:25+08:00",
+    "provider":  "mimo",
+    "model":  "mimo-v2.5",
+    "baseUrl":  "https://token-plan-cn.xiaomimimo.com/v1",
+    "elapsedMs":  16484,
+    "screenshot":  "mimo-yolo-live-screen.png",
+    "yolo":  {
+                 "path":  "mimo-yolo-local-vision-smoke.json",
+                 "detections":  20,
+                 "latencyMs":  669,
+                 "runtime":  "onnxruntime",
+                 "model":  "yolo26n-ui.onnx"
+             },
+    "responsePath":  "mimo-yolo-vlm-response.json",
+    "content":  "",
+    "parsedJson":  true,
+    "parseError":  null,
+    "parsed":  null,
+    "usage":  {
+                  "completion_tokens":  900,
+                  "prompt_tokens":  4412,
+                  "total_tokens":  5312,
+                  "completion_tokens_details":  {
+                                                    "reasoning_tokens":  899
+                                                },
+                  "prompt_tokens_details":  {
+                                                "image_tokens":  2040
+                                            }
+              }
+}

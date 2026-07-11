@@ -1,0 +1,43 @@
+{
+  "screenshot": {
+    "width": 1920,
+    "height": 1080,
+    "methodUsed": "bitblt",
+    "hasPngDataUrl": true,
+    "dataUrlChars": 1171686,
+    "health": {
+      "sampledPixels": 4096,
+      "dominantColorRatio": 0.4111328125,
+      "darkPixelRatio": 0.018310546875,
+      "suspiciousBlank": false,
+      "reason": null
+    }
+  },
+  "completion": {
+    "provider": "mimo",
+    "model": "mimo-v2.5",
+    "textChars": 332,
+    "elapsedMs": 6592,
+    "tokenUsage": {
+      "inputTokens": 2391,
+      "outputTokens": 316,
+      "totalTokens": 2707
+    }
+  },
+  "rawPreview": "{\n  \"observation\": \"Javis 应用界面正常显示，左侧有导航栏（包括搜索、新建对话、聊天、项目、自动任务、技能广场、本地知识库、应用、文档、图库、此电脑、项目、设置），中间区域有欢迎信息、输入框和预设建议，底部状态栏显示时间、日期和系统图标。\",\n  \"action\": {\n    \"tool\": \"computer.wait\",\n    \"params\": {\n      \"ms\": 0\n    }\n  },\n  \"target\": \"done\",\n  \"confidence\": \"high\",\n  \"status\": \"complete\",\n  \"summary\": \"Javis 应用界面已加载并处于就绪状态，可进行后续操作。\"\n}",
+  "parsed": {
+    "observation": "Javis 应用界面正常显示，左侧有导航栏（包括搜索、新建对话、聊天、项目、自动任务、技能广场、本地知识库、应用、文档、图库、此电脑、项目、设置），中间区域有欢迎信息、输入框和预设建议，底部状态栏显示时间、日期和系统图标。",
+    "tool": "computer.wait",
+    "params": {
+      "ms": 0
+    },
+    "target": "done",
+    "confidence": "high",
+    "status": "complete",
+    "summary": "Javis 应用界面已加载并处于就绪状态，可进行后续操作。"
+  },
+  "parseError": "",
+  "waitResult": {
+    "waited": 0
+  }
+}

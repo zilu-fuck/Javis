@@ -1,0 +1,72 @@
+{
+  "ok": true,
+  "notepad": {
+    "handle": 16387668,
+    "title": "无标题 - Notepad",
+    "className": "Notepad",
+    "rect": {
+      "x": 77,
+      "y": 141,
+      "width": 1438,
+      "height": 875
+    },
+    "isVisible": true,
+    "isForeground": false
+  },
+  "typed": {
+    "typed": true,
+    "length": 21
+  },
+  "logs": [
+    {
+      "phase": "approved",
+      "toolName": "computer.focusWindow",
+      "approvalId": "qa-focus-notepad-unicode-001",
+      "request": {
+        "handle": 16387668
+      }
+    },
+    {
+      "phase": "executed",
+      "cmd": "computer_focus_window",
+      "approvalId": "qa-focus-notepad-unicode-001",
+      "result": {
+        "focused": true,
+        "title": "无标题 - Notepad"
+      }
+    },
+    {
+      "phase": "approved",
+      "toolName": "computer.type",
+      "approvalId": "qa-type-unicode-space-001",
+      "request": {
+        "text": "Javis computer-use 测试",
+        "delayMs": 20,
+        "clearBefore": true
+      }
+    },
+    {
+      "phase": "executed",
+      "cmd": "computer_type",
+      "approvalId": "qa-type-unicode-space-001",
+      "result": {
+        "typed": true,
+        "length": 21
+      }
+    }
+  ],
+  "shotMeta": {
+    "width": 1438,
+    "height": 875,
+    "methodUsed": "printWindow",
+    "health": {
+      "sampledPixels": 4096,
+      "dominantColorRatio": 0.83251953125,
+      "darkPixelRatio": 0,
+      "suspiciousBlank": false,
+      "reason": null
+    },
+    "dataUrlLength": 63066
+  },
+  "shotDataUrl": "[redacted data url length=63066]"
+}

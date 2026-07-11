@@ -6,6 +6,7 @@ import {
   validateStepInputContext,
   writeStepOutput,
 } from "./shared-context";
+import { isArtifactEnvelope } from "./artifact-envelope";
 import { DEFAULT_TASK_TIMEOUT_MS, throwIfTaskAborted, withTaskTimeout } from "./task-wait";
 import type { WorkbenchWorkflow, WorkbenchWorkflowStep } from "./workflows";
 
@@ -34,9 +35,18 @@ export interface WorkflowStepFailureReplanAction {
   steps?: WorkbenchWorkflowStep[];
 }
 
+export interface WorkflowResumeState {
+  completedStepIds?: string[];
+  abandonedStepIds?: string[];
+  retryStepIds?: string[];
+  contextSnapshot?: Record<string, unknown>;
+  results?: Record<string, unknown>;
+}
+
 export interface WorkflowExecutorOptions {
   workflow: WorkbenchWorkflow;
   context?: SharedTaskContext;
+  resumeFrom?: WorkflowResumeState;
   signal?: AbortSignal;
   stepTimeoutMs?: number;
   maxStepRetries?: number;
@@ -87,6 +97,7 @@ export interface WorkflowExecutorOptions {
 export async function executeWorkflow({
   workflow,
   context = createSharedTaskContext(),
+  resumeFrom,
   signal,
   stepTimeoutMs = DEFAULT_TASK_TIMEOUT_MS,
   maxStepRetries = 1,
@@ -107,10 +118,21 @@ export async function executeWorkflow({
   };
   validateWorkflowDag(activeWorkflow);
 
-  const completed = new Set<string>();
-  const abandoned = new Set<string>();
+  hydrateContextFromSnapshot(context, resumeFrom?.contextSnapshot);
+  const completed = new Set(filterKnownStepIds(resumeFrom?.completedStepIds, activeWorkflow));
+  const abandoned = new Set(filterKnownStepIds(resumeFrom?.abandonedStepIds, activeWorkflow));
+  const retry = new Set(filterKnownStepIds(resumeFrom?.retryStepIds, activeWorkflow));
   const runningOrFinished = new Set<string>();
-  const results = new Map<string, unknown>();
+  for (const stepId of completed) {
+    runningOrFinished.add(stepId);
+  }
+  for (const stepId of abandoned) {
+    runningOrFinished.add(stepId);
+  }
+  for (const stepId of retry) {
+    runningOrFinished.delete(stepId);
+  }
+  const results = createResultMap(resumeFrom, completed, context);
   const replannedStepIds: string[] = [];
 
   while (completed.size + abandoned.size < activeWorkflow.steps.length) {
@@ -202,6 +224,57 @@ export async function executeWorkflow({
     results,
     contextSnapshot: context.snapshot(),
   };
+}
+
+function hydrateContextFromSnapshot(
+  context: SharedTaskContext,
+  snapshot: Record<string, unknown> | undefined,
+): void {
+  if (!snapshot) {
+    return;
+  }
+  for (const [key, value] of Object.entries(snapshot)) {
+    if (isArtifactEnvelope(value)) {
+      context.setEnvelope(key, value);
+      continue;
+    }
+    context.set(key, value);
+  }
+}
+
+function filterKnownStepIds(
+  stepIds: string[] | undefined,
+  workflow: WorkbenchWorkflow,
+): string[] {
+  if (!stepIds) {
+    return [];
+  }
+  const knownStepIds = new Set(workflow.steps.map((step) => step.id));
+  return stepIds.filter((stepId) => knownStepIds.has(stepId));
+}
+
+function createResultMap(
+  resumeFrom: WorkflowResumeState | undefined,
+  completed: Set<string>,
+  context: SharedTaskContext,
+): Map<string, unknown> {
+  const results = new Map<string, unknown>();
+  if (resumeFrom?.results) {
+    for (const [stepId, value] of Object.entries(resumeFrom.results)) {
+      if (completed.has(stepId)) {
+        results.set(stepId, value);
+      }
+    }
+  }
+  for (const stepId of completed) {
+    if (!results.has(stepId)) {
+      const value = context.get(`step:${stepId}`);
+      if (value !== undefined) {
+        results.set(stepId, value);
+      }
+    }
+  }
+  return results;
 }
 
 function validateWorkflowDag(workflow: WorkbenchWorkflow): void {

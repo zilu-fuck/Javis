@@ -52,6 +52,7 @@ enum SqlOperation {
 pub struct ApprovalRecordUpsertRequest {
     approval_id: String,
     task_id: String,
+    run_id: Option<String>,
     tool_name: String,
     workspace_path: String,
     permission_level: String,
@@ -207,6 +208,7 @@ pub fn approval_records_upsert(
             "INSERT INTO approval_records (
               approval_id,
               task_id,
+              run_id,
               tool_name,
               workspace_path,
               permission_level,
@@ -220,9 +222,10 @@ pub fn approval_records_upsert(
               code_proposed_edit_json,
               record_json,
               updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(approval_id) DO UPDATE SET
               task_id = excluded.task_id,
+              run_id = excluded.run_id,
               tool_name = excluded.tool_name,
               workspace_path = excluded.workspace_path,
               permission_level = excluded.permission_level,
@@ -239,6 +242,7 @@ pub fn approval_records_upsert(
             rusqlite::params![
                 request.approval_id,
                 request.task_id,
+                request.run_id,
                 request.tool_name,
                 request.workspace_path,
                 request.permission_level,
@@ -639,6 +643,7 @@ fn validate_sql(sql: &str, operation: SqlOperation) -> Result<(), String> {
                 return Ok(());
             }
             let tables = match first {
+                "alter" => alter_statement_tables(&tokens)?,
                 "create" => create_statement_tables(&tokens)?,
                 "insert" => {
                     let mut tables = table_after_keyword(&tokens, "into")?;
@@ -739,6 +744,15 @@ fn create_statement_tables(tokens: &[String]) -> Result<Vec<String>, String> {
     }
 }
 
+fn alter_statement_tables(tokens: &[String]) -> Result<Vec<String>, String> {
+    match tokens {
+        [alter, table, table_name, ..] if alter == "alter" && table == "table" => {
+            Ok(vec![table_name.clone()])
+        }
+        _ => Err("Only ALTER TABLE statements are allowed.".to_string()),
+    }
+}
+
 fn table_after_keyword(tokens: &[String], keyword: &str) -> Result<Vec<String>, String> {
     let Some(index) = tokens.iter().position(|token| token == keyword) else {
         return Err(format!("SQL statement is missing {keyword} table target."));
@@ -831,6 +845,7 @@ fn require_known_select_shape(tokens: &[String], sql_text: &str) -> Result<(), S
             | "select id namespace owner_id dimensions metric vector_json vector_norm metadata_json from vector_index_items where namespace limit"
             | "select id namespace owner_id dimensions metric vector_json vector_norm metadata_json from vector_index_items where namespace and scope_type and scope_id limit"
             | "select envelope_json from runtime_events where run_id order by sequence asc limit"
+            | "select envelope_json from runtime_events where run_id and sequence order by sequence asc limit"
             | "select envelope_json from runtime_events where task_id order by recorded_at asc sequence asc limit"
             | "select envelope_json from runtime_events where run_id order by sequence desc limit 1"
             | "select count as count from runtime_events where run_id"
@@ -976,6 +991,11 @@ fn has_required_select_operator_shape(signature: &str, sql_text: &str) -> bool {
         "select envelope_json from runtime_events where run_id order by sequence asc limit" => {
             sql_text.contains("where run_id = ?") && sql_text.contains("order by sequence asc") && sql_text.contains("limit ?")
         }
+        "select envelope_json from runtime_events where run_id and sequence order by sequence asc limit" => {
+            sql_text.contains("where run_id = ? and sequence <= ?")
+                && sql_text.contains("order by sequence asc")
+                && sql_text.contains("limit ?")
+        }
         "select envelope_json from runtime_events where task_id order by recorded_at asc sequence asc limit" => {
             sql_text.contains("where task_id = ?") && sql_text.contains("order by recorded_at asc") && sql_text.contains("limit ?")
         }
@@ -984,6 +1004,25 @@ fn has_required_select_operator_shape(signature: &str, sql_text: &str) -> bool {
         }
         "select count as count from runtime_events where run_id" => {
             sql_text.contains("where run_id = ?")
+        }
+        "select checkpoint_json from workflow_checkpoints where run_id order by event_sequence desc limit 1" => {
+            sql_text.contains("where run_id = ?")
+                && sql_text.contains("order by event_sequence desc")
+                && sql_text.contains("limit 1")
+        }
+        "select checkpoint_json from workflow_checkpoints where task_id order by created_at desc limit 1" => {
+            sql_text.contains("where task_id = ?")
+                && sql_text.contains("order by created_at desc")
+                && sql_text.contains("limit 1")
+        }
+        "select checkpoint_json from workflow_checkpoints where task_id order by event_sequence desc limit" => {
+            sql_text.contains("where task_id = ?")
+                && sql_text.contains("order by event_sequence desc")
+                && sql_text.contains("limit ?")
+        }
+        "select checkpoint_id from workflow_checkpoints where task_id order by event_sequence desc" => {
+            sql_text.contains("where task_id = ?")
+                && sql_text.contains("order by event_sequence desc")
         }
         _ => true,
     }
@@ -994,7 +1033,8 @@ fn require_known_execute_shape(tokens: &[String], sql_text: &str) -> Result<(), 
     if is_known_create_shape(tokens)
         || matches!(
             signature.as_str(),
-            "insert into schema_migrations id applied_at values"
+            "alter table approval_records add column run_id text"
+                | "insert into schema_migrations id applied_at values"
                 | "insert into task_history id title user_goal status updated_at snapshot_json values on conflict id do update set title excluded title user_goal excluded user_goal status excluded status updated_at excluded updated_at snapshot_json excluded snapshot_json"
                 | "insert into recent_workspaces path sort_order updated_at values on conflict path do update set sort_order excluded sort_order updated_at excluded updated_at"
                 | "insert into model_settings id provider model api_key_reference base_url updated_at values on conflict id do update set provider excluded provider model excluded model api_key_reference excluded api_key_reference base_url excluded base_url updated_at excluded updated_at"
@@ -1054,6 +1094,7 @@ fn require_known_execute_shape(tokens: &[String], sql_text: &str) -> Result<(), 
                 | "delete from vector_index_items where id"
                 | "delete from runtime_events where task_id"
                 | "delete from runtime_events where task_id and event_kind in"
+                | "delete from workflow_checkpoints where checkpoint_id"
         ) && has_required_execute_operator_shape(&signature, sql_text)
     {
         Ok(())
@@ -1064,6 +1105,9 @@ fn require_known_execute_shape(tokens: &[String], sql_text: &str) -> Result<(), 
 
 fn has_required_execute_operator_shape(signature: &str, sql_text: &str) -> bool {
     match signature {
+        "alter table approval_records add column run_id text" => {
+            sql_text == "alter table approval_records add column run_id text"
+        }
         "update agent_memory_facts set last_accessed_at case when last_accessed_at is null or last_accessed_at then else last_accessed_at end access_count coalesce access_count 0 1 where id and status" => {
             sql_text.contains("set last_accessed_at = case")
                 && sql_text.contains("last_accessed_at is null or last_accessed_at < ?")
@@ -1113,6 +1157,9 @@ fn has_required_execute_operator_shape(signature: &str, sql_text: &str) -> bool 
         "delete from runtime_events where task_id" => sql_text.contains("where task_id = ?"),
         "delete from runtime_events where task_id and event_kind in" => {
             sql_text.contains("where task_id = ?") && sql_text.contains("event_kind in")
+        }
+        "delete from workflow_checkpoints where checkpoint_id" => {
+            sql_text.contains("where checkpoint_id = ?")
         }
         _ => true,
     }
@@ -1187,6 +1234,7 @@ fn is_known_create_shape(tokens: &[String]) -> bool {
         "approval_records" => &[
             "approval_id",
             "task_id",
+            "run_id",
             "tool_name",
             "workspace_path",
             "permission_level",
@@ -1494,6 +1542,9 @@ fn validate_approval_record_upsert_request(
 ) -> Result<(), String> {
     require_non_empty(&request.approval_id, "approvalId")?;
     require_non_empty(&request.task_id, "taskId")?;
+    if let Some(run_id) = request.run_id.as_deref() {
+        require_non_empty(run_id, "runId")?;
+    }
     require_non_empty(&request.tool_name, "toolName")?;
     require_non_empty(&request.workspace_path, "workspacePath")?;
     require_non_empty(&request.preview_hash, "previewHash")?;
@@ -1526,6 +1577,7 @@ fn validate_approval_record_upsert_request(
         parse_json_object(&request.permission_request_json, "permissionRequestJson")?;
     require_json_string(&record, "approvalId", &request.approval_id)?;
     require_json_string(&record, "taskId", &request.task_id)?;
+    require_optional_json_string(&record, "runId", request.run_id.as_deref())?;
     require_json_string(&record, "toolName", &request.tool_name)?;
     require_json_string(&record, "workspacePath", &request.workspace_path)?;
     require_json_string(&record, "permissionLevel", &request.permission_level)?;
@@ -1654,6 +1706,7 @@ mod tests {
         let record = serde_json::json!({
             "approvalId": "approval-1",
             "taskId": "task-1",
+            "runId": "run-1",
             "toolName": "file.writeText",
             "workspacePath": "E:/Javis",
             "permissionLevel": "confirmed_write",
@@ -1666,6 +1719,7 @@ mod tests {
         ApprovalRecordUpsertRequest {
             approval_id: "approval-1".to_string(),
             task_id: "task-1".to_string(),
+            run_id: Some("run-1".to_string()),
             tool_name: "file.writeText".to_string(),
             workspace_path: "E:/Javis".to_string(),
             permission_level: "confirmed_write".to_string(),
@@ -1680,6 +1734,56 @@ mod tests {
             record_json: record.to_string(),
             updated_at: "2026-06-08T00:00:01.000Z".to_string(),
         }
+    }
+
+    fn in_memory_connection() -> Connection {
+        Connection::open_in_memory().expect("open in-memory sqlite database")
+    }
+
+    fn create_runtime_events_table(connection: &Connection) {
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE runtime_events (
+                  event_id TEXT PRIMARY KEY,
+                  task_id TEXT NOT NULL,
+                  run_id TEXT NOT NULL,
+                  sequence INTEGER NOT NULL,
+                  event_version INTEGER NOT NULL,
+                  event_kind TEXT NOT NULL,
+                  workflow_id TEXT,
+                  step_id TEXT,
+                  agent_id TEXT,
+                  occurred_at TEXT NOT NULL,
+                  recorded_at TEXT NOT NULL,
+                  envelope_json TEXT NOT NULL,
+                  UNIQUE(run_id, sequence)
+                );
+                "#,
+            )
+            .expect("create runtime_events table");
+    }
+
+    fn create_workflow_checkpoints_table(connection: &Connection) {
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE workflow_checkpoints (
+                  checkpoint_id TEXT PRIMARY KEY,
+                  task_id TEXT NOT NULL,
+                  run_id TEXT NOT NULL,
+                  workflow_id TEXT NOT NULL,
+                  workflow_version INTEGER NOT NULL,
+                  plan_hash TEXT NOT NULL,
+                  event_sequence INTEGER NOT NULL,
+                  created_at TEXT NOT NULL,
+                  workflow_json TEXT NOT NULL,
+                  checkpoint_json TEXT NOT NULL,
+                  UNIQUE(run_id, event_sequence)
+                );
+                "#,
+            )
+            .expect("create workflow_checkpoints table");
     }
 
     #[test]
@@ -1709,12 +1813,109 @@ mod tests {
     }
 
     #[test]
+    fn runtime_events_reject_duplicate_run_and_sequence() {
+        let connection = in_memory_connection();
+        create_runtime_events_table(&connection);
+
+        connection
+            .execute(
+                r#"INSERT INTO runtime_events
+                   (event_id, task_id, run_id, sequence, event_version, event_kind, workflow_id, step_id, agent_id, occurred_at, recorded_at, envelope_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                [
+                    "evt-1",
+                    "task-1",
+                    "run-1",
+                    "1",
+                    "1",
+                    "step.started",
+                    "workflow-1",
+                    "step-1",
+                    "agent-1",
+                    "2026-06-16T00:00:00.000Z",
+                    "2026-06-16T00:00:00.001Z",
+                    r#"{"eventId":"evt-1"}"#,
+                ],
+            )
+            .expect("insert first runtime event");
+
+        let duplicate = connection.execute(
+            r#"INSERT INTO runtime_events
+               (event_id, task_id, run_id, sequence, event_version, event_kind, workflow_id, step_id, agent_id, occurred_at, recorded_at, envelope_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+            [
+                "evt-2",
+                "task-1",
+                "run-1",
+                "1",
+                "1",
+                "step.completed",
+                "workflow-1",
+                "step-1",
+                "agent-1",
+                "2026-06-16T00:00:01.000Z",
+                "2026-06-16T00:00:01.001Z",
+                r#"{"eventId":"evt-2"}"#,
+            ],
+        );
+
+        assert!(duplicate.is_err());
+    }
+
+    #[test]
+    fn workflow_checkpoints_reject_duplicate_run_and_event_sequence() {
+        let connection = in_memory_connection();
+        create_workflow_checkpoints_table(&connection);
+
+        connection
+            .execute(
+                r#"INSERT INTO workflow_checkpoints
+                   (checkpoint_id, task_id, run_id, workflow_id, workflow_version, plan_hash, event_sequence, created_at, workflow_json, checkpoint_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                [
+                    "ckpt-1",
+                    "task-1",
+                    "run-1",
+                    "workflow-1",
+                    "1",
+                    "plan-1",
+                    "3",
+                    "2026-06-16T00:00:03.000Z",
+                    "{}",
+                    "{}",
+                ],
+            )
+            .expect("insert first checkpoint");
+
+        let duplicate = connection.execute(
+            r#"INSERT INTO workflow_checkpoints
+               (checkpoint_id, task_id, run_id, workflow_id, workflow_version, plan_hash, event_sequence, created_at, workflow_json, checkpoint_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+            [
+                "ckpt-2",
+                "task-1",
+                "run-1",
+                "workflow-1",
+                "1",
+                "plan-1",
+                "3",
+                "2026-06-16T00:00:04.000Z",
+                "{}",
+                "{}",
+            ],
+        );
+
+        assert!(duplicate.is_err());
+    }
+
+    #[test]
     fn allows_known_app_execute_statements() {
         let statements = [
             "BEGIN TRANSACTION",
             "COMMIT",
             "ROLLBACK",
             "CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
+            "ALTER TABLE approval_records ADD COLUMN run_id TEXT",
             "CREATE TABLE IF NOT EXISTS task_history (id TEXT PRIMARY KEY, title TEXT NOT NULL, user_goal TEXT NOT NULL, status TEXT NOT NULL, updated_at TEXT NOT NULL, snapshot_json TEXT NOT NULL)",
             "CREATE INDEX IF NOT EXISTS idx_resource_cache_kind_root ON resource_file_cache (kind, source_root_id)",
             "CREATE INDEX IF NOT EXISTS idx_app_classifications_cat ON app_classifications (category)",
@@ -1877,6 +2078,21 @@ mod tests {
                VALUES (?, ?, ?)"#,
             "DELETE FROM vector_index_buckets WHERE item_id = ?",
             "DELETE FROM vector_index_items WHERE id = ?",
+            "INSERT INTO runtime_events (event_id, task_id, run_id, sequence, event_version, event_kind, workflow_id, step_id, agent_id, occurred_at, recorded_at, envelope_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            r#"INSERT INTO workflow_checkpoints
+               (checkpoint_id, task_id, run_id, workflow_id, workflow_version, plan_hash, event_sequence, created_at, workflow_json, checkpoint_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(checkpoint_id) DO UPDATE SET
+                 task_id = excluded.task_id,
+                 run_id = excluded.run_id,
+                 workflow_id = excluded.workflow_id,
+                 workflow_version = excluded.workflow_version,
+                 plan_hash = excluded.plan_hash,
+                 event_sequence = excluded.event_sequence,
+                 created_at = excluded.created_at,
+                 workflow_json = excluded.workflow_json,
+                 checkpoint_json = excluded.checkpoint_json"#,
+            "DELETE FROM workflow_checkpoints WHERE checkpoint_id = ?",
         ];
 
         for sql in statements {
@@ -1977,6 +2193,15 @@ mod tests {
             "SELECT COUNT(*) as count FROM memory_injection_logs",
             "SELECT COUNT(*) as count FROM memory_injection_logs WHERE workspace_id = ?",
             "SELECT updated_at FROM agent_memory_facts WHERE status = ? ORDER BY updated_at DESC LIMIT 1",
+            "SELECT envelope_json FROM runtime_events WHERE run_id = ? ORDER BY sequence ASC LIMIT ?",
+            "SELECT envelope_json FROM runtime_events WHERE run_id = ? AND sequence <= ? ORDER BY sequence ASC LIMIT ?",
+            "SELECT envelope_json FROM runtime_events WHERE task_id = ? ORDER BY recorded_at ASC, sequence ASC LIMIT ?",
+            "SELECT envelope_json FROM runtime_events WHERE run_id = ? ORDER BY sequence DESC LIMIT 1",
+            "SELECT COUNT(*) as count FROM runtime_events WHERE run_id = ?",
+            "SELECT checkpoint_json FROM workflow_checkpoints WHERE run_id = ? ORDER BY event_sequence DESC LIMIT 1",
+            "SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id = ? ORDER BY created_at DESC LIMIT 1",
+            "SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id = ? ORDER BY event_sequence DESC LIMIT ?",
+            "SELECT checkpoint_id FROM workflow_checkpoints WHERE task_id = ? ORDER BY event_sequence DESC",
             r#"SELECT id, session_id, workspace_id, summary, important_points, open_threads, created_at, updated_at
                FROM agent_session_summaries
                WHERE workspace_id = ?
@@ -2010,6 +2235,7 @@ mod tests {
         let statements = [
             "DROP TABLE task_history",
             "ALTER TABLE task_history ADD COLUMN leaked TEXT",
+            "ALTER TABLE approval_records ADD COLUMN leaked TEXT",
             "ATTACH DATABASE 'x.db' AS x",
             "DETACH DATABASE main",
             "PRAGMA user_version",
@@ -2062,6 +2288,8 @@ mod tests {
             "DELETE FROM resource_file_cache WHERE kind <> ?",
             "DELETE FROM resource_file_cache WHERE kind = ? OR source_root_id = ?",
             "DELETE FROM task_history WHERE id IN (SELECT id FROM secrets)",
+            "DELETE FROM workflow_checkpoints",
+            "DELETE FROM workflow_checkpoints WHERE task_id = ?",
         ];
 
         for sql in statements {
@@ -2078,6 +2306,11 @@ mod tests {
             "SELECT * FROM task_history; DELETE FROM task_history",
             "SELECT * FROM task_history -- comment",
             "SELECT * FROM task_history",
+            "SELECT * FROM runtime_events",
+            "SELECT * FROM workflow_checkpoints",
+            "SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id <> ? ORDER BY event_sequence DESC LIMIT ?",
+            "SELECT checkpoint_json FROM workflow_checkpoints WHERE run_id = ? ORDER BY created_at DESC LIMIT 1",
+            "SELECT checkpoint_id FROM workflow_checkpoints WHERE task_id = ? ORDER BY created_at DESC",
             "SELECT user_goal FROM task_history",
             "SELECT record_json FROM approval_records",
             "SELECT * FROM resource_scan_roots ORDER BY source DESC, created_at ASC",

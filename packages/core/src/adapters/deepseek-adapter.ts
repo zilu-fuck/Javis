@@ -36,6 +36,7 @@ export class DeepSeekAdapter implements ProviderAdapter {
       temperature: input.temperature,
       stopSequences: input.stopSequences,
       locale: input.locale,
+      disableThinking: input.disableThinking,
       protocol: this.protocol,
     };
   }

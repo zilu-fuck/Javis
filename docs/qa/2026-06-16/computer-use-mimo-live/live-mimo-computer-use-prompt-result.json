@@ -1,0 +1,36 @@
+{
+  "completion": {
+    "provider": "mimo",
+    "model": "mimo-v2.5",
+    "elapsedMs": 7683,
+    "textChars": 625,
+    "tokenUsage": {
+      "inputTokens": 2762,
+      "outputTokens": 481,
+      "totalTokens": 3243
+    }
+  },
+  "parsed": {
+    "observation": "A 1920x1080 desktop with multiple windows open. The primary window is 'Javis' (a chat application) centered on the screen. Behind it, a dark-themed IDE (likely VS Code) is visible on the right, and another window is partially visible on the left. The Windows taskbar is at the bottom with several application icons. The desktop is cluttered with open applications.",
+    "action": {
+      "tool": "computer.listWindows",
+      "params": {}
+    },
+    "target": "Get a structured list of all open windows to understand the current desktop state for inspection",
+    "confidence": "high"
+  },
+  "parseError": "",
+  "screenshot": {
+    "width": 1920,
+    "height": 1080,
+    "methodUsed": "bitblt",
+    "health": {
+      "sampledPixels": 4096,
+      "dominantColorRatio": 0.410888671875,
+      "darkPixelRatio": 0.018310546875,
+      "suspiciousBlank": false,
+      "reason": null
+    }
+  },
+  "rawPreview": "```json\n{\n    \"observation\": \"A 1920x1080 desktop with multiple windows open. The primary window is 'Javis' (a chat application) centered on the screen. Behind it, a dark-themed IDE (likely VS Code) is visible on the right, and another window is partially visible on the left. The Windows taskbar is at the bottom with several application icons. The desktop is cluttered with open applications.\",\n    \"action\": {\n        \"tool\": \"computer.listWindows\",\n        \"params\": {}\n    },\n    \"target\": \"Get a structured list of all open windows to understand the current desktop state for inspection\",\n    \"confidence\": \"high\"\n}\n```"
+}

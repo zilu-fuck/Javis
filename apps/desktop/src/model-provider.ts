@@ -3,12 +3,15 @@ import { localeDefaultModelSettings } from "./model-settings";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { buildAgentSystemPrompt, injectTerminologyPrompt, getAdapter } from "@javis/core";
-import type { AgentKind, AgentStyleRecord, ProviderAdapter, WorkspacePromptProfile } from "@javis/core";
+import type { AgentKind, AgentStyleRecord, ModelMediaInput, ProviderAdapter, WorkspacePromptProfile } from "@javis/core";
 
 export interface CompletionOptions {
   model?: string;
   imageDataUrl?: string;
   images?: string[];
+  media?: ModelMediaInput[];
+  enableMediaUuid?: boolean;
+  disableThinking?: boolean;
   maxTokens?: number;
   temperature?: number;
   stopSequences?: string[];
@@ -309,6 +312,9 @@ async function createModelRequest(
       prompt: requestPrompt,
       imageDataUrl: options?.imageDataUrl,
       images: options?.images,
+      media: options?.media,
+      enableMediaUuid: options?.enableMediaUuid,
+      disableThinking: options?.disableThinking,
       model: options?.model ?? providerSettings.model,
       providerId,
       baseUrl: providerSettings.baseUrl,
@@ -325,6 +331,9 @@ async function createModelRequest(
     prompt: requestPrompt,
     imageDataUrl: options?.imageDataUrl,
     images: options?.images,
+    media: options?.media,
+    enableMediaUuid: options?.enableMediaUuid,
+    disableThinking: options?.disableThinking,
     providerId,
     model: options?.model ?? providerSettings.model,
     apiKeyReference: providerSettings.apiKeyReference,

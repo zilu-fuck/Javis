@@ -38,12 +38,18 @@ import {
   createRuntimeEventEnvelope,
   currentEnvelopeSequence,
   resetEnvelopeSequence,
+  seedEnvelopeSequence,
   type RuntimeEventEnvelope,
 } from "./runtime-event-envelope";
 import {
   buildCheckpointFromDagState,
+  computePlanHash,
   type WorkflowCheckpoint,
 } from "./workflow-checkpoint";
+import {
+  createWorkflowResumeStateFromReconciliation,
+  reconcileCheckpointWithEventLog,
+} from "./workflow-checkpoint-reconciliation";
 import { compileCommanderPlan, formatDiagnosticSummary } from "./planning/commander-plan-compiler";
 import {
   appendStepsToCompiledPlan,
@@ -69,6 +75,12 @@ import {
   createRecoveryAttempt,
   type RecoveryAttemptRecord,
 } from "./recovery-report";
+import type { ReplanShapeInput } from "./progress-ledger";
+import {
+  filterDelegableToolDescriptors,
+  READ_PREVIEW_SUBAGENT_DELEGATION_POLICY,
+  type DelegationPolicy,
+} from "./delegation-policy";
 import { inferImagePath, isVisionGoal } from "./vision-utils";
 import { appendLog } from "./snapshot-utils";
 import {
@@ -94,7 +106,7 @@ import {
   isContextOverflowError,
   type ContextSummaryTool,
 } from "./context-recovery";
-import { executeWorkflow } from "./workflow-dag-executor";
+import { executeWorkflow, type WorkflowResumeState } from "./workflow-dag-executor";
 import {
   getWorkbenchWorkflow,
   type WorkbenchWorkflow,
@@ -102,17 +114,22 @@ import {
   type WorkbenchWorkflowStep,
 } from "./workflows";
 import {
+  canExecuteWorkspaceWrite,
   formatAgentDisplayName,
   markCurrentStepFailed,
   runProjectReadOnlyCommands,
+  runWorkspaceGitCommitCommand,
+  runWorkspaceGitStageCommand,
   safeInspectRepository,
   workflowStepToTaskStep,
 } from "./workflow-step-helpers";
+import type { WorkspaceRuntime } from "./workspace-runtime";
 import { extractUrls, isComputerUseGoal } from "./routing";
 import type { CommanderDagStep, CommanderDagPlan } from "./commander-plan-schema";
 import type { AgentCapabilityTag } from "./agent-capability";
 import {
   resolveStepInput,
+  writeStepArtifactOutput,
   writeStepOutput,
   type SharedTaskContext,
 } from "./shared-context";
@@ -314,6 +331,7 @@ interface ReadCurrentProjectWorkflowOptions {
   taskId: ID;
   userGoal: string;
   availableToolDescriptors?: ToolDescriptor[];
+  workspaceRuntime?: WorkspaceRuntime;
 }
 
 export function isReadCurrentProjectGoal(userGoal: string): boolean {
@@ -331,6 +349,7 @@ export async function runReadCurrentProjectWorkflow({
   taskId,
   userGoal,
   availableToolDescriptors,
+  workspaceRuntime,
 }: ReadCurrentProjectWorkflowOptions) {
   const workflow = getWorkbenchWorkflow("read-current-project");
   if (!workflow) {
@@ -442,7 +461,7 @@ export async function runReadCurrentProjectWorkflow({
       })],
       ["shell_readonly", async () => runInspectProjectStep({
         availableToolNames,
-        agentTracker, controller, emit, emitEvent, projectTool, shellTool, taskId,
+        agentTracker, controller, emit, emitEvent, projectTool, shellTool, taskId, workspaceRuntime,
       })],
       ["git_inspect", async () => runAnalyzeCodeStep({
         availableToolNames,
@@ -544,7 +563,7 @@ export async function runReadCurrentProjectWorkflow({
             return {
               output: await runInspectProjectStep({
                 availableToolNames,
-                agentTracker, controller, emit, emitEvent, projectTool, shellTool, taskId,
+                agentTracker, controller, emit, emitEvent, projectTool, shellTool, taskId, workspaceRuntime,
               }),
             };
           case "analyze-code":
@@ -956,18 +975,30 @@ export async function runGenericWorkbenchWorkflow({
 
 export function getAvailableAgentsForPlanning(
   availableToolDescriptors?: readonly ToolDescriptor[],
+  userGoal?: string,
+  delegationPolicy?: DelegationPolicy,
 ): Array<{ kind: string; allowedToolNames: string[]; capabilities: string[] }> {
   const normalizedToolDescriptors = availableToolDescriptors
     ? normalizeAvailableToolDescriptors(availableToolDescriptors)
     : undefined;
+  const planningScope = filterPlanningScopeForGoal(userGoal, {
+    agents: createDefaultAgentRegistry().list().map((reg) => reg.agent.kind),
+    tools: normalizedToolDescriptors,
+  });
   const availableToolNames = normalizedToolDescriptors
-    ? new Set(normalizedToolDescriptors.map((descriptor) => descriptor.name))
+    ? new Set(planningScope.tools.map((descriptor) => descriptor.name))
     : undefined;
-  const tools = normalizedToolDescriptors ?? [];
-  return createDefaultAgentRegistry().list().map((reg) => {
+  const tools = delegationPolicy
+    ? filterDelegableToolDescriptors(planningScope.tools, delegationPolicy)
+    : planningScope.tools;
+  const delegableToolNames = new Set(tools.map((descriptor) => descriptor.name));
+  return createDefaultAgentRegistry().list()
+    .filter((reg) => planningScope.agentKinds.has(reg.agent.kind))
+    .map((reg) => {
     const allowedToolNames = normalizedToolDescriptors
-      ? getAllowedToolNamesForAgent(reg.agent.kind, normalizedToolDescriptors)
+      ? getAllowedToolNamesForAgent(reg.agent.kind, planningScope.tools)
           .filter((toolName) => availableToolNames?.has(toolName))
+          .filter((toolName) => !delegationPolicy || delegableToolNames.has(toolName))
       : reg.agent.allowedToolNames;
     const capabilities = deriveAgentCapabilities(reg.agent.kind, tools, allowedToolNames);
     return {
@@ -976,6 +1007,73 @@ export function getAvailableAgentsForPlanning(
       capabilities,
     };
   });
+}
+
+export function getDelegableSubAgentsForPlanning(
+  availableToolDescriptors?: readonly ToolDescriptor[],
+  userGoal?: string,
+  delegationPolicy?: DelegationPolicy,
+): Array<{ kind: string; allowedToolNames: string[]; capabilities: string[] }> {
+  return getAvailableAgentsForPlanning(
+    availableToolDescriptors,
+    userGoal,
+    delegationPolicy ?? READ_PREVIEW_SUBAGENT_DELEGATION_POLICY,
+  ).filter((agent) => agent.kind !== "commander");
+}
+
+export function filterPlanningScopeForGoal(
+  userGoal: string | undefined,
+  input: {
+    agents: readonly string[];
+    tools: readonly ToolDescriptor[] | undefined;
+  },
+): { agentKinds: Set<string>; tools: ToolDescriptor[] } {
+  const tools = input.tools ? [...input.tools] : [];
+  if (!userGoal || !isComputerUseGoal(userGoal)) {
+    return {
+      agentKinds: new Set(input.agents),
+      tools,
+    };
+  }
+
+  const agentKinds: Set<string> = new Set(
+    input.agents.filter((kind) =>
+      kind === "commander" ||
+      kind === "computer" ||
+      kind === "verifier" ||
+      kind === "vision"
+    ),
+  );
+  const scopedTools = tools.filter((descriptor) =>
+    descriptor.ownerAgentKinds.some((kind) => agentKinds.has(kind)) &&
+    (
+      descriptor.name.startsWith("commander.") ||
+      descriptor.name.startsWith("computer.") ||
+      descriptor.name.startsWith("vision.") ||
+      descriptor.name === "verifier.check" ||
+      descriptor.name === "file.scanInstalledApps" ||
+      descriptor.name === "file.scanUserImages" ||
+      descriptor.capabilityTags.some((tag) =>
+        tag === "evidence_check" ||
+        tag === "image_analyze" ||
+        tag === "image_describe" ||
+        tag === "image_ocr" ||
+        tag === "image_scan" ||
+        tag === "local_search" ||
+        tag === "desktop_screenshot" ||
+        tag === "desktop_list_windows" ||
+        tag === "desktop_ui_tree" ||
+        tag === "desktop_focus" ||
+        tag === "desktop_ui_input" ||
+        tag === "desktop_input"
+      )
+    )
+  );
+
+  return {
+    agentKinds,
+    tools: scopedTools,
+  };
 }
 
 function deriveAgentCapabilities(
@@ -1082,11 +1180,18 @@ async function safePlanWorkflow(
   }
   try {
     const availableTools = normalizeAvailableToolDescriptors(availableToolDescriptors);
+    const planningScope = filterPlanningScopeForGoal(userGoal, {
+      agents: createDefaultAgentRegistry().list().map((reg) => reg.agent.kind),
+      tools: availableTools,
+    });
     return await commanderTool.plan({
       userGoal,
       workflowId,
-      availableAgents: getAvailableAgentsForPlanning(availableTools),
-      availableTools: toolDescriptorsForPlanner(availableTools),
+      availableAgents: getAvailableAgentsForPlanning(
+        planningScope.tools,
+        userGoal,
+      ),
+      availableTools: toolDescriptorsForPlanner(planningScope.tools),
     });
   } catch {
     return undefined;
@@ -3301,6 +3406,7 @@ async function executeGitStageDagStep(options: {
   signal?: AbortSignal;
   toolTimeoutMs: number;
   userWaitTimeoutMs: number;
+  workspaceRuntime?: WorkspaceRuntime;
 }): Promise<unknown> {
   const {
     dagStep,
@@ -3316,6 +3422,7 @@ async function executeGitStageDagStep(options: {
     signal,
     toolTimeoutMs,
     userWaitTimeoutMs,
+    workspaceRuntime,
   } = options;
 
   if (!gitTool?.planStageFiles || !gitTool.executeStageFiles) {
@@ -3501,11 +3608,13 @@ async function executeGitStageDagStep(options: {
     });
   }
   const execution = await withTaskTimeout(
-    () => gitTool.executeStageFiles!({
-      approvalId: plan.approvalId,
-      paths,
-      taskId,
-    }),
+    () => canExecuteWorkspaceWrite(workspaceRuntime)
+      ? runWorkspaceGitStageCommand({ runtime: workspaceRuntime, plan, paths })
+      : gitTool.executeStageFiles!({
+        approvalId: plan.approvalId,
+        paths,
+        taskId,
+      }),
     {
       label: `tool ${GIT_STAGE_TOOL_NAME} execute`,
       timeoutMs: toolTimeoutMs,
@@ -3554,6 +3663,7 @@ async function executeGitCommitDagStep(options: {
   signal?: AbortSignal;
   toolTimeoutMs: number;
   userWaitTimeoutMs: number;
+  workspaceRuntime?: WorkspaceRuntime;
 }): Promise<unknown> {
   const {
     dagStep,
@@ -3569,6 +3679,7 @@ async function executeGitCommitDagStep(options: {
     signal,
     toolTimeoutMs,
     userWaitTimeoutMs,
+    workspaceRuntime,
   } = options;
 
   if (!gitTool?.planCommit || !gitTool.executeCommit) {
@@ -3756,12 +3867,14 @@ async function executeGitCommitDagStep(options: {
     });
   }
   const execution = await withTaskTimeout(
-    () => gitTool.executeCommit!({
-      approvalId: plan.approvalId,
-      message,
-      paths,
-      taskId,
-    }),
+    () => canExecuteWorkspaceWrite(workspaceRuntime)
+      ? runWorkspaceGitCommitCommand({ runtime: workspaceRuntime, plan, message, paths })
+      : gitTool.executeCommit!({
+        approvalId: plan.approvalId,
+        message,
+        paths,
+        taskId,
+      }),
     {
       label: `tool ${GIT_COMMIT_TOOL_NAME} execute`,
       timeoutMs: toolTimeoutMs,
@@ -5202,6 +5315,91 @@ function updateAskUserConversation(
 
 const COMMANDER_DAG_WORKFLOW_ID = "commander-dag";
 
+interface CommanderResumeBuildResult {
+  resumeState: WorkflowResumeState;
+  metadata: NonNullable<TaskSnapshot["durableResume"]>;
+}
+
+function buildCommanderResumeState({
+  resumeFromCheckpoint,
+  workflow,
+  emitEvent,
+  appendRuntimeLog,
+  taskId,
+}: {
+  resumeFromCheckpoint: CommanderDagTaskOptions["resumeFromCheckpoint"];
+  workflow: WorkbenchWorkflow;
+  emitEvent: (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number];
+  appendRuntimeLog: (log: TaskSnapshot["logs"][number]) => void;
+  taskId: string;
+}): CommanderResumeBuildResult | undefined {
+  if (!resumeFromCheckpoint) {
+    return undefined;
+  }
+  const { checkpoint, events } = resumeFromCheckpoint;
+  if (
+    checkpoint.workflowId !== workflow.id ||
+    checkpoint.planHash !== computePlanHash(workflow.steps)
+  ) {
+    emitEvent({
+      kind: "tool.completed",
+      taskId,
+      toolName: "workflow.resume.blocked",
+      detail: `Checkpoint ${checkpoint.runId} does not match the compiled Commander DAG plan.`,
+    });
+    throw new Error(`Checkpoint ${checkpoint.runId} does not match the compiled Commander DAG plan.`);
+  }
+
+  const reconciliation = reconcileCheckpointWithEventLog(checkpoint, events);
+  const resumeStateResult = createWorkflowResumeStateFromReconciliation(reconciliation);
+  if (resumeStateResult.status !== "ready") {
+    emitEvent({
+      kind: "tool.completed",
+      taskId,
+      toolName: "workflow.resume.blocked",
+      detail: `Checkpoint ${checkpoint.runId} cannot resume safely: ${resumeStateResult.reason}`,
+    });
+    throw new Error(
+      `Checkpoint ${checkpoint.runId} cannot resume safely: ${resumeStateResult.reason}`,
+    );
+  }
+
+  const resumeSource = resumeStateResult.source === "event-log"
+    ? "workflow.resume.rebuilt"
+    : "workflow.resume.ready";
+  const resumeDetail = resumeStateResult.source === "event-log"
+    ? `${resumeSource}: Checkpoint ${checkpoint.runId} was rebuilt from event log sequence ${reconciliation.latestEventSequence}; ` +
+      `${resumeStateResult.resumeState.completedStepIds?.length ?? 0} step(s) will be skipped and ` +
+      `${resumeStateResult.resumeState.retryStepIds?.length ?? 0} step(s) will retry.`
+    : `${resumeSource}: Checkpoint ${checkpoint.runId} is resumable at event sequence ${checkpoint.eventSequence}; ` +
+      `${resumeStateResult.resumeState.completedStepIds?.length ?? 0} step(s) will be skipped.`;
+  emitEvent({
+    kind: "tool.completed",
+    taskId,
+    toolName: resumeSource,
+    detail: resumeDetail,
+  });
+  appendRuntimeLog({
+    id: `${taskId}-${resumeSource}`,
+    kind: "tool",
+    title: resumeSource,
+    detail: resumeDetail,
+  });
+  return {
+    resumeState: resumeStateResult.resumeState,
+    metadata: {
+      runId: checkpoint.runId,
+      source: resumeStateResult.source,
+      checkpointEventSequence: checkpoint.eventSequence,
+      latestEventSequence: reconciliation.latestEventSequence,
+      completedStepIds: resumeStateResult.resumeState.completedStepIds ?? [],
+      retryStepIds: resumeStateResult.resumeState.retryStepIds ?? [],
+      approvalRequestIds: reconciliation.approvalRequestIds,
+      rebuilt: resumeStateResult.source === "event-log",
+    },
+  };
+}
+
 // ── Commander DAG Task Executor ────────────────────────────────────────────
 
 interface CommanderDagTaskOptions {
@@ -5218,7 +5416,7 @@ interface CommanderDagTaskOptions {
       handler: ((decision: string) => void | Promise<void>) | undefined,
     ): void;
   };
-  commanderTool: CommanderTool;
+  commanderTool?: CommanderTool;
   codeTool?: CodeTool;
   computerTool?: ComputerTool;
   fileTool?: FileTool;
@@ -5251,6 +5449,11 @@ interface CommanderDagTaskOptions {
   checkpointSink?: {
     save: (checkpoint: WorkflowCheckpoint) => void | Promise<void>;
   };
+  /** Optional safe resume seed derived from a prior durable checkpoint and its event log. */
+  resumeFromCheckpoint?: {
+    checkpoint: WorkflowCheckpoint;
+    events: RuntimeEventEnvelope[];
+  };
   /** LLM-based ReAct decision maker. Called each iteration of the ReAct loop. */
   reactDecideNext?: (
     request: ReActDecisionRequest,
@@ -5279,6 +5482,7 @@ interface CommanderDagTaskOptions {
     onProgress?: (step: unknown) => void;
     signal?: AbortSignal;
   }) => Promise<unknown[]>;
+  workspaceRuntime?: WorkspaceRuntime;
 }
 
 /**
@@ -5317,14 +5521,19 @@ export async function runCommanderDagTask({
   signal,
   runtimeEventSink,
   checkpointSink,
+  resumeFromCheckpoint,
   reactDecideNext,
   replanDag,
   computerUseLoopRunner,
+  workspaceRuntime,
 }: CommanderDagTaskOptions) {
   const { emit, getSnapshot, wait } = controller;
   const runtimeTimeouts = resolveCommanderTimeouts(runtimeConfig);
-  const runId = `run-${taskId}-${Date.now()}`;
+  const runId = resumeFromCheckpoint?.checkpoint.runId ?? `run-${taskId}-${Date.now()}`;
   resetEnvelopeSequence(runId);
+  if (resumeFromCheckpoint) {
+    seedEnvelopeSequence(runId, resumeFromCheckpoint.checkpoint.eventSequence);
+  }
   const availableTools = filterAvailableToolDescriptorsForRuntime(
     normalizeAvailableToolDescriptors(availableToolDescriptors),
     {
@@ -5365,10 +5574,26 @@ export async function runCommanderDagTask({
   taskEventBus.on((event) => { eventLogs.push(taskEventToLogEntry(event)); });
 
   let snapshot = getSnapshot();
-  function emitSnapshot(next: TaskSnapshot) { emit(next); snapshot = getSnapshot(); }
+  function emitSnapshot(next: TaskSnapshot) {
+    emit({
+      ...next,
+      runId,
+    });
+    snapshot = getSnapshot();
+  }
 
   let syntheticWorkflow: WorkbenchWorkflow | undefined;
   const abandonedStepIds = new Set<string>();
+  let durablePersistenceQueue = Promise.resolve();
+  function enqueueDurablePersistence(label: string, operation: () => void | Promise<void>): void {
+    durablePersistenceQueue = durablePersistenceQueue
+      .then(() => Promise.resolve(operation()))
+      .catch((error) => {
+        // Durable persistence failures must not crash the live task, but
+        // later writes should still run so the queue does not get poisoned.
+        console.error(`[${label}] failed:`, error);
+      });
+  }
   function buildCheckpointFromSnapshot(
     waitingReason?: WorkflowCheckpoint["waitingReason"],
   ): WorkflowCheckpoint {
@@ -5397,10 +5622,7 @@ export async function runCommanderDagTask({
   function saveCheckpoint(waitingReason?: WorkflowCheckpoint["waitingReason"]) {
     if (!checkpointSink || !syntheticWorkflow) return;
     const checkpoint = buildCheckpointFromSnapshot(waitingReason);
-    void Promise.resolve(checkpointSink.save(checkpoint)).catch((error) => {
-      // Durable checkpoint persistence must not crash the live task.
-      console.error("[checkpoint-sink] save failed:", error);
-    });
+    enqueueDurablePersistence("checkpoint-sink", () => checkpointSink.save(checkpoint));
   }
 
   function emitEvent(event: TaskRuntimeEvent) {
@@ -5411,10 +5633,7 @@ export async function runCommanderDagTask({
         runId,
         workflowId: COMMANDER_DAG_WORKFLOW_ID,
       });
-      void Promise.resolve(runtimeEventSink.append(envelope)).catch((error) => {
-        // Durable event persistence must not crash the live task.
-        console.error("[runtime-event-sink] append failed:", error);
-      });
+      enqueueDurablePersistence("runtime-event-sink", () => runtimeEventSink.append(envelope));
     }
     if (checkpointSink) {
       switch (event.kind) {
@@ -5440,6 +5659,10 @@ export async function runCommanderDagTask({
       }
     }
     return eventLogs[eventLogs.length - 1] as TaskSnapshot["logs"][number];
+  }
+
+  async function flushDurablePersistenceQueue(): Promise<void> {
+    await durablePersistenceQueue;
   }
 
   const taskStartedAt = Date.now();
@@ -5473,8 +5696,10 @@ export async function runCommanderDagTask({
   throwIfTaskAborted(signal, `Commander DAG task ${taskId}`);
 
   const recoveryAttempts: RecoveryAttemptRecord[] = [];
+  const recoveryReplanShapes: ReplanShapeInput[] = [];
   const planStages: PlanGenerationStageRecord[] = [];
   const planRecoveryCompiles: PlanRecoveryCompileRecord[] = [];
+  let durableResumeMetadata: TaskSnapshot["durableResume"] | undefined;
   // Captured once after the initial plan call returns and survives the
   // try/catch boundary, so the catch handler can still attach it to
   // the PlanGenerationTrace even when the failure happened later in
@@ -5484,8 +5709,13 @@ export async function runCommanderDagTask({
 
   try {
     // Phase 1: Commander generates DAG plan
-    const availableAgents = getAvailableAgentsForPlanning(availableTools);
-    const plannerAvailableTools = toolDescriptorsForPlanner(availableTools);
+    const availableAgents = getAvailableAgentsForPlanning(availableTools, userGoal);
+    const planningScope = filterPlanningScopeForGoal(userGoal, {
+      agents: availableAgents.map((agent) => agent.kind),
+      tools: availableTools,
+    });
+    const planningAvailableTools = planningScope.tools;
+    const plannerAvailableTools = toolDescriptorsForPlanner(planningAvailableTools);
     // `uncompiledPlan` is the raw post-normalize plan. After the compile
     // gate below, the validated `dagPlan: CompiledCommanderPlan` is the
     // only one used downstream. Keeping the uncompiled form as a
@@ -5494,69 +5724,86 @@ export async function runCommanderDagTask({
     // on knows the plan cleared the compile gate.
     let uncompiledPlan: CommanderDagPlan;
     try {
-      emitWaitingLog({
-        taskId,
-        phase: "waiting_model",
-        label: "commander.plan",
-        detail: "Waiting for Commander to generate a DAG plan.",
-        agentKind: "commander",
-        getSnapshot,
-        emitSnapshot,
-        emitEvent,
-      });
-      const rawPlan = await withTaskTimeout(
-        () => planCommanderDagWithContextRecovery({
-          commanderTool,
-          contextSummaryTool,
-          userGoal,
-          priorMessages,
-          fullPriorMessages: fullPriorMessages ?? priorMessages,
-          omittedPriorMessageCount,
-          availableAgents,
-          availableTools: plannerAvailableTools,
-          workflowId: COMMANDER_DAG_WORKFLOW_ID,
-          context,
-        }),
-        {
-          label: "commander.plan",
-          timeoutMs: runtimeTimeouts.modelTimeoutMs,
-          signal,
-          onTimeout: () => emitTimeoutLog({
+      if (!commanderTool && isComputerUseGoal(userGoal)) {
+        uncompiledPlan = createFallbackComputerUseDagPlan(userGoal, "commander tool unavailable");
+        emitSnapshot({
+          ...getSnapshot(),
+          commanderMessage: uncompiledPlan.reasoning,
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "tool.completed",
             taskId,
-            phase: "waiting_model",
+            toolName: "commander.plan.fallback",
+            detail: "Commander tool unavailable; using Computer Use fallback plan.",
+          })),
+        });
+      } else {
+        if (!commanderTool) {
+          throw new Error("Commander tool is not available.");
+        }
+        emitWaitingLog({
+          taskId,
+          phase: "waiting_model",
+          label: "commander.plan",
+          detail: "Waiting for Commander to generate a DAG plan.",
+          agentKind: "commander",
+          getSnapshot,
+          emitSnapshot,
+          emitEvent,
+        });
+        const rawPlan = await withTaskTimeout(
+          () => planCommanderDagWithContextRecovery({
+            commanderTool,
+            contextSummaryTool,
+            userGoal,
+            priorMessages,
+            fullPriorMessages: fullPriorMessages ?? priorMessages,
+            omittedPriorMessageCount,
+            availableAgents,
+            availableTools: plannerAvailableTools,
+            workflowId: COMMANDER_DAG_WORKFLOW_ID,
+            context,
+          }),
+          {
             label: "commander.plan",
             timeoutMs: runtimeTimeouts.modelTimeoutMs,
-            detail: "Commander plan timed out.",
-            agentKind: "commander",
-            getSnapshot,
-            emitSnapshot,
-            emitEvent,
-          }),
-          onAbort: () => emitCancelledLog({
-            taskId,
-            label: "commander.plan",
-            detail: "Commander plan cancelled.",
-            agentKind: "commander",
-            getSnapshot,
-            emitSnapshot,
-            emitEvent,
-          }),
-        },
-      );
-      try {
-        uncompiledPlan = normalizeCommanderDagPlan(rawPlan);
-      } catch (shapeError) {
-        const diagnostic = commanderPlanShapeDiagnostic(shapeError);
-        initialExtractedJson = stringifyForPlanTrace(rawPlan);
-        planStages.push({
-          stage: "initial",
-          attempt: 1,
-          status: "failed_non_repairable",
-          diagnostics: [diagnostic],
-          stepIds: [],
-          detail: diagnostic.message,
-        });
-        throw shapeError;
+            signal,
+            onTimeout: () => emitTimeoutLog({
+              taskId,
+              phase: "waiting_model",
+              label: "commander.plan",
+              timeoutMs: runtimeTimeouts.modelTimeoutMs,
+              detail: "Commander plan timed out.",
+              agentKind: "commander",
+              getSnapshot,
+              emitSnapshot,
+              emitEvent,
+            }),
+            onAbort: () => emitCancelledLog({
+              taskId,
+              label: "commander.plan",
+              detail: "Commander plan cancelled.",
+              agentKind: "commander",
+              getSnapshot,
+              emitSnapshot,
+              emitEvent,
+            }),
+          },
+        );
+        try {
+          uncompiledPlan = normalizeCommanderDagPlan(rawPlan);
+        } catch (shapeError) {
+          const diagnostic = commanderPlanShapeDiagnostic(shapeError);
+          initialExtractedJson = stringifyForPlanTrace(rawPlan);
+          planStages.push({
+            stage: "initial",
+            attempt: 1,
+            status: "failed_non_repairable",
+            diagnostics: [diagnostic],
+            stepIds: [],
+            detail: diagnostic.message,
+          });
+          throw shapeError;
+        }
       }
     } catch (planError) {
       // Commander JSON parse failure fallback: only kick in when the goal
@@ -5613,7 +5860,7 @@ export async function runCommanderDagTask({
     let compilationResult = compileCommanderPlan({
       plan: uncompiledPlan,
       availableAgents,
-      availableTools,
+      availableTools: planningAvailableTools,
       supportedApprovalGatedTools,
       preloadedContextKeys,
     });
@@ -5656,7 +5903,7 @@ export async function runCommanderDagTask({
         invalidPlan: uncompiledPlan,
         diagnostics: compilationResult.diagnostics,
         availableAgents,
-        availableTools,
+        availableTools: planningAvailableTools,
         supportedApprovalGatedTools,
         preloadedContextKeys,
         workflowId: COMMANDER_DAG_WORKFLOW_ID,
@@ -5729,6 +5976,76 @@ export async function runCommanderDagTask({
       });
     }
 
+    const workflowSteps = dagPlan.steps.map((step) => ({
+      id: step.id,
+      title: step.title,
+      agentKind: step.assignedAgentKind as WorkbenchWorkflowStep["agentKind"],
+      input: step.title,
+      output: step.successCriteria,
+      permissionLevel: getDagStepPermissionLevel(step, availableTools),
+      dependsOn: step.dependsOn ?? [],
+      canRunInParallel: true,
+      requiredCapabilities: step.requiredCapabilities as AgentCapabilityTag[] | undefined,
+      inputContextKeys: step.inputContextKeys,
+      outputContextKey: step.outputContextKey,
+    }));
+
+    syntheticWorkflow = {
+      id: COMMANDER_DAG_WORKFLOW_ID as WorkbenchWorkflowId,
+      title: dagPlan.title || "Commander DAG task",
+      triggerExamples: [],
+      goal: userGoal,
+      coordinatorAgentKind: "commander",
+      participatingAgentKinds: [...new Set(dagPlan.steps.map((s) => s.assignedAgentKind))] as AgentKind[],
+      currentSupport: "partial",
+      safetyNotes: [],
+      steps: workflowSteps,
+    };
+    const writeCommanderStepOutput = (
+      dagStep: CommanderDagStep,
+      output: unknown,
+      toolName?: string,
+    ) => {
+      writeStepArtifactOutput(
+        dagStep.outputContextKey ?? `step:${dagStep.id}`,
+        output,
+        context,
+        {
+          taskId,
+          runId,
+          stepId: dagStep.id,
+          agentKind: dagStep.assignedAgentKind,
+          agentId: `agent-${dagStep.assignedAgentKind}`,
+          toolName,
+        },
+      );
+    };
+    const resumeBuild = buildCommanderResumeState({
+      resumeFromCheckpoint,
+      workflow: syntheticWorkflow,
+      emitEvent,
+      appendRuntimeLog: (log) => {
+        emitSnapshot({
+          ...getSnapshot(),
+          logs: appendLog(getSnapshot(), log),
+        });
+      },
+      taskId,
+    });
+    const resumeState = resumeBuild?.resumeState;
+    durableResumeMetadata = resumeBuild?.metadata;
+    const resumedCompletedStepIds = new Set(resumeState?.completedStepIds ?? []);
+    const resumedAbandonedStepIds = new Set(resumeState?.abandonedStepIds ?? []);
+    if (resumeState?.contextSnapshot) {
+      for (const [key, value] of Object.entries(resumeState.contextSnapshot)) {
+        context.set(key, value);
+      }
+    }
+    const completedSteps = new Set<string>(resumeState?.completedStepIds ?? []);
+    for (const stepId of resumeState?.abandonedStepIds ?? []) {
+      abandonedStepIds.add(stepId);
+    }
+
     const plan: TaskStep[] = dagPlan.steps.map((step) => ({
       id: step.id,
       title: step.title,
@@ -5737,12 +6054,17 @@ export async function runCommanderDagTask({
       requiredCapabilities: step.requiredCapabilities,
       inputContextKeys: step.inputContextKeys,
       outputContextKey: step.outputContextKey,
-      status: "pending" as const,
+      status: resumedCompletedStepIds.has(step.id)
+        ? "completed" as const
+        : resumedAbandonedStepIds.has(step.id)
+          ? "failed" as const
+          : "pending" as const,
       successCriteria: step.successCriteria,
     }));
 
     context.set("commanderPlan", dagPlan);
 
+    await flushDurablePersistenceQueue();
     emitSnapshot({
       ...snapshot,
       title: dagPlan.title || "Commander DAG task",
@@ -5881,34 +6203,6 @@ export async function runCommanderDagTask({
       shellTool, schedulerTool, workspaceTool, webTool, trendTool, memoryTool, mcpTool,
       commanderTool, verifierTool, visionTool,
     };
-    const completedSteps = new Set<string>();
-
-    // Convert CommanderDagSteps to WorkbenchWorkflowSteps for the DAG executor
-    const workflowSteps = dagPlan.steps.map((step) => ({
-      id: step.id,
-      title: step.title,
-      agentKind: step.assignedAgentKind as WorkbenchWorkflowStep["agentKind"],
-      input: step.title,
-      output: step.successCriteria,
-      permissionLevel: getDagStepPermissionLevel(step, availableTools),
-      dependsOn: step.dependsOn ?? [],
-      canRunInParallel: true,
-      requiredCapabilities: step.requiredCapabilities as AgentCapabilityTag[] | undefined,
-      inputContextKeys: step.inputContextKeys,
-      outputContextKey: step.outputContextKey,
-    }));
-
-    syntheticWorkflow = {
-      id: COMMANDER_DAG_WORKFLOW_ID as WorkbenchWorkflowId,
-      title: dagPlan.title || "Commander DAG task",
-      triggerExamples: [],
-      goal: userGoal,
-      coordinatorAgentKind: "commander",
-      participatingAgentKinds: [...new Set(dagPlan.steps.map((s) => s.assignedAgentKind))] as AgentKind[],
-      currentSupport: "partial",
-      safetyNotes: [],
-      steps: workflowSteps,
-    };
 
     /**
      * P0-2: Execute a single DAG step through the ReAct loop.
@@ -6015,13 +6309,10 @@ export async function runCommanderDagTask({
             signal,
             toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
             userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
+            workspaceRuntime,
           });
           completedSteps.add(dagStep.id);
-          writeStepOutput(
-            (dagStep.outputContextKey ?? `step:${dagStep.id}`),
-            output,
-            context,
-          );
+          writeCommanderStepOutput(dagStep, output, descriptor.name);
           return { output };
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : String(error);
@@ -6070,13 +6361,10 @@ export async function runCommanderDagTask({
             signal,
             toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
             userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
+            workspaceRuntime,
           });
           completedSteps.add(dagStep.id);
-          writeStepOutput(
-            (dagStep.outputContextKey ?? `step:${dagStep.id}`),
-            output,
-            context,
-          );
+          writeCommanderStepOutput(dagStep, output, GIT_COMMIT_TOOL_NAME);
           return { output };
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : String(error);
@@ -6127,11 +6415,7 @@ export async function runCommanderDagTask({
             userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
           });
           completedSteps.add(dagStep.id);
-          writeStepOutput(
-            (dagStep.outputContextKey ?? `step:${dagStep.id}`),
-            output,
-            context,
-          );
+          writeCommanderStepOutput(dagStep, output, GIT_CREATE_PR_TOOL_NAME);
           return { output };
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : String(error);
@@ -6182,11 +6466,7 @@ export async function runCommanderDagTask({
             userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
           });
           completedSteps.add(dagStep.id);
-          writeStepOutput(
-            (dagStep.outputContextKey ?? `step:${dagStep.id}`),
-            output,
-            context,
-          );
+          writeCommanderStepOutput(dagStep, output, `${dagStep.assignedAgentKind}.${dagStep.id}`);
           return { output };
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : String(error);
@@ -6390,11 +6670,9 @@ export async function runCommanderDagTask({
           throw new Error(`Computer Use failed: ${redactImageDataUrlsForSummary(error)}`);
         }
 
+        const sanitizedSteps = steps.map((step) => sanitizeComputerUseStepForContext(step as ComputerUseStep));
         completedSteps.add(dagStep.id);
-        context.set(
-           (dagStep.outputContextKey ?? `step:${dagStep.id}`),
-          steps.map((step) => sanitizeComputerUseStepForContext(step as ComputerUseStep)),
-        );
+        writeCommanderStepOutput(dagStep, sanitizedSteps, "computer.useLoop");
         if (agentTracker.getState(agentId)) {
           agentTracker.setState(agentId, {
             status: "completed",
@@ -6413,7 +6691,7 @@ export async function runCommanderDagTask({
             detail: `步骤 ${dagStep.id}：桌面操作流程完成，共执行 ${steps.length} 步。`,
           })),
         });
-        return { output: steps };
+        return { output: sanitizedSteps };
       }
 
       if (agentTracker.getState(agentId)) {
@@ -6460,11 +6738,7 @@ export async function runCommanderDagTask({
                 signal,
               },
             );
-            writeStepOutput(
-              (dagStep.outputContextKey ?? `step:${dagStep.id}`),
-              output,
-              context,
-            );
+            writeCommanderStepOutput(dagStep, output, td.name);
             return output;
           },
         }));
@@ -6617,11 +6891,7 @@ export async function runCommanderDagTask({
           },
         );
         const output = synthesis?.message ?? dagStep.title;
-        writeStepOutput(
-           (dagStep.outputContextKey ?? `step:${dagStep.id}`),
-          output,
-          context,
-        );
+        writeCommanderStepOutput(dagStep, output, "commander.synthesize");
         completedSteps.add(dagStep.id);
 
         if (agentTracker.getState(agentId)) {
@@ -6891,6 +7161,14 @@ export async function runCommanderDagTask({
         const recoveryPlanNormalized = normalizeCommanderDagPlan(
           recoveryPlan as Parameters<typeof normalizeCommanderDagPlan>[0],
         );
+        recoveryReplanShapes.push({
+          steps: recoveryPlanNormalized.steps.map((step) => ({
+            agentKind: step.assignedAgentKind as WorkbenchWorkflowStep["agentKind"],
+            inputContextKeys: step.inputContextKeys,
+            outputContextKey: step.outputContextKey,
+            permissionLevel: getDagStepPermissionLevel(step, availableTools),
+          })),
+        });
         const recoveryExistingSteps = dagPlan.steps.map((s) => ({
           id: s.id,
           dependsOn: s.dependsOn ?? [],
@@ -6899,7 +7177,7 @@ export async function runCommanderDagTask({
         const recoveryCompile = compileCommanderPlan({
           plan: recoveryPlanNormalized,
           availableAgents,
-          availableTools,
+          availableTools: planningAvailableTools,
           supportedApprovalGatedTools: [...SUPPORTED_APPROVAL_GATED_TOOLS],
           preloadedContextKeys: [...DEFAULT_PRELOADED_CONTEXT_KEYS],
           existingSteps: recoveryExistingSteps,
@@ -7036,6 +7314,7 @@ export async function runCommanderDagTask({
     const execution = await executeWorkflow({
       workflow: syntheticWorkflow,
       context,
+      resumeFrom: resumeState,
       signal,
       stepTimeoutMs: runtimeTimeouts.toolTimeoutMs,
       maxStepRetries: runtimeTimeouts.maxStepRetries,
@@ -7069,8 +7348,18 @@ export async function runCommanderDagTask({
           })),
         });
       },
-      onStepFailed: (_step, _error, _ctx) => {
-        // Already handled in executeStepWithReAct above
+      onStepFailed: (step, error) => {
+        emitSnapshot({
+          ...getSnapshot(),
+          plan: markStep(getSnapshot().plan, step.id, "failed"),
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "step.failed",
+            taskId,
+            stepId: step.id,
+            error: redactImageDataUrlsForSummary(error),
+            agentKind: step.agentKind,
+          })),
+        });
       },
       onStepHeartbeat: (step, elapsedMs) => {
         emitSnapshot({
@@ -7218,6 +7507,9 @@ export async function runCommanderDagTask({
           generatedAt: new Date(now).toISOString(),
           abandonedStepIds: execution.abandonedStepIds,
           replannedStepIds: execution.replannedStepIds,
+          workflowSteps: syntheticWorkflow?.steps,
+          completedStepIds: execution.completedStepIds,
+          replanShapes: recoveryReplanShapes,
         })
       : undefined;
     const planGenerationTrace = buildPlanGenerationTrace({
@@ -7229,6 +7521,7 @@ export async function runCommanderDagTask({
       normalizedPlan: initialNormalizedPlan,
       promptVersion: COMMANDER_PLAN_PROMPT_VERSION,
     });
+    await flushDurablePersistenceQueue();
     emitSnapshot({
       ...getSnapshot(),
       ...(deriveGenericWorkflowSnapshotData(context.snapshot())),
@@ -7247,8 +7540,10 @@ export async function runCommanderDagTask({
         : finalCompleted
           ? `verified: ${execution.completedStepIds.length}/${execution.completedStepIds.length + (execution.abandonedStepIds?.length ?? 0)} steps completed via Commander DAG.`
           : `warn: ${execution.completedStepIds.length}/${execution.completedStepIds.length + (execution.abandonedStepIds?.length ?? 0)} steps completed.`,
+      ...(verifierCheck ? { verificationResult: verifierCheck } : {}),
       handoffReport,
       ...(recoveryReport ? { recoveryReport } : {}),
+      ...(durableResumeMetadata ? { durableResume: durableResumeMetadata } : {}),
       planGenerationTrace,
       executionTrace: trace ? {
         ...trace,
@@ -7268,6 +7563,7 @@ export async function runCommanderDagTask({
         ],
       } : undefined,
     });
+    await flushDurablePersistenceQueue();
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     const redactedErrorMsg = redactImageDataUrlsForSummary(errorMsg);
@@ -7284,6 +7580,11 @@ export async function runCommanderDagTask({
     const recoveryReport = recoveryAttempts.length > 0 && !cancelled
       ? buildRecoveryReport(recoveryAttempts, {
           generatedAt: new Date().toISOString(),
+          workflowSteps: syntheticWorkflow?.steps,
+          completedStepIds: getSnapshot().plan
+            .filter((step) => step.status === "completed")
+            .map((step) => step.id),
+          replanShapes: recoveryReplanShapes,
         })
       : undefined;
     const planGenerationTrace = buildPlanGenerationTrace({
@@ -7316,9 +7617,11 @@ export async function runCommanderDagTask({
       })),
       agents: agentTracker.getSnapshots(),
       ...(recoveryReport ? { recoveryReport } : {}),
+      ...(durableResumeMetadata ? { durableResume: durableResumeMetadata } : {}),
       planGenerationTrace,
       logs: appendLog(snapshot, emitEvent(completionEvent)),
     });
+    await flushDurablePersistenceQueue();
   }
 }
 
@@ -8195,6 +8498,7 @@ async function runInspectProjectStep({
   projectTool,
   shellTool,
   taskId,
+  workspaceRuntime,
 }: {
   availableToolNames?: ReadonlySet<string>;
   agentTracker: ReadCurrentProjectAgentTracker;
@@ -8204,6 +8508,7 @@ async function runInspectProjectStep({
   projectTool: ProjectTool;
   shellTool: ShellTool;
   taskId: ID;
+  workspaceRuntime?: WorkspaceRuntime;
 }): Promise<ProjectInspectionStepOutput> {
   if (availableToolNames && !availableToolNames.has("shell.runReadOnlyCommand")) {
     throw new Error("Tool shell.runReadOnlyCommand is not available.");
@@ -8229,7 +8534,7 @@ async function runInspectProjectStep({
   });
 
   const project = await projectTool.inspectProject();
-  const commands = await runProjectReadOnlyCommands(shellTool);
+  const commands = await runProjectReadOnlyCommands(shellTool, workspaceRuntime);
 
   agentTracker.setState("agent-shell", {
     status: "completed",

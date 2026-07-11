@@ -1,4 +1,5 @@
-import type { RuntimeEventEnvelope } from "@javis/core";
+import { computeContentHash, extractEventKind, isStreamingEvent } from "@javis/core";
+import type { RuntimeEventEnvelope, RuntimeEventKind } from "@javis/core";
 import type { DesktopDatabase, DesktopDatabaseMigration } from "./desktop-database";
 
 export const RUNTIME_EVENTS_TABLE_NAME = "runtime_events";
@@ -69,6 +70,7 @@ export interface RuntimeEventStore {
   append(envelope: RuntimeEventEnvelope): Promise<void>;
   appendBatch(envelopes: RuntimeEventEnvelope[]): Promise<void>;
   replayByRunId(runId: string): Promise<RuntimeEventEnvelope[]>;
+  replayByRunIdThroughSequence(runId: string, eventSequence: number): Promise<RuntimeEventEnvelope[]>;
   replayByTaskId(taskId: string, limit?: number): Promise<RuntimeEventEnvelope[]>;
   latestByRunId(runId: string): Promise<RuntimeEventEnvelope | undefined>;
   pruneByTaskId(taskId: string, keepStructuralOnly: boolean): Promise<number>;
@@ -77,6 +79,20 @@ export interface RuntimeEventStore {
 
 const MAX_ENVELOPES_PER_QUERY = 10_000;
 const DEFAULT_TASK_REPLAY_LIMIT = 5_000;
+export const COMPACTED_STREAM_TEXT_LIMIT = 20_000;
+export const COMPACTED_STREAM_EVENT_KIND = "runtime.compacted";
+
+export interface CompactedRuntimeStreamPayload {
+  kind: typeof COMPACTED_STREAM_EVENT_KIND;
+  taskId: string;
+  compactedEventKinds: RuntimeEventKind[];
+  compactedEventCount: number;
+  originalSequenceRange: { first: number; last: number };
+  summary: string;
+  contentHash: string;
+  hashAlgorithm: "sha256-canonical-json-v1";
+  truncated: boolean;
+}
 
 export function createRuntimeEventStore(database: DesktopDatabase): RuntimeEventStore {
   return {
@@ -94,6 +110,15 @@ export function createRuntimeEventStore(database: DesktopDatabase): RuntimeEvent
       const rows = await database.select<{ envelope_json: string }>(
         `SELECT envelope_json FROM runtime_events WHERE run_id = ? ORDER BY sequence ASC LIMIT ?`,
         [runId, MAX_ENVELOPES_PER_QUERY],
+      );
+      return rows.map((row) => JSON.parse(row.envelope_json) as RuntimeEventEnvelope);
+    },
+
+    async replayByRunIdThroughSequence(runId, eventSequence) {
+      const limit = Math.max(MAX_ENVELOPES_PER_QUERY, Math.trunc(eventSequence) + 1);
+      const rows = await database.select<{ envelope_json: string }>(
+        `SELECT envelope_json FROM runtime_events WHERE run_id = ? AND sequence <= ? ORDER BY sequence ASC LIMIT ?`,
+        [runId, eventSequence, limit],
       );
       return rows.map((row) => JSON.parse(row.envelope_json) as RuntimeEventEnvelope);
     },
@@ -117,10 +142,24 @@ export function createRuntimeEventStore(database: DesktopDatabase): RuntimeEvent
 
     async pruneByTaskId(taskId, keepStructuralOnly) {
       if (keepStructuralOnly) {
+        const events = await this.replayByTaskId(taskId, MAX_ENVELOPES_PER_QUERY);
+        if (!hasTerminalTaskEvent(taskId, events)) {
+          return 0;
+        }
+        const compactionEvents = buildStreamingCompactionEvents(taskId, events);
+        const compactedEventCount = compactionEvents.reduce(
+          (sum, envelope) => sum + (envelope.payload as CompactedRuntimeStreamPayload).compactedEventCount,
+          0,
+        );
+        if (compactedEventCount === 0) {
+          return 0;
+        }
         await database.execute(
           `DELETE FROM runtime_events WHERE task_id = ? AND event_kind IN (?, ?, ?, ?)`,
           [taskId, "agent.chunk_start", "agent.chunk", "agent.chunk_end", "tool.partial"],
         );
+        await this.appendBatch(compactionEvents);
+        return compactedEventCount;
       } else {
         await database.execute(
           `DELETE FROM runtime_events WHERE task_id = ?`,
@@ -138,6 +177,118 @@ export function createRuntimeEventStore(database: DesktopDatabase): RuntimeEvent
       return rows[0]?.count ?? 0;
     },
   };
+}
+
+function hasTerminalTaskEvent(taskId: string, events: RuntimeEventEnvelope[]): boolean {
+  return events.some((event) => {
+    const payload = event.payload as { kind?: string; taskId?: string };
+    return payload.taskId === taskId && (payload.kind === "task.completed" || payload.kind === "task.failed");
+  });
+}
+
+export function buildStreamingCompactionEvents(
+  taskId: string,
+  events: RuntimeEventEnvelope[],
+): RuntimeEventEnvelope<CompactedRuntimeStreamPayload>[] {
+  const eventsByRun = new Map<string, RuntimeEventEnvelope[]>();
+  const maxSequenceByRun = new Map<string, number>();
+  for (const envelope of events) {
+    if (envelope.taskId !== taskId) continue;
+    maxSequenceByRun.set(
+      envelope.runId,
+      Math.max(maxSequenceByRun.get(envelope.runId) ?? 0, envelope.sequence),
+    );
+    const kind = safeExtractEventKind(envelope);
+    if (kind && isStreamingEvent(kind)) {
+      const current = eventsByRun.get(envelope.runId) ?? [];
+      current.push(envelope);
+      eventsByRun.set(envelope.runId, current);
+    }
+  }
+
+  const compacted: RuntimeEventEnvelope<CompactedRuntimeStreamPayload>[] = [];
+  for (const [runId, streamingEvents] of eventsByRun) {
+    if (streamingEvents.length === 0) continue;
+    streamingEvents.sort((left, right) => left.sequence - right.sequence);
+    const representative = streamingEvents[0];
+    if (!representative) continue;
+    const nextSequence = (maxSequenceByRun.get(runId) ?? representative.sequence) + 1;
+    const now = new Date().toISOString();
+    const payload = buildCompactedStreamPayload(taskId, streamingEvents);
+    compacted.push({
+      eventId: `evt-${runId}-stream-compacted-${nextSequence}`,
+      eventVersion: 1,
+      sequence: nextSequence,
+      taskId,
+      runId,
+      workflowId: representative.workflowId,
+      correlationId: representative.correlationId,
+      traceId: representative.traceId,
+      occurredAt: now,
+      recordedAt: now,
+      payload,
+    });
+  }
+  return compacted;
+}
+
+function buildCompactedStreamPayload(
+  taskId: string,
+  streamingEvents: RuntimeEventEnvelope[],
+): CompactedRuntimeStreamPayload {
+  const chunks = extractStreamTextChunks(streamingEvents);
+  const fullText = chunks.filter((chunk) => chunk.length > 0).join("");
+  const summary = fullText.length > COMPACTED_STREAM_TEXT_LIMIT
+    ? `${fullText.slice(0, COMPACTED_STREAM_TEXT_LIMIT)}[truncated]`
+    : fullText;
+  const kinds = Array.from(new Set(
+    streamingEvents
+      .map((event) => safeExtractEventKind(event))
+      .filter((kind): kind is RuntimeEventKind => Boolean(kind)),
+  ));
+  return {
+    kind: COMPACTED_STREAM_EVENT_KIND,
+    taskId,
+    compactedEventKinds: kinds,
+    compactedEventCount: streamingEvents.length,
+    originalSequenceRange: {
+      first: streamingEvents[0]?.sequence ?? 0,
+      last: streamingEvents[streamingEvents.length - 1]?.sequence ?? 0,
+    },
+    summary,
+    contentHash: computeContentHash({
+      kinds,
+      payloads: streamingEvents.map((event) => event.payload),
+      sequences: streamingEvents.map((event) => event.sequence),
+    }),
+    hashAlgorithm: "sha256-canonical-json-v1",
+    truncated: fullText.length > COMPACTED_STREAM_TEXT_LIMIT,
+  };
+}
+
+function safeExtractEventKind(envelope: RuntimeEventEnvelope): RuntimeEventKind | undefined {
+  try {
+    return extractEventKind(envelope);
+  } catch {
+    return undefined;
+  }
+}
+
+function extractStreamTextChunks(streamingEvents: RuntimeEventEnvelope[]): string[] {
+  const hasAgentChunks = streamingEvents.some((event) => safeExtractEventKind(event) === "agent.chunk");
+  return streamingEvents.map((event) => extractStreamText(event, hasAgentChunks));
+}
+
+function extractStreamText(envelope: RuntimeEventEnvelope, hasAgentChunks: boolean): string {
+  const payload = envelope.payload;
+  if (typeof payload !== "object" || payload === null) return "";
+  const record = payload as Record<string, unknown>;
+  const kind = safeExtractEventKind(envelope);
+  if (typeof record.text === "string") return record.text;
+  if (typeof record.partialOutput === "string") return record.partialOutput;
+  if (kind === "agent.chunk_end" && !hasAgentChunks && typeof record.fullText === "string") return record.fullText;
+  if (kind === "agent.chunk_start" || kind === "agent.chunk_end") return "";
+  return JSON.stringify(record);
 }
 
 async function insertEnvelope(
