@@ -39,6 +39,55 @@ describe("decideRuntimeChain", () => {
     expect(decision.surfaces.user).toBe("natural_response");
   });
 
+  it("downgrades a project-mode greeting to the L1 direct-chat path", () => {
+    const decision = decideRuntimeChain(makeInput({
+      startMode: "project",
+      routeDecision: {
+        level: "L1",
+        mode: "direct_chat",
+        score: 0,
+        reasons: ["casual_greeting", "simple"],
+      },
+    }));
+
+    expect(decision.dispatch).toEqual({
+      kind: "direct_chat",
+      reason: "simple_chat_without_known_agent_intent",
+    });
+  });
+
+  it("keeps other simple project-mode requests on Commander", () => {
+    const decision = decideRuntimeChain(makeInput({ startMode: "project" }));
+
+    expect(decision.dispatch.kind).toBe("commander_task");
+  });
+
+  it("does not let explicit chat mode bypass a confident workspace route", () => {
+    const decision = decideRuntimeChain(makeInput({
+      startMode: "chat",
+      routeDecision: {
+        level: "L2",
+        mode: "single_agent_task",
+        score: 0,
+        reasons: ["custom_route"],
+        customRoute: {
+          route: "workspace.demo.triage",
+          workflowId: "workspace.demo.triage-flow",
+          score: 5,
+          threshold: 4,
+          signals: ["incident-triage"],
+        },
+      },
+      recommendedWorkflowIds: ["workspace.demo.triage-flow"],
+      hasKnownRouteIntent: true,
+    }));
+
+    expect(decision.dispatch).toEqual({
+      kind: "single_agent_task",
+      reason: "custom_route_workflow",
+    });
+  });
+
   it("routes project mode through Commander like the demo hub", () => {
     const decision = decideRuntimeChain(makeInput({
       startMode: "project",

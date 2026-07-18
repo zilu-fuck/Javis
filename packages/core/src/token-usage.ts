@@ -6,6 +6,7 @@ export function createEmptyTokenUsageSummary(): TokenUsageSummary {
     inputTokens: 0,
     outputTokens: 0,
     totalTokens: 0,
+    peakContextTokens: 0,
     modelCalls: 0,
     byAgentKind: [],
   };
@@ -33,6 +34,7 @@ export function addModelUsage(
     inputTokens: current.inputTokens + inputTokens,
     outputTokens: current.outputTokens + outputTokens,
     totalTokens: current.totalTokens + totalTokens,
+    peakContextTokens: Math.max(current.peakContextTokens ?? 0, totalTokens),
     modelCalls: current.modelCalls + 1,
     byAgentKind: [
       ...current.byAgentKind.filter((entry) => entry.agentKind !== agentKind),

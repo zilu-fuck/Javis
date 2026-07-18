@@ -26,6 +26,9 @@ export class OpenAIAdapter implements ProviderAdapter {
   buildCompletionRequest(input: AdapterCompletionInput): AdapterRequestPayload {
     return {
       prompt: input.prompt,
+      systemPrompt: input.systemPrompt,
+      messages: input.messages,
+      assistantPrefill: input.assistantPrefill,
       imageDataUrl: input.imageDataUrl,
       images: input.images,
       media: input.media,
@@ -39,6 +42,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       temperature: input.temperature,
       stopSequences: input.stopSequences,
       locale: input.locale,
+      timeoutMs: input.timeoutMs,
       protocol: this.protocol,
     };
   }

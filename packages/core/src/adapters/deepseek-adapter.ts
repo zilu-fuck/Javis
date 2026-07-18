@@ -28,6 +28,9 @@ export class DeepSeekAdapter implements ProviderAdapter {
   buildCompletionRequest(input: AdapterCompletionInput): AdapterRequestPayload {
     return {
       prompt: input.prompt,
+      systemPrompt: input.systemPrompt,
+      messages: input.messages,
+      assistantPrefill: input.assistantPrefill,
       providerId: input.providerId || "deepseek",
       model: input.model,
       apiKeyReference: input.apiKeyReference,
@@ -36,6 +39,7 @@ export class DeepSeekAdapter implements ProviderAdapter {
       temperature: input.temperature,
       stopSequences: input.stopSequences,
       locale: input.locale,
+      timeoutMs: input.timeoutMs,
       disableThinking: input.disableThinking,
       protocol: this.protocol,
     };

@@ -19,8 +19,18 @@ export interface ModelMediaInput {
   uuid?: string;
 }
 
+export type ModelMessageRole = "user" | "assistant";
+
+export interface ModelMessage {
+  role: ModelMessageRole;
+  content: string;
+}
+
 export interface AdapterCompletionInput {
   prompt: string;
+  systemPrompt?: string;
+  messages?: ModelMessage[];
+  assistantPrefill?: string;
   imageDataUrl?: string;
   /** Multi-image support — passed alongside imageDataUrl for backward compat. */
   images?: string[];
@@ -40,6 +50,9 @@ export interface AdapterCompletionInput {
 
 export interface AdapterRequestPayload {
   prompt: string;
+  systemPrompt?: string;
+  messages?: ModelMessage[];
+  assistantPrefill?: string;
   imageDataUrl?: string;
   images?: string[];
   media?: ModelMediaInput[];

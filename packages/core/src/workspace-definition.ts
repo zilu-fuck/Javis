@@ -42,7 +42,10 @@ export interface WorkspaceDefinition {
 export interface WorkspaceAgentDefinition {
   /** Unique agent id, e.g. "agent-proofreader" */
   id: string;
-  /** Must be one of the known agent kinds */
+  /**
+   * A workspace-owned kind in the form workspace.<workspace-id>.<kebab-kind>.
+   * Built-in kinds are reserved and cannot be shadowed by a workspace.
+   */
   kind: AgentKind;
   displayName: string;
   description: string;
@@ -95,7 +98,7 @@ export interface WorkspaceToolDefinition {
 // ── Route Definition ──────────────────────────────────────────────────────
 
 export interface WorkspaceRouteDefinition {
-  /** Unique route kind identifier */
+  /** Workspace-owned route kind: workspace.<workspace-id>.<kebab-route>. */
   routeKind: string;
   /** Target workflow id to dispatch to when this route matches */
   workflowId: string;

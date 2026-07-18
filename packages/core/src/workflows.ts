@@ -12,7 +12,8 @@ export type WorkbenchWorkflowId =
   | "browser-test"
   | "pdf-organization"
   | "code-review"
-  | "computer-use";
+  | "computer-use"
+  | `workspace.${string}.${string}`;
 
 export interface WorkbenchWorkflowStep {
   id: string;

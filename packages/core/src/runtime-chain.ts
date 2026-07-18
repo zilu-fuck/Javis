@@ -62,6 +62,10 @@ export function decideRuntimeChain(input: RuntimeChainDecisionInput): RuntimeCha
 }
 
 function decideDispatch(input: RuntimeChainDecisionInput): RuntimeChainDecision["dispatch"] {
+  if (input.routeDecision.customRoute) {
+    return { kind: "single_agent_task", reason: "custom_route_workflow" };
+  }
+
   if (input.startMode === "chat") {
     return input.hasChatTool
       ? { kind: "direct_chat", reason: "explicit_chat_mode" }
@@ -69,7 +73,10 @@ function decideDispatch(input: RuntimeChainDecisionInput): RuntimeChainDecision[
   }
 
   if (
-    input.startMode !== "project" &&
+    (
+      input.startMode !== "project" ||
+      input.routeDecision.reasons.includes("casual_greeting")
+    ) &&
     input.routeDecision.level === "L1" &&
     input.hasChatTool &&
     !input.hasKnownRouteIntent

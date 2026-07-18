@@ -4,6 +4,8 @@ import type { TaskRuntimeEvent } from "./task-event-bus";
 
 export interface RuntimeExecutionConfig {
   contextStrategy?: "auto" | "short" | "long";
+  contextWindowTokens?: number;
+  maxReplans?: number;
   agentMaxIterations?: number;
   maxStepRetries?: number;
   taskTimeoutMs?: number;
@@ -27,6 +29,7 @@ export function resolveCommanderTimeouts(config?: RuntimeExecutionConfig): {
   userWaitTimeoutMs: number;
   agentMaxIterations: number;
   maxStepRetries: number;
+  maxReplans: number;
 } {
   const taskTimeoutMs = clampRuntimeNumber(config?.taskTimeoutMs, 30_000, 900_000, COMMANDER_MODEL_TIMEOUT_MS);
   return {
@@ -56,6 +59,7 @@ export function resolveCommanderTimeouts(config?: RuntimeExecutionConfig): {
       3,
       1,
     ),
+    maxReplans: clampRuntimeNumber(config?.maxReplans, 0, 8, 3),
   };
 }
 

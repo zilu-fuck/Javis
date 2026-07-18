@@ -1,6 +1,7 @@
 import type { ShellCommandRequest } from "@javis/tools";
 import { isCodebaseUnderstandingRequest } from "./agent-intent";
 import type { WorkbenchWorkflowId } from "./workflows";
+import type { RouteRegistry } from "./route-registry";
 
 export type RouteKind =
   | "pdf"
@@ -13,12 +14,15 @@ export type RouteKind =
   | "local-document"
   | "schedule"
   | "browser"
-  | "computer-use";
+  | "computer-use"
+  | `workspace.${string}.${string}`;
 
 export interface RouteScore {
   route: RouteKind;
   score: number;
   signals: string[];
+  /** Optional route-specific confidence threshold. */
+  threshold?: number;
 }
 
 export interface RouteScoringContext {
@@ -104,6 +108,7 @@ export function isComputerUseGoal(userGoal: string): boolean {
 export function scoreRoutes(
   userGoal: string,
   context: RouteScoringContext = {},
+  routeRegistry?: RouteRegistry,
 ): RouteScore[] {
   const urls = extractUrls(userGoal);
   const routeScores: RouteScore[] = [
@@ -120,24 +125,28 @@ export function scoreRoutes(
     createComputerUseRouteScore(userGoal),
   ];
 
-  return routeScores.sort((left, right) => right.score - left.score);
+  const customRoutes = routeRegistry?.scoreAll(userGoal, context) ?? [];
+  return [...routeScores, ...customRoutes].sort((left, right) => right.score - left.score);
 }
 
 export function getTopRoute(
   userGoal: string,
   context?: RouteScoringContext,
+  routeRegistry?: RouteRegistry,
 ): RouteScore | undefined {
-  const [topRoute] = scoreRoutes(userGoal, context);
-  return topRoute && topRoute.score >= ROUTE_THRESHOLD ? topRoute : undefined;
+  const [topRoute] = scoreRoutes(userGoal, context, routeRegistry);
+  const threshold = topRoute?.threshold ?? ROUTE_THRESHOLD;
+  return topRoute && topRoute.score >= threshold ? topRoute : undefined;
 }
 
 export function getTopRoutes(
   userGoal: string,
   context?: RouteScoringContext,
   maxRoutes = 3,
+  routeRegistry?: RouteRegistry,
 ): RouteScore[] {
-  return scoreRoutes(userGoal, context)
-    .filter((route) => route.score >= ROUTE_THRESHOLD)
+  return scoreRoutes(userGoal, context, routeRegistry)
+    .filter((route) => route.score >= (route.threshold ?? ROUTE_THRESHOLD))
     .slice(0, Math.max(0, maxRoutes));
 }
 
@@ -145,12 +154,17 @@ export function getRecommendedWorkflowIds(
   userGoal: string,
   context?: RouteScoringContext,
   maxRoutes = 3,
+  routeRegistry?: RouteRegistry,
 ): WorkbenchWorkflowId[] {
   const workflowIds: WorkbenchWorkflowId[] = [];
-  for (const route of getTopRoutes(userGoal, context, maxRoutes)) {
-    const workflowId = routeToWorkflowId(route.route, userGoal);
-    if (workflowId && !workflowIds.includes(workflowId)) {
-      workflowIds.push(workflowId);
+  for (const route of getTopRoutes(userGoal, context, maxRoutes, routeRegistry)) {
+    const workflowId = routeRegistry?.getWorkflowId(route.route) ?? routeToWorkflowId(route.route, userGoal);
+    // RouteRegistry intentionally accepts string ids so integrations can load
+    // definitions before the workflow module is imported. The dispatcher
+    // validates the resolved id against its registry before execution.
+    const typedWorkflowId = workflowId as WorkbenchWorkflowId | undefined;
+    if (typedWorkflowId && !workflowIds.includes(typedWorkflowId)) {
+      workflowIds.push(typedWorkflowId);
     }
   }
   return workflowIds;

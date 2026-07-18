@@ -14,6 +14,22 @@ const baseInput: AdapterCompletionInput = {
   apiKeyReference: "key-ref",
 };
 
+describe("provider request deadlines", () => {
+  it.each([
+    ["OpenAI", new OpenAIAdapter()],
+    ["OpenAI-compatible", new OpenAICompatibleAdapter("custom", "https://example.test/v1")],
+    ["DeepSeek", new DeepSeekAdapter()],
+    ["Anthropic", new AnthropicAdapter()],
+  ])("passes timeoutMs through the %s adapter", (_name, adapter) => {
+    const payload = adapter.buildCompletionRequest({
+      ...baseInput,
+      timeoutMs: 12_345,
+    });
+
+    expect(payload.timeoutMs).toBe(12_345);
+  });
+});
+
 describe("OpenAIAdapter", () => {
   it("builds openai-compatible request payload", () => {
     const adapter = new OpenAIAdapter();
@@ -39,6 +55,9 @@ describe("OpenAIAdapter", () => {
     const adapter = new OpenAIAdapter();
     const payload = adapter.buildCompletionRequest({
       ...baseInput,
+      systemPrompt: "Trusted policy",
+      messages: [{ role: "user", content: "Earlier question" }],
+      assistantPrefill: "Result:",
       imageDataUrl: "data:image/png;base64,one",
       images: ["data:image/png;base64,one", "data:image/png;base64,two"],
       media: [{ url: "data:image/png;base64,one", uuid: "screen:one" }],
@@ -50,6 +69,9 @@ describe("OpenAIAdapter", () => {
       locale: "zh-CN",
     });
     expect(payload.imageDataUrl).toBe("data:image/png;base64,one");
+    expect(payload.systemPrompt).toBe("Trusted policy");
+    expect(payload.messages).toEqual([{ role: "user", content: "Earlier question" }]);
+    expect(payload.assistantPrefill).toBe("Result:");
     expect(payload.images).toEqual(["data:image/png;base64,one", "data:image/png;base64,two"]);
     expect(payload.media).toEqual([{ url: "data:image/png;base64,one", uuid: "screen:one" }]);
     expect(payload.enableMediaUuid).toBe(true);

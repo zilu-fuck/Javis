@@ -170,8 +170,12 @@ export interface AgentRegistry {
   findByKind(kind: string): AgentRegistration | undefined;
   /** Get model requirements for an agent kind */
   getModelRequirements(kind: string): ModelRequirements | undefined;
-  /** Register a new agent or replace an existing one with the same id. */
-  register(agent: Agent): void;
+  /**
+   * Register an agent. Trusted callers may replace a same-kind registration
+   * for explicit in-process customization; untrusted workspace definitions
+   * must pass allowKindReplacement=false so they cannot shadow a built-in.
+   */
+  register(agent: Agent, options?: AgentRegistrationOptions): void;
   /** Remove an agent by id. No-op if not found. */
   unregister(agentId: string): void;
 }
@@ -189,6 +193,10 @@ export function createAgentRegistry(agents: ReadonlyArray<Agent>): AgentRegistry
 
   const byKind = new Map<string, AgentRegistration>();
   const byId = new Map<string, AgentRegistration>();
+  const shadowedByRegistrationId = new Map<
+    string,
+    { registration: AgentRegistration; index: number }
+  >();
   for (const reg of registrations) {
     byKind.set(reg.agent.kind, reg);
     byId.set(reg.agent.id, reg);
@@ -214,21 +222,41 @@ export function createAgentRegistry(agents: ReadonlyArray<Agent>): AgentRegistry
       return byKind.get(kind)?.modelRequirements;
     },
 
-    register(agent) {
-      // Remove existing registration with same id if present
+    register(agent, options: AgentRegistrationOptions = {}) {
+      // A DAG addresses agents by kind, so only one live registration per kind
+      // can be unambiguous. Workspace agents replace the current kind and the
+      // previous registration is restored when the workspace agent unloads.
       const existingIdx = registrations.findIndex((r) => r.agent.id === agent.id);
+      const sameKindIdx = registrations.findIndex((r) => r.agent.kind === agent.kind);
+      if (options.allowKindReplacement === false && (existingIdx >= 0 || sameKindIdx >= 0)) {
+        throw new Error(`Agent kind ${agent.kind} is already registered and cannot be shadowed.`);
+      }
+      let insertIndex = registrations.length;
       if (existingIdx >= 0) {
         const removed = registrations[existingIdx];
         byKind.delete(removed.agent.kind);
         byId.delete(removed.agent.id);
         registrations.splice(existingIdx, 1);
+        insertIndex = existingIdx;
+      } else {
+        if (sameKindIdx >= 0) {
+          const shadowed = registrations[sameKindIdx];
+          shadowedByRegistrationId.set(agent.id, {
+            registration: shadowed,
+            index: sameKindIdx,
+          });
+          byKind.delete(shadowed.agent.kind);
+          byId.delete(shadowed.agent.id);
+          registrations.splice(sameKindIdx, 1);
+          insertIndex = sameKindIdx;
+        }
       }
       const reg: AgentRegistration = {
         agent,
         capabilityTags: inferCapabilityTags(agent),
         modelRequirements: agent.modelRequirements ?? DEFAULT_MODEL_REQUIREMENTS,
       };
-      registrations.push(reg);
+      registrations.splice(Math.min(insertIndex, registrations.length), 0, reg);
       byKind.set(agent.kind, reg);
       byId.set(agent.id, reg);
     },
@@ -240,8 +268,20 @@ export function createAgentRegistry(agents: ReadonlyArray<Agent>): AgentRegistry
       byKind.delete(removed.agent.kind);
       byId.delete(removed.agent.id);
       registrations.splice(idx, 1);
+      const shadowed = shadowedByRegistrationId.get(agentId);
+      if (shadowed) {
+        shadowedByRegistrationId.delete(agentId);
+        const restoreIndex = Math.min(shadowed.index, registrations.length);
+        registrations.splice(restoreIndex, 0, shadowed.registration);
+        byKind.set(shadowed.registration.agent.kind, shadowed.registration);
+        byId.set(shadowed.registration.agent.id, shadowed.registration);
+      }
     },
   };
+}
+
+export interface AgentRegistrationOptions {
+  allowKindReplacement?: boolean;
 }
 
 export function scoreAgentCapability(

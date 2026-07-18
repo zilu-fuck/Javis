@@ -1,7 +1,49 @@
 import { describe, expect, it } from "vitest";
 import { createRouteLog, routeMessage, scoreComplexity } from "./local-router";
+import { createRouteRegistry } from "./route-registry";
 
 describe("local-router", () => {
+  it("records confident workspace route matches in the decision and route log", () => {
+    const registry = createRouteRegistry();
+    registry.register("workspace.demo.triage", "workspace.demo.triage-flow", (input) => ({
+      route: "workspace.demo.triage",
+      score: /triage incident/i.test(input) ? 5 : 1,
+      threshold: 4,
+      signals: ["incident-triage"],
+    }));
+
+    const decision = routeMessage("triage incident", registry);
+    expect(decision).toMatchObject({
+      level: "L2",
+      mode: "single_agent_task",
+      customRoute: {
+        route: "workspace.demo.triage",
+        workflowId: "workspace.demo.triage-flow",
+        score: 5,
+        threshold: 4,
+        signals: ["incident-triage"],
+      },
+    });
+    expect(decision.reasons).toContain("custom_route:workspace.demo.triage");
+    expect(createRouteLog("task-custom-route", "triage incident", decision).customRoute)
+      .toEqual(decision.customRoute);
+    expect(routeMessage("ordinary greeting", registry).customRoute).toBeUndefined();
+  });
+
+  it("does not let a tied workspace score override a confident built-in route", () => {
+    const registry = createRouteRegistry();
+    registry.register("workspace.demo.review", "workspace.demo.review-flow", () => ({
+      route: "workspace.demo.review",
+      score: 2,
+      threshold: 2,
+      signals: ["generic-review"],
+    }));
+
+    const decision = routeMessage("review code changes", registry);
+    expect(decision.customRoute).toBeUndefined();
+  });
+
+
   it.each(["你好", "hello", "继续", "简单解释一下这个概念"])(
     "routes simple chat to L1: %s",
     (input) => {
@@ -11,6 +53,10 @@ describe("local-router", () => {
       });
     },
   );
+
+  it("marks a greeting so Project mode can safely downgrade it to L1", () => {
+    expect(routeMessage("\u4f60\u597d").reasons).toContain("casual_greeting");
+  });
 
   it.each(["总结这个文件", "查一下这个资料", "search React docs"])(
     "routes single tool-like tasks to L2: %s",

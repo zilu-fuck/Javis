@@ -10,8 +10,29 @@ import {
   isComputerUseGoal,
   scoreRoutes,
 } from "./routing";
+import { createRouteRegistry } from "./route-registry";
 
 describe("routing", () => {
+  it("applies custom route thresholds and maps confident routes to workspace workflows", () => {
+    const registry = createRouteRegistry();
+    registry.register("workspace.demo.review", "workspace.demo.review-flow", (userGoal) => ({
+      route: "workspace.demo.review",
+      score: /review workspace/i.test(userGoal) ? 5 : 1,
+      signals: ["workspace-review"],
+      threshold: 4,
+    }));
+
+    expect(getTopRoute("review workspace", undefined, registry)).toEqual({
+      route: "workspace.demo.review",
+      score: 5,
+      signals: ["workspace-review"],
+      threshold: 4,
+    });
+    expect(getRecommendedWorkflowIds("review workspace", undefined, 3, registry))
+      .toEqual(["workspace.demo.review-flow"]);
+    expect(getTopRoutes("unrelated goal", undefined, 3, registry)).toEqual([]);
+  });
+
   it("requires file context for PDF organization routing", () => {
     expect(isPdfOrganizationGoal("\u6574\u7406\u601d\u8def")).toBe(false);
     expect(isPdfOrganizationGoal("\u6574\u7406\u6587\u4ef6")).toBe(true);

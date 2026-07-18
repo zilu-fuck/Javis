@@ -6,7 +6,10 @@ export type { RouteScore, RouteScoringContext };
 export type RouteScoringFn = (userGoal: string, context: RouteScoringContext) => RouteScore;
 
 export interface RouteRegistry {
-  /** Register a scoring function for a route kind. Associates it with a workflow id. */
+  /**
+   * Register a scoring function for a route kind. Associates it with a workflow id.
+   * Registration is exclusive until the route is explicitly unregistered.
+   */
   register(routeKind: string, workflowId: string, scoringFn: RouteScoringFn): void;
   /** Remove a route kind. */
   unregister(routeKind: string): void;
@@ -21,6 +24,9 @@ export function createRouteRegistry(): RouteRegistry {
 
   return {
     register(routeKind, workflowId, scoringFn) {
+      if (scorers.has(routeKind)) {
+        throw new Error(`Route kind ${routeKind} is already registered and cannot be shadowed.`);
+      }
       scorers.set(routeKind, { workflowId, fn: scoringFn });
     },
 

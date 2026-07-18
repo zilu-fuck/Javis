@@ -1,5 +1,5 @@
-export { buildAgentSystemPrompt } from "./buildAgentSystemPrompt";
-export type { BuildAgentSystemPromptOptions, WorkspacePromptProfile } from "./buildAgentSystemPrompt";
+export { buildAgentPromptBundle, buildAgentSystemPrompt } from "./buildAgentSystemPrompt";
+export type { AgentPromptBundle, BuildAgentSystemPromptOptions, WorkspacePromptProfile } from "./buildAgentSystemPrompt";
 export { getCollaborationRules } from "./collaborationRules";
 export { getCoreRules } from "./coreRules";
 export { getOutputContract } from "./outputContracts";
@@ -14,6 +14,8 @@ export {
   clampCustomStyle,
   defaultAgentStyleFileName,
   normalizePromptLocale,
+  sanitizePromptDataText,
+  stringifyPromptData,
   wrapCustomStyle,
 } from "./styleLoader";
 export type { AgentPromptLocale, AgentStyleRecord, AgentStyleSource } from "./styleLoader";
