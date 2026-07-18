@@ -1,4 +1,5 @@
 import type { DesktopDatabase, DesktopDatabaseMigration } from "./desktop-database";
+import { withInferredContextTokens } from "@javis/ui/model-context-window";
 import {
   createDefaultModelConfiguration,
   type AgentModelOverrides,
@@ -97,20 +98,22 @@ async function loadModelConfiguration(
   );
 
   if (profileRows.length === 0) {
-    return createDefaultModelConfiguration();
+    return withInferredModelConfiguration(createDefaultModelConfiguration());
   }
 
-  const profiles: ModelProfile[] = profileRows.map((row) => ({
-    id: row.id,
-    slot: parseSlot(row.slot),
-    displayName: row.display_name,
-    provider: row.provider,
-    model: row.model,
-    apiKeyReference: row.api_key_reference,
-    baseUrl: row.base_url,
-    contextTokens: parseContextTokens(row.capabilities),
-    capabilities: parseCapabilities(row.capabilities),
-  }));
+  const profiles: ModelProfile[] = profileRows.map((row) =>
+    withInferredContextTokens({
+      id: row.id,
+      slot: parseSlot(row.slot),
+      displayName: row.display_name,
+      provider: row.provider,
+      model: row.model,
+      apiKeyReference: row.api_key_reference,
+      baseUrl: row.base_url,
+      contextTokens: parseContextTokens(row.capabilities),
+      capabilities: parseCapabilities(row.capabilities),
+    }),
+  );
 
   const agentOverrides: AgentModelOverrides = {};
   for (const row of overrideRows) {
@@ -128,9 +131,10 @@ async function saveModelConfiguration(
   overrides: AgentModelOverrides,
 ): Promise<ModelConfiguration> {
   const now = new Date().toISOString();
+  const normalizedProfiles = profiles.map((profile) => withInferredContextTokens(profile));
 
   // Upsert profiles
-  for (const profile of profiles) {
+  for (const profile of normalizedProfiles) {
     await database.execute(
       `INSERT INTO ${MODEL_PROFILES_TABLE_NAME} (id, slot, display_name, provider, model, api_key_reference, base_url, capabilities, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -168,7 +172,7 @@ ON CONFLICT(id) DO UPDATE SET
     }
   }
 
-  return { profiles, agentOverrides: overrides };
+  return { profiles: normalizedProfiles, agentOverrides: overrides };
 }
 
 // --- Migration from legacy ---
@@ -187,14 +191,17 @@ async function importFromLegacyModelSettings(
   }
 
   // Migrate legacy settings to primary slot
-  const defaultConfig = createDefaultModelConfiguration(locale);
-  const primaryProfile: ModelProfile = {
+  const defaultConfig = withInferredModelConfiguration(createDefaultModelConfiguration(locale));
+  const primaryProfile: ModelProfile = withInferredContextTokens({
     ...defaultConfig.profiles[0],
     provider: legacySettings.provider || defaultConfig.profiles[0].provider,
     model: legacySettings.model || defaultConfig.profiles[0].model,
     apiKeyReference: legacySettings.apiKeyReference || defaultConfig.profiles[0].apiKeyReference,
     baseUrl: legacySettings.baseUrl || defaultConfig.profiles[0].baseUrl,
-  };
+    // The legacy model can differ from the locale default; infer against the
+    // actual migrated model instead of retaining a stale default value.
+    contextTokens: undefined,
+  });
 
   const profiles = [
     primaryProfile,
@@ -243,4 +250,11 @@ function serializeCapabilities(profile: ModelProfile): string {
     ...profile.capabilities,
     ...(profile.contextTokens ? { contextTokens: profile.contextTokens } : {}),
   });
+}
+
+function withInferredModelConfiguration(config: ModelConfiguration): ModelConfiguration {
+  return {
+    ...config,
+    profiles: config.profiles.map((profile) => withInferredContextTokens(profile)),
+  };
 }

@@ -20,8 +20,8 @@ import type { CompletionResult } from "./model-provider";
 
 export interface VisionBridgeInput {
   userMessage: string;
-  primaryProfile: ModelProfile;
-  multimodalProfile: ModelProfile;
+  primaryProfile?: ModelProfile;
+  multimodalProfile?: ModelProfile;
   locale: string;
   onProgress?: (msg: string) => void;
 }
@@ -31,6 +31,8 @@ export interface VisionBridgeOutput {
   enrichedMessage: string;
   /** Whether a bridge was actually used (false when primary already has vision). */
   bridgeUsed: boolean;
+  /** Whether the caller should forward original images to the primary model. */
+  passThroughImages: boolean;
 }
 
 /**
@@ -42,21 +44,22 @@ export async function bridgeVisionIfNeeded(
   input: VisionBridgeInput,
 ): Promise<VisionBridgeOutput> {
   // Fast path: primary model can see images on its own.
-  if (modelSupportsVision(input.primaryProfile.capabilities)) {
+  if (input.primaryProfile && modelSupportsVision(input.primaryProfile.capabilities)) {
     return {
-      enrichedMessage: input.userMessage,
+      enrichedMessage: stripImageMarkers(input.userMessage).trim(),
       bridgeUsed: false,
+      passThroughImages: true,
     };
   }
 
   // Fast path: no images to bridge.
   if (!hasImageAttachments(input.userMessage)) {
-    return { enrichedMessage: input.userMessage, bridgeUsed: false };
+    return { enrichedMessage: input.userMessage, bridgeUsed: false, passThroughImages: false };
   }
 
   const imageUrls = extractImageDataUrls(input.userMessage);
   if (imageUrls.length === 0) {
-    return { enrichedMessage: input.userMessage, bridgeUsed: false };
+    return { enrichedMessage: input.userMessage, bridgeUsed: false, passThroughImages: false };
   }
 
   // Bridge path: need a configured multimodal model.
@@ -65,12 +68,13 @@ export async function bridgeVisionIfNeeded(
     !modelSupportsVision(input.multimodalProfile.capabilities)
   ) {
     const base = stripImageMarkers(input.userMessage).trim();
+    const warning =
+      "[Javis: image received but no vision-capable model is configured. " +
+      "Open Settings → AI and set up the Multimodal slot.]";
     return {
-      enrichedMessage:
-        base ||
-        "[Javis: image received but no vision-capable model is configured. " +
-        "Open Settings → AI and set up the Multimodal slot.]",
+      enrichedMessage: [base, warning].filter(Boolean).join("\n\n"),
       bridgeUsed: false,
+      passThroughImages: false,
     };
   }
 
@@ -100,7 +104,7 @@ export async function bridgeVisionIfNeeded(
   }
 
   if (notes.length === 0) {
-    return { enrichedMessage: cleanMessage, bridgeUsed: false };
+    return { enrichedMessage: cleanMessage, bridgeUsed: false, passThroughImages: false };
   }
 
   const visionContext = formatVisionContext(notes);
@@ -108,5 +112,5 @@ export async function bridgeVisionIfNeeded(
     ? `${visionContext}\n\n${cleanMessage}`
     : visionContext;
 
-  return { enrichedMessage: enriched, bridgeUsed: true };
+  return { enrichedMessage: enriched, bridgeUsed: true, passThroughImages: false };
 }

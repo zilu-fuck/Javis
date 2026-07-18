@@ -15,8 +15,9 @@ use crate::sandbox::{
 };
 use crate::{
     approve_native_approval_binding, create_approval_id, create_fnv1a_hash,
-    create_native_approval_binding, normalize_path, require_native_approval_binding,
-    resolve_command_program, resolve_workspace_path, NativeApprovalBinding,
+    create_native_approval_binding, normalize_path, redact_secret_like_text,
+    require_native_approval_binding, resolve_command_program, resolve_workspace_path,
+    NativeApprovalBinding,
 };
 
 pub(crate) const GIT_PUSH_APPROVAL_TOOL_NAME: &str = "git.pushBranch";
@@ -1012,7 +1013,7 @@ fn require_git_workspace_write_backend(cwd: &Path, args: &[&str]) -> Result<(), 
         cwd,
         workspace_write_policy(cwd, vec![cwd.to_path_buf()]),
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| redact_secret_like_text(&error.to_string()))
 }
 
 fn require_git_network_backend(cwd: &Path, args: &[&str]) -> Result<(), String> {
@@ -1024,7 +1025,7 @@ fn require_git_network_backend(cwd: &Path, args: &[&str]) -> Result<(), String> 
         cwd,
         policy,
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| redact_secret_like_text(&error.to_string()))
 }
 
 fn require_gh_network_backend(cwd: &Path, args: &[&str]) -> Result<(), String> {
@@ -1036,7 +1037,7 @@ fn require_gh_network_backend(cwd: &Path, args: &[&str]) -> Result<(), String> {
         cwd,
         policy,
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| redact_secret_like_text(&error.to_string()))
 }
 
 fn run_sandboxed_git_command(
@@ -1055,9 +1056,9 @@ fn run_sandboxed_git_command(
         stdin,
         timeout_ms: None,
     })
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| redact_secret_like_text(&error.to_string()))?;
     if output.exit_code.unwrap_or(1) != 0 {
-        return Err(output.stderr.trim().to_string());
+        return Err(redact_git_command_error(&output.stderr));
     }
     Ok(output.stdout.trim().to_string())
 }
@@ -1082,9 +1083,9 @@ fn run_sandboxed_gh_command(
         stdin,
         timeout_ms: None,
     })
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| redact_secret_like_text(&error.to_string()))?;
     if output.exit_code.unwrap_or(1) != 0 {
-        return Err(output.stderr.trim().to_string());
+        return Err(redact_git_command_error(&output.stderr));
     }
     Ok(output.stdout.trim().to_string())
 }
@@ -1105,9 +1106,9 @@ fn run_sandboxed_gh_readonly_network_command(cwd: &Path, args: &[&str]) -> Resul
         stdin: None,
         timeout_ms: None,
     })
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| redact_secret_like_text(&error.to_string()))?;
     if output.exit_code.unwrap_or(1) != 0 {
-        return Err(output.stderr.trim().to_string());
+        return Err(redact_git_command_error(&output.stderr));
     }
     Ok(output.stdout.trim().to_string())
 }
@@ -1118,11 +1119,22 @@ fn git_output_raw(cwd: &Path, args: &[&str]) -> Result<String, String> {
         .args(hardened_git_args(args))
         .current_dir(cwd)
         .output()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| redact_secret_like_text(&error.to_string()))?;
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        return Err(redact_git_command_error(&String::from_utf8_lossy(
+            &output.stderr,
+        )));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn redact_git_command_error(stderr: &str) -> String {
+    let redacted = redact_secret_like_text(stderr.trim());
+    if redacted.is_empty() {
+        "Git command failed without diagnostic output.".to_string()
+    } else {
+        redacted
+    }
 }
 
 fn git_output_for_paths(
@@ -2938,8 +2950,8 @@ fn parse_remote_verbose(output: &str) -> Vec<GitRemoteInfo> {
                 push_url: None,
             });
         match direction {
-            "(fetch)" => entry.fetch_url = Some(url.to_string()),
-            "(push)" => entry.push_url = Some(url.to_string()),
+            "(fetch)" => entry.fetch_url = Some(redact_secret_like_text(url)),
+            "(push)" => entry.push_url = Some(redact_secret_like_text(url)),
             _ => {}
         }
     }
@@ -3064,6 +3076,27 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn redacts_git_errors_and_remote_credentials() {
+        let error = redact_git_command_error(
+            "fatal: Authorization: Bearer ghp_private_token_value for https://alice:correct-horse@example.com/repo.git",
+        );
+        assert!(error.contains("[redacted-secret]"));
+        assert!(!error.contains("ghp_private_token_value"));
+        assert!(!error.contains("correct-horse"));
+        assert_eq!(
+            redact_git_command_error("  "),
+            "Git command failed without diagnostic output."
+        );
+
+        let remotes = parse_remote_verbose(
+            "origin\thttps://alice:correct-horse@example.com/repo.git?token=query-secret (fetch)\n",
+        );
+        let serialized = serde_json::to_string(&remotes).expect("serialize remotes");
+        assert!(!serialized.contains("correct-horse"));
+        assert!(!serialized.contains("query-secret"));
     }
 
     #[test]

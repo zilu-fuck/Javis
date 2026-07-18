@@ -1,7 +1,8 @@
-import { encodeMcpToolServerName, type ToolDescriptor } from "@javis/tools";
+import { encodeMcpToolServerName, sanitizeMcpInputSchema, type ToolDescriptor } from "@javis/tools";
 import {
   mcpRuntimeServerKey,
   mcpRuntimeServerSignature,
+  requiredInputsForMcpSchema,
   type McpRuntimeServerConfig,
 } from "./mcp-tool-descriptors";
 
@@ -155,13 +156,16 @@ function parseCachedToolDescriptor(value: unknown): ToolDescriptor | null {
   }
   const capabilityTags = record.capabilityTags.filter((item): item is string => typeof item === "string").slice(0, 12);
   const ownerAgentKinds = record.ownerAgentKinds.filter((item): item is string => typeof item === "string").slice(0, 12);
+  const metadata = parseMetadata(record.metadata);
+  const inputSchema = sanitizeMcpInputSchema(metadata?.mcpInputSchema);
   return {
     name: record.name,
     permissionLevel: "read",
     summary: record.summary.slice(0, 600),
     capabilityTags,
     ownerAgentKinds,
-    metadata: parseMetadata(record.metadata),
+    ...(inputSchema ? { requiredInputs: requiredInputsForMcpSchema(inputSchema) } : {}),
+    metadata,
   };
 }
 
@@ -169,7 +173,13 @@ function parseMetadata(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
   }
-  return { ...(value as Record<string, unknown>) };
+  const metadata = { ...(value as Record<string, unknown>) };
+  if (metadata.mcpInputSchema !== undefined) {
+    const schema = sanitizeMcpInputSchema(metadata.mcpInputSchema);
+    if (!schema) return undefined;
+    metadata.mcpInputSchema = schema;
+  }
+  return metadata;
 }
 
 function isFreshCacheEntry(entry: McpToolDescriptorCacheEntry, now: number): boolean {

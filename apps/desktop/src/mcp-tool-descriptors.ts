@@ -1,9 +1,13 @@
 import {
   encodeMcpToolServerName,
+  sanitizeMcpInputSchema,
+  validateMcpInput,
   type McpCallRequest,
+  type McpInputSchema,
   type PermissionLevel,
   type ToolDescriptor,
   type WriteRiskLevel,
+  type ToolRequiredInput,
 } from "@javis/tools";
 
 export interface McpRuntimeServerConfig {
@@ -101,7 +105,15 @@ export function buildMcpToolDescriptorsFromList(
   if (!isExecutableMcpServer(server)) return [];
   const toolServerName = encodeMcpToolServerName(mcpRuntimeServerKey(server));
   if (!toolServerName) return [];
-  return parseMcpListedTools(listToolsResult)
+  const listedTools = parseMcpListedTools(listToolsResult);
+  const nameCounts = new Map<string, number>();
+  for (const tool of listedTools) {
+    nameCounts.set(tool.name, (nameCounts.get(tool.name) ?? 0) + 1);
+  }
+  // MCP tool names are the dispatch key. A duplicate name makes annotations
+  // ambiguous, so reject every copy instead of selecting a seemingly safe one.
+  return listedTools
+    .filter((tool) => nameCounts.get(tool.name) === 1)
     .map((tool) => buildMcpToolDescriptor(server, toolServerName, tool))
     .filter((descriptor): descriptor is ToolDescriptor => descriptor !== null)
     .slice(0, MAX_MCP_TOOL_DESCRIPTORS_PER_SERVER);
@@ -115,13 +127,36 @@ export function isAllowlistedMcpCallToolRequest(
   const requestedToolName = mcpRequestToolName(request);
   const requestedSource = request.source?.trim();
   if (!requestedToolName || !requestedSource) return false;
-  return descriptors.some((descriptor) =>
-    descriptor.permissionLevel === "read" &&
-    descriptor.metadata?.mcpAction === "callTool" &&
-    descriptor.metadata.mcpServerName === request.serverName &&
-    descriptor.metadata.mcpSource === requestedSource &&
-    descriptor.metadata.mcpToolName === requestedToolName
+  const descriptor = descriptors.find((candidate) =>
+    candidate.permissionLevel === "read" &&
+    candidate.metadata?.mcpAction === "callTool" &&
+    candidate.metadata.mcpServerName === request.serverName &&
+    candidate.metadata.mcpSource === requestedSource &&
+    candidate.metadata.mcpToolName === requestedToolName
   );
+  if (!descriptor) return false;
+  const schema = readMcpInputSchema(descriptor.metadata?.mcpInputSchema);
+  const argumentsValue = request.arguments ?? request.input?.arguments ?? {};
+  return !validateMcpInput(schema, argumentsValue);
+}
+
+/** Validate arguments against the descriptor selected by server/source/name. */
+export function validateAllowlistedMcpCallArguments(
+  descriptors: readonly ToolDescriptor[],
+  request: McpCallRequest,
+  argumentsValue: unknown,
+): string | undefined {
+  const requestedToolName = mcpRequestToolName(request);
+  const requestedSource = request.source?.trim();
+  const descriptor = descriptors.find((candidate) =>
+    candidate.permissionLevel === "read" &&
+    candidate.metadata?.mcpAction === "callTool" &&
+    candidate.metadata.mcpServerName === request.serverName &&
+    candidate.metadata.mcpSource === requestedSource &&
+    candidate.metadata.mcpToolName === requestedToolName
+  );
+  if (!descriptor) return "MCP tool is not allowlisted for this server.";
+  return validateMcpInput(readMcpInputSchema(descriptor.metadata?.mcpInputSchema), argumentsValue);
 }
 
 function mcpRequestToolName(request: McpCallRequest): string {
@@ -136,12 +171,15 @@ function buildMcpToolDescriptor(
   encodedServerName: string,
   tool: McpListedTool,
 ): ToolDescriptor | null {
+  const inputSchema = sanitizeMcpInputSchema(tool.inputSchema);
+  if (!inputSchema) return null;
   const permission = classifyMcpToolPermission(tool);
   if (permission.permissionLevel !== "read") {
     return null;
   }
   const encodedToolName = encodeMcpToolServerName(tool.name);
   if (!encodedToolName) return null;
+  const requiredInputs = requiredInputsForMcpSchema(inputSchema);
   return {
     name: `mcp.${encodedServerName}.tool.${encodedToolName}`,
     permissionLevel: permission.permissionLevel,
@@ -149,13 +187,68 @@ function buildMcpToolDescriptor(
     summary: summarizeMcpTool(server, tool),
     capabilityTags: capabilityTagsForMcpTool(tool),
     ownerAgentKinds: MCP_OWNER_AGENT_KINDS,
+    ...(requiredInputs.length > 0
+      ? { requiredInputs }
+      : {}),
     metadata: {
       mcpServerName: server.name,
       mcpSource: server.source,
       mcpAction: "callTool",
       mcpToolName: tool.name,
+      mcpInputSchema: inputSchema,
     },
   };
+}
+
+export function requiredInputsForMcpSchema(schema: McpInputSchema): ToolRequiredInput[] {
+  return schema.required.flatMap((name) => {
+    const property = schema.properties[name];
+    const type = requiredInputTypeForMcpProperty(property);
+    return type ? [{ name, type }] : [];
+  });
+}
+
+function requiredInputTypeForMcpProperty(
+  property: McpInputSchema["properties"][string] | undefined,
+): ToolRequiredInput["type"] | undefined {
+  if (!property) return undefined;
+  switch (property.type) {
+    case "string":
+      return "string";
+    case "number":
+    case "integer":
+      return "number";
+    case "boolean":
+      return "boolean";
+    case "object":
+      return "object";
+    case "array": {
+      const itemType = requiredInputTypeForMcpProperty(property.items);
+      if (itemType === "string") return "string[]";
+      if (itemType === "number") return "number[]";
+      if (itemType === "boolean") return "boolean[]";
+      if (itemType === "object") return "object[]";
+      return undefined;
+    }
+    default:
+      return requiredInputTypeForMcpEnum(property.enum);
+  }
+}
+
+function requiredInputTypeForMcpEnum(
+  values: Array<string | number | boolean | null> | undefined,
+): "string" | "number" | "boolean" | undefined {
+  if (!values || values.length === 0 || values.some((value) => value === null)) {
+    return undefined;
+  }
+  const types = new Set(values.map((value) => typeof value));
+  if (types.size !== 1) return undefined;
+  const [type] = types;
+  return type === "string" || type === "number" || type === "boolean" ? type : undefined;
+}
+
+function readMcpInputSchema(value: unknown): McpInputSchema | undefined {
+  return sanitizeMcpInputSchema(value);
 }
 
 function parseMcpListedTools(value: unknown): McpListedTool[] {
@@ -202,13 +295,15 @@ function classifyMcpToolPermission(tool: McpListedTool): {
   if (nameTokens.some(isUnsafeMcpToolNameToken)) {
     return { permissionLevel: "confirmed_write", writeRiskLevel: "risky" };
   }
-  if (annotations?.readOnlyHint === true) {
-    return { permissionLevel: "read" };
-  }
-  if (annotations?.readOnlyHint === false) {
+  // A third-party annotation or a friendly-looking name cannot grant access
+  // alone. Require both the explicit MCP signal and the local name allowlist.
+  if (annotations?.readOnlyHint !== true) {
     return { permissionLevel: "confirmed_write", writeRiskLevel: "risky" };
   }
-  if (nameTokens.some((token) => MCP_READONLY_TOOL_NAME_TOKENS.has(token))) {
+  if (
+    nameTokens.some((token) => MCP_READONLY_TOOL_NAME_TOKENS.has(token)) &&
+    nameTokens.every(isMcpReadonlyNameToken)
+  ) {
     return { permissionLevel: "read" };
   }
   return { permissionLevel: "confirmed_write", writeRiskLevel: "risky" };
@@ -225,6 +320,12 @@ function tokenizeMcpToolName(name: string): string[] {
 function isUnsafeMcpToolNameToken(token: string): boolean {
   return MCP_UNSAFE_TOOL_NAME_TOKENS.has(token) ||
     MCP_UNSAFE_COMPACT_PREFIXES.some((prefix) => token.length > prefix.length && token.startsWith(prefix));
+}
+
+function isMcpReadonlyNameToken(token: string): boolean {
+  return MCP_READONLY_TOOL_NAME_TOKENS.has(token)
+    || MCP_READONLY_NEUTRAL_NAME_TOKENS.has(token)
+    || /^\d+$/.test(token);
 }
 
 function summarizeMcpTool(server: McpRuntimeServerConfig, tool: McpListedTool): string {
@@ -380,6 +481,11 @@ const MCP_UNSAFE_TOOL_NAME_TOKENS = new Set([
   "merge",
   "grant",
   "revoke",
+  "wipe",
+  "exfiltrate",
+  "exfil",
+  "leak",
+  "invoke",
   "login",
   "auth",
   "subscribe",
@@ -438,6 +544,11 @@ const MCP_UNSAFE_COMPACT_PREFIXES = [
   "merge",
   "grant",
   "revoke",
+  "wipe",
+  "exfiltrate",
+  "exfil",
+  "leak",
+  "invoke",
   "login",
   "auth",
   "subscribe",
@@ -462,4 +573,13 @@ const MCP_READONLY_TOOL_NAME_TOKENS = new Set([
   "resolve",
   "explain",
   "info",
+]);
+// A dynamic MCP tool is read-only only when every name component is either a
+// read verb or a small neutral noun vocabulary. Unknown components remain
+// approval-gated/hidden; the server's readOnlyHint is never sufficient alone.
+const MCP_READONLY_NEUTRAL_NAME_TOKENS = new Set([
+  "custom", "file", "files", "directory", "directories", "tree", "record", "records",
+  "resource", "resources", "data", "value", "values", "item", "items", "doc", "docs",
+  "document", "documents", "content", "metadata", "json", "text", "page", "pages", "by",
+  "id", "name", "url", "urls", "workspace", "project", "branch", "history", "schema",
 ]);

@@ -9,7 +9,8 @@ use tauri::{AppHandle, Emitter};
 
 use crate::code::normalize_optional_config_value;
 use crate::{
-    classify_http_request_error, infer_model_completion_provider_id,
+    classify_http_request_error, classify_http_status_error, create_fnv1a_hash,
+    create_model_completion_response_diagnostic, infer_model_completion_provider_id,
     normalize_model_completion_model_name,
     streaming::{StreamChunkPayload, StreamingRequestResult},
     ModelCompletionRequest, ModelCompletionResponse, ModelUsage,
@@ -53,30 +54,28 @@ fn build_anthropic_headers(api_key: &str, provider_id: &str) -> Vec<(String, Str
     headers
 }
 
-fn build_anthropic_completion_body(
+pub(crate) fn build_anthropic_completion_body(
     model: &str,
     request: &ModelCompletionRequest,
 ) -> Result<serde_json::Value, String> {
     let max_tokens = request.max_tokens.unwrap_or(2048);
     let content = build_anthropic_message_content(request)?;
+    let messages = crate::build_completion_messages(request, content, false);
     let mut body = serde_json::json!({
         "model": model,
         "max_tokens": max_tokens,
-        "messages": [
-            {
-                "role": "user",
-                "content": content
-            }
-        ],
+        "messages": messages,
         "stream": false,
     });
+    if let Some(system_prompt) = crate::trimmed_non_empty(request.system_prompt.as_deref()) {
+        body["system"] = serde_json::json!(system_prompt);
+    }
     if let Some(temperature) = request.temperature {
         body["temperature"] = serde_json::json!(temperature);
     }
-    if let Some(ref stop_sequences) = request.stop_sequences {
-        if !stop_sequences.is_empty() {
-            body["stop_sequences"] = serde_json::json!(stop_sequences);
-        }
+    let stop_sequences = crate::normalized_stop_sequences(request);
+    if !stop_sequences.is_empty() {
+        body["stop_sequences"] = serde_json::json!(stop_sequences);
     }
     Ok(body)
 }
@@ -87,24 +86,22 @@ fn build_anthropic_stream_body(
 ) -> Result<serde_json::Value, String> {
     let max_tokens = request.max_tokens.unwrap_or(2048);
     let content = build_anthropic_message_content(request)?;
+    let messages = crate::build_completion_messages(request, content, false);
     let mut body = serde_json::json!({
         "model": model,
         "max_tokens": max_tokens,
-        "messages": [
-            {
-                "role": "user",
-                "content": content
-            }
-        ],
+        "messages": messages,
         "stream": true,
     });
+    if let Some(system_prompt) = crate::trimmed_non_empty(request.system_prompt.as_deref()) {
+        body["system"] = serde_json::json!(system_prompt);
+    }
     if let Some(temperature) = request.temperature {
         body["temperature"] = serde_json::json!(temperature);
     }
-    if let Some(ref stop_sequences) = request.stop_sequences {
-        if !stop_sequences.is_empty() {
-            body["stop_sequences"] = serde_json::json!(stop_sequences);
-        }
+    let stop_sequences = crate::normalized_stop_sequences(request);
+    if !stop_sequences.is_empty() {
+        body["stop_sequences"] = serde_json::json!(stop_sequences);
     }
     Ok(body)
 }
@@ -175,16 +172,14 @@ fn extract_anthropic_usage(value: &serde_json::Value) -> Option<ModelUsage> {
 
 fn extract_anthropic_response_text(value: &serde_json::Value) -> Option<String> {
     let content = value.get("content")?.as_array()?;
-    for block in content {
-        if block.get("type")?.as_str()? == "text" {
-            if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                if !text.is_empty() {
-                    return Some(text.to_string());
-                }
-            }
-        }
-    }
-    None
+    let text = content
+        .iter()
+        .filter(|block| block.get("type").and_then(|value| value.as_str()) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(|value| value.as_str()))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("");
+    (!text.is_empty()).then_some(text)
 }
 
 pub(crate) fn run_anthropic_completion_request(
@@ -226,25 +221,33 @@ pub(crate) fn run_anthropic_completion_request(
         .text()
         .map_err(|error| format!("Anthropic completion could not read response: {error}"))?;
     if !status.is_success() {
-        let detail: String = response_text.chars().take(300).collect();
-        return Err(match status.as_u16() {
-            401 => format!("Anthropic API Key 验证失败（{provider_id} 返回 401）。请检查 API Key 是否正确。响应：{detail}"),
-            403 => format!("Anthropic API 访问被拒（{provider_id} 返回 403）。请检查权限或 Base URL。响应：{detail}"),
-            _ => format!("Anthropic API 返回 HTTP {}（{provider_id}）。响应：{detail}", status.as_u16()),
-        });
+        return Err(
+            classify_http_status_error(status, &response_text, &provider_id)
+                .unwrap_or_else(|| format!("Anthropic API returned HTTP {}.", status.as_u16())),
+        );
     }
 
     let value = serde_json::from_str::<serde_json::Value>(&response_text).map_err(|error| {
         format!(
-            "Anthropic completion returned invalid JSON: {error}; response: {}",
-            truncate(&response_text, 500)
+            "Anthropic completion returned invalid JSON: {error}; {}",
+            create_model_completion_response_diagnostic(
+                &provider_id,
+                &model,
+                &endpoint,
+                &response_text,
+            )
         )
     })?;
 
     let text = extract_anthropic_response_text(&value).ok_or_else(|| {
         format!(
-            "Anthropic completion returned no text content. response: {}",
-            truncate(&response_text, 500)
+            "Anthropic completion returned no text content. {}",
+            create_model_completion_response_diagnostic(
+                &provider_id,
+                &model,
+                &endpoint,
+                &response_text,
+            )
         )
     })?;
 
@@ -253,6 +256,10 @@ pub(crate) fn run_anthropic_completion_request(
         model: Some(model),
         provider: Some(provider_id),
         token_usage: extract_anthropic_usage(&value),
+        finish_reason: value
+            .get("stop_reason")
+            .and_then(|reason| reason.as_str())
+            .map(str::to_string),
     })
 }
 
@@ -274,8 +281,13 @@ pub(crate) fn execute_anthropic_streaming_request(
     let body = build_anthropic_stream_body(&model, request)?;
     let body_text = serde_json::to_string(&body).map_err(|error| error.to_string())?;
 
+    let effective_timeout = request
+        .timeout_ms
+        .filter(|&ms| ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(ANTHROPIC_STREAMING_TIMEOUT);
     let client = reqwest::blocking::Client::builder()
-        .timeout(ANTHROPIC_STREAMING_TIMEOUT)
+        .timeout(effective_timeout)
         .build()
         .map_err(|error| error.to_string())?;
 
@@ -288,10 +300,24 @@ pub(crate) fn execute_anthropic_streaming_request(
         .body(body_text)
         .send()
         .map_err(|error| format!("Anthropic stream request failed: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let response_text = response
+            .text()
+            .map_err(|error| format!("Anthropic stream could not read error response: {error}"))?;
+        return Err(
+            classify_http_status_error(status, &response_text, &provider_id)
+                .unwrap_or_else(|| format!("Anthropic stream returned HTTP {}.", status.as_u16())),
+        );
+    }
 
     let buf_reader = BufReader::with_capacity(65536, response);
     let mut total_chunks: u32 = 0;
     let mut token_usage: Option<ModelUsage> = None;
+    let mut input_tokens: u32 = 0;
+    let mut output_tokens: u32 = 0;
+    let mut finish_reason: Option<String> = None;
+    let mut saw_message_stop = false;
 
     for line in buf_reader.lines() {
         if cancelled.load(Ordering::Relaxed) {
@@ -307,18 +333,38 @@ pub(crate) fn execute_anthropic_streaming_request(
             continue;
         }
 
-        let value = match serde_json::from_str::<serde_json::Value>(data) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
+        let value = serde_json::from_str::<serde_json::Value>(data)
+            .map_err(|error| format!("Anthropic stream returned invalid JSON chunk: {error}"))?;
 
         let event_type = value.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if event_type == "error" {
+            return Err(format_anthropic_stream_error(&value, &provider_id));
+        }
+        if event_type == "message_stop" {
+            saw_message_stop = true;
+            break;
+        }
 
-        // Extract usage from message_delta (final event)
+        // Anthropic reports prompt usage on message_start and completion
+        // usage on message_delta. Keep the largest value seen for each field
+        // because the latter is cumulative rather than a per-event delta.
+        if let Some(usage) = extract_anthropic_stream_usage(&value) {
+            input_tokens = input_tokens.max(usage.input_tokens);
+            output_tokens = output_tokens.max(usage.output_tokens);
+            token_usage = Some(ModelUsage {
+                input_tokens,
+                output_tokens,
+                total_tokens: input_tokens.saturating_add(output_tokens),
+            });
+        }
+
         if event_type == "message_delta" {
-            if let Some(usage) = extract_anthropic_stream_usage(&value) {
-                token_usage = Some(usage);
-            }
+            finish_reason = value
+                .get("delta")
+                .and_then(|delta| delta.get("stop_reason"))
+                .and_then(|reason| reason.as_str())
+                .map(str::to_string)
+                .or(finish_reason);
         }
 
         // Extract text from content_block_delta with type=text_delta
@@ -345,37 +391,153 @@ pub(crate) fn execute_anthropic_streaming_request(
         }
     }
 
-    if total_chunks == 0 && !cancelled.load(Ordering::Relaxed) {
-        return Err("Anthropic stream returned no content chunks.".to_string());
-    }
+    validate_anthropic_stream_completion(
+        total_chunks,
+        cancelled.load(Ordering::Relaxed),
+        saw_message_stop,
+        finish_reason.as_deref(),
+    )?;
 
     Ok(StreamingRequestResult {
         total_chunks,
         token_usage,
+        finish_reason: if cancelled.load(Ordering::Relaxed) {
+            Some("cancelled".to_string())
+        } else {
+            finish_reason
+        },
     })
+}
+
+fn validate_anthropic_stream_completion(
+    total_chunks: u32,
+    cancelled: bool,
+    saw_message_stop: bool,
+    finish_reason: Option<&str>,
+) -> Result<(), String> {
+    if cancelled {
+        return Ok(());
+    }
+    if total_chunks == 0 {
+        return Err("Anthropic stream returned no content chunks.".to_string());
+    }
+    let has_finish_reason = finish_reason.is_some_and(|reason| !reason.trim().is_empty());
+    if !saw_message_stop && !has_finish_reason {
+        return Err(
+            "Anthropic stream ended before a terminal message_stop event or stop_reason was received."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn format_anthropic_stream_error(value: &serde_json::Value, provider_id: &str) -> String {
+    // Provider error payloads may echo prompts, reasoning, or credentials. Keep
+    // the diagnostic useful without returning any provider-controlled text.
+    let fingerprint_input = value
+        .get("error")
+        .map(ToString::to_string)
+        .unwrap_or_else(|| value.to_string());
+    let fingerprint = fingerprint_input.chars().take(4096).collect::<String>();
+    let event_type = value
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("error");
+    format!(
+        "Anthropic stream provider error (provider={provider_id}; event={event_type}; bodyHash={}).",
+        create_fnv1a_hash(fingerprint.as_bytes()),
+    )
 }
 
 fn extract_anthropic_stream_usage(value: &serde_json::Value) -> Option<ModelUsage> {
-    // message_delta contains usage with output_tokens
-    // message_start contains usage with input_tokens
-    // We combine them if available; for simplicity, extract what's in this event
-    let usage = value.get("usage")?;
-    let output_tokens = usage.get("output_tokens")?.as_u64()? as u32;
+    let usage = if value.get("type").and_then(|v| v.as_str()) == Some("message_start") {
+        value
+            .get("message")
+            .and_then(|message| message.get("usage"))?
+    } else {
+        value.get("usage")?
+    };
     let input_tokens = usage
         .get("input_tokens")
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+        .map(|value| value.min(u32::MAX as u64) as u32)
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("output_tokens")
+        .and_then(|v| v.as_u64())
+        .map(|value| value.min(u32::MAX as u64) as u32)
+        .unwrap_or(0);
+    if input_tokens == 0 && output_tokens == 0 {
+        return None;
+    }
     Some(ModelUsage {
         input_tokens,
         output_tokens,
-        total_tokens: input_tokens + output_tokens,
+        total_tokens: input_tokens.saturating_add(output_tokens),
     })
 }
 
-fn truncate(s: &str, max_len: usize) -> &str {
-    if s.len() <= max_len {
-        s
-    } else {
-        &s[..max_len]
+#[cfg(test)]
+mod tests {
+    use super::{
+        extract_anthropic_stream_usage, format_anthropic_stream_error,
+        validate_anthropic_stream_completion,
+    };
+
+    #[test]
+    fn provider_stream_errors_do_not_echo_provider_text() {
+        let value = serde_json::json!({
+            "type": "error",
+            "error": {
+                "message": "private reasoning and sk-anthropic-secret",
+            },
+        });
+        let error = format_anthropic_stream_error(&value, "anthropic");
+
+        assert!(error.contains("provider=anthropic"));
+        assert!(error.contains("event=error"));
+        assert!(error.contains("bodyHash=fnv1a-"));
+        assert!(!error.contains("private reasoning"));
+        assert!(!error.contains("sk-anthropic-secret"));
+    }
+
+    #[test]
+    fn extracts_prompt_usage_from_message_start() {
+        let value = serde_json::json!({
+            "type": "message_start",
+            "message": { "usage": { "input_tokens": 42, "output_tokens": 0 } },
+        });
+        let usage = extract_anthropic_stream_usage(&value).expect("usage");
+        assert_eq!(usage.input_tokens, 42);
+        assert_eq!(usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn extracts_completion_usage_from_message_delta() {
+        let value = serde_json::json!({
+            "type": "message_delta",
+            "usage": { "output_tokens": 7 },
+        });
+        let usage = extract_anthropic_stream_usage(&value).expect("usage");
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 7);
+    }
+
+    #[test]
+    fn rejects_eof_without_anthropic_terminal_signal() {
+        let error = validate_anthropic_stream_completion(1, false, false, None)
+            .expect_err("unterminated stream should fail");
+        assert!(error.contains("terminal message_stop event or stop_reason"));
+    }
+
+    #[test]
+    fn accepts_anthropic_message_stop_or_stop_reason() {
+        assert!(validate_anthropic_stream_completion(1, false, true, None).is_ok());
+        assert!(validate_anthropic_stream_completion(1, false, false, Some("max_tokens")).is_ok());
+    }
+
+    #[test]
+    fn accepts_cancelled_anthropic_stream_without_terminal_signal() {
+        assert!(validate_anthropic_stream_completion(0, true, false, None).is_ok());
     }
 }

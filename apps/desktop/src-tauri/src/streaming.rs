@@ -13,11 +13,12 @@ use tauri::{AppHandle, Emitter};
 
 use crate::code::{create_chat_completions_endpoint, normalize_optional_config_value};
 use crate::{
-    create_openai_compatible_stream_body, default_openai_compatible_base_url_for_provider,
+    classify_http_status_error, create_fnv1a_hash, create_openai_compatible_stream_body,
+    default_openai_compatible_base_url_for_provider, extract_openai_compatible_finish_reason,
     extract_openai_compatible_stream_text, extract_openai_compatible_usage,
     hydrate_model_completion_api_key_secret, infer_model_completion_provider_id,
     normalize_model_completion_model_name, openai_compatible_request_requires_api_key,
-    ModelCompletionRequest, ModelUsage,
+    validate_model_completion_request, ModelCompletionRequest, ModelUsage,
 };
 
 const STREAMING_READ_TIMEOUT: Duration = Duration::from_secs(120);
@@ -28,6 +29,14 @@ const STREAMING_CHUNK_CHAR_THRESHOLD: usize = 20;
 /// Fallback: emit after this many raw SSE chunks even if char threshold
 /// isn't met (handles short tokens like punctuation or whitespace).
 const STREAMING_CHUNK_COUNT_THRESHOLD: u32 = 5;
+
+fn effective_streaming_timeout(request: &ModelCompletionRequest) -> Duration {
+    request
+        .timeout_ms
+        .filter(|&ms| ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or(STREAMING_READ_TIMEOUT)
+}
 
 static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -106,6 +115,7 @@ pub fn stream_model_prompt_start(
     mut request: ModelCompletionRequest,
     stream_id: Option<String>,
 ) -> Result<String, String> {
+    validate_model_completion_request(&request)?;
     hydrate_model_completion_api_key_secret(&app_handle, &mut request)?;
     let stream_id = stream_id
         .unwrap_or_else(|| format!("stream-{}", NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed)));
@@ -126,7 +136,7 @@ pub fn stream_model_prompt_start(
                     "stream-model-done",
                     StreamDonePayload {
                         stream_id: stream_id_clone,
-                        finish_reason: Some("stop".into()),
+                        finish_reason: result.finish_reason,
                         total_chunks: result.total_chunks,
                         token_usage: result.token_usage,
                     },
@@ -153,6 +163,7 @@ pub async fn stream_model_prompt_l1_start(
     mut request: ModelCompletionRequest,
     stream_id: Option<String>,
 ) -> Result<String, String> {
+    validate_model_completion_request(&request)?;
     hydrate_model_completion_api_key_secret(&app_handle, &mut request)?;
     let stream_id = stream_id
         .unwrap_or_else(|| format!("stream-{}", NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed)));
@@ -193,7 +204,7 @@ pub async fn stream_model_prompt_l1_start(
                     "stream-model-done",
                     StreamDonePayload {
                         stream_id: stream_id_clone,
-                        finish_reason: Some("stop".into()),
+                        finish_reason: result.finish_reason,
                         total_chunks: result.total_chunks,
                         token_usage: result.token_usage,
                     },
@@ -242,7 +253,7 @@ fn execute_streaming_request(
     let body_text = serde_json::to_string(&body).map_err(|error| error.to_string())?;
 
     let client = reqwest::blocking::Client::builder()
-        .timeout(STREAMING_READ_TIMEOUT)
+        .timeout(effective_streaming_timeout(request))
         .build()
         .map_err(|error| error.to_string())?;
     let mut request_builder = client
@@ -255,9 +266,21 @@ fn execute_streaming_request(
     let response = request_builder
         .send()
         .map_err(|error| format!("Model stream request failed: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let response_text = response
+            .text()
+            .map_err(|error| format!("Model stream could not read error response: {error}"))?;
+        return Err(
+            classify_http_status_error(status, &response_text, &provider_id)
+                .unwrap_or_else(|| format!("Model stream returned HTTP {}.", status.as_u16())),
+        );
+    }
     let buf_reader = BufReader::with_capacity(65536, response);
     let mut total_chunks: u32 = 0;
     let mut token_usage: Option<ModelUsage> = None;
+    let mut finish_reason: Option<String> = None;
+    let mut saw_done_marker = false;
 
     // Batch accumulator: reduces IPC events by emitting fewer, larger chunks
     // instead of one Tauri event per token.
@@ -274,13 +297,23 @@ fn execute_streaming_request(
             continue;
         }
         let data = trimmed.trim_start_matches("data:").trim();
-        if data.is_empty() || data == "[DONE]" {
+        if data.is_empty() {
             continue;
+        }
+        if data == "[DONE]" {
+            saw_done_marker = true;
+            break;
         }
         let value = serde_json::from_str::<serde_json::Value>(data)
             .map_err(|error| format!("Model stream returned invalid JSON chunk: {error}"))?;
+        if let Some(error) = extract_provider_stream_error(&value, &provider_id) {
+            return Err(error);
+        }
         if let Some(usage) = extract_openai_compatible_usage(&value) {
             token_usage = Some(usage);
+        }
+        if let Some(reason) = extract_openai_compatible_finish_reason(&value) {
+            finish_reason = Some(reason);
         }
         if let Some(text) = extract_openai_compatible_stream_text(&value) {
             batch_text.push_str(&text);
@@ -319,13 +352,21 @@ fn execute_streaming_request(
         );
     }
 
-    if total_chunks == 0 && !cancelled.load(Ordering::Relaxed) {
-        return Err("Model stream returned no content chunks.".to_string());
-    }
+    validate_openai_stream_completion(
+        total_chunks,
+        cancelled.load(Ordering::Relaxed),
+        saw_done_marker,
+        finish_reason.as_deref(),
+    )?;
 
     Ok(StreamingRequestResult {
         total_chunks,
         token_usage,
+        finish_reason: if cancelled.load(Ordering::Relaxed) {
+            Some("cancelled".to_string())
+        } else {
+            finish_reason
+        },
     })
 }
 
@@ -349,7 +390,7 @@ async fn execute_streaming_request_async(
     let body = create_openai_compatible_stream_body(&model, request);
 
     let client = reqwest::Client::builder()
-        .timeout(STREAMING_READ_TIMEOUT)
+        .timeout(effective_streaming_timeout(request))
         .build()
         .map_err(|error| error.to_string())?;
     let mut request_builder = client
@@ -363,14 +404,27 @@ async fn execute_streaming_request_async(
         .send()
         .await
         .map_err(|error| format!("Model stream request failed: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let response_text = response
+            .text()
+            .await
+            .map_err(|error| format!("Model stream could not read error response: {error}"))?;
+        return Err(
+            classify_http_status_error(status, &response_text, &provider_id)
+                .unwrap_or_else(|| format!("Model stream returned HTTP {}.", status.as_u16())),
+        );
+    }
 
     let mut total_chunks: u32 = 0;
     let mut token_usage: Option<ModelUsage> = None;
+    let mut finish_reason: Option<String> = None;
+    let mut saw_done_marker = false;
     let mut batch_text = String::with_capacity(64);
     let mut batch_chunks: u32 = 0;
-    let mut pending = String::new();
+    let mut pending: Vec<u8> = Vec::new();
 
-    while let Some(chunk) = response
+    'stream: while let Some(chunk) = response
         .chunk()
         .await
         .map_err(|error| format!("Stream read error: {error}"))?
@@ -378,10 +432,14 @@ async fn execute_streaming_request_async(
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
-        pending.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(newline_index) = pending.find('\n') {
-            let line = pending[..newline_index].trim().to_string();
-            pending = pending[newline_index + 1..].to_string();
+        pending.extend_from_slice(&chunk);
+        while let Some(newline_index) = pending.iter().position(|byte| *byte == b'\n') {
+            let line_bytes = pending.drain(..=newline_index).collect::<Vec<_>>();
+            let line = std::str::from_utf8(&line_bytes[..line_bytes.len() - 1])
+                .map_err(|error| format!("Model stream returned invalid UTF-8: {error}"))?
+                .trim_end_matches('\r')
+                .trim()
+                .to_string();
             consume_stream_line(
                 &line,
                 app,
@@ -390,14 +448,22 @@ async fn execute_streaming_request_async(
                 &provider_id,
                 &mut total_chunks,
                 &mut token_usage,
+                &mut finish_reason,
+                &mut saw_done_marker,
                 &mut batch_text,
                 &mut batch_chunks,
             )?;
+            if saw_done_marker {
+                break 'stream;
+            }
         }
     }
 
-    let trailing = pending.trim().to_string();
-    if !trailing.is_empty() {
+    let trailing = std::str::from_utf8(&pending)
+        .map_err(|error| format!("Model stream returned invalid UTF-8: {error}"))?
+        .trim()
+        .to_string();
+    if !saw_done_marker && !trailing.is_empty() {
         consume_stream_line(
             &trailing,
             app,
@@ -406,6 +472,8 @@ async fn execute_streaming_request_async(
             &provider_id,
             &mut total_chunks,
             &mut token_usage,
+            &mut finish_reason,
+            &mut saw_done_marker,
             &mut batch_text,
             &mut batch_chunks,
         )?;
@@ -424,13 +492,21 @@ async fn execute_streaming_request_async(
         );
     }
 
-    if total_chunks == 0 && !cancelled.load(Ordering::Relaxed) {
-        return Err("Model stream returned no content chunks.".to_string());
-    }
+    validate_openai_stream_completion(
+        total_chunks,
+        cancelled.load(Ordering::Relaxed),
+        saw_done_marker,
+        finish_reason.as_deref(),
+    )?;
 
     Ok(StreamingRequestResult {
         total_chunks,
         token_usage,
+        finish_reason: if cancelled.load(Ordering::Relaxed) {
+            Some("cancelled".to_string())
+        } else {
+            finish_reason
+        },
     })
 }
 
@@ -443,6 +519,8 @@ fn consume_stream_line(
     provider_id: &str,
     total_chunks: &mut u32,
     token_usage: &mut Option<ModelUsage>,
+    finish_reason: &mut Option<String>,
+    saw_done_marker: &mut bool,
     batch_text: &mut String,
     batch_chunks: &mut u32,
 ) -> Result<(), String> {
@@ -451,13 +529,23 @@ fn consume_stream_line(
         return Ok(());
     }
     let data = trimmed.trim_start_matches("data:").trim();
-    if data.is_empty() || data == "[DONE]" {
+    if data.is_empty() {
+        return Ok(());
+    }
+    if data == "[DONE]" {
+        *saw_done_marker = true;
         return Ok(());
     }
     let value = serde_json::from_str::<serde_json::Value>(data)
         .map_err(|error| format!("Model stream returned invalid JSON chunk: {error}"))?;
+    if let Some(error) = extract_provider_stream_error(&value, provider_id) {
+        return Err(error);
+    }
     if let Some(usage) = extract_openai_compatible_usage(&value) {
         *token_usage = Some(usage);
+    }
+    if let Some(reason) = extract_openai_compatible_finish_reason(&value) {
+        *finish_reason = Some(reason);
     }
     if let Some(text) = extract_openai_compatible_stream_text(&value) {
         batch_text.push_str(&text);
@@ -483,9 +571,44 @@ fn consume_stream_line(
     Ok(())
 }
 
+fn validate_openai_stream_completion(
+    total_chunks: u32,
+    cancelled: bool,
+    saw_done_marker: bool,
+    finish_reason: Option<&str>,
+) -> Result<(), String> {
+    if cancelled {
+        return Ok(());
+    }
+    if total_chunks == 0 {
+        return Err("Model stream returned no content chunks.".to_string());
+    }
+    let has_finish_reason = finish_reason.is_some_and(|reason| !reason.trim().is_empty());
+    if !saw_done_marker && !has_finish_reason {
+        return Err(
+            "Model stream ended before a terminal [DONE] marker or finish_reason was received."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn extract_provider_stream_error(value: &serde_json::Value, provider_id: &str) -> Option<String> {
+    let error = value.get("error")?;
+    // Provider error payloads may echo prompts, reasoning, or credentials. Keep
+    // the diagnostic useful without returning any provider-controlled text.
+    let fingerprint_input = error.to_string();
+    let fingerprint = fingerprint_input.chars().take(4096).collect::<String>();
+    Some(format!(
+        "Model stream provider error (provider={provider_id}; event=error; bodyHash={}).",
+        create_fnv1a_hash(fingerprint.as_bytes()),
+    ))
+}
+
 pub(crate) struct StreamingRequestResult {
     pub total_chunks: u32,
     pub token_usage: Option<ModelUsage>,
+    pub finish_reason: Option<String>,
 }
 
 /// Cancel all active streams — called during app shutdown or task disposal.
@@ -497,4 +620,43 @@ pub fn cancel_all_model_streams() {
 #[allow(dead_code)]
 pub fn cancel_all_active_streams() {
     cancel_all_streams();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_provider_stream_error, validate_openai_stream_completion};
+
+    #[test]
+    fn provider_stream_errors_do_not_echo_provider_text() {
+        let value = serde_json::json!({
+            "error": {
+                "message": "private reasoning and sk-stream-secret",
+            },
+        });
+        let error = extract_provider_stream_error(&value, "deepseek").expect("provider error");
+
+        assert!(error.contains("provider=deepseek"));
+        assert!(error.contains("event=error"));
+        assert!(error.contains("bodyHash=fnv1a-"));
+        assert!(!error.contains("private reasoning"));
+        assert!(!error.contains("sk-stream-secret"));
+    }
+
+    #[test]
+    fn rejects_eof_without_openai_terminal_signal() {
+        let error = validate_openai_stream_completion(1, false, false, None)
+            .expect_err("unterminated stream should fail");
+        assert!(error.contains("terminal [DONE] marker or finish_reason"));
+    }
+
+    #[test]
+    fn accepts_openai_done_marker_or_finish_reason() {
+        assert!(validate_openai_stream_completion(1, false, true, None).is_ok());
+        assert!(validate_openai_stream_completion(1, false, false, Some("length")).is_ok());
+    }
+
+    #[test]
+    fn accepts_cancelled_openai_stream_without_terminal_signal() {
+        assert!(validate_openai_stream_completion(0, true, false, None).is_ok());
+    }
 }

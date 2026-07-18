@@ -1,9 +1,9 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
-use reqwest::Url;
+use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use std::{
     env, fs,
-    io::Read,
+    io::{self, Read},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs},
     path::PathBuf,
     process::{Command, Output, Stdio},
@@ -13,8 +13,11 @@ use std::{
 
 use crate::{
     env_flag_enabled, extract_title, format_system_time, html_decode, html_to_text,
-    resolve_command_program, search_with_fixture_file,
+    redact_secret_like_text, resolve_command_program, search_with_fixture_file,
 };
+
+const MAX_HTTP_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_PROCESS_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -135,14 +138,19 @@ pub(crate) fn fetch_web_source(request: WebSourceRequest) -> Result<WebSource, S
         builder = builder.resolve_to_addrs(host, &target.resolved_addrs);
     }
     builder = builder.no_proxy();
-    let client = builder.build().map_err(|error| error.to_string())?;
-    let body = client
+    let client = builder
+        .build()
+        .map_err(|error| redact_secret_like_text(&error.to_string()))?;
+    let mut response = client
         .get(target.url.clone())
         .header("User-Agent", "Javis/0.1")
         .send()
-        .map_err(|error| error.to_string())?
-        .text()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| redact_secret_like_text(&error.to_string()))?;
+    ensure_successful_web_response(response.status())?;
+    let body_bytes = read_limited(&mut response, MAX_HTTP_RESPONSE_BYTES).map_err(|error| {
+        redact_secret_like_text(&format!("Could not read web response: {error}"))
+    })?;
+    let body = String::from_utf8_lossy(&body_bytes);
     let plain_text = html_to_text(&body);
 
     Ok(WebSource {
@@ -151,6 +159,16 @@ pub(crate) fn fetch_web_source(request: WebSourceRequest) -> Result<WebSource, S
         excerpt: plain_text.chars().take(600).collect(),
         fetched_at: format_system_time(SystemTime::now()),
     })
+}
+
+fn ensure_successful_web_response(status: StatusCode) -> Result<(), String> {
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Web source request failed with HTTP status {status}."
+        ))
+    }
 }
 
 fn validate_public_http_url(raw_url: &str) -> Result<ValidatedPublicHttpUrl, String> {
@@ -165,6 +183,9 @@ fn validate_public_http_url_with_resolver(
     match url.scheme() {
         "http" | "https" => {}
         _ => return Err("Only http and https URLs are supported.".to_string()),
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("URL credentials are not allowed.".to_string());
     }
 
     let Some(host) = url.host_str() else {
@@ -200,14 +221,17 @@ fn validate_public_http_url_with_resolver(
         if resolved_addrs.is_empty() {
             return Err("URL host did not resolve to an address.".to_string());
         }
-        return Ok(ValidatedPublicHttpUrl { url, resolved_addrs });
+        return Ok(ValidatedPublicHttpUrl {
+            url,
+            resolved_addrs,
+        });
     }
 }
 
 fn resolve_host_ips(host: &str, port: u16) -> Result<Vec<IpAddr>, String> {
     let addrs = (host, port)
         .to_socket_addrs()
-        .map_err(|error| format!("Could not resolve URL host: {error}"))?
+        .map_err(|error| redact_secret_like_text(&format!("Could not resolve URL host: {error}")))?
         .map(|addr| addr.ip())
         .collect::<Vec<_>>();
     if addrs.is_empty() {
@@ -232,21 +256,35 @@ fn is_private_ip(ip: IpAddr) -> bool {
 }
 
 fn is_private_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
     ip.is_loopback()
         || ip.is_private()
         || ip.is_link_local()
         || ip.is_unspecified()
         || ip.is_broadcast()
         || ip.is_multicast()
-        || matches!(ip.octets(), [100, 64..=127, _, _])
+        || matches!(octets, [0, _, _, _])
+        || matches!(octets, [100, 64..=127, _, _])
+        || matches!(octets, [192, 0, 0, _] | [192, 0, 2, _] | [192, 88, 99, _])
+        || matches!(octets, [198, 18..=19, _, _] | [198, 51, 100, _])
+        || matches!(octets, [203, 0, 113, _] | [240..=255, _, _, _])
 }
 
 fn is_private_ipv6(ip: Ipv6Addr) -> bool {
+    let segments = ip.segments();
     ip.is_loopback()
         || ip.is_unspecified()
         || ip.is_multicast()
         || ip.is_unicast_link_local()
         || (ip.octets()[0] & 0xfe) == 0xfc
+        || ip.to_ipv4().is_some()
+        || (segments[0] & 0xe000) != 0x2000
+        || matches!(segments, [0x2001, 0x0000, _, _, _, _, _, _])
+        || matches!(segments, [0x2001, 0x0002, 0, _, _, _, _, _])
+        || (segments[0] == 0x2001 && (segments[1] & 0xfff0) == 0x0010)
+        || (segments[0] == 0x2001 && (segments[1] & 0xfff0) == 0x0020)
+        || matches!(segments, [0x2001, 0x0db8, _, _, _, _, _, _])
+        || segments[0] == 0x2002
 }
 
 #[tauri::command]
@@ -278,23 +316,29 @@ pub(crate) fn search_web_sources(
 
     if env_flag_enabled("JAVIS_SEARCH_DISABLE_GITHUB_CLI") {
         return search_with_agent_chrome(query, max_results).map_err(|error| {
-            format!("GitHub CLI search disabled; Chrome fallback failed: {error}")
+            redact_secret_like_text(&format!(
+                "GitHub CLI search disabled; Chrome fallback failed: {error}"
+            ))
         });
     }
 
     if !prefer_github {
         return search_with_agent_chrome(query, max_results)
-            .map_err(|error| format!("Web search failed: {error}"));
+            .map_err(|error| redact_secret_like_text(&format!("Web search failed: {error}")));
     }
 
     match search_with_github_cli(query, max_results) {
         Ok(results) if !results.is_empty() => Ok(results),
         Ok(_) => search_with_agent_chrome(query, max_results)
-            .map_err(|error| format!("GitHub CLI returned no results; Chrome fallback failed: {error}")),
+            .map_err(|error| {
+                redact_secret_like_text(&format!(
+                    "GitHub CLI returned no results; Chrome fallback failed: {error}"
+                ))
+            }),
         Err(primary_error) => search_with_agent_chrome(query, max_results).map_err(|fallback_error| {
-            format!(
+            redact_secret_like_text(&format!(
                 "GitHub CLI search failed: {primary_error}; Chrome fallback failed: {fallback_error}"
-            )
+            ))
         }),
     }
 }
@@ -318,20 +362,19 @@ pub(crate) fn search_with_github_cli(
         &args,
         Duration::from_secs(12),
     )
-    .map_err(|error| format!("GitHub CLI is unavailable: {error}"))?;
+    .map_err(|error| redact_secret_like_text(&format!("GitHub CLI is unavailable: {error}")))?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "GitHub CLI search failed without stderr.".to_string()
-        } else {
-            stderr
-        });
+        return Err(command_error_from_stderr(
+            &output.stderr,
+            "GitHub CLI search failed without stderr.",
+        ));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let items = serde_json::from_str::<Vec<GithubSearchItem>>(&stdout)
-        .map_err(|error| format!("GitHub CLI search returned invalid JSON: {error}"))?;
+    let items = serde_json::from_str::<Vec<GithubSearchItem>>(&stdout).map_err(|error| {
+        redact_secret_like_text(&format!("GitHub CLI search returned invalid JSON: {error}"))
+    })?;
     Ok(github_items_to_search_results(items, max_results))
 }
 
@@ -390,14 +433,14 @@ pub(crate) fn search_with_agent_chrome(
     );
     let _ = fs::remove_dir_all(&profile);
 
-    let output = output.map_err(|error| format!("Agent Chrome failed to start: {error}"))?;
+    let output = output.map_err(|error| {
+        redact_secret_like_text(&format!("Agent Chrome failed to start: {error}"))
+    })?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if stderr.is_empty() {
-            "Agent Chrome search failed without stderr.".to_string()
-        } else {
-            stderr
-        });
+        return Err(command_error_from_stderr(
+            &output.stderr,
+            "Agent Chrome search failed without stderr.",
+        ));
     }
 
     let html = String::from_utf8_lossy(&output.stdout);
@@ -437,7 +480,7 @@ pub(crate) fn create_agent_chrome_profile_dir() -> Result<PathBuf, String> {
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
     let directory = env::temp_dir().join(format!("javis-agent-chrome-{suffix}"));
-    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    fs::create_dir_all(&directory).map_err(|error| redact_secret_like_text(&error.to_string()))?;
     Ok(directory)
 }
 
@@ -451,7 +494,7 @@ pub(crate) fn run_command_with_timeout(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| redact_secret_like_text(&error.to_string()))?;
     let mut stdout = child
         .stdout
         .take()
@@ -461,18 +504,10 @@ pub(crate) fn run_command_with_timeout(
         .take()
         .ok_or_else(|| "Command stderr pipe was unavailable.".to_string())?;
     let stdout_reader = thread::spawn(move || {
-        let mut buffer = Vec::new();
-        stdout
-            .read_to_end(&mut buffer)
-            .map(|_| buffer)
-            .map_err(|error| error.to_string())
+        read_limited(&mut stdout, MAX_PROCESS_OUTPUT_BYTES).map_err(|error| error.to_string())
     });
     let stderr_reader = thread::spawn(move || {
-        let mut buffer = Vec::new();
-        stderr
-            .read_to_end(&mut buffer)
-            .map(|_| buffer)
-            .map_err(|error| error.to_string())
+        read_limited(&mut stderr, MAX_PROCESS_OUTPUT_BYTES).map_err(|error| error.to_string())
     });
     let start = SystemTime::now();
 
@@ -481,10 +516,12 @@ pub(crate) fn run_command_with_timeout(
             Ok(Some(status)) => {
                 let stdout = stdout_reader
                     .join()
-                    .map_err(|_| "Command stdout reader panicked.".to_string())??;
+                    .map_err(|_| "Command stdout reader panicked.".to_string())?
+                    .map_err(|error| redact_secret_like_text(&error))?;
                 let stderr = stderr_reader
                     .join()
-                    .map_err(|_| "Command stderr reader panicked.".to_string())??;
+                    .map_err(|_| "Command stderr reader panicked.".to_string())?
+                    .map_err(|error| redact_secret_like_text(&error))?;
                 return Ok(Output {
                     status,
                     stdout,
@@ -510,9 +547,37 @@ pub(crate) fn run_command_with_timeout(
                 let _ = child.wait();
                 let _ = stdout_reader.join();
                 let _ = stderr_reader.join();
-                return Err(error.to_string());
+                return Err(redact_secret_like_text(&error.to_string()));
             }
         }
+    }
+}
+
+fn command_error_from_stderr(stderr: &[u8], empty_message: &str) -> String {
+    let stderr = redact_secret_like_text(String::from_utf8_lossy(stderr).trim());
+    if stderr.is_empty() {
+        empty_message.to_string()
+    } else {
+        stderr
+    }
+}
+
+fn read_limited<R: Read>(reader: &mut R, max_bytes: usize) -> io::Result<Vec<u8>> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 8 * 1024];
+
+    loop {
+        let bytes_read = reader.read(&mut chunk)?;
+        if bytes_read == 0 {
+            return Ok(buffer);
+        }
+        if buffer.len().saturating_add(bytes_read) > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("output exceeded the {max_bytes}-byte limit"),
+            ));
+        }
+        buffer.extend_from_slice(&chunk[..bytes_read]);
     }
 }
 
@@ -634,7 +699,10 @@ pub(crate) fn percent_encode_query(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::{
+        io::Cursor,
+        net::{IpAddr, Ipv4Addr, SocketAddr},
+    };
 
     #[test]
     fn validate_public_http_url_allows_public_https() {
@@ -692,10 +760,7 @@ mod tests {
         assert_eq!(target.url.host_str(), Some("8.8.8.8"));
         assert_eq!(
             target.resolved_addrs,
-            vec![SocketAddr::new(
-                IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
-                8080,
-            )]
+            vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 8080,)]
         );
     }
 
@@ -718,6 +783,80 @@ mod tests {
     }
 
     #[test]
+    fn validate_public_http_url_rejects_ipv4_mapped_and_compatible_private_ips() {
+        for url in [
+            "http://[::ffff:127.0.0.1]/test",
+            "http://[::ffff:10.0.0.1]/test",
+            "http://[::ffff:169.254.169.254]/test",
+            "http://[::127.0.0.1]/test",
+            "http://[::10.0.0.1]/test",
+            "http://[::169.254.169.254]/test",
+        ] {
+            assert!(
+                validate_public_http_url(url).is_err(),
+                "{url} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_public_http_url_rejects_non_global_reserved_ips() {
+        for url in [
+            "http://0.1.2.3/test",
+            "http://192.0.0.8/test",
+            "http://192.0.2.1/test",
+            "http://198.18.0.1/test",
+            "http://198.51.100.1/test",
+            "http://203.0.113.1/test",
+            "http://240.0.0.1/test",
+            "http://[2001:db8::1]/test",
+            "http://[fec0::1]/test",
+        ] {
+            assert!(
+                validate_public_http_url(url).is_err(),
+                "{url} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn private_ip_check_allows_public_ipv6() {
+        assert!(!is_private_ip(
+            "2606:4700:4700::1111".parse::<IpAddr>().unwrap()
+        ));
+    }
+
+    #[test]
+    fn read_limited_accepts_data_at_the_limit() {
+        let mut reader = Cursor::new(b"1234".to_vec());
+
+        let result = read_limited(&mut reader, 4).expect("data at limit");
+
+        assert_eq!(result, b"1234");
+    }
+
+    #[test]
+    fn read_limited_rejects_data_over_the_limit() {
+        let mut reader = Cursor::new(b"12345".to_vec());
+
+        let error = read_limited(&mut reader, 4).expect_err("data over limit");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("4-byte limit"));
+    }
+
+    #[test]
+    fn web_source_rejects_non_success_http_status() {
+        assert!(ensure_successful_web_response(StatusCode::OK).is_ok());
+        assert_eq!(
+            ensure_successful_web_response(StatusCode::NOT_FOUND)
+                .expect_err("404 response must not become source evidence"),
+            "Web source request failed with HTTP status 404 Not Found."
+        );
+        assert!(ensure_successful_web_response(StatusCode::INTERNAL_SERVER_ERROR).is_err());
+    }
+
+    #[test]
     fn validate_public_http_url_rejects_metadata_hosts() {
         for url in [
             "http://169.254.169.254/latest/meta-data",
@@ -734,5 +873,29 @@ mod tests {
     fn validate_public_http_url_rejects_non_http_schemes() {
         assert!(validate_public_http_url("file:///C:/Windows/win.ini").is_err());
         assert!(validate_public_http_url("ftp://example.com/file").is_err());
+    }
+
+    #[test]
+    fn validate_public_http_url_rejects_embedded_credentials() {
+        let error = validate_public_http_url_with_resolver(
+            "https://alice:correct-horse@example.com/private",
+            |_host, _port| Ok(vec!["93.184.216.34".parse().unwrap()]),
+        )
+        .expect_err("URL credentials must be rejected");
+
+        assert_eq!(error, "URL credentials are not allowed.");
+        assert!(!error.contains("correct-horse"));
+    }
+
+    #[test]
+    fn command_stderr_is_redacted_before_becoming_an_error() {
+        let error = command_error_from_stderr(
+            b"gh failed: Authorization: Bearer github-private-token",
+            "fallback",
+        );
+
+        assert!(error.contains("Bearer [redacted-secret]"));
+        assert!(!error.contains("github-private-token"));
+        assert_eq!(command_error_from_stderr(b"  ", "fallback"), "fallback");
     }
 }

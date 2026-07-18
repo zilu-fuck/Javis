@@ -7,7 +7,7 @@ use tauri::AppHandle;
 
 use crate::{
     audit::{append_jsonl_line_to_path, task_audit_jsonl_path},
-    resolve_command_program, resolve_workspace_path,
+    redact_secret_like_text, resolve_command_program, resolve_workspace_path,
     sandbox::{
         read_only_policy, run_sandboxed_command, sandbox_audit_jsonl_line_for_output,
         SandboxCommandRequest, SandboxReport,
@@ -60,12 +60,12 @@ pub(crate) fn run_read_only_command_with_audit_path(
         stdin: None,
         timeout_ms: None,
     })
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| redact_secret_like_text(&error.to_string()))?;
     if let Some(audit_path) = audit_path {
         let line = sandbox_audit_jsonl_line_for_output(&output, None)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| redact_secret_like_text(&error.to_string()))?;
         append_jsonl_line_to_path(audit_path, &line, "Sandbox audit")
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| redact_secret_like_text(&error.to_string()))?;
     }
 
     Ok(ShellCommandOutput {
@@ -73,7 +73,7 @@ pub(crate) fn run_read_only_command_with_audit_path(
         cwd: output.cwd,
         exit_code: output.exit_code,
         stdout: output.stdout.trim().to_string(),
-        stderr: output.stderr.trim().to_string(),
+        stderr: redact_secret_like_text(output.stderr.trim()),
         sandbox: output.sandbox,
     })
 }

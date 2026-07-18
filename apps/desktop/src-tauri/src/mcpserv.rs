@@ -1,6 +1,5 @@
-use once_cell::sync::Lazy;
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use serde::{Deserialize, Serialize, Serializer};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -11,7 +10,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use crate::error::JavisError;
+use crate::{error::JavisError, redact_secret_like_text};
 
 const MCP_DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const MCP_MIN_REQUEST_TIMEOUT_MS: u64 = 1_000;
@@ -19,33 +18,114 @@ const MCP_MAX_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const MCP_STDERR_TAIL_MAX_CHARS: usize = 2_000;
 const MCP_MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 const MCP_MAX_HEADER_LINE_BYTES: usize = 8 * 1024;
-const MCP_READONLY_TOOL_ALLOWLIST_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const MCP_MAX_SCHEMA_DEPTH: usize = 8;
 const MCP_INSTALL_MAX_FILES: usize = 1_000;
 const MCP_INSTALL_FILE_BYTES: u64 = 10 * 1024 * 1024;
 const MCP_INSTALL_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
-static MCP_READONLY_TOOL_ALLOWLIST_CACHE: Lazy<
-    Mutex<BTreeMap<String, McpReadonlyToolAllowlistCacheEntry>>,
-> = Lazy::new(|| Mutex::new(BTreeMap::new()));
-
-#[derive(Debug, Clone)]
-struct McpReadonlyToolAllowlistCacheEntry {
-    signature: String,
-    cached_at: Instant,
-    read_only_tool_names: BTreeSet<String>,
-}
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct CodexMcpServerSummary {
     name: String,
     transport: String,
+    #[serde(serialize_with = "serialize_redacted_optional_text")]
     command: Option<String>,
+    #[serde(serialize_with = "serialize_redacted_optional_url")]
     url: Option<String>,
+    #[serde(serialize_with = "serialize_redacted_args")]
     args: Vec<String>,
+    #[serde(serialize_with = "serialize_redacted_optional_text")]
     cwd: Option<String>,
+    #[serde(skip_serializing)]
     env: BTreeMap<String, String>,
     enabled: bool,
     source: String,
     removable: bool,
+}
+
+fn serialize_redacted_optional_text<S>(
+    value: &Option<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    value
+        .as_deref()
+        .map(redact_secret_like_text)
+        .serialize(serializer)
+}
+
+fn serialize_redacted_optional_url<S>(
+    value: &Option<String>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    value
+        .as_deref()
+        .map(redact_mcp_summary_url)
+        .serialize(serializer)
+}
+
+fn serialize_redacted_args<S>(value: &[String], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    redact_mcp_summary_args(value).serialize(serializer)
+}
+
+fn redact_mcp_summary_url(value: &str) -> String {
+    let Ok(mut url) = reqwest::Url::parse(value) else {
+        return redact_secret_like_text(value);
+    };
+    if !url.username().is_empty() || url.password().is_some() {
+        let _ = url.set_username("redacted");
+        let _ = url.set_password(None);
+    }
+    if url.query().is_some() {
+        url.set_query(Some("redacted"));
+    }
+    if url.fragment().is_some() {
+        url.set_fragment(Some("redacted"));
+    }
+    redact_secret_like_text(url.as_str())
+}
+
+fn redact_mcp_summary_args(args: &[String]) -> Vec<String> {
+    let mut redact_next = false;
+    args.iter()
+        .map(|arg| {
+            if redact_next {
+                redact_next = false;
+                return "[redacted-secret]".to_string();
+            }
+            redact_next = is_sensitive_mcp_arg_name(arg);
+            redact_secret_like_text(arg)
+        })
+        .collect()
+}
+
+fn is_sensitive_mcp_arg_name(value: &str) -> bool {
+    matches!(
+        value
+            .trim_start_matches('-')
+            .to_ascii_lowercase()
+            .replace('-', "_")
+            .as_str(),
+        "api_key"
+            | "access_token"
+            | "refresh_token"
+            | "session_token"
+            | "authorization"
+            | "auth_token"
+            | "token"
+            | "secret"
+            | "client_secret"
+            | "password"
+            | "passwd"
+            | "cookie"
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -69,7 +149,9 @@ pub(crate) struct InstallMcpServerRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct McpToolCallRequest {
     server_name: String,
-    source: Option<String>,
+    /// The source is part of the server identity.  A name alone is
+    /// ambiguous when Javis and Codex expose servers with the same name.
+    source: String,
     action: Option<String>,
     tool_name: Option<String>,
     arguments: Option<serde_json::Value>,
@@ -79,7 +161,224 @@ pub(crate) struct McpToolCallRequest {
 
 #[tauri::command]
 pub(crate) fn read_mcp_config() -> Result<Option<String>, String> {
-    read_mcp_config_impl().map_err(|e| e.to_string())
+    read_mcp_config_for_renderer_impl().map_err(|e| e.to_string())
+}
+
+fn read_mcp_config_for_renderer_impl() -> Result<Option<String>, JavisError> {
+    let Some(content) = read_mcp_config_impl()? else {
+        return Ok(None);
+    };
+    let mut value = serde_json::from_str::<serde_json::Value>(&content).map_err(|_| {
+        JavisError::Validation(
+            "MCP config contains invalid JSON and cannot be displayed safely.".into(),
+        )
+    })?;
+    sanitize_mcp_config_for_renderer(&mut value);
+    serde_json::to_string(&value)
+        .map(Some)
+        .map_err(|error| JavisError::Serde(format!("Cannot serialize MCP config safely: {error}")))
+}
+
+fn sanitize_mcp_config_for_renderer(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                sanitize_mcp_config_for_renderer(item);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            let keys = object.keys().cloned().collect::<Vec<_>>();
+            for key in keys {
+                let normalized = normalize_mcp_config_key(&key);
+                if is_sensitive_mcp_config_key(&normalized) {
+                    object.remove(&key);
+                    continue;
+                }
+                let Some(entry) = object.get_mut(&key) else {
+                    continue;
+                };
+                match normalized.as_str() {
+                    "url" => {
+                        if let Some(url) = entry.as_str() {
+                            *entry = serde_json::Value::String(redact_mcp_summary_url(url));
+                        }
+                    }
+                    "args" => {
+                        if let Some(args) = entry.as_array() {
+                            let mut redact_next = false;
+                            let redacted = args
+                                .iter()
+                                .map(|arg| {
+                                    let Some(text) = arg.as_str() else {
+                                        redact_next = false;
+                                        return arg.clone();
+                                    };
+                                    if redact_next {
+                                        redact_next = false;
+                                        return serde_json::Value::String(
+                                            "[redacted-secret]".to_string(),
+                                        );
+                                    }
+                                    redact_next = is_sensitive_mcp_arg_name(text);
+                                    serde_json::Value::String(redact_secret_like_text(text))
+                                })
+                                .collect::<Vec<_>>();
+                            *entry = serde_json::Value::Array(redacted);
+                        }
+                    }
+                    "command" | "cwd" => {
+                        if let Some(text) = entry.as_str() {
+                            *entry = serde_json::Value::String(redact_secret_like_text(text));
+                        }
+                    }
+                    _ => sanitize_mcp_config_for_renderer(entry),
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Restore fields that were removed or obfuscated for the renderer when it
+/// writes an otherwise unchanged server back to disk. This keeps a UI toggle
+/// from destroying credentials embedded in a legacy config while ensuring the
+/// values never cross the renderer boundary.
+fn restore_renderer_redacted_server_fields(
+    incoming: &mut serde_json::Value,
+    previous: &serde_json::Value,
+) -> bool {
+    let Some(incoming_object) = incoming.as_object_mut() else {
+        return false;
+    };
+    let Some(previous_object) = previous.as_object() else {
+        return false;
+    };
+
+    let url_matches_previous = match (
+        incoming_object
+            .get("url")
+            .and_then(serde_json::Value::as_str),
+        previous_object
+            .get("url")
+            .and_then(serde_json::Value::as_str),
+    ) {
+        (Some(incoming_url), Some(previous_url)) => {
+            incoming_url == previous_url || incoming_url == redact_mcp_summary_url(previous_url)
+        }
+        (None, None) => true,
+        _ => false,
+    };
+    if !url_matches_previous {
+        return false;
+    }
+
+    let mut changed = false;
+    if let (Some(incoming_url), Some(previous_url)) = (
+        incoming_object
+            .get("url")
+            .and_then(serde_json::Value::as_str),
+        previous_object
+            .get("url")
+            .and_then(serde_json::Value::as_str),
+    ) {
+        if incoming_url == redact_mcp_summary_url(previous_url) && incoming_url != previous_url {
+            incoming_object.insert(
+                "url".to_string(),
+                serde_json::Value::String(previous_url.to_string()),
+            );
+            changed = true;
+        }
+    }
+    for (key, value) in previous_object {
+        if is_sensitive_mcp_config_key(&normalize_mcp_config_key(key))
+            && !incoming_object.contains_key(key)
+        {
+            incoming_object.insert(key.clone(), value.clone());
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn restore_renderer_redacted_config_fields(
+    incoming: &mut serde_json::Value,
+    previous: &serde_json::Value,
+) -> bool {
+    let mut changed = false;
+    match (incoming, previous) {
+        (
+            serde_json::Value::Object(incoming_object),
+            serde_json::Value::Object(previous_object),
+        ) => {
+            if let (
+                Some(serde_json::Value::Object(incoming_servers)),
+                Some(serde_json::Value::Object(previous_servers)),
+            ) = (
+                incoming_object.get_mut("mcpServers"),
+                previous_object.get("mcpServers"),
+            ) {
+                let names = incoming_servers.keys().cloned().collect::<Vec<_>>();
+                for name in names {
+                    if let (Some(incoming_server), Some(previous_server)) =
+                        (incoming_servers.get_mut(&name), previous_servers.get(&name))
+                    {
+                        changed |= restore_renderer_redacted_server_fields(
+                            incoming_server,
+                            previous_server,
+                        );
+                    }
+                }
+            }
+        }
+        (serde_json::Value::Array(incoming_items), serde_json::Value::Array(previous_items)) => {
+            for incoming_item in incoming_items {
+                let Some(incoming_name) = incoming_item
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                else {
+                    continue;
+                };
+                let Some(previous_item) = previous_items.iter().find(|item| {
+                    item.get("name").and_then(serde_json::Value::as_str) == Some(incoming_name)
+                }) else {
+                    continue;
+                };
+                changed |= restore_renderer_redacted_server_fields(incoming_item, previous_item);
+            }
+        }
+        _ => {}
+    }
+    changed
+}
+
+fn normalize_mcp_config_key(key: &str) -> String {
+    key.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn is_sensitive_mcp_config_key(key: &str) -> bool {
+    matches!(
+        key,
+        "env"
+            | "apikey"
+            | "accesskey"
+            | "accesstoken"
+            | "refreshtoken"
+            | "sessiontoken"
+            | "authtoken"
+            | "token"
+            | "authorization"
+            | "cookie"
+            | "credential"
+            | "credentials"
+            | "secret"
+            | "clientsecret"
+            | "password"
+            | "passwd"
+            | "headers"
+    )
 }
 
 fn read_mcp_config_impl() -> Result<Option<String>, JavisError> {
@@ -103,9 +402,23 @@ pub(crate) fn write_mcp_config(json: String) -> Result<(), String> {
 
 fn write_mcp_config_impl(json: &str) -> Result<(), JavisError> {
     // Validate JSON before writing
-    let value = serde_json::from_str::<serde_json::Value>(json)
+    let mut value = serde_json::from_str::<serde_json::Value>(json)
         .map_err(|e| JavisError::Validation(format!("Invalid JSON for MCP config: {e}")))?;
     validate_javis_mcp_config_for_write(&value)?;
+
+    // The renderer receives a redacted view. Merge back only fields that
+    // exactly match that view, so an ordinary UI toggle preserves legacy
+    // credentials without allowing a changed URL to inherit old secrets.
+    let mut persisted_json = json.to_string();
+    if let Some(previous_json) = read_mcp_config_impl()? {
+        if let Ok(previous) = serde_json::from_str::<serde_json::Value>(&previous_json) {
+            if restore_renderer_redacted_config_fields(&mut value, &previous) {
+                persisted_json = serde_json::to_string_pretty(&value).map_err(|error| {
+                    JavisError::Serde(format!("Cannot serialize MCP config safely: {error}"))
+                })?;
+            }
+        }
+    }
 
     let config_dir = dirs::config_dir()
         .ok_or_else(|| JavisError::Io("Cannot determine config directory".into()))?;
@@ -116,7 +429,7 @@ fn write_mcp_config_impl(json: &str) -> Result<(), JavisError> {
 
     let config_path = javis_dir.join("mcp.json");
     let tmp_path = javis_dir.join("mcp.json.tmp");
-    fs::write(&tmp_path, json)
+    fs::write(&tmp_path, persisted_json)
         .map_err(|e| JavisError::Io(format!("Cannot write MCP config: {e}")))?;
     fs::rename(&tmp_path, &config_path)
         .map_err(|e| JavisError::Io(format!("Cannot finalize MCP config: {e}")))?;
@@ -197,12 +510,13 @@ fn validate_javis_mcp_server_config_for_write(
 pub(crate) fn install_mcp_server_from_github(
     request: InstallMcpServerRequest,
 ) -> Result<InstallMcpServerSummary, String> {
-    install_mcp_server_from_github_impl(&request).map_err(|e| e.to_string())
+    install_mcp_server_from_github_impl(&request)
+        .map_err(|error| redact_secret_like_text(&error.to_string()))
 }
 
 #[tauri::command]
 pub(crate) fn scan_codex_mcp_servers() -> Result<Vec<CodexMcpServerSummary>, String> {
-    scan_codex_mcp_servers_impl().map_err(|e| e.to_string())
+    scan_codex_mcp_servers_impl().map_err(|error| redact_secret_like_text(&error.to_string()))
 }
 
 #[tauri::command]
@@ -211,7 +525,8 @@ pub(crate) fn set_codex_mcp_server_enabled(
     source: Option<String>,
     enabled: bool,
 ) -> Result<Vec<CodexMcpServerSummary>, String> {
-    set_codex_mcp_server_enabled_impl(&name, source.as_deref(), enabled).map_err(|e| e.to_string())
+    set_codex_mcp_server_enabled_impl(&name, source.as_deref(), enabled)
+        .map_err(|error| redact_secret_like_text(&error.to_string()))
 }
 
 #[tauri::command]
@@ -219,14 +534,15 @@ pub(crate) fn delete_codex_mcp_server(
     name: String,
     source: Option<String>,
 ) -> Result<Vec<CodexMcpServerSummary>, String> {
-    delete_codex_mcp_server_impl(&name, source.as_deref()).map_err(|e| e.to_string())
+    delete_codex_mcp_server_impl(&name, source.as_deref())
+        .map_err(|error| redact_secret_like_text(&error.to_string()))
 }
 
 #[tauri::command]
 pub(crate) fn call_mcp_server_tool(
     request: McpToolCallRequest,
 ) -> Result<serde_json::Value, String> {
-    call_mcp_server_tool_impl(&request).map_err(|e| e.to_string())
+    call_mcp_server_tool_impl(&request).map_err(|error| redact_secret_like_text(&error.to_string()))
 }
 
 fn scan_codex_mcp_servers_impl() -> Result<Vec<CodexMcpServerSummary>, JavisError> {
@@ -246,17 +562,14 @@ fn call_mcp_server_tool_impl(
     request: &McpToolCallRequest,
 ) -> Result<serde_json::Value, JavisError> {
     validate_mcp_name(&request.server_name)?;
-    let server = find_enabled_mcp_server(&request.server_name, request.source.as_deref())?;
+    validate_mcp_source(&request.source)?;
+    let server = find_enabled_mcp_server(&request.server_name, &request.source)?;
     let action = request.action.as_deref().unwrap_or("callTool");
     let timeout = mcp_request_timeout(request.timeout_ms);
     let mut client = StdioMcpClient::start(&server)?;
     client.initialize(timeout)?;
     match action {
-        "listTools" => {
-            let result = client.request("tools/list", serde_json::json!({}), timeout)?;
-            update_mcp_readonly_tool_allowlist_cache(&server, &result);
-            Ok(result)
-        }
+        "listTools" => client.request("tools/list", serde_json::json!({}), timeout),
         "callTool" => {
             let tool_name = request
                 .tool_name
@@ -274,22 +587,16 @@ fn call_mcp_server_tool_impl(
                     JavisError::Validation("MCP callTool requires a toolName input.".to_string())
                 })?;
             let arguments = mcp_call_tool_arguments(request);
-            let is_allowlisted =
-                match cached_mcp_readonly_tool_allowlist_contains(&server, tool_name) {
-                    Some(result) => result,
-                    None => {
-                        let listed_tools =
-                            client.request("tools/list", serde_json::json!({}), timeout)?;
-                        let result = is_read_only_mcp_tool_in_list(&listed_tools, tool_name);
-                        update_mcp_readonly_tool_allowlist_cache(&server, &listed_tools);
-                        result
-                    }
-                };
-            if !is_allowlisted {
-                return Err(JavisError::Validation(format!(
-                    "MCP callTool is limited to discovered read-only tools: {tool_name}"
-                )));
-            }
+            // Authorize against the live manifest from this exact client
+            // session. A cached tools/list response cannot grant execution.
+            let listed_tools = client.request("tools/list", serde_json::json!({}), timeout)?;
+            let tool =
+                find_trusted_read_only_mcp_tool(&listed_tools, tool_name).ok_or_else(|| {
+                    JavisError::Validation(format!(
+                    "MCP callTool requires a live, explicitly read-only descriptor: {tool_name}"
+                ))
+                })?;
+            validate_mcp_tool_arguments(&tool, &arguments)?;
             client.request(
                 "tools/call",
                 serde_json::json!({
@@ -344,77 +651,25 @@ fn mcp_request_timeout(timeout_ms: Option<u64>) -> Duration {
     )
 }
 
+#[cfg(test)]
 fn is_read_only_mcp_tool_in_list(list_tools_result: &serde_json::Value, tool_name: &str) -> bool {
-    parse_mcp_listed_tools(list_tools_result)
-        .iter()
-        .any(|tool| tool.name == tool_name && is_read_only_mcp_tool(tool))
+    find_trusted_read_only_mcp_tool(list_tools_result, tool_name).is_some()
 }
 
-fn cached_mcp_readonly_tool_allowlist_contains(
-    server: &CodexMcpServerSummary,
-    tool_name: &str,
-) -> Option<bool> {
-    let key = mcp_readonly_tool_allowlist_cache_key(server);
-    let signature = mcp_readonly_tool_allowlist_cache_signature(server);
-    let Ok(mut cache) = MCP_READONLY_TOOL_ALLOWLIST_CACHE.lock() else {
-        return None;
-    };
-    let now = Instant::now();
-    let Some(entry) = cache.get(&key) else {
-        return None;
-    };
-    if entry.signature != signature
-        || now.duration_since(entry.cached_at) > MCP_READONLY_TOOL_ALLOWLIST_CACHE_TTL
-    {
-        cache.remove(&key);
-        return None;
-    }
-    Some(entry.read_only_tool_names.contains(tool_name))
-}
-
-fn update_mcp_readonly_tool_allowlist_cache(
-    server: &CodexMcpServerSummary,
+fn find_trusted_read_only_mcp_tool(
     list_tools_result: &serde_json::Value,
-) {
-    let read_only_tool_names = parse_mcp_listed_tools(list_tools_result)
+    tool_name: &str,
+) -> Option<McpListedTool> {
+    parse_mcp_listed_tools(list_tools_result)
         .into_iter()
-        .filter(is_read_only_mcp_tool)
-        .map(|tool| tool.name)
-        .collect::<BTreeSet<_>>();
-    let Ok(mut cache) = MCP_READONLY_TOOL_ALLOWLIST_CACHE.lock() else {
-        return;
-    };
-    cache.insert(
-        mcp_readonly_tool_allowlist_cache_key(server),
-        McpReadonlyToolAllowlistCacheEntry {
-            signature: mcp_readonly_tool_allowlist_cache_signature(server),
-            cached_at: Instant::now(),
-            read_only_tool_names,
-        },
-    );
-}
-
-fn mcp_readonly_tool_allowlist_cache_key(server: &CodexMcpServerSummary) -> String {
-    format!("{}:{}", server.source, server.name)
-}
-
-fn mcp_readonly_tool_allowlist_cache_signature(server: &CodexMcpServerSummary) -> String {
-    serde_json::to_string(&serde_json::json!({
-        "transport": server.transport,
-        "command": server.command,
-        "url": server.url,
-        "args": server.args,
-        "cwd": server.cwd,
-        "env": server.env,
-        "enabled": server.enabled,
-    }))
-    .unwrap_or_default()
+        .find(|tool| tool.name == tool_name && is_read_only_mcp_tool(tool))
 }
 
 #[derive(Debug, Clone, Default)]
 struct McpListedTool {
     name: String,
     annotations: McpToolAnnotations,
+    input_schema: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -424,27 +679,38 @@ struct McpToolAnnotations {
 }
 
 fn parse_mcp_listed_tools(value: &serde_json::Value) -> Vec<McpListedTool> {
-    value
-        .get("tools")
-        .and_then(|tools| tools.as_array())
-        .map(|tools| {
-            tools
-                .iter()
-                .filter_map(parse_mcp_listed_tool)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
+    let Some(tools) = value.get("tools").and_then(|tools| tools.as_array()) else {
+        return Vec::new();
+    };
+    let mut name_counts = BTreeMap::<String, usize>::new();
+    for value in tools {
+        if let Some(name) = mcp_listed_tool_name(value) {
+            *name_counts.entry(name.to_string()).or_default() += 1;
+        }
+    }
+    tools
+        .iter()
+        .filter_map(parse_mcp_listed_tool)
+        .filter(|tool| name_counts.get(&tool.name) == Some(&1))
+        .collect()
+}
+
+fn mcp_listed_tool_name(value: &serde_json::Value) -> Option<&str> {
+    let name = value.as_object()?.get("name")?.as_str()?.trim();
+    (!name.is_empty()).then_some(name)
 }
 
 fn parse_mcp_listed_tool(value: &serde_json::Value) -> Option<McpListedTool> {
     let object = value.as_object()?;
-    let name = object.get("name")?.as_str()?.trim();
-    if name.is_empty() {
+    let name = mcp_listed_tool_name(value)?;
+    let input_schema = object.get("inputSchema")?;
+    if !is_supported_mcp_input_schema(input_schema) {
         return None;
     }
     Some(McpListedTool {
         name: name.to_string(),
         annotations: parse_mcp_tool_annotations(object.get("annotations")),
+        input_schema: input_schema.clone(),
     })
 }
 
@@ -461,7 +727,9 @@ fn parse_mcp_tool_annotations(value: Option<&serde_json::Value>) -> McpToolAnnot
 }
 
 fn is_read_only_mcp_tool(tool: &McpListedTool) -> bool {
-    if tool.annotations.destructive_hint == Some(true) {
+    if tool.annotations.read_only_hint != Some(true)
+        || tool.annotations.destructive_hint == Some(true)
+    {
         return false;
     }
     let name_tokens = tokenize_mcp_tool_name(&tool.name);
@@ -471,15 +739,282 @@ fn is_read_only_mcp_tool(tool: &McpListedTool) -> bool {
     {
         return false;
     }
-    if tool.annotations.read_only_hint == Some(true) {
-        return true;
-    }
-    if tool.annotations.read_only_hint == Some(false) {
-        return false;
-    }
     name_tokens
         .iter()
         .any(|token| MCP_READONLY_TOOL_NAME_TOKENS.contains(&token.as_str()))
+        && name_tokens
+            .iter()
+            .all(|token| is_mcp_readonly_name_token(token))
+}
+
+fn is_supported_mcp_input_schema(schema: &serde_json::Value) -> bool {
+    is_supported_mcp_object_schema(schema, 0, true)
+}
+
+fn is_supported_mcp_object_schema(
+    schema: &serde_json::Value,
+    depth: usize,
+    require_properties: bool,
+) -> bool {
+    if depth > MCP_MAX_SCHEMA_DEPTH {
+        return false;
+    }
+    let Some(object) = schema.as_object() else {
+        return false;
+    };
+    if has_unsupported_mcp_schema_keys(
+        object,
+        &[
+            "type",
+            "properties",
+            "required",
+            "additionalProperties",
+            "description",
+            "title",
+            "$schema",
+            "$id",
+            "examples",
+        ],
+    ) {
+        return false;
+    }
+    if object.get("type").and_then(|value| value.as_str()) != Some("object") {
+        return false;
+    }
+    let properties = match object.get("properties") {
+        Some(value) => {
+            let Some(properties) = value.as_object() else {
+                return false;
+            };
+            properties
+        }
+        None => {
+            if require_properties {
+                return false;
+            }
+            // An object without properties is treated as an empty, closed
+            // object by this intentionally small schema subset.
+            return validate_mcp_object_schema_tail(object, &serde_json::Map::new());
+        }
+    };
+    if properties.len() > 32
+        || properties.iter().any(|(name, property)| {
+            !is_safe_mcp_field_name(name) || !is_supported_mcp_property_schema(property, depth + 1)
+        })
+    {
+        return false;
+    }
+    validate_mcp_object_schema_tail(object, properties)
+}
+
+fn validate_mcp_object_schema_tail(
+    object: &serde_json::Map<String, serde_json::Value>,
+    properties: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    let Some(required_value) = object.get("required") else {
+        return validate_mcp_additional_properties(object);
+    };
+    let Some(required) = required_value.as_array() else {
+        return false;
+    };
+    required.len() <= 32
+        && required.iter().all(|value| {
+            value
+                .as_str()
+                .is_some_and(|name| is_safe_mcp_field_name(name) && properties.contains_key(name))
+        })
+        && validate_mcp_additional_properties(object)
+}
+
+fn validate_mcp_additional_properties(object: &serde_json::Map<String, serde_json::Value>) -> bool {
+    object
+        .get("additionalProperties")
+        .map(|value| value.as_bool() == Some(false))
+        .unwrap_or(true)
+}
+
+fn is_supported_mcp_property_schema(schema: &serde_json::Value, depth: usize) -> bool {
+    if depth > MCP_MAX_SCHEMA_DEPTH {
+        return false;
+    }
+    let Some(object) = schema.as_object() else {
+        return false;
+    };
+    if has_unsupported_mcp_schema_keys(
+        object,
+        &[
+            "type",
+            "enum",
+            "items",
+            "properties",
+            "required",
+            "additionalProperties",
+            "description",
+            "title",
+            "$schema",
+            "$id",
+            "examples",
+        ],
+    ) {
+        return false;
+    }
+    let property_type = object.get("type").and_then(|value| value.as_str());
+    let type_supported = property_type.is_some_and(|value| {
+        matches!(
+            value,
+            "string" | "number" | "integer" | "boolean" | "object" | "array"
+        )
+    });
+    let enum_supported = object.get("enum").is_some_and(|value| {
+        value.as_array().is_some_and(|values| {
+            !values.is_empty()
+                && values.len() <= 32
+                && values.iter().all(|entry| {
+                    entry.is_null() || entry.is_string() || entry.is_boolean() || entry.is_number()
+                })
+        })
+    });
+    if !type_supported && !enum_supported {
+        return false;
+    }
+    if property_type == Some("array") {
+        return object
+            .get("items")
+            .is_some_and(|items| is_supported_mcp_property_schema(items, depth + 1))
+            && !object.contains_key("properties")
+            && !object.contains_key("required")
+            && !object.contains_key("additionalProperties");
+    }
+    if property_type == Some("object") {
+        return is_supported_mcp_object_schema(schema, depth, false)
+            && object.get("items").is_none();
+    }
+    object.get("items").is_none()
+        && !object.contains_key("properties")
+        && !object.contains_key("required")
+        && !object.contains_key("additionalProperties")
+}
+
+fn is_safe_mcp_field_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 120
+        && !matches!(name, "__proto__" | "prototype" | "constructor")
+        && !name.chars().any(char::is_control)
+}
+
+fn has_unsupported_mcp_schema_keys(
+    object: &serde_json::Map<String, serde_json::Value>,
+    allowed: &[&str],
+) -> bool {
+    object.keys().any(|key| !allowed.contains(&key.as_str()))
+}
+
+fn validate_mcp_tool_arguments(
+    tool: &McpListedTool,
+    arguments: &serde_json::Value,
+) -> Result<(), JavisError> {
+    let arguments = arguments.as_object().ok_or_else(|| {
+        JavisError::Validation("MCP tool arguments must be a JSON object.".to_string())
+    })?;
+    let schema = tool
+        .input_schema
+        .as_object()
+        .ok_or_else(|| JavisError::Validation("MCP tool input schema is invalid.".to_string()))?;
+    validate_mcp_object_arguments(arguments, schema, "MCP tool arguments")
+}
+
+fn validate_mcp_object_arguments(
+    arguments: &serde_json::Map<String, serde_json::Value>,
+    schema: &serde_json::Map<String, serde_json::Value>,
+    label: &str,
+) -> Result<(), JavisError> {
+    let properties = schema
+        .get("properties")
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| JavisError::Validation(format!("{label} schema properties are invalid.")))?;
+    if arguments.keys().any(|name| !properties.contains_key(name)) {
+        return Err(JavisError::Validation(format!(
+            "{label} contain a field absent from the live input schema."
+        )));
+    }
+    if let Some(required) = schema.get("required").and_then(|value| value.as_array()) {
+        for name in required.iter().filter_map(|value| value.as_str()) {
+            if !arguments.contains_key(name) {
+                return Err(JavisError::Validation(format!(
+                    "{label} are missing required field: {name}"
+                )));
+            }
+        }
+    }
+    for (name, value) in arguments {
+        let property = properties.get(name).ok_or_else(|| {
+            JavisError::Validation(format!("MCP tool argument is not declared: {name}"))
+        })?;
+        if !mcp_argument_matches_schema(value, property) {
+            return Err(JavisError::Validation(format!(
+                "MCP tool argument does not match the live input schema: {name}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn mcp_argument_matches_schema(value: &serde_json::Value, schema: &serde_json::Value) -> bool {
+    let Some(object) = schema.as_object() else {
+        return false;
+    };
+    if let Some(values) = object.get("enum").and_then(|entry| entry.as_array()) {
+        if !values.contains(value) {
+            return false;
+        }
+    }
+    match object.get("type").and_then(|entry| entry.as_str()) {
+        None => object.get("enum").is_some(),
+        Some("string") => value.is_string(),
+        Some("number") => value.is_number(),
+        Some("integer") => value
+            .as_f64()
+            .is_some_and(|number| number.is_finite() && number.fract() == 0.0),
+        Some("boolean") => value.is_boolean(),
+        Some("object") => {
+            let Some(arguments) = value.as_object() else {
+                return false;
+            };
+            let Some(properties) = object.get("properties").and_then(|value| value.as_object())
+            else {
+                return arguments.is_empty();
+            };
+            if arguments.keys().any(|name| !properties.contains_key(name)) {
+                return false;
+            }
+            if let Some(required) = object.get("required").and_then(|value| value.as_array()) {
+                if required
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .any(|name| !arguments.contains_key(name))
+                {
+                    return false;
+                }
+            }
+            arguments.iter().all(|(name, value)| {
+                properties
+                    .get(name)
+                    .is_some_and(|property| mcp_argument_matches_schema(value, property))
+            })
+        }
+        Some("array") => {
+            let Some(values) = value.as_array() else {
+                return false;
+            };
+            let Some(items) = object.get("items") else {
+                return false;
+            };
+            values
+                .iter()
+                .all(|item| mcp_argument_matches_schema(item, items))
+        }
+        Some(_) => false,
+    }
 }
 
 fn tokenize_mcp_tool_name(name: &str) -> Vec<String> {
@@ -504,6 +1039,12 @@ fn is_unsafe_mcp_tool_name_token(token: &str) -> bool {
         || MCP_UNSAFE_COMPACT_PREFIXES
             .iter()
             .any(|prefix| token.len() > prefix.len() && token.starts_with(prefix))
+}
+
+fn is_mcp_readonly_name_token(token: &str) -> bool {
+    MCP_READONLY_TOOL_NAME_TOKENS.contains(&token)
+        || MCP_READONLY_NEUTRAL_NAME_TOKENS.contains(&token)
+        || !token.is_empty() && token.chars().all(|ch| ch.is_ascii_digit())
 }
 
 const MCP_UNSAFE_TOOL_NAME_TOKENS: &[&str] = &[
@@ -563,6 +1104,11 @@ const MCP_UNSAFE_TOOL_NAME_TOKENS: &[&str] = &[
     "merge",
     "grant",
     "revoke",
+    "wipe",
+    "exfiltrate",
+    "exfil",
+    "leak",
+    "invoke",
     "login",
     "auth",
     "subscribe",
@@ -622,6 +1168,11 @@ const MCP_UNSAFE_COMPACT_PREFIXES: &[&str] = &[
     "merge",
     "grant",
     "revoke",
+    "wipe",
+    "exfiltrate",
+    "exfil",
+    "leak",
+    "invoke",
     "login",
     "auth",
     "subscribe",
@@ -631,28 +1182,65 @@ const MCP_READONLY_TOOL_NAME_TOKENS: &[&str] = &[
     "read", "get", "list", "search", "find", "query", "fetch", "lookup", "inspect", "describe",
     "stat", "status", "show", "view", "resolve", "explain", "info",
 ];
+const MCP_READONLY_NEUTRAL_NAME_TOKENS: &[&str] = &[
+    "custom",
+    "file",
+    "files",
+    "directory",
+    "directories",
+    "tree",
+    "record",
+    "records",
+    "resource",
+    "resources",
+    "data",
+    "value",
+    "values",
+    "item",
+    "items",
+    "doc",
+    "docs",
+    "document",
+    "documents",
+    "content",
+    "metadata",
+    "json",
+    "text",
+    "page",
+    "pages",
+    "by",
+    "id",
+    "name",
+    "url",
+    "urls",
+    "workspace",
+    "project",
+    "branch",
+    "history",
+    "schema",
+];
 
-fn find_enabled_mcp_server(
-    name: &str,
-    source: Option<&str>,
-) -> Result<CodexMcpServerSummary, JavisError> {
-    if let Some(server) = read_javis_mcp_servers()?.into_iter().find(|server| {
-        server.name == name
-            && server.enabled
-            && source.map(|value| value == server.source).unwrap_or(true)
-    }) {
+fn find_enabled_mcp_server(name: &str, source: &str) -> Result<CodexMcpServerSummary, JavisError> {
+    if let Some(server) = select_enabled_mcp_server(&read_javis_mcp_servers()?, name, source) {
         return Ok(server);
     }
-    if let Some(server) = scan_codex_mcp_servers_impl()?.into_iter().find(|server| {
-        server.name == name
-            && server.enabled
-            && source.map(|value| value == server.source).unwrap_or(true)
-    }) {
+    if let Some(server) = select_enabled_mcp_server(&scan_codex_mcp_servers_impl()?, name, source) {
         return Ok(server);
     }
     Err(JavisError::NotFound(format!(
         "Enabled MCP server was not found: {name}"
     )))
+}
+
+fn select_enabled_mcp_server(
+    servers: &[CodexMcpServerSummary],
+    name: &str,
+    source: &str,
+) -> Option<CodexMcpServerSummary> {
+    servers
+        .iter()
+        .find(|server| server.name == name && server.source == source && server.enabled)
+        .cloned()
 }
 
 fn read_javis_mcp_servers() -> Result<Vec<CodexMcpServerSummary>, JavisError> {
@@ -782,7 +1370,10 @@ impl StdioMcpClient {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| {
-                JavisError::Io(format!("Cannot start MCP server {}: {error}", server.name))
+                JavisError::Io(redact_secret_like_text(&format!(
+                    "Cannot start MCP server {}: {error}",
+                    server.name
+                )))
             })?;
         let stdin = child
             .stdin
@@ -909,6 +1500,7 @@ impl StdioMcpClient {
     }
 
     fn with_stderr_tail(&self, error: JavisError) -> JavisError {
+        let error = redact_mcp_error(error);
         let tail = self
             .stderr_tail
             .lock()
@@ -930,6 +1522,21 @@ impl StdioMcpClient {
     }
 }
 
+fn redact_mcp_error(error: JavisError) -> JavisError {
+    match error {
+        JavisError::Io(message) => JavisError::Io(redact_secret_like_text(&message)),
+        JavisError::Serde(message) => JavisError::Serde(redact_secret_like_text(&message)),
+        JavisError::Validation(message) => {
+            JavisError::Validation(redact_secret_like_text(&message))
+        }
+        JavisError::NotFound(message) => JavisError::NotFound(redact_secret_like_text(&message)),
+        JavisError::Permission(message) => {
+            JavisError::Permission(redact_secret_like_text(&message))
+        }
+        JavisError::Internal(message) => JavisError::Internal(redact_secret_like_text(&message)),
+    }
+}
+
 fn read_mcp_stderr_tail<R: Read>(mut stderr: R, tail: Arc<Mutex<String>>) {
     let mut buffer = [0_u8; 1024];
     loop {
@@ -940,15 +1547,18 @@ fn read_mcp_stderr_tail<R: Read>(mut stderr: R, tail: Arc<Mutex<String>>) {
         };
         let chunk = String::from_utf8_lossy(&buffer[..bytes]);
         if let Ok(mut current) = tail.lock() {
-            append_bounded_text_tail(&mut current, &chunk, MCP_STDERR_TAIL_MAX_CHARS);
+            // Redact before the bounded tail can discard an auth scheme or a
+            // known key prefix. The final error assembly sanitizes again.
+            current.push_str(&chunk);
+            *current = redact_secret_like_text(&current);
+            trim_bounded_text_tail(&mut current, MCP_STDERR_TAIL_MAX_CHARS);
         } else {
             break;
         }
     }
 }
 
-fn append_bounded_text_tail(current: &mut String, chunk: &str, max_chars: usize) {
-    current.push_str(chunk);
+fn trim_bounded_text_tail(current: &mut String, max_chars: usize) {
     let char_count = current.chars().count();
     if char_count <= max_chars {
         return;
@@ -958,11 +1568,12 @@ fn append_bounded_text_tail(current: &mut String, chunk: &str, max_chars: usize)
 }
 
 fn append_mcp_stderr_tail_to_message(message: &str, tail: &str) -> String {
-    let normalized_tail = tail.trim().replace('\0', "");
+    let sanitized_message = redact_secret_like_text(message);
+    let normalized_tail = redact_secret_like_text(&tail.trim().replace('\0', ""));
     if normalized_tail.is_empty() {
-        return message.to_string();
+        return sanitized_message;
     }
-    format!("{message} MCP stderr tail: {normalized_tail}")
+    format!("{sanitized_message} MCP stderr tail: {normalized_tail}")
 }
 
 fn read_mcp_message<R: BufRead>(reader: &mut R) -> Result<serde_json::Value, String> {
@@ -1099,6 +1710,15 @@ fn validate_mcp_name(name: &str) -> Result<(), JavisError> {
     {
         return Err(JavisError::Validation(
             "Codex MCP server name is invalid.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_mcp_source(source: &str) -> Result<(), JavisError> {
+    if source.trim().is_empty() || source != source.trim() || source.chars().any(char::is_control) {
+        return Err(JavisError::Validation(
+            "MCP server source is required and invalid.".to_string(),
         ));
     }
     Ok(())
@@ -2124,8 +2744,20 @@ while ($true) {
       id = $message.id
       result = @{
         tools = @(
-          @{ name = 'search'; annotations = @{ readOnlyHint = $true } },
-          @{ name = 'write_file'; annotations = @{ readOnlyHint = $true } }
+          @{
+            name = 'search'
+            annotations = @{ readOnlyHint = $true }
+            inputSchema = @{
+              type = 'object'
+              properties = @{ query = @{ type = 'string' } }
+              required = @('query')
+            }
+          },
+          @{
+            name = 'write_file'
+            annotations = @{ readOnlyHint = $true }
+            inputSchema = @{ type = 'object'; properties = @{} }
+          }
         )
       }
     }
@@ -2219,6 +2851,97 @@ while ($true) {
     }
 
     #[test]
+    fn renderer_mcp_config_sanitizer_removes_secrets_without_changing_shape() {
+        let mut config = serde_json::json!({
+            "mcpServers": {
+                "docs": {
+                    "transport": "sse",
+                    "url": "https://alice:correct-horse@example.test/mcp?token=query-secret#fragment-secret",
+                    "env": {"API_KEY": "env-private-value"},
+                    "args": ["--api-key", "argument-private-value", "--label", "safe"],
+                    "enabled": true
+                }
+            }
+        });
+
+        sanitize_mcp_config_for_renderer(&mut config);
+
+        let server = &config["mcpServers"]["docs"];
+        assert!(server.get("env").is_none());
+        assert_eq!(server["args"][1], "[redacted-secret]");
+        assert_eq!(server["args"][3], "safe");
+        let url = server["url"].as_str().expect("sanitized URL");
+        assert!(url.contains("https://redacted@example.test/mcp?redacted#redacted"));
+        let serialized = config.to_string();
+        for secret in [
+            "correct-horse",
+            "query-secret",
+            "fragment-secret",
+            "env-private-value",
+            "argument-private-value",
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "renderer config leaked {secret}"
+            );
+        }
+    }
+
+    #[test]
+    fn internal_mcp_config_reader_remains_distinct_from_renderer_sanitizer() {
+        let mut config = serde_json::json!({
+            "mcpServers": {"local": {"env": {"API_KEY": "internal-value"}}}
+        });
+        let raw = config.clone();
+
+        sanitize_mcp_config_for_renderer(&mut config);
+
+        assert_eq!(
+            raw["mcpServers"]["local"]["env"]["API_KEY"],
+            "internal-value"
+        );
+        assert!(config["mcpServers"]["local"].get("env").is_none());
+    }
+
+    #[test]
+    fn restores_redacted_legacy_fields_only_for_the_same_server_url() {
+        let previous = serde_json::json!({
+            "mcpServers": {
+                "docs": {
+                    "transport": "sse",
+                    "url": "https://alice:correct-horse@example.test/mcp?token=query-secret",
+                    "env": {"API_KEY": "env-private-value"},
+                    "enabled": true
+                }
+            }
+        });
+        let mut incoming = previous.clone();
+        sanitize_mcp_config_for_renderer(&mut incoming);
+
+        assert!(incoming["mcpServers"]["docs"].get("env").is_none());
+        assert!(restore_renderer_redacted_config_fields(
+            &mut incoming,
+            &previous
+        ));
+        assert_eq!(incoming, previous);
+
+        let mut changed_url = serde_json::json!({
+            "mcpServers": {
+                "docs": {
+                    "transport": "sse",
+                    "url": "https://example.test/other",
+                    "enabled": true
+                }
+            }
+        });
+        assert!(!restore_renderer_redacted_config_fields(
+            &mut changed_url,
+            &previous
+        ));
+        assert!(changed_url["mcpServers"]["docs"].get("env").is_none());
+    }
+
+    #[test]
     fn clamps_mcp_request_timeout() {
         assert_eq!(
             mcp_request_timeout(Some(250)).as_millis(),
@@ -2262,7 +2985,7 @@ while ($true) {
     fn extracts_mcp_call_arguments_from_direct_arguments_first() {
         let request = McpToolCallRequest {
             server_name: "filesystem".to_string(),
-            source: Some("javis".to_string()),
+            source: "javis".to_string(),
             action: Some("callTool".to_string()),
             tool_name: Some("search".to_string()),
             arguments: Some(serde_json::json!({"query": "direct"})),
@@ -2283,7 +3006,7 @@ while ($true) {
     fn extracts_mcp_call_arguments_from_parameter_wrappers() {
         let request = McpToolCallRequest {
             server_name: "filesystem".to_string(),
-            source: Some("javis".to_string()),
+            source: "javis".to_string(),
             action: Some("callTool".to_string()),
             tool_name: Some("search".to_string()),
             arguments: None,
@@ -2306,9 +3029,63 @@ while ($true) {
     }
 
     #[test]
+    fn mcp_tool_call_requires_source_identity() {
+        let request = serde_json::json!({
+            "serverName": "filesystem",
+            "action": "listTools",
+        });
+        assert!(serde_json::from_value::<McpToolCallRequest>(request).is_err());
+    }
+
+    #[test]
+    fn mcp_server_selection_uses_source_when_names_collide() {
+        let servers = vec![
+            CodexMcpServerSummary {
+                name: "filesystem".to_string(),
+                transport: "sse".to_string(),
+                command: None,
+                url: Some("https://javis.example/mcp".to_string()),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                enabled: true,
+                source: "javis".to_string(),
+                removable: false,
+            },
+            CodexMcpServerSummary {
+                name: "filesystem".to_string(),
+                transport: "sse".to_string(),
+                command: None,
+                url: Some("https://codex.example/mcp".to_string()),
+                args: Vec::new(),
+                cwd: None,
+                env: BTreeMap::new(),
+                enabled: true,
+                source: "codex".to_string(),
+                removable: false,
+            },
+        ];
+
+        assert_eq!(
+            select_enabled_mcp_server(&servers, "filesystem", "codex")
+                .and_then(|server| server.url),
+            Some("https://codex.example/mcp".to_string())
+        );
+        assert!(select_enabled_mcp_server(&servers, "filesystem", "missing").is_none());
+    }
+
+    #[test]
+    fn mcp_source_rejects_missing_or_ambiguous_values() {
+        assert!(validate_mcp_source("").is_err());
+        assert!(validate_mcp_source(" javis").is_err());
+        assert!(validate_mcp_source("javis\n").is_err());
+        assert!(validate_mcp_source("javis").is_ok());
+    }
+
+    #[test]
     fn mcp_stderr_tail_is_bounded_and_appended_to_errors() {
-        let mut tail = String::new();
-        append_bounded_text_tail(&mut tail, "abcdef", 4);
+        let mut tail = "abcdef".to_string();
+        trim_bounded_text_tail(&mut tail, 4);
 
         assert_eq!(tail, "cdef");
         assert_eq!(
@@ -2326,80 +3103,272 @@ while ($true) {
     }
 
     #[test]
+    fn mcp_stderr_tail_and_original_error_are_secret_redacted() {
+        let message = append_mcp_stderr_tail_to_message(
+            "request used api_key=caller-private-key",
+            "server rejected Authorization: Bearer server-private-token",
+        );
+
+        assert!(message.contains("api_key=[redacted-secret]"));
+        assert!(message.contains("Bearer [redacted-secret]"));
+        assert!(!message.contains("caller-private-key"));
+        assert!(!message.contains("server-private-token"));
+    }
+
+    #[test]
+    fn mcp_stderr_tail_redacts_secrets_across_read_chunks() {
+        let tail = Arc::new(Mutex::new(String::new()));
+        read_mcp_stderr_tail(
+            std::io::Cursor::new("Authorization: Bearer "),
+            Arc::clone(&tail),
+        );
+        read_mcp_stderr_tail(
+            std::io::Cursor::new("split-secret-value"),
+            Arc::clone(&tail),
+        );
+
+        let tail = tail.lock().expect("tail lock").clone();
+        assert!(tail.contains("Bearer [redacted-secret]"));
+        assert!(!tail.contains("split-secret-value"));
+    }
+
+    #[test]
     fn allows_only_discovered_read_only_mcp_tools() {
         let list = serde_json::json!({
             "tools": [
-                {"name": "custom_lookup", "annotations": {"readOnlyHint": true}},
-                {"name": "read_file"},
-                {"name": "search"},
-                {"name": "transform_dataset"},
-                {"name": "write_file", "annotations": {"readOnlyHint": true}},
-                {"name": "writeFile", "annotations": {"readOnlyHint": true}},
-                {"name": "deletefile", "annotations": {"readOnlyHint": true}},
-                {"name": "run command", "annotations": {"readOnlyHint": true}},
-                {"name": "save_note", "annotations": {"readOnlyHint": true}},
-                {"name": "replaceDocument", "annotations": {"readOnlyHint": true}},
-                {"name": "insert_row", "annotations": {"readOnlyHint": true}},
-                {"name": "drop_table", "annotations": {"readOnlyHint": true}},
-                {"name": "commit_changes", "annotations": {"readOnlyHint": true}},
-                {"name": "push_branch", "annotations": {"readOnlyHint": true}},
-                {"name": "download_file", "annotations": {"readOnlyHint": true}},
-                {"name": "danger", "annotations": {"destructiveHint": true}}
+                {
+                    "name": "custom_lookup",
+                    "annotations": {"readOnlyHint": true},
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"]
+                    }
+                },
+                {
+                    "name": "read_file",
+                    "inputSchema": {"type": "object", "properties": {}}
+                },
+                {
+                    "name": "search",
+                    "annotations": {"readOnlyHint": true}
+                },
+                {
+                    "name": "write_file",
+                    "annotations": {"readOnlyHint": true},
+                    "inputSchema": {"type": "object", "properties": {}}
+                },
+                {
+                    "name": "danger_search",
+                    "annotations": {"readOnlyHint": true, "destructiveHint": true},
+                    "inputSchema": {"type": "object", "properties": {}}
+                },
+                {
+                    "name": "lookupAndWipe",
+                    "annotations": {"readOnlyHint": true},
+                    "inputSchema": {"type": "object", "properties": {}}
+                },
+                {
+                    "name": "getAndExfiltrate",
+                    "annotations": {"readOnlyHint": true},
+                    "inputSchema": {"type": "object", "properties": {}}
+                },
+                {
+                    "name": "fetchAndLeak",
+                    "annotations": {"readOnlyHint": true},
+                    "inputSchema": {"type": "object", "properties": {}}
+                },
+                {
+                    "name": "lookupAndInvoke",
+                    "annotations": {"readOnlyHint": true},
+                    "inputSchema": {"type": "object", "properties": {}}
+                }
             ]
         });
 
         assert!(is_read_only_mcp_tool_in_list(&list, "custom_lookup"));
-        assert!(is_read_only_mcp_tool_in_list(&list, "read_file"));
-        assert!(is_read_only_mcp_tool_in_list(&list, "search"));
-        assert!(!is_read_only_mcp_tool_in_list(&list, "transform_dataset"));
+        assert!(!is_read_only_mcp_tool_in_list(&list, "read_file"));
+        assert!(!is_read_only_mcp_tool_in_list(&list, "search"));
         assert!(!is_read_only_mcp_tool_in_list(&list, "write_file"));
-        assert!(!is_read_only_mcp_tool_in_list(&list, "writeFile"));
-        assert!(!is_read_only_mcp_tool_in_list(&list, "deletefile"));
-        assert!(!is_read_only_mcp_tool_in_list(&list, "run command"));
-        assert!(!is_read_only_mcp_tool_in_list(&list, "save_note"));
-        assert!(!is_read_only_mcp_tool_in_list(&list, "replaceDocument"));
-        assert!(!is_read_only_mcp_tool_in_list(&list, "insert_row"));
-        assert!(!is_read_only_mcp_tool_in_list(&list, "drop_table"));
-        assert!(!is_read_only_mcp_tool_in_list(&list, "commit_changes"));
-        assert!(!is_read_only_mcp_tool_in_list(&list, "push_branch"));
-        assert!(!is_read_only_mcp_tool_in_list(&list, "download_file"));
-        assert!(!is_read_only_mcp_tool_in_list(&list, "danger"));
+        assert!(!is_read_only_mcp_tool_in_list(&list, "danger_search"));
+        assert!(!is_read_only_mcp_tool_in_list(&list, "lookupAndWipe"));
+        assert!(!is_read_only_mcp_tool_in_list(&list, "getAndExfiltrate"));
+        assert!(!is_read_only_mcp_tool_in_list(&list, "fetchAndLeak"));
+        assert!(!is_read_only_mcp_tool_in_list(&list, "lookupAndInvoke"));
         assert!(!is_read_only_mcp_tool_in_list(&list, "missing"));
     }
 
     #[test]
-    fn caches_read_only_mcp_tool_allowlists_per_server_signature() {
-        let server = test_mcp_server("filesystem");
-        MCP_READONLY_TOOL_ALLOWLIST_CACHE.lock().unwrap().clear();
+    fn rejects_duplicate_mcp_tool_names_before_read_only_authorization() {
         let list = serde_json::json!({
             "tools": [
-                {"name": "search"},
-                {"name": "write_file", "annotations": {"readOnlyHint": true}},
-                {"name": "custom_lookup", "annotations": {"readOnlyHint": true}}
+                {
+                    "name": "search",
+                    "annotations": {"readOnlyHint": true},
+                    "inputSchema": {"type": "object", "properties": {}}
+                },
+                {
+                    "name": "search",
+                    "annotations": {"readOnlyHint": true},
+                    "inputSchema": {"type": "object", "properties": {}}
+                },
+                {
+                    "name": "custom_lookup",
+                    "annotations": {"readOnlyHint": true},
+                    "inputSchema": {"type": "object", "properties": {}}
+                },
+                {
+                    "name": "custom_lookup",
+                    "annotations": {"readOnlyHint": true, "destructiveHint": true},
+                    "inputSchema": {"type": "object", "properties": {}}
+                },
+                {
+                    "name": "lookup",
+                    "annotations": {"readOnlyHint": true},
+                    "inputSchema": {"type": "object", "properties": {}}
+                },
+                {"name": "lookup"},
+                {
+                    "name": "read_file",
+                    "annotations": {"readOnlyHint": true},
+                    "inputSchema": {"type": "object", "properties": {}}
+                }
             ]
         });
 
-        update_mcp_readonly_tool_allowlist_cache(&server, &list);
+        assert!(!is_read_only_mcp_tool_in_list(&list, "search"));
+        assert!(!is_read_only_mcp_tool_in_list(&list, "custom_lookup"));
+        assert!(!is_read_only_mcp_tool_in_list(&list, "lookup"));
+        assert!(is_read_only_mcp_tool_in_list(&list, "read_file"));
+    }
 
-        assert_eq!(
-            cached_mcp_readonly_tool_allowlist_contains(&server, "search"),
-            Some(true)
-        );
-        assert_eq!(
-            cached_mcp_readonly_tool_allowlist_contains(&server, "custom_lookup"),
-            Some(true)
-        );
-        assert_eq!(
-            cached_mcp_readonly_tool_allowlist_contains(&server, "write_file"),
-            Some(false)
-        );
+    #[test]
+    fn validates_mcp_arguments_against_the_live_manifest() {
+        let list = serde_json::json!({
+            "tools": [{
+                "name": "search",
+                "annotations": {"readOnlyHint": true},
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer"}
+                    },
+                    "required": ["query"]
+                }
+            }]
+        });
+        let tool = find_trusted_read_only_mcp_tool(&list, "search").expect("trusted tool");
 
-        let mut changed_server = server.clone();
-        changed_server.args.push("--changed".to_string());
-        assert_eq!(
-            cached_mcp_readonly_tool_allowlist_contains(&changed_server, "search"),
-            None
-        );
+        assert!(validate_mcp_tool_arguments(
+            &tool,
+            &serde_json::json!({"query": "docs", "limit": 5})
+        )
+        .is_ok());
+        assert!(validate_mcp_tool_arguments(&tool, &serde_json::json!({"limit": 5})).is_err());
+        assert!(validate_mcp_tool_arguments(&tool, &serde_json::json!({"query": 5})).is_err());
+        assert!(validate_mcp_tool_arguments(
+            &tool,
+            &serde_json::json!({"query": "docs", "unexpected": true})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn validates_nested_mcp_object_and_array_arguments() {
+        let list = serde_json::json!({
+            "tools": [{
+                "name": "search",
+                "annotations": {"readOnlyHint": true},
+                "inputSchema": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["request"],
+                    "properties": {
+                        "request": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["mode", "items"],
+                            "properties": {
+                                "mode": {"enum": ["read", "inspect"]},
+                                "items": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "additionalProperties": false,
+                                        "required": ["kind"],
+                                        "properties": {
+                                            "kind": {"enum": ["file", "directory"]},
+                                            "path": {"type": "string"}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }]
+        });
+        let tool = find_trusted_read_only_mcp_tool(&list, "search").expect("trusted tool");
+
+        assert!(validate_mcp_tool_arguments(
+            &tool,
+            &serde_json::json!({
+                "request": {
+                    "mode": "read",
+                    "items": [{"kind": "file", "path": "src"}]
+                }
+            })
+        )
+        .is_ok());
+        assert!(validate_mcp_tool_arguments(
+            &tool,
+            &serde_json::json!({
+                "request": {
+                    "mode": "delete",
+                    "items": [{"kind": "file", "path": "src"}]
+                }
+            })
+        )
+        .is_err());
+        assert!(validate_mcp_tool_arguments(
+            &tool,
+            &serde_json::json!({
+                "request": {
+                    "mode": "read",
+                    "items": [{"kind": "socket"}],
+                    "unexpected": true
+                }
+            })
+        )
+        .is_err());
+        assert!(validate_mcp_tool_arguments(
+            &tool,
+            &serde_json::json!({"request": {"mode": "read", "items": [{}]}})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn rejects_open_ended_nested_mcp_object_schemas() {
+        let list = serde_json::json!({
+            "tools": [{
+                "name": "search",
+                "annotations": {"readOnlyHint": true},
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "request": {
+                            "type": "object",
+                            "additionalProperties": true,
+                            "properties": {}
+                        }
+                    }
+                }
+            }]
+        });
+
+        assert!(find_trusted_read_only_mcp_tool(&list, "search").is_none());
     }
 
     #[test]
@@ -2474,21 +3443,6 @@ while ($true) {
         })));
     }
 
-    fn test_mcp_server(name: &str) -> CodexMcpServerSummary {
-        CodexMcpServerSummary {
-            name: name.to_string(),
-            transport: "stdio".to_string(),
-            command: Some("npx".to_string()),
-            url: None,
-            args: vec!["-y".to_string(), "@demo/mcp".to_string()],
-            cwd: Some("E:/Javis".to_string()),
-            env: BTreeMap::new(),
-            enabled: true,
-            source: "javis".to_string(),
-            removable: true,
-        }
-    }
-
     #[test]
     fn parses_codex_mcp_servers_from_config_toml() {
         let servers = parse_codex_mcp_servers(
@@ -2522,6 +3476,52 @@ GODOT_PATH = 'C:\godot.exe'
             Some(r"C:\godot.exe")
         );
         assert!(servers[0].removable);
+    }
+
+    #[test]
+    fn codex_mcp_summary_serialization_never_exposes_credentials() {
+        let server = CodexMcpServerSummary {
+            name: "demo-server".to_string(),
+            transport: "stdio".to_string(),
+            command: Some("node".to_string()),
+            url: Some(
+                "https://alice:correct-horse@example.test/sse?token=query-secret#fragment-secret-value"
+                    .to_string(),
+            ),
+            args: vec![
+                "--api-key".to_string(),
+                "sk-private-argument-value".to_string(),
+                "--label".to_string(),
+                "safe".to_string(),
+            ],
+            cwd: Some("E:/Javis".to_string()),
+            env: BTreeMap::from([
+                ("API_KEY".to_string(), "env-private-value".to_string()),
+                ("SAFE_NAME".to_string(), "still-not-public".to_string()),
+            ]),
+            enabled: true,
+            source: "codex".to_string(),
+            removable: false,
+        };
+
+        let serialized = serde_json::to_value(&server).expect("serialize public summary");
+        let text = serialized.to_string();
+
+        assert!(serialized.get("env").is_none());
+        assert_eq!(serialized["args"][1], "[redacted-secret]");
+        for secret in [
+            "correct-horse",
+            "query-secret",
+            "fragment-secret-value",
+            "env-private-value",
+            "still-not-public",
+            "sk-private-argument-value",
+        ] {
+            assert!(
+                !text.contains(secret),
+                "serialized MCP summary leaked {secret}"
+            );
+        }
     }
 
     #[test]

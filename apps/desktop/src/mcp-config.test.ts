@@ -91,6 +91,44 @@ describe("mcp config", () => {
     });
   });
 
+  it("keeps renderer-safe legacy configs writable after env removal", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(JSON.stringify({
+      mcpServers: {
+        docs: {
+          transport: "sse",
+          url: "https://example.com/mcp",
+          enabled: true,
+        },
+      },
+    }));
+
+    const config = await loadMcpConfig();
+
+    expect(config[0]).toEqual(expect.objectContaining({
+      name: "docs",
+      transport: "sse",
+      url: "https://example.com/mcp",
+      env: undefined,
+    }));
+    await saveMcpConfig(config);
+
+    expect(invoke).toHaveBeenLastCalledWith("write_mcp_config", {
+      json: JSON.stringify({
+        mcpServers: {
+          docs: {
+            transport: "sse",
+            url: "https://example.com/mcp",
+            enabled: true,
+            command: undefined,
+            args: undefined,
+            cwd: undefined,
+            env: undefined,
+          },
+        },
+      }, null, 2),
+    });
+  });
+
   it("does not expose raw metadata when saving array configs", async () => {
     vi.mocked(invoke).mockResolvedValueOnce(JSON.stringify([
       {

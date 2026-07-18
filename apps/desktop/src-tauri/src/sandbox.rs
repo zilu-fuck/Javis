@@ -12,7 +12,7 @@ use crate::{
     approve_native_approval_binding, create_approval_id, create_fnv1a_hash,
     create_native_approval_binding,
     error::JavisError,
-    normalize_path, require_native_approval_binding,
+    normalize_path, redact_secret_like_text, require_native_approval_binding,
     scan::is_sensitive_read_path,
     shell::{
         is_allowed_read_only_command, is_retryable_windows_process_initialization_exit,
@@ -1213,7 +1213,7 @@ fn run_policy_only_read_only_command(
         cwd: normalize_path(&cwd),
         exit_code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        stderr: redact_secret_like_text(&String::from_utf8_lossy(&output.stderr)),
         sandbox: SandboxReport {
             backend: SandboxBackend::PolicyOnly,
             backend_status: active_platform_backend_status(),
@@ -2821,7 +2821,7 @@ fn launch_windows_sandboxed_process(
     }
 
     let stdout_str = String::from_utf8_lossy(&stdout_buf).to_string();
-    let stderr_str = String::from_utf8_lossy(&stderr_buf).to_string();
+    let stderr_str = redact_secret_like_text(&String::from_utf8_lossy(&stderr_buf));
 
     Ok(SandboxCommandOutput {
         command: plan.command.clone(),
@@ -3080,7 +3080,7 @@ fn launch_linux_bubblewrap_process(
 
     let exit_code = output.status.code();
     let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr_str = redact_secret_like_text(&String::from_utf8_lossy(&output.stderr));
 
     Ok(SandboxCommandOutput {
         command: plan.command.clone(),
@@ -3305,7 +3305,7 @@ fn launch_macos_seatbelt_process(
 
     let exit_code = output.status.code();
     let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
+    let stderr_str = redact_secret_like_text(&String::from_utf8_lossy(&output.stderr));
 
     Ok(SandboxCommandOutput {
         command: plan.command.clone(),
@@ -3379,7 +3379,43 @@ fn platform_backend_status() -> SandboxBackendStatus {
 }
 
 fn command_summary(program: &str, args: &[String]) -> String {
-    format!("{} {}", program, args.join(" ")).trim().to_string()
+    let mut redact_next = false;
+    let args = args
+        .iter()
+        .map(|arg| {
+            if redact_next {
+                redact_next = false;
+                return "[redacted-secret]".to_string();
+            }
+            redact_next = is_sensitive_command_arg_name(arg);
+            redact_secret_like_text(arg)
+        })
+        .collect::<Vec<_>>();
+    format!("{} {}", redact_secret_like_text(program), args.join(" "))
+        .trim()
+        .to_string()
+}
+
+fn is_sensitive_command_arg_name(value: &str) -> bool {
+    matches!(
+        value
+            .trim_start_matches('-')
+            .to_ascii_lowercase()
+            .replace('-', "_")
+            .as_str(),
+        "api_key"
+            | "access_token"
+            | "refresh_token"
+            | "session_token"
+            | "authorization"
+            | "auth_token"
+            | "token"
+            | "secret"
+            | "client_secret"
+            | "password"
+            | "passwd"
+            | "cookie"
+    )
 }
 
 fn windows_command_line(executable: &Path, args: &[String]) -> String {
@@ -3567,6 +3603,22 @@ pub(crate) fn is_default_protected_path(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_summary_redacts_separate_secret_arguments() {
+        let summary = command_summary(
+            "tool",
+            &[
+                "--api-key".to_string(),
+                "sk-private-command-value".to_string(),
+                "--label".to_string(),
+                "safe".to_string(),
+            ],
+        );
+
+        assert_eq!(summary, "tool --api-key [redacted-secret] --label safe");
+        assert!(!summary.contains("sk-private-command-value"));
+    }
     use crate::audit::append_jsonl_line_to_path;
     use std::{fs, process::Command};
 

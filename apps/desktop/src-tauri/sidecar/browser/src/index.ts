@@ -6,6 +6,8 @@ import * as fs from "node:fs";
 import * as dns from "node:dns/promises";
 import * as net from "node:net";
 import { execFile } from "node:child_process";
+import { launchBrowser } from "./browser-launch.js";
+import { isPrivateIp } from "./network-policy.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -54,7 +56,7 @@ async function ensureBrowser(headless = true): Promise<{ browser: Browser; conte
   userDataDir = path.join(os.tmpdir(), `javis-browser-${Date.now()}`);
   fs.mkdirSync(userDataDir, { recursive: true });
 
-  browser = await chromium.launch({ headless });
+  browser = await launchBrowser(chromium, headless);
   context = await browser.newContext({ viewport: { width: 1280, height: 720 } });
   await context.route("**/*", async (route) => {
     const allowed = await isBrowserRequestAllowed(route.request().url(), requestPolicy.allowLocalhost);
@@ -151,37 +153,6 @@ function isPrivateHost(host: string): boolean {
   if (isLocalhost(host)) return true;
   if (host === "metadata.google.internal" || host === "metadata") return true;
   return net.isIP(host) !== 0 && isPrivateIp(host);
-}
-
-function isPrivateIp(address: string): boolean {
-  if (net.isIPv4(address)) {
-    const parts = address.split(".").map((part) => Number(part));
-    const a = parts[0] ?? -1;
-    const b = parts[1] ?? -1;
-    return (
-      a === 0 ||
-      a === 10 ||
-      a === 127 ||
-      a === 169 && b === 254 ||
-      a === 172 && b >= 16 && b <= 31 ||
-      a === 192 && b === 168 ||
-      a === 100 && b >= 64 && b <= 127 ||
-      a === 224 ||
-      a >= 240
-    );
-  }
-  if (net.isIPv6(address)) {
-    const normalized = address.toLowerCase();
-    return (
-      normalized === "::" ||
-      normalized === "::1" ||
-      normalized.startsWith("fe80:") ||
-      normalized.startsWith("fc") ||
-      normalized.startsWith("fd") ||
-      normalized.startsWith("ff")
-    );
-  }
-  return true;
 }
 
 // ---------------------------------------------------------------------------

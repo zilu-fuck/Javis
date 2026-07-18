@@ -438,6 +438,15 @@ fn generate_request_id() -> String {
     format!("req-{nanos}")
 }
 
+fn sidecar_error_message(error: &serde_json::Value) -> String {
+    error
+        .as_str()
+        .or_else(|| error.get("message").and_then(|value| value.as_str()))
+        .filter(|message| !message.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| error.to_string())
+}
+
 /// Ensure the sidecar process is running. On first call it spawns node, waits
 /// for the `{"id":"ready",...}` handshake, and stores the managed handles in
 /// state. Subsequent calls are no-ops.
@@ -620,7 +629,7 @@ fn send_request(
                     .map_err(|e| JavisError::Serde(format!("Invalid JSON from sidecar: {e}")))?;
 
                 if let Some(error) = value.get("error") {
-                    let msg = error.as_str().unwrap_or("Unknown sidecar error");
+                    let msg = sidecar_error_message(error);
                     return Err(JavisError::Internal(format!("Sidecar error: {msg}")));
                 }
 
@@ -1052,21 +1061,35 @@ fn is_private_ip(ip: IpAddr) -> bool {
 }
 
 fn is_private_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
     ip.is_loopback()
         || ip.is_private()
         || ip.is_link_local()
         || ip.is_unspecified()
         || ip.is_broadcast()
         || ip.is_multicast()
-        || matches!(ip.octets(), [100, 64..=127, _, _])
+        || matches!(octets, [0, _, _, _])
+        || matches!(octets, [100, 64..=127, _, _])
+        || matches!(octets, [192, 0, 0, _] | [192, 0, 2, _] | [192, 88, 99, _])
+        || matches!(octets, [198, 18..=19, _, _] | [198, 51, 100, _])
+        || matches!(octets, [203, 0, 113, _] | [240..=255, _, _, _])
 }
 
 fn is_private_ipv6(ip: Ipv6Addr) -> bool {
+    let segments = ip.segments();
     ip.is_loopback()
         || ip.is_unspecified()
         || ip.is_multicast()
         || ip.is_unicast_link_local()
         || (ip.octets()[0] & 0xfe) == 0xfc
+        || ip.to_ipv4().is_some()
+        || (segments[0] & 0xe000) != 0x2000
+        || matches!(segments, [0x2001, 0x0000, _, _, _, _, _, _])
+        || matches!(segments, [0x2001, 0x0002, 0, _, _, _, _, _])
+        || (segments[0] == 0x2001 && (segments[1] & 0xfff0) == 0x0010)
+        || (segments[0] == 0x2001 && (segments[1] & 0xfff0) == 0x0020)
+        || matches!(segments, [0x2001, 0x0db8, _, _, _, _, _, _])
+        || segments[0] == 0x2002
 }
 
 // ---------------------------------------------------------------------------
@@ -1814,6 +1837,23 @@ mod tests {
     }
 
     #[test]
+    fn validate_url_rejects_mapped_and_non_global_reserved_ips() {
+        for url in [
+            "http://0.1.2.3/test",
+            "http://192.0.2.1/test",
+            "http://198.18.0.1/test",
+            "http://203.0.113.1/test",
+            "http://240.0.0.1/test",
+            "http://[::ffff:127.0.0.1]/test",
+            "http://[::ffff:8.8.8.8]/test",
+            "http://[2001:db8::1]/test",
+            "http://[fec0::1]/test",
+        ] {
+            assert!(validate_url(url).is_err(), "{url} should be rejected");
+        }
+    }
+
+    #[test]
     fn validate_url_rejects_ftp() {
         assert!(validate_url("ftp://example.com").is_err());
     }
@@ -1884,6 +1924,27 @@ mod tests {
     fn generate_request_id_has_prefix() {
         let id = generate_request_id();
         assert!(id.starts_with("req-"));
+    }
+
+    #[test]
+    fn sidecar_error_message_reads_structured_protocol_errors() {
+        let error = serde_json::json!({
+            "code": -32000,
+            "message": "browser executable is unavailable"
+        });
+
+        assert_eq!(
+            sidecar_error_message(&error),
+            "browser executable is unavailable"
+        );
+    }
+
+    #[test]
+    fn sidecar_error_message_preserves_legacy_string_errors() {
+        assert_eq!(
+            sidecar_error_message(&serde_json::json!("legacy sidecar failure")),
+            "legacy sidecar failure"
+        );
     }
 
     #[test]

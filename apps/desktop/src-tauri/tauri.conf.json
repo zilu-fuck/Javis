@@ -44,6 +44,8 @@
       "../../../node_modules/.pnpm/opencode-windows-x64@1.15.10/node_modules/opencode-windows-x64/bin/opencode.exe": "bin/opencode-windows-x64/opencode.exe",
       "../../../node_modules/.pnpm/opencode-windows-x64-baseline@1.15.10/node_modules/opencode-windows-x64-baseline/bin/opencode.exe": "bin/opencode-windows-x64-baseline/opencode.exe",
       "sidecar/browser/dist/index.js": "sidecar/browser/dist/index.js",
+      "sidecar/browser/dist/browser-launch.js": "sidecar/browser/dist/browser-launch.js",
+      "sidecar/browser/dist/network-policy.js": "sidecar/browser/dist/network-policy.js",
       "../../../node_modules/.pnpm/playwright@1.60.0/node_modules/playwright/": "sidecar/browser/node_modules/playwright/",
       "../../../node_modules/.pnpm/playwright-core@1.60.0/node_modules/playwright-core/": "sidecar/browser/node_modules/playwright-core/",
       "../../../scripts/local-vision-worker.cmd": "scripts/local-vision-worker.cmd",

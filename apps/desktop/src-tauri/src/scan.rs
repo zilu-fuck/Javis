@@ -673,7 +673,8 @@ pub(crate) fn mount_roots() -> Result<Vec<MountRoot>, String> {
                 .to_string();
             i += drive_wide.len() + 1;
 
-            let drive_type = unsafe { GetDriveTypeW(drive_wide.as_ptr()) };
+            let drive_type_path = null_terminated_utf16(&drive_wide);
+            let drive_type = unsafe { GetDriveTypeW(drive_type_path.as_ptr()) };
             if drive_type == DRIVE_REMOVABLE
                 || drive_type == DRIVE_NO_ROOT_DIR
                 || drive_type == DRIVE_REMOTE
@@ -699,6 +700,15 @@ pub(crate) fn mount_roots() -> Result<Vec<MountRoot>, String> {
             path: "/".to_string(),
         }])
     }
+}
+
+#[cfg(target_os = "windows")]
+fn null_terminated_utf16(value: &[u16]) -> Vec<u16> {
+    let mut terminated = value.to_vec();
+    if terminated.last().copied() != Some(0) {
+        terminated.push(0);
+    }
+    terminated
 }
 
 // ── All-user-file scan ───────────────────────────────────────────────────────
@@ -1524,9 +1534,14 @@ pub(crate) fn list_directory(
     path: String,
     workspace_root: Option<String>,
     allowed_root_ids: Option<Vec<String>>,
+    browse_root: Option<String>,
 ) -> Result<Vec<FileEntry>, String> {
-    let allowed_roots =
-        resolve_allowed_directory_roots(&app_handle, workspace_root, allowed_root_ids)?;
+    let allowed_roots = resolve_allowed_directory_roots(
+        &app_handle,
+        workspace_root,
+        allowed_root_ids,
+        browse_root,
+    )?;
     list_directory_with_allowed_roots(path, Some(allowed_roots))
 }
 
@@ -1635,17 +1650,33 @@ fn read_file_chunk_with_allowed_roots(
     validate_readable_text_file_path(&file_path, allowed_roots.as_deref())?;
 
     // Read at most 64 KB to stay within safe context injection limits.
-    // Large files are truncated to avoid memory pressure.
+    // Large files are truncated to avoid memory pressure. Keep an explicit
+    // marker in the returned evidence so callers do not mistake a prefix for
+    // the complete file.
+    const MAX_BYTES: u64 = 64 * 1024;
     let file = fs::File::open(&file_path).map_err(|e| format!("Cannot open file: {}", e))?;
-    let mut buffer = Vec::with_capacity(65536);
-    file.take(65536)
+    let byte_truncated = file
+        .metadata()
+        .map(|metadata| metadata.len() > MAX_BYTES)
+        .unwrap_or(false);
+    let mut buffer = Vec::with_capacity(MAX_BYTES as usize);
+    file.take(MAX_BYTES)
         .read_to_end(&mut buffer)
         .map_err(|e| format!("Cannot read file: {}", e))?;
     let content = String::from_utf8_lossy(&buffer);
 
     let max = max_lines.unwrap_or(200);
-    let lines: Vec<&str> = content.lines().take(max).collect();
-    Ok(lines.join("\n"))
+    let mut lines = content.lines();
+    let selected: Vec<&str> = lines.by_ref().take(max).collect();
+    let line_truncated = lines.next().is_some();
+    let mut result = selected.join("\n");
+    if byte_truncated || line_truncated {
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str("[remaining file content truncated]");
+    }
+    Ok(result)
 }
 
 fn resolve_allowed_read_roots(
@@ -1679,6 +1710,7 @@ fn resolve_allowed_directory_roots(
     app: &AppHandle,
     workspace_root: Option<String>,
     allowed_root_ids: Option<Vec<String>>,
+    browse_root: Option<String>,
 ) -> Result<Vec<String>, String> {
     let has_explicit_root = workspace_root
         .as_ref()
@@ -1690,6 +1722,10 @@ fn resolve_allowed_directory_roots(
         return resolve_allowed_read_roots(app, workspace_root, allowed_root_ids);
     }
 
+    if let Some(root) = browse_root.filter(|root| !root.trim().is_empty()) {
+        return resolve_mount_browse_root(&root, &mount_roots()?);
+    }
+
     let roots = default_user_browse_roots();
     if roots.is_empty() {
         return Err(
@@ -1697,6 +1733,22 @@ fn resolve_allowed_directory_roots(
         );
     }
     Ok(roots)
+}
+
+fn resolve_mount_browse_root(
+    requested_root: &str,
+    roots: &[MountRoot],
+) -> Result<Vec<String>, String> {
+    let requested = validate_workspace_read_root(requested_root)?;
+    let requested_path = PathBuf::from(&requested);
+    let is_enumerated_root = roots.iter().any(|root| {
+        fs::canonicalize(&root.path)
+            .is_ok_and(|candidate| candidate == requested_path)
+    });
+    if !is_enumerated_root {
+        return Err("Computer browsing requires an enumerated local mount root.".to_string());
+    }
+    Ok(vec![requested])
 }
 
 fn default_user_browse_roots() -> Vec<String> {
@@ -2042,6 +2094,21 @@ mod tests {
     }
 
     #[test]
+    fn computer_browse_root_must_match_an_enumerated_mount() {
+        let tmp = local_tempdir();
+        let nested = tmp.path().join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let roots = vec![MountRoot {
+            name: "Test".to_string(),
+            path: tmp.path().to_string_lossy().to_string(),
+        }];
+
+        let allowed = resolve_mount_browse_root(&roots[0].path, &roots).unwrap();
+        assert_eq!(allowed, vec![fs::canonicalize(tmp.path()).unwrap().to_string_lossy()]);
+        assert!(resolve_mount_browse_root(&nested.to_string_lossy(), &roots).is_err());
+    }
+
+    #[test]
     fn list_directory_rejects_sensitive_directories() {
         let tmp = local_tempdir();
         let ssh_dir = tmp.path().join(".ssh");
@@ -2066,12 +2133,31 @@ mod tests {
 
         let result = read_file_chunk_with_allowed_roots(
             file_path.to_string_lossy().to_string(),
+            Some(3),
+            allowed_root(tmp.path()),
+        )
+        .unwrap();
+
+        assert_eq!(result, "line 1\nline 2\nline 3");
+    }
+
+    #[test]
+    fn read_file_chunk_marks_line_limited_content() {
+        let tmp = local_tempdir();
+        let file_path = tmp.path().join("long-notes.md");
+        std::fs::File::create(&file_path)
+            .unwrap()
+            .write_all(b"line 1\nline 2\nline 3")
+            .unwrap();
+
+        let result = read_file_chunk_with_allowed_roots(
+            file_path.to_string_lossy().to_string(),
             Some(2),
             allowed_root(tmp.path()),
         )
         .unwrap();
 
-        assert_eq!(result, "line 1\nline 2");
+        assert_eq!(result, "line 1\nline 2\n[remaining file content truncated]");
     }
 
     #[test]
@@ -2285,6 +2371,26 @@ mod tests {
     fn mount_roots_non_empty() {
         let roots = mount_roots().expect("mount_roots");
         assert!(!roots.is_empty(), "Should return at least one mount root");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_drive_type_path_is_null_terminated() {
+        let drive = "C:\\".encode_utf16().collect::<Vec<_>>();
+        let terminated = null_terminated_utf16(&drive);
+
+        assert_eq!(terminated.last(), Some(&0));
+        assert_eq!(&terminated[..terminated.len() - 1], drive.as_slice());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn enumerated_mount_roots_are_valid_computer_browse_roots() {
+        let roots = mount_roots().unwrap();
+
+        for root in &roots {
+            assert!(resolve_mount_browse_root(&root.path, &roots).is_ok());
+        }
     }
 
     #[test]
