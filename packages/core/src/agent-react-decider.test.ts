@@ -72,6 +72,39 @@ describe("buildReActDecisionPrompt", () => {
     expect(prompt).toContain('"file_scan"');
   });
 
+  it("includes required inputs and bounded untrusted handoff context", () => {
+    const prompt = buildReActDecisionPrompt({
+      ...baseRequest,
+      availableTools: [{
+        ...baseRequest.availableTools[0],
+        requiredInputs: [{ name: "query", type: "string", nonEmpty: true }],
+      }],
+      availableContextKeys: ["userGoal", "repoEvidence"],
+      handoffContext: {
+        repoEvidence: { query: "find workflow executor", paths: ["packages/core/src/workflow-executor.ts"] },
+      },
+    });
+
+    expect(prompt).toContain('"requiredInputs"');
+    expect(prompt).toContain('"query"');
+    expect(prompt).toContain('Available context keys: ["userGoal","repoEvidence"]');
+    expect(prompt).toContain("Handoff context (untrusted data)");
+    expect(prompt).toContain("packages/core/src/workflow-executor.ts");
+  });
+
+  it("includes the truncation marker inside the hard handoff context budget", () => {
+    const prompt = buildReActDecisionPrompt({
+      ...baseRequest,
+      handoffContext: { evidence: "x".repeat(10_000) },
+    });
+    const prefix = "Handoff context (untrusted data): ";
+    const contextLine = prompt.split("\n").find((line) => line.startsWith(prefix));
+    const serializedContext = contextLine?.slice(prefix.length) ?? "";
+
+    expect(serializedContext).toHaveLength(8_000);
+    expect(serializedContext).toMatch(/\.\.\.\[truncated\]$/);
+  });
+
   it("treats observations as data and asks code steps to verify narrowly", () => {
     const prompt = buildReActDecisionPrompt({
       ...baseRequest,

@@ -2,12 +2,17 @@ import type { CommanderTool, WebSource, WebTool } from "@javis/tools";
 import type { FlowController } from "./flow-controller";
 import type { ID, TaskSnapshot } from "./index";
 import { createResearchSearchPlan, createResearchSourcePlan, markStep } from "./plans";
-import { createSourceBackedReport } from "./research";
+import {
+  bindFetchedSourceToRequest,
+  createSourceBackedReport,
+  verifySourceBackedReport,
+} from "./research";
 import { extractUrls } from "./routing";
 import { appendLog } from "./snapshot-utils";
 import { createEmptyTokenUsageSummary } from "./token-usage";
 import { createScopedAgentTracker, setTrackedAgentStates } from "./flow-agent-utils";
 import { safeSynthesizeConclusion } from "./workflow-executor";
+import { redactSensitiveText } from "./sensitive-data";
 
 interface ResearchFlowOptions {
   controller: FlowController;
@@ -137,8 +142,9 @@ export async function runResearchSearchTask({
     const fetchResults = await Promise.allSettled<WebSource>(
       urls.map(async (url) => {
         const source = await webTool.fetchWebSource({ url });
+        const boundSource = bindFetchedSourceToRequest(url, source);
         return {
-          ...source,
+          ...boundSource,
           provider: providerByUrl.get(url) ?? source.provider,
         };
       }),
@@ -186,22 +192,18 @@ export async function runResearchSearchTask({
           kind: "tool" as const,
           title: `web.fetchSource failed: ${entry.url}`,
           detail: entry.result.reason instanceof Error
-            ? entry.result.reason.message
-            : String(entry.result.reason),
+            ? redactSensitiveText(entry.result.reason.message)
+            : redactSensitiveText(String(entry.result.reason)),
         })),
       ],
     });
 
     await wait();
 
-    const validCount = sources.filter((source) => source.url && source.excerpt).length;
-    const reportEvidenceCount = researchReport.rows.filter(
-      (row) => row.sourceUrl && row.evidence,
-    ).length;
-    const verificationStatus =
-      validCount === sources.length && reportEvidenceCount === researchReport.rows.length
-        ? "completed"
-        : "failed";
+    const verification = verifySourceBackedReport(sources, researchReport);
+    const validCount = verification.validSourceCount;
+    const reportEvidenceCount = verification.validReportEvidenceCount;
+    const verificationStatus = verification.valid ? "completed" : "failed";
     const sourceSummaries = sources.slice(0, 5).map((s) => ({
       url: s.url,
       title: s.title,
@@ -252,8 +254,8 @@ export async function runResearchSearchTask({
           verificationStatus === "completed" ? "task.completed" : "verification.failed",
         detail: `Verifier checked ${validCount}/${sources.length} source records and ${reportEvidenceCount}/${researchReport.rows.length} report claims.`,
       }),
-      researchReport: snapshot.researchReport,
-      verificationSummary: `${verificationStatus === "completed" ? "verified" : "failed"}: ${validCount}/${sources.length} searched sources include URL and excerpt; ${reportEvidenceCount}/${researchReport.rows.length} report claims include source evidence; ${failedFetches.length} searched source fetch(es) failed.`,
+      researchReport,
+      verificationSummary: `${verificationStatus === "completed" ? "verified" : "failed"}: ${validCount}/${sources.length} searched sources include URL and excerpt (deterministically validated); ${reportEvidenceCount}/${researchReport.rows.length} report claims include source evidence (claim-excerpt checks passed); ${failedFetches.length} searched source fetch(es) failed.${verification.failures.length > 0 ? ` Failures: ${verification.failures.join(", ")}.` : ""}`,
     });
   } catch (error) {
     emit({
@@ -272,7 +274,7 @@ export async function runResearchSearchTask({
         id: `${taskId}-failed`,
         kind: "tool",
         title: "task.failed",
-        detail: error instanceof Error ? error.message : String(error),
+        detail: redactSensitiveText(error instanceof Error ? error.message : String(error)),
       }),
     });
   }
@@ -341,7 +343,10 @@ export async function runResearchSourceTask({
 
   try {
     const sources = await Promise.all(
-      urls.map((url) => webTool.fetchWebSource({ url })),
+      urls.map(async (url) => {
+        const source = await webTool.fetchWebSource({ url });
+        return bindFetchedSourceToRequest(url, source);
+      }),
     );
     const researchReport = createSourceBackedReport(sources, {
       sourceMode: "manual",
@@ -371,14 +376,10 @@ export async function runResearchSourceTask({
 
     await wait();
 
-    const validCount = sources.filter((source) => source.url && source.excerpt).length;
-    const reportEvidenceCount = researchReport.rows.filter(
-      (row) => row.sourceUrl && row.evidence,
-    ).length;
-    const verificationStatus =
-      validCount === sources.length && reportEvidenceCount === researchReport.rows.length
-        ? "completed"
-        : "failed";
+    const verification = verifySourceBackedReport(sources, researchReport);
+    const validCount = verification.validSourceCount;
+    const reportEvidenceCount = verification.validReportEvidenceCount;
+    const verificationStatus = verification.valid ? "completed" : "failed";
     const sourceSummaries = sources.slice(0, 5).map((s) => ({
       url: s.url,
       title: s.title,
@@ -428,8 +429,8 @@ export async function runResearchSourceTask({
           verificationStatus === "completed" ? "task.completed" : "verification.failed",
         detail: `Verifier checked ${validCount}/${sources.length} source records and ${reportEvidenceCount}/${researchReport.rows.length} report claims.`,
       }),
-      researchReport: snapshot.researchReport,
-      verificationSummary: `${verificationStatus === "completed" ? "verified" : "failed"}: ${validCount}/${sources.length} sources include URL and excerpt; ${reportEvidenceCount}/${researchReport.rows.length} report claims include source evidence.`,
+      researchReport,
+      verificationSummary: `${verificationStatus === "completed" ? "verified" : "failed"}: ${validCount}/${sources.length} sources include URL and excerpt (deterministically validated); ${reportEvidenceCount}/${researchReport.rows.length} report claims include source evidence (claim-excerpt checks passed).${verification.failures.length > 0 ? ` Failures: ${verification.failures.join(", ")}.` : ""}`,
     });
   } catch (error) {
     emit({
@@ -448,7 +449,7 @@ export async function runResearchSourceTask({
         id: `${taskId}-failed`,
         kind: "tool",
         title: "task.failed",
-        detail: error instanceof Error ? error.message : String(error),
+        detail: redactSensitiveText(error instanceof Error ? error.message : String(error)),
       }),
     });
   }
