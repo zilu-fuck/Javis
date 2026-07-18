@@ -62,23 +62,50 @@ export function isCheckpointTrigger(kind: string): kind is CheckpointTrigger {
   return CHECKPOINT_TRIGGERS.has(kind as CheckpointTrigger);
 }
 
+/**
+ * Execution fields carried by a Commander plan but not required by the
+ * historical WorkbenchWorkflowStep interface.  Checkpoint snapshots retain
+ * these fields at runtime so a restored plan cannot silently swap tools or
+ * inputs while keeping the same workflow-level shape.
+ */
+type ExecutionPlanStep = WorkbenchWorkflowStep & {
+  toolName?: string;
+  toolInput?: Record<string, unknown>;
+  executionMode?: string;
+  capability?: string;
+  choices?: unknown[];
+  successCriteria?: string;
+};
+
 export function computePlanHash(steps: WorkbenchWorkflowStep[]): string {
   const normalized = steps
-    .map((s) => ({
-      id: s.id,
-      title: s.title,
-      input: s.input,
-      output: s.output,
-      deps: [...(s.dependsOn ?? [])].sort(),
-      agent: s.agentKind,
-      cap: [...(s.requiredCapabilities ?? [])].sort(),
-      inputContextKeys: [...(s.inputContextKeys ?? [])].sort(),
-      outputContextKey: s.outputContextKey ?? "",
-      permissionLevel: s.permissionLevel,
-      canRunInParallel: s.canRunInParallel,
-    }))
+    .map((step) => {
+      const s = step as ExecutionPlanStep;
+      return {
+        id: s.id,
+        title: s.title,
+        input: s.input,
+        output: s.output,
+        deps: [...(s.dependsOn ?? [])].sort(),
+        agent: s.agentKind,
+        cap: [...(s.requiredCapabilities ?? [])].sort(),
+        inputContextKeys: [...(s.inputContextKeys ?? [])].sort(),
+        outputContextKey: s.outputContextKey ?? "",
+        permissionLevel: s.permissionLevel,
+        canRunInParallel: s.canRunInParallel,
+        // These fields determine the concrete operation performed after a
+        // checkpoint is restored. Empty sentinels preserve a stable distinction
+        // between an omitted legacy field and a populated value.
+        toolName: s.toolName ?? "",
+        toolInput: s.toolInput ?? null,
+        executionMode: s.executionMode ?? "",
+        capability: s.capability ?? "",
+        choices: s.choices ?? [],
+        successCriteria: s.successCriteria ?? "",
+      };
+    })
     .sort((a, b) => a.id.localeCompare(b.id));
-  return `plan-sha256-${computeContentHash(normalized)}-${steps.length}`;
+  return `plan-sha256-v2-${computeContentHash(normalized)}-${steps.length}`;
 }
 
 export function buildCheckpointFromDagState(input: {
@@ -119,14 +146,17 @@ export function buildCheckpointFromDagState(input: {
       contextSnapshot[key] = sanitizeArtifactForPersistence(value);
       continue;
     }
-    const producerStep = input.workflow.steps.find((step) => step.outputContextKey === key);
+    const producerStep = input.workflow.steps
+      .find((step) => step.outputContextKey === key) as ExecutionPlanStep | undefined;
     contextSnapshot[key] = sanitizeArtifactForPersistence(createArtifactEnvelope(value, {
       taskId: input.taskId,
       runId: input.runId,
       type: `sharedContext.${key}`,
       producer: {
+        workflowId: input.workflow.id,
         stepId: producerStep?.id ?? "checkpoint",
         agentKind: producerStep?.agentKind,
+        toolName: producerStep?.toolName,
       },
       sensitivity: "workspace",
     }));

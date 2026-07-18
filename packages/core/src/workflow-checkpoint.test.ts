@@ -156,6 +156,50 @@ describe("buildCheckpointFromDagState", () => {
     }])).not.toBe(baseHash);
   });
 
+  it("binds Commander tool dispatch fields into the plan hash", () => {
+    const [baseStep] = testWorkflow().steps;
+    const commanderStep = {
+      ...baseStep,
+      toolName: "code.searchRepository",
+      toolInput: { goal: "find entrypoint", knownTerms: ["main", "src"] },
+      executionMode: "direct_tool_call",
+      capability: "code_search",
+      choices: [{ label: "Current workspace", value: "workspace", isRecommended: true }],
+      successCriteria: "Repository evidence identifies the entrypoint.",
+    };
+    const baseHash = computePlanHash([commanderStep]);
+
+    expect(baseHash).toMatch(/^plan-sha256-v2-/);
+    for (const changed of [
+      { ...commanderStep, toolName: "code.traceCallChain" },
+      { ...commanderStep, toolInput: { goal: "find config", knownTerms: ["main", "src"] } },
+      { ...commanderStep, executionMode: "react" },
+      { ...commanderStep, capability: "code_trace" },
+      { ...commanderStep, choices: [{ label: "All workspaces", value: "all" }] },
+      { ...commanderStep, successCriteria: "A call chain is returned." },
+    ]) {
+      expect(computePlanHash([changed])).not.toBe(baseHash);
+    }
+  });
+
+  it("keeps Commander tool input object key order hash-compatible", () => {
+    const [baseStep] = testWorkflow().steps;
+    const left = {
+      ...baseStep,
+      toolName: "code.searchRepository",
+      toolInput: { goal: "find entrypoint", knownTerms: ["main", "src"] },
+      executionMode: "direct_tool_call",
+    };
+    const right = {
+      ...baseStep,
+      toolName: "code.searchRepository",
+      toolInput: { knownTerms: ["main", "src"], goal: "find entrypoint" },
+      executionMode: "direct_tool_call",
+    };
+
+    expect(computePlanHash([left])).toBe(computePlanHash([right]));
+  });
+
   it("preserves artifact envelopes supplied through contextSnapshot", () => {
     const envelope = createArtifactEnvelope(
       { changedFiles: ["src/a.ts"], diff: "patch" },

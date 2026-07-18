@@ -1,8 +1,19 @@
+import { isSensitiveFieldName, redactSensitiveText } from "./sensitive-data";
+
 export interface ArtifactProducerRef {
+  workflowId?: string;
   stepId: string;
   agentKind?: string;
   agentId?: string;
   toolName?: string;
+}
+
+export interface ArtifactEnvelopeExpectation {
+  taskId?: string;
+  runId?: string;
+  artifactId?: string;
+  createdAt?: string;
+  producer?: Partial<ArtifactProducerRef>;
 }
 
 export interface EvidenceReference {
@@ -27,6 +38,8 @@ export interface ArtifactEnvelope<T = unknown> {
   createdAt: string;
   contentHash: string;
   hashAlgorithm: ArtifactHashAlgorithm;
+  /** Original source hash when persistence sanitizes or redacts the payload. */
+  sourceContentHash?: string;
 
   payload: T;
   sourceRefs?: EvidenceReference[];
@@ -60,7 +73,7 @@ export function createArtifactEnvelope<T>(
     schemaVersion: context.schemaVersion ?? 1,
     taskId: context.taskId,
     runId: context.runId,
-    producer: context.producer,
+    producer: { ...context.producer },
     createdAt: now,
     contentHash: computeContentHash(payload),
     hashAlgorithm: "sha256-canonical-json-v1",
@@ -202,10 +215,12 @@ function rotateRight(value: number, bits: number): number {
 
 export function sanitizeArtifactForPersistence<T>(envelope: ArtifactEnvelope<T>): ArtifactEnvelope<unknown> {
   if (envelope.sensitivity === "secret") {
+    const payload = "[redacted:secret]";
     return {
       ...envelope,
-      payload: "[redacted:secret]" as unknown as T,
-      contentHash: envelope.contentHash,
+      payload,
+      sourceContentHash: envelope.sourceContentHash ?? envelope.contentHash,
+      contentHash: computeContentHash(payload),
     };
   }
 
@@ -213,6 +228,12 @@ export function sanitizeArtifactForPersistence<T>(envelope: ArtifactEnvelope<T>)
   return {
     ...envelope,
     payload: sanitizedPayload,
+    ...(computeContentHash(sanitizedPayload) === envelope.contentHash
+      ? {}
+      : {
+          sourceContentHash: envelope.sourceContentHash ?? envelope.contentHash,
+          contentHash: computeContentHash(sanitizedPayload),
+        }),
   };
 }
 
@@ -221,20 +242,23 @@ function deepSanitize(value: unknown, depth = 0): unknown {
   if (value === null || value === undefined) return value;
 
   if (typeof value === "string") {
-    let sanitized = value.replace(IMAGE_DATA_URL_PATTERN, "[redacted:image data URL]");
+    let sanitized = redactSensitiveText(
+      value.replace(IMAGE_DATA_URL_PATTERN, "[redacted:image data URL]"),
+    );
     if (sanitized.length > PERSISTED_TEXT_MAX_LENGTH) {
       sanitized = sanitized.slice(0, PERSISTED_TEXT_MAX_LENGTH) + "[truncated]";
     }
     return sanitized;
   }
 
-  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "boolean") return value;
 
   if (Array.isArray(value)) {
     const items = value.length > PERSISTED_ARRAY_MAX_ITEMS
       ? value.slice(0, PERSISTED_ARRAY_MAX_ITEMS)
       : value;
-    return items.map((item) => deepSanitize(item, depth + 1));
+    return items.map((item) => deepSanitize(item, depth + 1) ?? null);
   }
 
   if (typeof value === "object") {
@@ -243,9 +267,14 @@ function deepSanitize(value: unknown, depth = 0): unknown {
     const limited = keys.length > PERSISTED_OBJECT_MAX_ENTRIES
       ? keys.slice(0, PERSISTED_OBJECT_MAX_ENTRIES)
       : keys;
-    const result: Record<string, unknown> = {};
+    const result = Object.create(null) as Record<string, unknown>;
     for (const key of limited) {
-      result[key] = deepSanitize(record[key], depth + 1);
+      const sanitized = isSensitiveFieldName(key)
+        ? "[redacted:secret]"
+        : deepSanitize(record[key], depth + 1);
+      if (sanitized !== undefined) {
+        result[key] = sanitized;
+      }
     }
     if (keys.length > PERSISTED_OBJECT_MAX_ENTRIES) {
       result["[truncated:keys]"] = keys.length;
@@ -265,9 +294,80 @@ export function isArtifactEnvelope(value: unknown): value is ArtifactEnvelope {
     typeof obj.schemaVersion === "number" &&
     typeof obj.taskId === "string" &&
     typeof obj.runId === "string" &&
+    typeof obj.producer === "object" &&
+    obj.producer !== null &&
+    typeof obj.createdAt === "string" &&
     typeof obj.contentHash === "string" &&
+    typeof obj.hashAlgorithm === "string" &&
     obj.payload !== undefined
   );
+}
+
+export function validateArtifactEnvelope(
+  value: unknown,
+  expected?: ArtifactEnvelopeExpectation,
+): value is ArtifactEnvelope {
+  if (!isArtifactEnvelope(value)) return false;
+  if (!isValidArtifactId(value.artifactId, value.runId, value.createdAt)) return false;
+  if (!hasNonEmptyText(value.type) || !hasNonEmptyText(value.taskId) || !hasNonEmptyText(value.runId)) {
+    return false;
+  }
+  if (value.schemaVersion < 1 || !Number.isInteger(value.schemaVersion)) return false;
+  if (value.hashAlgorithm !== "sha256-canonical-json-v1" && value.hashAlgorithm !== "sha256-bytes-v1") {
+    return false;
+  }
+  if (expected?.taskId !== undefined && value.taskId !== expected.taskId) return false;
+  if (expected?.runId !== undefined && value.runId !== expected.runId) return false;
+  if (expected?.artifactId !== undefined && value.artifactId !== expected.artifactId) return false;
+  if (expected?.createdAt !== undefined && value.createdAt !== expected.createdAt) return false;
+  if (!isValidArtifactProducer(value.producer)) return false;
+  if (expected?.producer && !matchesExpectedProducer(value.producer, expected.producer)) return false;
+  if (value.hashAlgorithm !== "sha256-canonical-json-v1") return false;
+  if (!/^[0-9a-f]{64}$/u.test(value.contentHash)) return false;
+  if (computeContentHash(value.payload) !== value.contentHash) return false;
+  if (value.sourceContentHash !== undefined && !/^[0-9a-f]{64}$/u.test(value.sourceContentHash)) return false;
+  if (value.sensitivity !== undefined && !["public", "workspace", "secret"].includes(value.sensitivity)) {
+    return false;
+  }
+  return true;
+}
+
+function isValidArtifactId(artifactId: string, runId: string, createdAt: string): boolean {
+  if (!hasNonEmptyText(artifactId) || !hasNonEmptyText(runId) || !isCanonicalIsoDateTime(createdAt)) {
+    return false;
+  }
+  const prefix = `art-${runId}-`;
+  if (!artifactId.startsWith(prefix)) return false;
+  const match = /^([1-9]\d*)-(\d{12,16})$/u.exec(artifactId.slice(prefix.length));
+  if (!match) return false;
+  const artifactTimestamp = Number(match[2]);
+  return Number.isSafeInteger(artifactTimestamp) &&
+    Math.abs(artifactTimestamp - Date.parse(createdAt)) <= 1_000;
+}
+
+function isCanonicalIsoDateTime(value: string): boolean {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
+}
+
+function isValidArtifactProducer(producer: ArtifactProducerRef): boolean {
+  if (!hasNonEmptyText(producer.stepId)) return false;
+  return (["workflowId", "agentKind", "agentId", "toolName"] as const).every((key) =>
+    producer[key] === undefined || hasNonEmptyText(producer[key]),
+  );
+}
+
+function matchesExpectedProducer(
+  producer: ArtifactProducerRef,
+  expected: Partial<ArtifactProducerRef>,
+): boolean {
+  return (["workflowId", "stepId", "agentKind", "agentId", "toolName"] as const).every((key) =>
+    expected[key] === undefined || producer[key] === expected[key],
+  );
+}
+
+function hasNonEmptyText(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
 }
 
 export function resetArtifactIdCounter(): void {

@@ -267,17 +267,68 @@ describe("artifact output helpers", () => {
         taskId: "task-1",
         runId: "run-1",
         type: "diffPreview",
-        producer: { stepId: "step-2", agentKind: "code" },
+        producer: {
+          workflowId: "commander-dag",
+          stepId: "step-2",
+          agentKind: "code",
+          agentId: "code-agent",
+          toolName: "code.proposeEdit",
+        },
       },
     );
 
     writeStepArtifactOutput("diffPreview", envelope, context, {
       taskId: "task-1",
       runId: "run-1",
+      workflowId: "commander-dag",
       stepId: "step-2",
       agentKind: "code",
+      agentId: "code-agent",
+      toolName: "code.proposeEdit",
     });
 
     expect(context.getEnvelope("diffPreview")).toBe(envelope);
+  });
+
+  it("rewraps a provided envelope whose provenance does not match the executing step", () => {
+    const context = createSharedTaskContext();
+    const forged = createArtifactEnvelope(
+      { diff: "x" },
+      {
+        taskId: "other-task",
+        runId: "other-run",
+        type: "diffPreview",
+        producer: {
+          workflowId: "other-workflow",
+          stepId: "other-step",
+          agentKind: "research",
+          toolName: "web.search",
+        },
+      },
+    );
+
+    writeStepArtifactOutput("diffPreview", forged, context, {
+      taskId: "task-1",
+      runId: "run-1",
+      workflowId: "commander-dag",
+      stepId: "step-2",
+      agentKind: "code",
+      agentId: "code-agent",
+      toolName: "code.proposeEdit",
+    });
+
+    expect(context.get("diffPreview")).toEqual({ diff: "x" });
+    expect(context.getEnvelope("diffPreview")).toMatchObject({
+      taskId: "task-1",
+      runId: "run-1",
+      producer: {
+        workflowId: "commander-dag",
+        stepId: "step-2",
+        agentKind: "code",
+        agentId: "code-agent",
+        toolName: "code.proposeEdit",
+      },
+    });
+    expect(context.getEnvelope("diffPreview")?.artifactId).not.toBe(forged.artifactId);
   });
 });

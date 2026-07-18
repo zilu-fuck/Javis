@@ -3,6 +3,7 @@ import { compileCommanderPlan } from "../commander-plan-compiler";
 import type { CommanderDagPlan } from "../../commander-plan-schema";
 import type { ToolDescriptor } from "@javis/tools";
 import type { CompileCommanderPlanInput } from "../commander-plan-compiler";
+import { DEFAULT_PRELOADED_CONTEXT_KEYS } from "../../shared-context";
 
 // --- Test Helpers -------------------------------------------------------------
 
@@ -24,7 +25,18 @@ function makeInput(overrides: Partial<CompileCommanderPlanInput> & { plan: Comma
   return {
     availableAgents: [
       { kind: "commander", allowedToolNames: ["commander.plan", "commander.synthesize", "commander.askUser"] },
-      { kind: "code", allowedToolNames: ["code.inspectRepository", "code.searchRepository", "shell.runReadOnlyCommand"] },
+      {
+        kind: "code",
+        allowedToolNames: [
+          "code.inspectRepository",
+          "code.searchRepository",
+          "shell.runReadOnlyCommand",
+          "git.stageFiles",
+          "git.createCommit",
+          "git.createPullRequest",
+          "git.commentPullRequest",
+        ],
+      },
       { kind: "file", allowedToolNames: ["file.scanMarkdownDocuments", "file.writeText", "file.executePdfOrganization"] },
       { kind: "computer", allowedToolNames: ["computer.listDirectory", "computer.openPath", "computer.screenshot"] },
       { kind: "verifier", allowedToolNames: ["verifier.check"] },
@@ -49,7 +61,10 @@ function makeInput(overrides: Partial<CompileCommanderPlanInput> & { plan: Comma
         permissionLevel: "confirmed_write",
         capabilityTags: ["file_execute"],
         ownerAgentKinds: ["file"],
-        requiredInputs: [{ name: "targetPath", type: "string", nonEmpty: true }],
+        requiredInputs: [
+          { name: "targetPath", type: "string", nonEmpty: true },
+          { name: "content", type: "string" },
+        ],
       }),
       makeToolDescriptor("file.executePdfOrganization", {
         permissionLevel: "confirmed_write",
@@ -285,12 +300,46 @@ describe("compileCommanderPlan", () => {
           dependsOn: ["collect"],
           inputContextKeys: ["researchEvidence"],
           toolInput: { targetPath: "report.md" },
+          outputContextKey: "writeResult",
           successCriteria: ".",
+        },
+        {
+          id: "verify",
+          title: "Verify report",
+          assignedAgentKind: "verifier",
+          requiredCapabilities: ["evidence_check"],
+          dependsOn: ["write"],
+          inputContextKeys: ["writeResult"],
+          successCriteria: "The report write is verified.",
         },
       ],
     };
     const result = compileCommanderPlan(makeInput({ plan }));
     expect(result.ok).toBe(true);
+  });
+
+  it("rejects file.writeText content without an explicit value or producer artifact", () => {
+    const plan: CommanderDagPlan = {
+      title: "Write unsupported content",
+      reasoning: "test",
+      steps: [{
+        id: "write",
+        title: "Write report",
+        assignedAgentKind: "file",
+        toolName: "file.writeText",
+        requiredCapabilities: [],
+        dependsOn: [],
+        toolInput: { targetPath: "report.md" },
+        successCriteria: "The report is written.",
+      }],
+    };
+    const result = compileCommanderPlan(makeInput({ plan }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.diagnostics.some(
+        (diagnostic) => diagnostic.code === "MISSING_TOOL_INPUT" && diagnostic.path?.endsWith(".content"),
+      )).toBe(true);
+    }
   });
 
   it("rejects capability-only approval-gated steps that omit the exact toolName", () => {
@@ -571,6 +620,47 @@ describe("compileCommanderPlan", () => {
     }
   });
 
+  it("compiles boolean[] tool inputs and rejects string coercion", () => {
+    const availableAgents = [{ kind: "file", allowedToolNames: ["mcp.search.flags"] }];
+    const availableTools = [makeToolDescriptor("mcp.search.flags", {
+      capabilityTags: ["local_search"],
+      ownerAgentKinds: ["file"],
+      requiredInputs: [{ name: "flags", type: "boolean[]", nonEmpty: true }],
+    })];
+    const createPlan = (flags: unknown): CommanderDagPlan => ({
+      title: "Typed MCP input",
+      reasoning: "test",
+      steps: [{
+        id: "search",
+        title: "Search with flags",
+        assignedAgentKind: "file",
+        toolName: "mcp.search.flags",
+        requiredCapabilities: ["local_search"],
+        dependsOn: [],
+        toolInput: { flags },
+        successCriteria: "Search completed.",
+      }],
+    });
+
+    expect(compileCommanderPlan(makeInput({
+      plan: createPlan([true, false]),
+      availableAgents,
+      availableTools,
+    })).ok).toBe(true);
+
+    const invalid = compileCommanderPlan(makeInput({
+      plan: createPlan(["true"]),
+      availableAgents,
+      availableTools,
+    }));
+    expect(invalid.ok).toBe(false);
+    if (!invalid.ok) {
+      expect(invalid.diagnostics.some(
+        (diagnostic) => diagnostic.code === "MISSING_TOOL_INPUT" && diagnostic.path?.includes("flags"),
+      )).toBe(true);
+    }
+  });
+
   it("rejects git.createPullRequest without baseBranch", () => {
     const plan: CommanderDagPlan = {
       title: "PR without base",
@@ -679,11 +769,31 @@ describe("compileCommanderPlan", () => {
       reasoning: "test",
       steps: [
         {
+          id: "collect",
+          title: "Collect evidence",
+          assignedAgentKind: "code",
+          toolName: "code.searchRepository",
+          requiredCapabilities: ["code_search"],
+          dependsOn: [],
+          outputContextKey: "evidence",
+          successCriteria: "Evidence is collected.",
+        },
+        {
+          id: "verify",
+          title: "Verify evidence",
+          assignedAgentKind: "verifier",
+          requiredCapabilities: ["evidence_check"],
+          dependsOn: ["collect"],
+          inputContextKeys: ["evidence"],
+          successCriteria: "Evidence is sufficient.",
+        },
+        {
           id: "synth",
           title: "Synthesize",
           assignedAgentKind: "commander",
           requiredCapabilities: ["synthesis"],
-          dependsOn: [],
+          dependsOn: ["verify"],
+          inputContextKeys: ["evidence"],
           executionMode: "direct_response",
           successCriteria: ".",
         },
@@ -699,12 +809,32 @@ describe("compileCommanderPlan", () => {
       reasoning: "test",
       steps: [
         {
+          id: "collect",
+          title: "Collect evidence",
+          assignedAgentKind: "code",
+          toolName: "code.searchRepository",
+          requiredCapabilities: ["code_search"],
+          dependsOn: [],
+          outputContextKey: "evidence",
+          successCriteria: "Evidence is collected.",
+        },
+        {
+          id: "verify",
+          title: "Verify evidence",
+          assignedAgentKind: "verifier",
+          requiredCapabilities: ["evidence_check"],
+          dependsOn: ["collect"],
+          inputContextKeys: ["evidence"],
+          successCriteria: "Evidence is sufficient.",
+        },
+        {
           id: "synth",
           title: "Synthesize",
           assignedAgentKind: "commander",
           toolName: "commander.synthesize",
           requiredCapabilities: ["synthesis"],
-          dependsOn: [],
+          dependsOn: ["verify"],
+          inputContextKeys: ["evidence"],
           executionMode: "direct_response",
           successCriteria: ".",
         },
@@ -712,6 +842,34 @@ describe("compileCommanderPlan", () => {
     };
     const result = compileCommanderPlan(makeInput({ plan }));
     expect(result.ok).toBe(true);
+  });
+
+  it("rejects commander.synthesize with direct_tool_call", () => {
+    const plan: CommanderDagPlan = {
+      title: "Unsafe synthesis dispatch",
+      reasoning: "test",
+      steps: [{
+        id: "synth",
+        title: "Synthesize",
+        assignedAgentKind: "commander",
+        toolName: "commander.synthesize",
+        requiredCapabilities: ["synthesis"],
+        dependsOn: [],
+        executionMode: "direct_tool_call",
+        successCriteria: ".",
+      }],
+    };
+
+    const result = compileCommanderPlan(makeInput({ plan }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const diagnostic = result.diagnostics.find((item) =>
+        item.code === "INVALID_EXECUTION_MODE" && item.stepId === "synth"
+      );
+      expect(diagnostic?.message).toContain("evidence guard");
+      expect(diagnostic?.suggestedFix).toContain("direct_response");
+    }
   });
 
   it("warns about unknown capability when step has a toolName fallback", () => {
@@ -889,6 +1047,134 @@ describe("compileCommanderPlan", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("requires a verifier when evidence is published and consumed by synthesis", () => {
+    const plan: CommanderDagPlan = {
+      title: "Evidence without verifier",
+      reasoning: "The worker output must be checked before completion.",
+      steps: [{
+        id: "scan",
+        title: "Scan",
+        assignedAgentKind: "code",
+        toolName: "code.searchRepository",
+        requiredCapabilities: ["code_search"],
+        dependsOn: [],
+        outputContextKey: "evidence",
+        successCriteria: "Evidence is collected.",
+      }, {
+        id: "answer",
+        title: "Answer",
+        assignedAgentKind: "commander",
+        requiredCapabilities: ["synthesis"],
+        dependsOn: ["scan"],
+        inputContextKeys: ["evidence"],
+        executionMode: "direct_response",
+        successCriteria: "The evidence-backed answer is shown to the user.",
+      }],
+    };
+
+    const result = compileCommanderPlan(makeInput({ plan }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.diagnostics.some((diagnostic) => diagnostic.code === "MISSING_VERIFIER")).toBe(true);
+    }
+  });
+
+  it("allows user-visible synthesis that has no evidence input", () => {
+    const plan: CommanderDagPlan = {
+      title: "Synthesis without verifier",
+      reasoning: "A final response must be evidence-gated.",
+      steps: [{
+        id: "answer",
+        title: "Answer",
+        assignedAgentKind: "commander",
+        requiredCapabilities: ["synthesis"],
+        dependsOn: [],
+        executionMode: "direct_response",
+        successCriteria: "The user receives a grounded answer.",
+      }],
+    };
+
+    const result = compileCommanderPlan(makeInput({ plan }));
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("allows worker-only plans because runtime provenance verification gates implicit synthesis", () => {
+    const plan: CommanderDagPlan = {
+      title: "Implicit synthesis without verifier",
+      reasoning: "The runtime would synthesize the worker result after the DAG.",
+      steps: [{
+        id: "scan",
+        title: "Scan",
+        assignedAgentKind: "code",
+        toolName: "code.searchRepository",
+        requiredCapabilities: ["code_search"],
+        dependsOn: [],
+        successCriteria: "Repository evidence is collected.",
+      }],
+    };
+
+    const result = compileCommanderPlan(makeInput({
+      plan,
+      availableTools: makeInput({ plan }).availableTools.filter((tool) => tool.name !== "verifier.check"),
+    }));
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects a verifier that only consumes preloaded context", () => {
+    const plan: CommanderDagPlan = {
+      title: "Verifier without handoff",
+      reasoning: "The verifier must inspect a producer artifact.",
+      steps: [{
+        id: "verify",
+        title: "Verify",
+        assignedAgentKind: "verifier",
+        requiredCapabilities: ["evidence_check"],
+        dependsOn: [],
+        inputContextKeys: ["userGoal"],
+        successCriteria: "Evidence passes verification.",
+      }],
+    };
+
+    const result = compileCommanderPlan(makeInput({ plan }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.diagnostics.some((diagnostic) => diagnostic.code === "VERIFIER_MISSING_EVIDENCE")).toBe(true);
+    }
+  });
+
+  it("accepts a verifier that consumes a non-preloaded producer artifact", () => {
+    const plan: CommanderDagPlan = {
+      title: "Evidence with verifier",
+      reasoning: "The verifier consumes the worker handoff.",
+      steps: [{
+        id: "scan",
+        title: "Scan",
+        assignedAgentKind: "code",
+        toolName: "code.searchRepository",
+        requiredCapabilities: ["code_search"],
+        dependsOn: [],
+        outputContextKey: "evidence",
+        successCriteria: "Evidence is collected.",
+      }, {
+        id: "verify",
+        title: "Verify",
+        assignedAgentKind: "verifier",
+        requiredCapabilities: ["evidence_check"],
+        dependsOn: ["scan"],
+        inputContextKeys: ["evidence"],
+        successCriteria: "Evidence passes verification.",
+      }],
+    };
+
+    const result = compileCommanderPlan(makeInput({ plan }));
+
+    expect(result.ok).toBe(true);
+  });
+
   it("handles existingSteps for recovery plans", () => {
     const plan: CommanderDagPlan = {
       title: "Recovery plan",
@@ -1047,6 +1333,38 @@ describe("compileCommanderPlan", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.warnings.filter((d) => d.code === "MISSING_CONTEXT_PRODUCER")).toHaveLength(0);
+    }
+  });
+
+  it("does not treat schema-known output artifacts as preloaded runtime context", () => {
+    const plan: CommanderDagPlan = {
+      title: "Unproduced artifact",
+      reasoning: "test",
+      steps: [{
+        id: "review",
+        title: "Review diff",
+        assignedAgentKind: "code",
+        requiredCapabilities: ["code_search"],
+        dependsOn: [],
+        inputContextKeys: ["diffPreview"],
+        successCriteria: "Diff reviewed.",
+      }],
+    };
+
+    expect(DEFAULT_PRELOADED_CONTEXT_KEYS).not.toContain("diffPreview");
+    const result = compileCommanderPlan(makeInput({
+      plan,
+      preloadedContextKeys: [...DEFAULT_PRELOADED_CONTEXT_KEYS],
+    }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.diagnostics).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          code: "MISSING_CONTEXT_PRODUCER",
+          stepId: "review",
+        }),
+      ]));
     }
   });
 

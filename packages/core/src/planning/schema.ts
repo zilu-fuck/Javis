@@ -28,6 +28,7 @@ import {
   CommanderPlanStepShape as ToolsCommanderPlanStep,
   CommanderPlanResultShape as ToolsCommanderPlanResult,
   AskUserChoiceShape as ToolsAskUserChoice,
+  CommanderExecutionPolicyShape as ToolsCommanderExecutionPolicy,
   StepExecutionModeShape as ToolsStepExecutionMode,
 } from "@javis/tools";
 
@@ -35,7 +36,7 @@ import {
 export const PLAN_GENERATION_TRACE_SCHEMA_VERSION = "1.0.0";
 
 /** Bumped whenever the commander plan shape changes. */
-export const COMMANDER_PLAN_SCHEMA_VERSION = "1.0.0";
+export const COMMANDER_PLAN_SCHEMA_VERSION = "1.2.0";
 
 /**
  * Bumped whenever the planner prompt template text changes
@@ -44,13 +45,13 @@ export const COMMANDER_PLAN_SCHEMA_VERSION = "1.0.0";
  * post-mortem analytics can correlate plan success with prompt
  * version.
  */
-export const COMMANDER_PLAN_PROMPT_VERSION = "1.1.1";
+export const COMMANDER_PLAN_PROMPT_VERSION = "1.3.0";
 
 // --- Tool descriptor input shapes --------------------------------------------
 
 export const ToolRequiredInputShape = z.object({
   name: z.string().min(1),
-  type: z.enum(["string", "string[]"]),
+  type: z.enum(["string", "string[]", "number", "number[]", "boolean", "boolean[]", "object", "object[]"]),
   nonEmpty: z.boolean().optional(),
 });
 export type ToolRequiredInputShapeT = z.infer<typeof ToolRequiredInputShape>;
@@ -69,16 +70,35 @@ export function buildToolInputShape(
   }
   const shape: Record<string, z.ZodTypeAny> = {};
   for (const req of requiredInputs) {
-    if (req.type === "string") {
-      shape[req.name] = req.nonEmpty
-        ? z.string().trim().min(1)
-        : z.string();
-    } else {
-      // string[]
-      const arr = req.nonEmpty
-        ? z.array(z.string().trim().min(1)).min(1)
-        : z.array(z.string());
-      shape[req.name] = arr;
+    switch (req.type) {
+      case "string":
+        shape[req.name] = req.nonEmpty ? z.string().trim().min(1) : z.string();
+        break;
+      case "string[]":
+        shape[req.name] = req.nonEmpty
+          ? z.array(z.string().trim().min(1)).min(1)
+          : z.array(z.string());
+        break;
+      case "number":
+        shape[req.name] = z.number().finite();
+        break;
+      case "number[]":
+        shape[req.name] = req.nonEmpty ? z.array(z.number().finite()).min(1) : z.array(z.number().finite());
+        break;
+      case "boolean":
+        shape[req.name] = z.boolean();
+        break;
+      case "boolean[]":
+        shape[req.name] = req.nonEmpty ? z.array(z.boolean()).min(1) : z.array(z.boolean());
+        break;
+      case "object":
+        shape[req.name] = z.record(z.string(), z.unknown());
+        break;
+      case "object[]":
+        shape[req.name] = req.nonEmpty
+          ? z.array(z.record(z.string(), z.unknown())).min(1)
+          : z.array(z.record(z.string(), z.unknown()));
+        break;
     }
   }
   return z.object(shape).passthrough();
@@ -98,6 +118,8 @@ export type StepExecutionModeT = z.infer<typeof StepExecutionModeShape>;
  * Ask-user choice shape — re-exported from tools for the same reason.
  */
 export const AskUserChoiceShape = ToolsAskUserChoice;
+export const CommanderExecutionPolicyShape = ToolsCommanderExecutionPolicy;
+export type CommanderExecutionPolicyT = z.infer<typeof CommanderExecutionPolicyShape>;
 
 export const CommanderDagStepShape = z.object({
   id: z
@@ -122,6 +144,7 @@ export type CommanderDagStepT = z.infer<typeof CommanderDagStepShape>;
 export const CommanderDagPlanShape = z.object({
   title: z.string().min(1).max(120),
   reasoning: z.string().min(1),
+  executionPolicy: CommanderExecutionPolicyShape.optional(),
   steps: z.array(CommanderDagStepShape).min(1).max(12),
 });
 export type CommanderDagPlanT = z.infer<typeof CommanderDagPlanShape>;
@@ -227,7 +250,19 @@ export function zodToPlanJsonSchemaString(): string {
  */
 export function planShapeToPromptText(): string {
   const lines: string[] = [];
-  lines.push("{title:string, reasoning:string, steps:Step[1..12]}");
+  lines.push("{title:string, reasoning:string, executionPolicy?:ExecutionPolicy, steps:Step[1..12]}");
+  lines.push(
+    "ExecutionPolicy={"
+      + "maxConcurrency?:1..8,"
+      + "stepTimeoutMs?:5000..300000,"
+      + "maxRetries?:0..3,"
+      + "retryBackoffMs?:0..30000,"
+      + "rateLimitPerSecond?:>0..20,"
+      + "maxReadyQueueSize?:1..24,"
+      + "circuitBreakerFailureThreshold?:1..8,"
+      + "degradationStrategy?:replan|partial_results|fail_fast"
+      + "}",
+  );
   lines.push(
     "Step={"
       + "id:kebab-case, "
@@ -284,6 +319,24 @@ export const COMMANDER_PLAN_PROMPT_EXAMPLE: CommanderDagPlanT = {
   ],
 };
 
+/** Chinese counterpart used when the planner prompt is localized to zh-CN. */
+export const COMMANDER_PLAN_PROMPT_EXAMPLE_ZH: CommanderDagPlanT = {
+  title: "澄清",
+  reasoning: "需要确定目标路径。",
+  steps: [
+    {
+      id: "clarify-path",
+      title: "应使用哪个文件夹？",
+      assignedAgentKind: "commander",
+      capability: "clarification",
+      requiredCapabilities: [],
+      dependsOn: [],
+      choices: ["当前工作区", "选择其他文件夹"],
+      successCriteria: "用户已选择文件夹。",
+    },
+  ],
+};
+
 /**
  * A more complete synthetic plan that exercises every optional step
  * field (toolName, requiredCapabilities, dependsOn, inputContextKeys,
@@ -307,13 +360,24 @@ export const COMMANDER_PLAN_PROMPT_EXAMPLE_FULL: CommanderDagPlanT = {
       successCriteria: "Repository search returns matching files.",
     },
     {
+      id: "verify-evidence",
+      title: "Verify the repository evidence",
+      assignedAgentKind: "verifier",
+      toolName: "verifier.check",
+      requiredCapabilities: ["evidence_check"],
+      dependsOn: ["search-code"],
+      inputContextKeys: ["repoEvidence"],
+      outputContextKey: "verificationResult",
+      successCriteria: "Verifier confirms the repository evidence is sufficient.",
+    },
+    {
       id: "summarize",
       title: "Summarize the evidence for the user",
       assignedAgentKind: "commander",
       toolName: "commander.synthesize",
       requiredCapabilities: ["synthesis"],
-      dependsOn: ["search-code"],
-      inputContextKeys: ["repoEvidence"],
+      dependsOn: ["verify-evidence"],
+      inputContextKeys: ["repoEvidence", "verificationResult"],
       outputContextKey: "summary",
       executionMode: "direct_response",
       successCriteria: "Summary names the files and what they do.",

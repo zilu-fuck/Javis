@@ -3,10 +3,13 @@ import {
   addModelUsage,
   createFileScanTaskRuntime,
   createInitialTaskSnapshot,
+  createRouteRegistry,
+  createWorkflowRegistry,
   demoAgents,
   getAgentSystemPrompt,
   getWorkbenchWorkflow,
   listWorkbenchWorkflows,
+  type WorkbenchWorkflow,
 } from "./index";
 import { initialToolDescriptors } from "@javis/tools";
 import type {
@@ -34,6 +37,16 @@ function subscribeToRuntime(runtime: ReturnType<typeof createFileScanTaskRuntime
   return { snapshots, unsubscribe };
 }
 
+function createPassingVerifierTool() {
+  return {
+    check: vi.fn(async () => ({
+      status: "pass" as const,
+      summary: "Fixture evidence verified.",
+      detail: "Fixture verifier accepted the workflow evidence.",
+    })),
+  };
+}
+
 async function waitForStatus(
   snapshots: TaskSnapshot[],
   status: TaskSnapshot["status"],
@@ -53,6 +66,7 @@ describe("createFileScanTaskRuntime", () => {
       inputTokens: 0,
       outputTokens: 0,
       totalTokens: 0,
+      peakContextTokens: 0,
       modelCalls: 0,
       byAgentKind: [],
     });
@@ -142,7 +156,47 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
-  it("routes simple project-mode chat through Commander clarification", async () => {
+  it("passes the selected workspace into Commander planning without asking for it again", async () => {
+    const commanderPlan = vi.fn<CommanderTool["plan"]>(async () => ({
+      title: "分析当前项目",
+      reasoning: "工作区已经由运行时提供，可以直接读取项目证据。",
+      steps: [{
+        id: "scan-project",
+        title: "扫描当前项目文件",
+        assignedAgentKind: "file",
+        capability: "file_scan",
+        requiredCapabilities: ["file_scan"],
+        dependsOn: [] as string[],
+        successCriteria: "已读取当前工作区的项目文件。",
+      }],
+    }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => []),
+      },
+      commanderTool: { plan: commanderPlan },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("分析一下这个项目", {
+      mode: "project",
+      workspacePath: "E:/MAIMAI_BOT",
+    });
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(commanderPlan).toHaveBeenCalledWith(expect.objectContaining({
+      workspacePath: "E:/MAIMAI_BOT",
+    }));
+    expect(finalSnapshot.workspacePath).toBe("E:/MAIMAI_BOT");
+    expect(finalSnapshot.askUserQuestion).toBeUndefined();
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("downgrades a project-mode greeting to L1 direct chat", async () => {
     const commanderPlan = vi.fn(async () => ({
       title: "Clarification needed",
       reasoning: "Project mode should ask before planning ambiguous work.",
@@ -171,21 +225,18 @@ describe("createFileScanTaskRuntime", () => {
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
-    runtime.start("浣犲ソ", { mode: "project" });
+    runtime.start("\u4f60\u597d", { mode: "project" });
 
-    const waitingSnapshot = await waitForStatus(snapshots, "waiting_info");
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
 
-    expect(commanderPlan).toHaveBeenCalledTimes(1);
-    expect(chatComplete).not.toHaveBeenCalled();
-    expect(waitingSnapshot.askUserQuestion?.question).toBe("请先补充一个关键信息，方便我继续规划。");
-    expect(waitingSnapshot.conversationMessages?.some((message) =>
-      message.kind === "ask_user_question" &&
-      message.askUserQuestion?.question === "请先补充一个关键信息，方便我继续规划。"
-    )).toBe(true);
-    expect(waitingSnapshot.logs.some((log) => log.title === "route_decided")).toBe(true);
-    expect(waitingSnapshot.logs.find((log) => log.title === "route_decided")?.detail)
+    expect(commanderPlan).not.toHaveBeenCalled();
+    expect(chatComplete).toHaveBeenCalledTimes(1);
+    expect(finalSnapshot.commanderMessage).toBe("Hello, I am Javis.");
+    expect(finalSnapshot.askUserQuestion).toBeUndefined();
+    expect(finalSnapshot.logs.some((log) => log.title === "route_decided")).toBe(true);
+    expect(finalSnapshot.logs.find((log) => log.title === "route_decided")?.detail)
       .toContain('"routeLevel":"L1"');
-    expect(waitingSnapshot.logs.find((log) => log.title === "route_decided")?.userMessage)
+    expect(finalSnapshot.logs.find((log) => log.title === "route_decided")?.userMessage)
       .toBe("已选择合适的处理方式。");
 
     unsubscribe();
@@ -318,7 +369,7 @@ describe("createFileScanTaskRuntime", () => {
       commanderTool: {
         plan: commanderPlan,
         synthesize: vi.fn(async () => ({
-          message: "这个项目的主入口在 src/main.ts；从代码证据看，它是一个本地 Javis Agent 运行链路。审查结果通过，但仍建议继续补充模块级调用链。",
+          message: "这个项目的主入口在 src/main.ts；代码证据足够支撑项目功能结论。",
         })),
       },
       codeTool: {
@@ -586,7 +637,13 @@ describe("createFileScanTaskRuntime", () => {
         successCriteria: "The fifth decision can complete.",
       }],
     }));
-    const scanMarkdownDocuments = vi.fn(async () => []);
+    const scanMarkdownDocuments = vi.fn(async () => [{
+      path: "E:/Javis/empty-scan-marker.md",
+      modifiedAt: "2026-07-12T00:00:00.000Z",
+      sizeBytes: 0,
+      heading: "No matching documents",
+      excerpt: "The scan completed and found no requested content.",
+    }]);
     let decisions = 0;
     const reactDecideNext = vi.fn(async () => {
       decisions += 1;
@@ -645,11 +702,19 @@ describe("createFileScanTaskRuntime", () => {
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
-    runtime.start("answer this directly", { mode: "project" });
+    runtime.start("answer this directly", {
+      mode: "project",
+      modelImages: ["data:image/png;base64,AA=="],
+    });
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(finalSnapshot.status).toBe("completed");
-    expect(synthesize).toHaveBeenCalled();
+    expect(commanderPlan).toHaveBeenCalledWith(expect.objectContaining({
+      images: ["data:image/png;base64,AA=="],
+    }));
+    expect(synthesize).toHaveBeenCalledWith(expect.objectContaining({
+      images: ["data:image/png;base64,AA=="],
+    }));
     expect(reactDecideNext).not.toHaveBeenCalled();
     expect(scanMarkdownDocuments).not.toHaveBeenCalled();
 
@@ -671,7 +736,7 @@ describe("createFileScanTaskRuntime", () => {
         successCriteria: "The user receives a natural answer.",
       }],
     }));
-    const synthesize = vi.fn(async () => ({ message: "Commander handled the unmatched L2 task." }));
+    const synthesize = vi.fn(async () => ({ message: "Here is the direct answer." }));
     const chatComplete = vi.fn(async () => ({ text: "Chat should not answer this." }));
     const runtime = createFileScanTaskRuntime({
       delayMs: 0,
@@ -689,7 +754,7 @@ describe("createFileScanTaskRuntime", () => {
     expect(commanderPlan).toHaveBeenCalledTimes(1);
     expect(synthesize).toHaveBeenCalled();
     expect(chatComplete).not.toHaveBeenCalled();
-    expect(finalSnapshot.commanderMessage).toBe("Commander handled the unmatched L2 task.");
+    expect(finalSnapshot.commanderMessage).toBe("Here is the direct answer.");
 
     unsubscribe();
     runtime.dispose();
@@ -755,6 +820,7 @@ describe("createFileScanTaskRuntime", () => {
       inputTokens: 135,
       outputTokens: 37,
       totalTokens: 180,
+      peakContextTokens: 120,
       modelCalls: 3,
       byAgentKind: [
         {
@@ -888,7 +954,7 @@ describe("createFileScanTaskRuntime", () => {
         successCriteria: "The request has a user-facing response.",
       }],
     }));
-    const synthesize = vi.fn(async () => ({ message: "Commander handled this request." }));
+    const synthesize = vi.fn(async () => ({ message: "Here is the direct answer." }));
     const planWriteText = vi.fn(async () => createTextWritePlan("reports/search.md"));
     const runtime = createFileScanTaskRuntime({
       delayMs: 0,
@@ -1081,6 +1147,7 @@ describe("createFileScanTaskRuntime", () => {
       delayMs: 0,
       commanderTool: {
         plan: commanderPlan,
+        synthesize: vi.fn(async () => ({ message: "Unknown." })),
       },
       fileTool: {
         scanMarkdownDocuments: vi.fn(async () => []),
@@ -1281,6 +1348,7 @@ describe("createFileScanTaskRuntime", () => {
       delayMs: 0,
       commanderTool: {
         plan: commanderPlan,
+        synthesize: vi.fn(async () => ({ message: "Unknown." })),
       },
       fileTool: {
         scanMarkdownDocuments: vi.fn(async () => []),
@@ -1335,6 +1403,7 @@ describe("createFileScanTaskRuntime", () => {
         searchWeb,
         fetchWebSource,
       },
+      verifierTool: createPassingVerifierTool(),
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
@@ -1396,6 +1465,7 @@ describe("createFileScanTaskRuntime", () => {
       },
       commanderTool: {
         plan: commanderPlan,
+        synthesize: vi.fn(async () => ({ message: "Here is the direct answer." })),
       },
       availableToolDescriptors: initialToolDescriptors.filter((descriptor) => descriptor.name !== "web.search"),
     });
@@ -1448,6 +1518,7 @@ describe("createFileScanTaskRuntime", () => {
       codeTool,
       commanderTool: {
         plan: commanderPlan,
+        synthesize: vi.fn(async () => ({ message: "Here is the direct answer." })),
       },
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
@@ -1507,6 +1578,7 @@ describe("createFileScanTaskRuntime", () => {
       codeTool,
       commanderTool: {
         plan: commanderPlan,
+        synthesize: vi.fn(async () => ({ message: "Here is the direct answer." })),
       },
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
@@ -1607,7 +1679,7 @@ describe("createFileScanTaskRuntime", () => {
     ]);
     expect(finalSnapshot.plan.find((step) => step.id === "daily-reminder:persist-reminder")?.status).toBe("skipped");
     expect(finalSnapshot.commanderMessage).toContain("daily-reminder:persist-reminder");
-    expect(finalSnapshot.verificationSummary).toContain("blueprint executed through the DAG executor");
+    expect(finalSnapshot.verificationSummary).toContain("Verifier tool is unavailable.");
 
     unsubscribe();
     runtime.dispose();
@@ -1826,6 +1898,7 @@ describe("createFileScanTaskRuntime", () => {
       inputTokens: 1200,
       outputTokens: 340,
       totalTokens: 1540,
+      peakContextTokens: 1540,
       modelCalls: 1,
       byAgentKind: [
         {
@@ -2412,6 +2485,11 @@ describe("createFileScanTaskRuntime", () => {
     );
     expect(finalSnapshot.permissionRequest?.status).toBe("approved");
     expect(finalSnapshot.verificationSummary).toContain("was written");
+    expect(finalSnapshot.documents).toContainEqual(expect.objectContaining({
+      path: "reports/search.md",
+      heading: "AI news summary",
+      sizeBytes: generatedContent.length,
+    }));
     const finalMessages = finalSnapshot.conversationMessages ?? [];
     expect(finalMessages.some((message) =>
       message.kind === "permission_request" &&
@@ -2426,8 +2504,48 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
+  it("uses Chinese text and registers the generated Markdown artifact for Chinese goals", async () => {
+    const content = "# \u65f6\u5149\u4fee\u590d\u5e08\n\n\u6545\u4e8b\u6b63\u6587。\n";
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      chatTool: createTextContentChatTool(content),
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+        planWriteText: async () => createTextWritePlan("\u65f6\u5149\u4fee\u590d\u5e08.md"),
+        writeText: async (request) => createTextWriteResult(request.targetPath, request.content.length),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("\u5199\u4e00\u7bc7\u5c0f\u8bf4，\u4fdd\u5b58\u4e3a\u65f6\u5149\u4fee\u590d\u5e08.md", {
+      mode: "project",
+      taskId: "task-chinese-text-write",
+    });
+    const permissionSnapshot = await waitForStatus(snapshots, "waiting_permission");
+
+    expect(permissionSnapshot.title).toBe("\u6587\u672c\u6587\u4ef6\u5199\u5165\u9700\u8981\u6388\u6743");
+    expect(permissionSnapshot.permissionRequest).toMatchObject({
+      title: "\u6279\u51c6\u6587\u672c\u6587\u4ef6\u5199\u5165",
+      reason: expect.stringContaining("\u9700\u8981\u4f60\u7684\u660e\u786e\u6388\u6743"),
+    });
+    runtime.resolvePermission("approved");
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(finalSnapshot.title).toBe("\u6587\u672c\u6587\u4ef6\u5df2\u5199\u5165");
+    expect(finalSnapshot.commanderMessage).toBe("\u6587\u4ef6\u4ee3\u7406\u5df2\u5c06\u5185\u5bb9\u5199\u5165 \u65f6\u5149\u4fee\u590d\u5e08.md。");
+    expect(finalSnapshot.documents).toContainEqual(expect.objectContaining({
+      path: "\u65f6\u5149\u4fee\u590d\u5e08.md",
+      heading: "\u65f6\u5149\u4fee\u590d\u5e08",
+      purpose: "\u6839\u636e\u7528\u6237\u7684\u6587\u672c\u6587\u4ef6\u8bf7\u6c42\u751f\u6210。",
+    }));
+    expect(finalSnapshot.logs.some((log) => log.userMessage === "\u6587\u672c\u6587\u4ef6\u5df2\u6210\u529f\u5199\u5165。")).toBe(true);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
   it("generates requested file content with the model before project-mode approval", async () => {
-    const plan = createTextWritePlan("javis-output.md");
+    const plan = createTextWritePlan("\u96fe\u6e2f.md");
     const firstSection = `# \u96fe\u6e2f\n\n${"\u591c\u8272\u4e2d\u7684\u6d77\u6f6e\u7f13\u6162\u62cd\u6253\u77f3\u5cb8\u3002".repeat(300)}`;
     const secondSection = "\u6668\u5149\u91cc\u7684\u6e14\u706b\u9010\u6e10\u6d88\u5931\u3002".repeat(600);
     const generatedContent = `${firstSection}\n\n${secondSection}\n`;
@@ -2448,7 +2566,7 @@ describe("createFileScanTaskRuntime", () => {
       createTextWriteResult(request.targetPath, request.content.length),
     );
     const planWriteText = vi.fn(async (request: { targetPath: string; content: string }) => {
-      expect(request.targetPath).toBe("javis-output.md");
+      expect(request.targetPath).toBe("\u96fe\u6e2f.md");
       expect(request.content).toBe(generatedContent);
       expect(request.content).not.toContain("Generated from request");
       expect(request.content).not.toContain("## Notes");
@@ -2482,18 +2600,18 @@ describe("createFileScanTaskRuntime", () => {
     expect(complete).toHaveBeenNthCalledWith(
       1,
       expect.stringContaining("Fully perform the requested writing task"),
-      expect.objectContaining({ maxTokens: 4096 }),
+      expect.objectContaining({ useMaxOutputTokens: true }),
     );
     expect(complete).toHaveBeenNthCalledWith(
       2,
       expect.stringContaining("Continue the document below"),
-      expect.objectContaining({ maxTokens: 4096 }),
+      expect.objectContaining({ useMaxOutputTokens: true }),
     );
     expect(planWriteText).toHaveBeenCalledTimes(1);
     expect(permissionSnapshot.permissionRequest?.level).toBe("confirmed_write");
     expect(permissionSnapshot.permissionRequest?.dryRun.operation).toBe("Write text file");
     expect(writeText).toHaveBeenCalledWith(
-      expect.objectContaining({ targetPath: "javis-output.md", content: generatedContent }),
+      expect.objectContaining({ targetPath: "\u96fe\u6e2f.md", content: generatedContent }),
       plan.approvalId,
       expect.stringMatching(/^task-/),
     );
@@ -2505,6 +2623,273 @@ describe("createFileScanTaskRuntime", () => {
       role: "assistant",
       content: finalSnapshot.commanderMessage,
     });
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("streams generated file content before requesting write approval", async () => {
+    const complete = vi.fn(async () => ({ text: "fallback should not run" }));
+    let streamOptions: { maxTokens?: number; useMaxOutputTokens?: boolean } | undefined;
+    async function* stream(
+      _prompt: string,
+      options?: { maxTokens?: number; useMaxOutputTokens?: boolean },
+    ) {
+      streamOptions = options;
+      yield { text: "# Visible draft\n\n" };
+      yield { text: "The story appears while it is being written." };
+    }
+    const eventBus = createTaskEventBus();
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      eventBus,
+      chatTool: { complete, stream },
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+        planWriteText: async () => createTextWritePlan("visible-draft.md"),
+        writeText: vi.fn(async () => createTextWriteResult("visible-draft.md")),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("write a story and save it as visible-draft.md", {
+      mode: "project",
+      taskId: "task-streamed-text-write",
+    });
+    const permissionSnapshot = await waitForStatus(snapshots, "waiting_permission");
+
+    expect(complete).not.toHaveBeenCalled();
+    expect(streamOptions).toMatchObject({ useMaxOutputTokens: true });
+    expect(streamOptions?.maxTokens).toBeUndefined();
+    expect(snapshots.some((item) =>
+      item.isStreaming && item.streamingText?.includes("Visible draft")
+    )).toBe(true);
+    expect(permissionSnapshot.permissionRequest?.status).toBe("pending");
+    expect(permissionSnapshot.tokenUsage?.modelCalls).toBe(1);
+
+    runtime.resolvePermission("denied");
+    await waitForStatus(snapshots, "completed");
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("continues a length-truncated stream before requesting write approval", async () => {
+    const complete = vi.fn(async () => ({ text: "fallback should not run" }));
+    let streamCallCount = 0;
+    async function* stream(
+      _prompt: string,
+      options?: { onFinish?: (finishReason?: string) => void },
+    ) {
+      streamCallCount += 1;
+      if (streamCallCount === 1) {
+        yield { text: `# \u591c\u6e2f\n\n${"\u6f6e".repeat(4_100)}` };
+        options?.onFinish?.("length");
+        return;
+      }
+      yield { text: "\u5929\u4eae\u65f6，\u4ed6\u7ec8\u4e8e\u56de\u5230\u4e86\u5bb6。" };
+      options?.onFinish?.("stop");
+    }
+    const planWriteText = vi.fn(async () => createTextWritePlan("streamed-story.md"));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      eventBus: createTaskEventBus(),
+      chatTool: { complete, stream },
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+        planWriteText,
+        writeText: vi.fn(async () => createTextWriteResult("streamed-story.md")),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("\u5199\u4e00\u7bc74000\u5b57\u7684\u5c0f\u8bf4，\u4fdd\u5b58\u4e3a streamed-story.md", {
+      mode: "project",
+      taskId: "task-truncated-streamed-text-write",
+    });
+    const permissionSnapshot = await waitForStatus(snapshots, "waiting_permission");
+
+    expect(streamCallCount).toBe(2);
+    expect(complete).not.toHaveBeenCalled();
+    expect(planWriteText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: expect.stringContaining("\u5929\u4eae\u65f6，\u4ed6\u7ec8\u4e8e\u56de\u5230\u4e86\u5bb6。"),
+      }),
+      "task-truncated-streamed-text-write",
+    );
+    expect(permissionSnapshot.permissionRequest?.status).toBe("pending");
+    expect(permissionSnapshot.tokenUsage?.modelCalls).toBe(2);
+
+    runtime.resolvePermission("denied");
+    await waitForStatus(snapshots, "completed");
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("continues a truncated stream without inventing a length target", async () => {
+    const prompts: string[] = [];
+    async function* stream(
+      prompt: string,
+      options?: { onFinish?: (finishReason?: string) => void },
+    ) {
+      prompts.push(prompt);
+      if (prompts.length === 1) {
+        yield { text: "# \u65e0\u5b57\u6570\u9650\u5236\u7684\u6545\u4e8b\n\n\u6545\u4e8b\u4ece\u8fd9\u91cc\u5f00\u59cb。" };
+        options?.onFinish?.("length");
+        return;
+      }
+      yield { text: "\u8fd9\u662f\u5b8c\u6574\u7684\u7ed3\u5c3e。" };
+      options?.onFinish?.("stop");
+    }
+    const planWriteText = vi.fn(async () => createTextWritePlan("open-ended-story.md"));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      eventBus: createTaskEventBus(),
+      chatTool: {
+        complete: vi.fn(async () => ({ text: "fallback should not run" })),
+        stream,
+      },
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+        planWriteText,
+        writeText: vi.fn(async () => createTextWriteResult("open-ended-story.md")),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("\u5199\u4e00\u7bc7\u5c0f\u8bf4，\u4fdd\u5b58\u4e3a open-ended-story.md", {
+      mode: "project",
+      taskId: "task-open-ended-streamed-text-write",
+    });
+    const permissionSnapshot = await waitForStatus(snapshots, "waiting_permission");
+
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("without introducing an arbitrary length target");
+    expect(planWriteText).toHaveBeenCalledWith(
+      expect.objectContaining({ content: expect.stringContaining("\u8fd9\u662f\u5b8c\u6574\u7684\u7ed3\u5c3e。") }),
+      "task-open-ended-streamed-text-write",
+    );
+    expect(permissionSnapshot.permissionRequest?.status).toBe("pending");
+
+    runtime.resolvePermission("denied");
+    await waitForStatus(snapshots, "completed");
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("does not request approval when every streamed continuation is truncated", async () => {
+    let streamCallCount = 0;
+    async function* stream(
+      _prompt: string,
+      options?: { onFinish?: (finishReason?: string) => void },
+    ) {
+      streamCallCount += 1;
+      yield { text: "\u672a\u5b8c\u6210\u7684\u6b63\u6587".repeat(300) };
+      options?.onFinish?.("length");
+    }
+    const planWriteText = vi.fn(async () => createTextWritePlan("truncated-story.md"));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      eventBus: createTaskEventBus(),
+      chatTool: {
+        complete: vi.fn(async () => ({ text: "fallback should not run" })),
+        stream,
+      },
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+        planWriteText,
+        writeText: vi.fn(async () => createTextWriteResult("truncated-story.md")),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("\u5199\u4e00\u7bc74000\u5b57\u7684\u5c0f\u8bf4，\u4fdd\u5b58\u4e3a truncated-story.md", {
+      mode: "project",
+      taskId: "task-exhausted-truncated-stream",
+    });
+    const finalSnapshot = await waitForStatus(snapshots, "failed");
+
+    expect(streamCallCount).toBe(8);
+    expect(planWriteText).not.toHaveBeenCalled();
+    expect(finalSnapshot.permissionRequest).toBeUndefined();
+    expect(finalSnapshot.logs[finalSnapshot.logs.length - 1]?.detail)
+      .toContain("remained truncated after 8 model call(s)");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("uses a numbered filename when an inferred text-write target already exists", async () => {
+    const content = "# New story\n\nComplete content.\n";
+    const planWriteText = vi.fn(async (request: { targetPath: string; content: string }) => {
+      if (request.targetPath === "new-story.md") {
+        throw new Error(
+          "Text write target already exists; overwriting is not supported in v1.",
+        );
+      }
+      return createTextWritePlan(request.targetPath);
+    });
+    const writeText = vi.fn(async (request: { targetPath: string; content: string }) =>
+      createTextWriteResult(request.targetPath, request.content.length),
+    );
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      chatTool: createTextContentChatTool(content),
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+        planWriteText,
+        writeText,
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("\u5199\u4e00\u7bc7\u5c0f\u8bf4\uff0c\u4fdd\u5b58\u4e3a md \u6587\u4ef6", { mode: "project" });
+    const permissionSnapshot = await waitForStatus(snapshots, "waiting_permission");
+    runtime.resolvePermission("approved");
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+
+    expect(planWriteText.mock.calls.map(([request]) => request.targetPath)).toEqual([
+      "new-story.md",
+      "new-story-2.md",
+    ]);
+    expect(permissionSnapshot.permissionRequest?.dryRun.affectedPaths[0]?.target)
+      .toContain("new-story-2.md");
+    expect(writeText).toHaveBeenCalledWith(
+      expect.objectContaining({ targetPath: "new-story-2.md", content }),
+      expect.any(String),
+      expect.stringMatching(/^task-/),
+    );
+    expect(finalSnapshot.status).toBe("completed");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("does not silently rename an explicit text-write target", async () => {
+    const planWriteText = vi.fn(async () => {
+      throw new Error(
+        "Text write target already exists; overwriting is not supported in v1.",
+      );
+    });
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      chatTool: createTextContentChatTool("# New story\n"),
+      fileTool: {
+        scanMarkdownDocuments: async () => [],
+        planWriteText,
+        writeText: vi.fn(),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("write a story and save it as notes.md", { mode: "project" });
+    const finalSnapshot = await waitForStatus(snapshots, "failed");
+
+    expect(planWriteText).toHaveBeenCalledTimes(1);
+    expect(planWriteText).toHaveBeenCalledWith(
+      expect.objectContaining({ targetPath: "notes.md" }),
+      expect.stringMatching(/^task-/),
+    );
+    expect(finalSnapshot.permissionRequest).toBeUndefined();
 
     unsubscribe();
     runtime.dispose();
@@ -2527,7 +2912,7 @@ describe("createFileScanTaskRuntime", () => {
     runtime.start("\u5199\u4e00\u7bc7\u5c0f\u8bf4\uff0c\u4fdd\u5b58\u4e3a md \u6587\u4ef6", { mode: "project" });
     const finalSnapshot = await waitForStatus(snapshots, "failed");
 
-    expect(finalSnapshot.title).toBe("Text content generation failed");
+    expect(finalSnapshot.title).toBe("文本内容生成失败");
     expect(finalSnapshot.permissionRequest).toBeUndefined();
     expect(finalSnapshot.tokenUsage?.modelCalls).toBe(1);
     expect(planWriteText).not.toHaveBeenCalled();
@@ -2716,11 +3101,11 @@ describe("createFileScanTaskRuntime", () => {
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(writeText).toHaveBeenCalledTimes(1);
-    expect(finalSnapshot.title).toBe("Text file written");
+    expect(finalSnapshot.title).toBe("文本文件已写入");
     expect(snapshots.some((item) =>
       item.id === "task-cancelled-during-native-write" && item.status === "cancelled"
     )).toBe(false);
-    expect(finalSnapshot.verificationSummary).toContain("was written");
+    expect(finalSnapshot.verificationSummary).toContain("已在确认写入授权后完成写入");
 
     unsubscribe();
     runtime.dispose();
@@ -2817,7 +3202,12 @@ describe("createFileScanTaskRuntime", () => {
   it("does not preview or approve incomplete long-form content after the call limit", async () => {
     const complete = vi.fn(async (
       _prompt: string,
-      _options?: { maxTokens?: number; temperature?: number; locale?: string },
+      _options?: {
+        maxTokens?: number;
+        useMaxOutputTokens?: boolean;
+        temperature?: number;
+        locale?: string;
+      },
     ) => ({ text: "\u4e0d\u8db3\u7684\u6b63\u6587" }));
     const planWriteText = vi.fn(async () => createTextWritePlan("javis-output.md"));
     const writeText = vi.fn(async () => createTextWriteResult("javis-output.md"));
@@ -2836,7 +3226,7 @@ describe("createFileScanTaskRuntime", () => {
     const finalSnapshot = await waitForStatus(snapshots, "failed");
 
     expect(complete).toHaveBeenCalledTimes(8);
-    expect(complete.mock.calls.every((call) => call[1]?.maxTokens === 4096)).toBe(true);
+    expect(complete.mock.calls.every((call) => call[1]?.useMaxOutputTokens === true)).toBe(true);
     expect(finalSnapshot.permissionRequest).toBeUndefined();
     expect(finalSnapshot.logs[finalSnapshot.logs.length - 1]?.detail).toContain("Generated content is incomplete");
     expect(finalSnapshot.tokenUsage?.modelCalls).toBe(8);
@@ -2929,7 +3319,10 @@ describe("createFileScanTaskRuntime", () => {
         writeText,
       },
       browserTool,
-      commanderTool: { plan: commanderPlan },
+      commanderTool: {
+        plan: commanderPlan,
+        synthesize: vi.fn(async () => ({ message: "Unknown." })),
+      },
       availableToolDescriptors: initialToolDescriptors,
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
@@ -3231,6 +3624,7 @@ describe("createFileScanTaskRuntime", () => {
       fileTool: {
         scanMarkdownDocuments: vi.fn(async () => documents),
       },
+      verifierTool: createPassingVerifierTool(),
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
@@ -3290,16 +3684,116 @@ describe("createFileScanTaskRuntime", () => {
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(scanMarkdownDocuments).not.toHaveBeenCalled();
-    expect(complete).toHaveBeenCalledWith(expect.stringContaining("浣犲ソ"), {
+    expect(complete).toHaveBeenCalledWith("浣犲ソ", expect.objectContaining({
       maxTokens: 1200,
       temperature: 0.7,
       locale: "zh-CN",
-    });
-    expect(complete).toHaveBeenCalledWith(expect.stringContaining("不要把推测写成事实"), expect.any(Object));
+      systemPrompt: expect.stringContaining("不要把推测写成事实"),
+      messages: [],
+    }));
     expect(finalSnapshot.title).toBeTruthy();
     expect(finalSnapshot.commanderMessage).toBe("Hello, I am Javis.");
     expect(finalSnapshot.tokenUsage?.modelCalls).toBe(1);
     expect(finalSnapshot.status).toBe("completed");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("dispatches a confident workspace route before the chat-mode fast path", async () => {
+    const routeRegistry = createRouteRegistry();
+    routeRegistry.register("workspace.demo.triage", "workspace.demo.triage-flow", () => ({
+      route: "workspace.demo.triage",
+      score: 5,
+      threshold: 4,
+      signals: ["incident-triage"],
+    }));
+    const workflowRegistry = createWorkflowRegistry();
+    const workflow: WorkbenchWorkflow = {
+      id: "workspace.demo.triage-flow",
+      title: "Workspace incident triage",
+      triggerExamples: ["triage incident"],
+      goal: "Classify incident evidence.",
+      coordinatorAgentKind: "commander",
+      participatingAgentKinds: ["commander", "file", "verifier"],
+      steps: [{
+        id: "classify-documents",
+        title: "Classify incident evidence",
+        agentKind: "file",
+        input: "Incident details",
+        output: "Incident classification",
+        permissionLevel: "read",
+        dependsOn: [],
+        canRunInParallel: false,
+      }],
+      currentSupport: "implemented",
+      safetyNotes: ["Read-only workflow."],
+    };
+    workflowRegistry.register(workflow);
+    const complete = vi.fn(async () => ({ text: "Chat fallback should not run." }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      routeRegistry,
+      workflowRegistry,
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      chatTool: { complete },
+      verifierTool: createPassingVerifierTool(),
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("triage incident", { mode: "chat" });
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+    const routeLog = finalSnapshot.logs.find((log) => log.title === "route_decided");
+    expect(complete).not.toHaveBeenCalled();
+    expect(finalSnapshot.title).toBe("Workspace incident triage");
+    expect(routeLog && JSON.parse(routeLog.detail).customRoute).toMatchObject({
+      route: "workspace.demo.triage",
+      workflowId: "workspace.demo.triage-flow",
+      score: 5,
+      threshold: 4,
+    });
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("keeps chat-mode safety boundaries ahead of a matching workspace route", async () => {
+    const routeRegistry = createRouteRegistry();
+    routeRegistry.register("workspace.demo.desktop", "workspace.demo.desktop-flow", () => ({
+      route: "workspace.demo.desktop",
+      score: 5,
+      threshold: 4,
+      signals: ["desktop-request"],
+    }));
+    const workflowRegistry = createWorkflowRegistry();
+    workflowRegistry.register({
+      id: "workspace.demo.desktop-flow",
+      title: "Workspace desktop flow",
+      triggerExamples: ["操控桌面打开 QQ"],
+      goal: "Inspect a desktop request.",
+      coordinatorAgentKind: "commander",
+      participatingAgentKinds: ["commander", "file", "verifier"],
+      steps: [],
+      currentSupport: "implemented",
+      safetyNotes: ["Read-only test workflow."],
+    });
+    const complete = vi.fn(async () => ({ text: "Chat fallback should not run." }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      routeRegistry,
+      workflowRegistry,
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      chatTool: { complete },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("操控桌面打开 QQ", { mode: "chat" });
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+    expect(finalSnapshot.title).toBe("已拦截");
+    expect(finalSnapshot.commanderMessage).toContain("聊天模式");
+    expect(complete).not.toHaveBeenCalled();
 
     unsubscribe();
     runtime.dispose();
@@ -3372,7 +3866,7 @@ describe("createFileScanTaskRuntime", () => {
       {
         url: "https://example.test/source",
         title: "Source",
-        excerpt: "Search evidence.",
+        excerpt: "Search evidence contains enough grounded source text.",
         fetchedAt: "2026-06-16T00:00:00.000Z",
         provider: "fixture",
       },
@@ -3380,7 +3874,7 @@ describe("createFileScanTaskRuntime", () => {
     const fetchWebSource = vi.fn(async ({ url }: { url: string }) => ({
       url,
       title: "Fetched source",
-      excerpt: "Fetched evidence.",
+      excerpt: "Fetched evidence contains enough grounded source text.",
       fetchedAt: "2026-06-16T00:01:00.000Z",
       provider: "fixture",
     }));
@@ -3389,6 +3883,7 @@ describe("createFileScanTaskRuntime", () => {
       delayMs: 0,
       fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
       chatTool: { complete },
+      verifierTool: createPassingVerifierTool(),
       webTool: {
         searchWeb,
         fetchWebSource,
@@ -3434,12 +3929,16 @@ describe("createFileScanTaskRuntime", () => {
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(finalSnapshot.id).toBe("task-existing");
-    expect(complete).toHaveBeenCalledWith(expect.stringContaining("first question"), {
+    expect(complete).toHaveBeenCalledWith("second question", expect.objectContaining({
       maxTokens: 1200,
       temperature: 0.7,
       locale: "en",
-    });
-    expect(complete).toHaveBeenCalledWith(expect.stringContaining("do not present guesses as facts"), expect.any(Object));
+      systemPrompt: expect.stringMatching(/prior user\/assistant messages[\s\S]*do not present guesses as facts/),
+      messages: [
+        { role: "user", content: "first question" },
+        { role: "assistant", content: "First answer" },
+      ],
+    }));
     expect(finalSnapshot.conversationMessages).toEqual([
       { role: "user", content: "first question" },
       { role: "assistant", content: "First answer" },
@@ -3453,12 +3952,14 @@ describe("createFileScanTaskRuntime", () => {
 
   it("windows long chat context for the model while preserving the full conversation timeline", async () => {
     let prompt = "";
+    let options: { systemPrompt?: string; messages?: Array<{ role: "user" | "assistant"; content: string }> } | undefined;
     const priorMessages = Array.from({ length: 130 }, (_, index) => ({
       role: index % 2 === 0 ? "user" as const : "assistant" as const,
       content: index === 0 ? "oldest-message-should-be-omitted" : `message-${index}`,
     }));
-    const complete = vi.fn(async (nextPrompt: string) => {
+    const complete = vi.fn(async (nextPrompt: string, nextOptions?: typeof options) => {
       prompt = nextPrompt;
+      options = nextOptions;
       return { text: "Answer after long context" };
     });
     const runtime = createFileScanTaskRuntime({
@@ -3476,9 +3977,10 @@ describe("createFileScanTaskRuntime", () => {
 
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
-    expect(prompt).toContain("(10 earlier message(s) omitted)");
-    expect(prompt).not.toContain("oldest-message-should-be-omitted");
-    expect(prompt).toContain("message-129");
+    expect(prompt).toBe("continue the thread");
+    expect(options?.systemPrompt).toContain("10 earlier message(s) were omitted");
+    expect(options?.messages?.some((message) => message.content === "oldest-message-should-be-omitted")).toBe(false);
+    expect(options?.messages?.[options.messages.length - 1]?.content).toBe("message-129");
     expect(finalSnapshot.conversationMessages).toHaveLength(132);
     expect(finalSnapshot.conversationMessages?.[0]?.content).toBe("oldest-message-should-be-omitted");
     expect(finalSnapshot.conversationMessages?.[130]).toEqual({
@@ -3491,19 +3993,22 @@ describe("createFileScanTaskRuntime", () => {
   });
 
   it("recovers general chat from context overflow with summary plus recent messages", async () => {
-    let recoveredPrompt = "";
+    let recoveredMessages: Array<{ role: "user" | "assistant"; content: string }> = [];
     const priorMessages = Array.from({ length: 14 }, (_, index) => ({
       role: index % 2 === 0 ? "user" as const : "assistant" as const,
       content: index === 0 ? "old-raw-detail-should-be-summarized" : `context-message-${index}`,
     }));
-    const complete = vi.fn(async (nextPrompt: string) => {
+    const complete = vi.fn(async (
+      nextPrompt: string,
+      options?: { messages?: Array<{ role: "user" | "assistant"; content: string }> },
+    ) => {
       if (complete.mock.calls.length === 1) {
         throw new Error("maximum context length exceeded");
       }
       if (nextPrompt.includes("Summarize this earlier Javis conversation")) {
         return { text: "- Earlier discussion established a stable API constraint." };
       }
-      recoveredPrompt = nextPrompt;
+      recoveredMessages = options?.messages ?? [];
       return { text: "Recovered answer" };
     });
     const runtime = createFileScanTaskRuntime({
@@ -3522,11 +4027,10 @@ describe("createFileScanTaskRuntime", () => {
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(complete).toHaveBeenCalledTimes(3);
-    expect(recoveredPrompt).toContain("Earlier conversation summary:");
-    expect(recoveredPrompt).toContain("stable API constraint");
-    expect(recoveredPrompt).toContain("context-message-13");
-    expect(recoveredPrompt).not.toContain("old-raw-detail-should-be-summarized");
-    expect(recoveredPrompt).not.toContain("earlier message(s) omitted");
+    expect(recoveredMessages[0]?.content).toContain("Earlier conversation summary:");
+    expect(recoveredMessages[0]?.content).toContain("stable API constraint");
+    expect(recoveredMessages.some((message) => message.content === "context-message-13")).toBe(true);
+    expect(recoveredMessages.some((message) => message.content.includes("old-raw-detail-should-be-summarized"))).toBe(false);
     expect(finalSnapshot.commanderMessage).toBe("Recovered answer");
     expect(finalSnapshot.conversationMessages).toHaveLength(16);
     expect(finalSnapshot.conversationMessages?.[0]?.content).toBe("old-raw-detail-should-be-summarized");
@@ -3563,6 +4067,7 @@ describe("createFileScanTaskRuntime", () => {
 
   it("uses the short context strategy for model prompts without truncating the timeline", async () => {
     let prompt = "";
+    let options: { systemPrompt?: string; messages?: Array<{ role: "user" | "assistant"; content: string }> } | undefined;
     const priorMessages = Array.from({ length: 50 }, (_, index) => ({
       role: index % 2 === 0 ? "user" as const : "assistant" as const,
       content: index === 0 ? "short-context-oldest-message" : `short-message-${index}`,
@@ -3572,8 +4077,9 @@ describe("createFileScanTaskRuntime", () => {
       runtimeConfig: { contextStrategy: "short" },
       fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
       chatTool: {
-        complete: vi.fn(async (nextPrompt: string) => {
+        complete: vi.fn(async (nextPrompt: string, nextOptions?: typeof options) => {
           prompt = nextPrompt;
+          options = nextOptions;
           return { text: "Short context answer" };
         }),
       },
@@ -3588,11 +4094,102 @@ describe("createFileScanTaskRuntime", () => {
 
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
-    expect(prompt).toContain("(10 earlier message(s) omitted)");
-    expect(prompt).not.toContain("short-context-oldest-message");
-    expect(prompt).toContain("short-message-49");
+    expect(prompt).toBe("continue briefly");
+    expect(options?.systemPrompt).toContain("10 earlier message(s) were omitted");
+    expect(options?.messages?.some((message) => message.content === "short-context-oldest-message")).toBe(false);
+    expect(options?.messages?.[options.messages.length - 1]?.content).toBe("short-message-49");
     expect(finalSnapshot.conversationMessages).toHaveLength(52);
     expect(finalSnapshot.conversationMessages?.[0]?.content).toBe("short-context-oldest-message");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("caps an individual history message to a small model context budget", async () => {
+    let modelMessages: Array<{ role: "user" | "assistant"; content: string }> = [];
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      runtimeConfig: { contextStrategy: "long", contextWindowTokens: 1_024 },
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      chatTool: {
+        complete: vi.fn(async (_prompt, options) => {
+          modelMessages = options?.messages ?? [];
+          return { text: "bounded" };
+        }),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("continue", {
+      mode: "chat",
+      priorMessages: [{ role: "user", content: "中".repeat(2_000) }],
+    });
+
+    await waitForStatus(snapshots, "completed");
+
+    expect(modelMessages).toHaveLength(1);
+    expect(modelMessages[0]?.content).toContain(" ... ");
+    expect([...(modelMessages[0]?.content ?? "")].length).toBeLessThanOrEqual(819);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("does not admit an over-budget newest message for a one-token context", async () => {
+    let modelMessages: Array<{ role: "user" | "assistant"; content: string }> = [];
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      runtimeConfig: { contextStrategy: "long", contextWindowTokens: 1 },
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      chatTool: {
+        complete: vi.fn(async (_prompt, options) => {
+          modelMessages = options?.messages ?? [];
+          return { text: "bounded" };
+        }),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("continue", {
+      mode: "chat",
+      priorMessages: [{ role: "user", content: "oversized history" }],
+    });
+
+    await waitForStatus(snapshots, "completed");
+
+    expect(modelMessages).toHaveLength(1);
+    expect(modelMessages[0]?.content).toBe("o");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("drops an assistant reply when its user turn falls outside the context window", async () => {
+    let modelMessages: Array<{ role: "user" | "assistant"; content: string }> = [];
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      runtimeConfig: { contextStrategy: "long", contextWindowTokens: 16 },
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      chatTool: {
+        complete: vi.fn(async (_prompt, options) => {
+          modelMessages = options?.messages ?? [];
+          return { text: "bounded" };
+        }),
+      },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("continue", {
+      mode: "chat",
+      priorMessages: [
+        { role: "user", content: "u".repeat(100) },
+        { role: "assistant", content: "orphaned reply" },
+      ],
+    });
+
+    await waitForStatus(snapshots, "completed");
+
+    expect(modelMessages).toEqual([]);
 
     unsubscribe();
     runtime.dispose();
@@ -3618,7 +4215,10 @@ describe("createFileScanTaskRuntime", () => {
     const runtime = createFileScanTaskRuntime({
       delayMs: 0,
       fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
-      commanderTool: { plan: commanderPlan },
+      commanderTool: {
+        plan: commanderPlan,
+        synthesize: vi.fn(async () => ({ message: "Here is the direct answer." })),
+      },
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
@@ -3672,7 +4272,10 @@ describe("createFileScanTaskRuntime", () => {
       delayMs: 0,
       fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
       chatTool: { complete: summarize },
-      commanderTool: { plan: commanderPlan },
+      commanderTool: {
+        plan: commanderPlan,
+        synthesize: vi.fn(async () => ({ message: "Here is the direct answer." })),
+      },
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
@@ -3711,11 +4314,15 @@ describe("createFileScanTaskRuntime", () => {
     runtime.start("describe this", {
       mode: "chat",
       displayAttachments: ["data:image/png;base64,AA=="],
+      modelImages: ["data:image/png;base64,AA=="],
     });
 
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(finalSnapshot.conversationMessages?.[0]?.attachments).toBeUndefined();
+    expect(complete).toHaveBeenCalledWith("describe this", expect.objectContaining({
+      images: ["data:image/png;base64,AA=="],
+    }));
 
     unsubscribe();
     runtime.dispose();
@@ -3738,6 +4345,7 @@ describe("createFileScanTaskRuntime", () => {
         scanMarkdownDocuments,
         classifyDocuments: vi.fn(async () => []),
       },
+      verifierTool: createPassingVerifierTool(),
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
@@ -3809,6 +4417,7 @@ describe("createFileScanTaskRuntime", () => {
     const runtime = createFileScanTaskRuntime({
       delayMs: 0,
       fileTool: { scanMarkdownDocuments },
+      verifierTool: createPassingVerifierTool(),
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
@@ -3850,6 +4459,7 @@ describe("createFileScanTaskRuntime", () => {
     const runtime = createFileScanTaskRuntime({
       delayMs: 0,
       fileTool: { scanMarkdownDocuments },
+      verifierTool: createPassingVerifierTool(),
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
@@ -4820,14 +5430,46 @@ function createTextContentChatTool(content: string) {
 import { createTaskEventBus } from "./task-event-bus";
 
 describe("completeGeneralChat streaming pipeline", () => {
+  it("routes from the original user text instead of untrusted enriched context", async () => {
+    const complete = vi.fn(async (prompt: string) => ({ text: `answered:${prompt}`, tokenUsage: undefined }));
+    const fetchWebSource = vi.fn(async () => ({
+      url: "https://example.test",
+      excerpt: "This source should not be fetched for a greeting.",
+      fetchedAt: "2026-07-12T00:00:00.000Z",
+    }));
+    const runtime = createFileScanTaskRuntime({
+      fileTool: undefined as any,
+      chatTool: { complete },
+      webTool: { fetchWebSource },
+    });
+    const { snapshots } = subscribeToRuntime(runtime);
+    const enrichedGoal = "hello\n\n[untrusted document] research https://example.test";
+
+    runtime.start(enrichedGoal, {
+      mode: "chat",
+      taskId: "task-routing-goal",
+      routingGoal: "hello",
+    });
+
+    await vi.waitFor(() => {
+      expect(snapshots[snapshots.length - 1]?.status).toBe("completed");
+    }, { timeout: 3000 });
+    expect(complete).toHaveBeenCalledWith(enrichedGoal, expect.any(Object));
+    expect(fetchWebSource).not.toHaveBeenCalled();
+    runtime.dispose();
+  });
+
   it("routes simple L1 chat through l1 streaming without Commander or ReAct", async () => {
-    let streamOptions: { streamMode?: "default" | "l1" } | undefined;
+    let streamOptions: { streamMode?: "default" | "l1"; timeoutMs?: number } | undefined;
     let streamPrompt = "";
     const commanderPlan = vi.fn();
     const reactDecideNext = vi.fn();
     const mockChatTool = {
       complete: vi.fn(async () => ({ text: "fallback", tokenUsage: undefined })),
-      stream: vi.fn(async function* (prompt: string, options?: { streamMode?: "default" | "l1" }) {
+      stream: vi.fn(async function* (
+        prompt: string,
+        options?: { streamMode?: "default" | "l1"; timeoutMs?: number },
+      ) {
         streamPrompt = prompt;
         streamOptions = options;
         yield { text: "Hi" };
@@ -4852,6 +5494,7 @@ describe("completeGeneralChat streaming pipeline", () => {
 
     expect(mockChatTool.stream).toHaveBeenCalledOnce();
     expect(streamOptions?.streamMode).toBe("l1");
+    expect(streamOptions?.timeoutMs).toBe(90_000);
     expect(mockChatTool.complete).not.toHaveBeenCalled();
     expect(commanderPlan).not.toHaveBeenCalled();
     expect(reactDecideNext).not.toHaveBeenCalled();
@@ -4864,6 +5507,7 @@ describe("completeGeneralChat streaming pipeline", () => {
   });
 
   it("recovers streaming general chat context overflow with summary plus recent messages", async () => {
+    let finalMessages: Array<{ role: "user" | "assistant"; content: string }> = [];
     const priorMessages = Array.from({ length: 14 }, (_, index) => ({
       role: index % 2 === 0 ? "user" as const : "assistant" as const,
       content: index === 0 ? "old-stream-detail-should-be-summarized" : `stream-context-${index}`,
@@ -4874,15 +5518,21 @@ describe("completeGeneralChat streaming pipeline", () => {
           expect(options).toMatchObject({
             skipAgentMemory: true,
             skipSkillContext: true,
+            timeoutMs: 90_000,
           });
           return { text: "- Earlier stream context requires preserving user constraints.", tokenUsage: undefined };
         }
         return { text: "Recovered stream answer", tokenUsage: undefined };
       }),
-      stream: vi.fn(async function* (prompt: string) {
-        if (!prompt.includes("Earlier conversation summary:")) {
+      stream: vi.fn(async function* (
+        _prompt: string,
+        options?: { messages?: Array<{ role: "user" | "assistant"; content: string }> },
+      ) {
+        const messages = options?.messages ?? [];
+        if (!messages.some((message) => message.content.includes("Earlier conversation summary:"))) {
           throw new Error("maximum context length exceeded");
         }
+        finalMessages = messages;
         yield { text: "Recovered stream answer" };
       }),
     };
@@ -4915,13 +5565,12 @@ describe("completeGeneralChat streaming pipeline", () => {
     }, { timeout: 3000 });
 
     const finalSnapshot = snapshots[snapshots.length - 1];
-    const finalPrompt = mockChatTool.stream.mock.calls[1]?.[0] ?? "";
     expect(mockChatTool.stream).toHaveBeenCalledTimes(2);
     expect(mockChatTool.complete).toHaveBeenCalledTimes(1);
-    expect(finalPrompt).toContain("Earlier conversation summary:");
-    expect(finalPrompt).toContain("preserving user constraints");
-    expect(finalPrompt).toContain("stream-context-13");
-    expect(finalPrompt).not.toContain("old-stream-detail-should-be-summarized");
+    expect(finalMessages[0]?.content).toContain("Earlier conversation summary:");
+    expect(finalMessages[0]?.content).toContain("preserving user constraints");
+    expect(finalMessages.some((message) => message.content === "stream-context-13")).toBe(true);
+    expect(finalMessages.some((message) => message.content.includes("old-stream-detail-should-be-summarized"))).toBe(false);
     expect(finalSnapshot?.commanderMessage).toBe("Recovered stream answer");
     expect(finalSnapshot?.conversationMessages?.[0]?.content).toBe("old-stream-detail-should-be-summarized");
     expect(finalSnapshot?.isStreaming).toBe(false);
@@ -5010,6 +5659,59 @@ describe("completeGeneralChat streaming pipeline", () => {
 
     const finalSnapshot = snapshots[snapshots.length - 1];
     expect(finalSnapshot?.commanderMessage).toBe("Hello world!");
+
+    runtime.dispose();
+  });
+
+  it("fails streamed general chat when the provider reports output truncation", async () => {
+    const complete = vi.fn(async () => ({ text: "fallback should not run" }));
+    const mockChatTool = {
+      complete,
+      stream: async function* (
+        _prompt: string,
+        options?: { onFinish?: (finishReason?: string) => void },
+      ) {
+        yield { text: "Partial answer" };
+        options?.onFinish?.("length");
+      },
+    };
+    const runtime = createFileScanTaskRuntime({
+      fileTool: undefined as any,
+      chatTool: mockChatTool,
+      eventBus: createTaskEventBus(),
+    });
+    const { snapshots } = subscribeToRuntime(runtime);
+
+    runtime.start("test truncated stream", { mode: "chat", taskId: "task-truncated-stream" });
+
+    await vi.waitFor(() => {
+      expect(snapshots[snapshots.length - 1]?.status).toBe("failed");
+    }, { timeout: 3000 });
+    expect(complete).not.toHaveBeenCalled();
+    expect(JSON.stringify(snapshots[snapshots.length - 1]?.logs ?? []))
+      .toContain("Model response was truncated (length)");
+
+    runtime.dispose();
+  });
+
+  it("fails non-streaming general chat when the provider reports output truncation", async () => {
+    const complete = vi.fn(async () => ({
+      text: "Partial answer",
+      finishReason: "max_tokens",
+    }));
+    const runtime = createFileScanTaskRuntime({
+      fileTool: undefined as any,
+      chatTool: { complete },
+    });
+    const { snapshots } = subscribeToRuntime(runtime);
+
+    runtime.start("test truncated completion", { mode: "chat", taskId: "task-truncated-completion" });
+
+    await vi.waitFor(() => {
+      expect(snapshots[snapshots.length - 1]?.status).toBe("failed");
+    }, { timeout: 3000 });
+    expect(JSON.stringify(snapshots[snapshots.length - 1]?.logs ?? []))
+      .toContain("Model response was truncated (max_tokens)");
 
     runtime.dispose();
   });

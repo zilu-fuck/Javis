@@ -58,10 +58,20 @@ export type TaskRuntimeEvent =
     }
   | { kind: "tool.planned"; taskId: ID; toolName: string; detail: string }
   | { kind: "tool.completed"; taskId: ID; toolName: string; detail: string }
-  | { kind: "permission.requested"; taskId: ID; request: ToolPermissionRequest }
+  | {
+      kind: "permission.requested";
+      taskId: ID;
+      stepId: ID;
+      toolName: string;
+      previewHash: string;
+      request: ToolPermissionRequest;
+    }
   | {
       kind: "permission.resolved";
       taskId: ID;
+      stepId: ID;
+      toolName: string;
+      previewHash: string;
       requestId: string;
       decision: "approved" | "denied";
     }
@@ -284,6 +294,8 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         detail: event.request.reason,
         userMessage: "需要你的确认才能继续",
         devDetail: event.request.reason,
+        agentId: agentIdFromToolName(event.toolName),
+        stepId: event.stepId,
       };
     case "permission.resolved":
       return {
@@ -293,6 +305,8 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         detail: `Permission ${event.requestId} was ${event.decision}.`,
         userMessage: event.decision === "approved" ? "确认已通过" : "确认已拒绝",
         devDetail: `Permission ${event.requestId} was ${event.decision}.`,
+        agentId: agentIdFromToolName(event.toolName),
+        stepId: event.stepId,
       };
     case "ask_user.requested":
       return {

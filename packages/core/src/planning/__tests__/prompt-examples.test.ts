@@ -16,6 +16,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildCommanderPlanPrompt,
   COMMANDER_PLAN_PROMPT_EXAMPLE,
+  COMMANDER_PLAN_PROMPT_EXAMPLE_ZH,
   COMMANDER_PLAN_PROMPT_EXAMPLE_FULL,
   COMMANDER_PLAN_SCHEMA_PROMPT,
   COMMANDER_PLAN_SCHEMA_VERSION,
@@ -101,6 +102,18 @@ describe("Prompt examples compile", () => {
     expect(fullPrompt).toContain(COMMANDER_PLAN_SCHEMA_PROMPT);
   });
 
+  it("uses localized few-shot content for Chinese planner prompts", () => {
+    const prompt = buildCommanderPlanPrompt({
+      userGoal: "请帮我检查当前项目",
+      locale: "zh-CN",
+      workflowId: "test",
+      availableAgents: [],
+    });
+    expect(prompt).toContain(JSON.stringify(COMMANDER_PLAN_PROMPT_EXAMPLE_ZH));
+    expect(prompt).not.toContain(JSON.stringify(COMMANDER_PLAN_PROMPT_EXAMPLE));
+    expect(prompt).not.toContain("Which folder should I use?");
+  });
+
   it("the JSON Schema derived from Zod is stable", () => {
     // Snapshot the JSON Schema so a future contributor who adds a new
     // field to CommanderDagStepShape sees exactly which downstream
@@ -110,6 +123,6 @@ describe("Prompt examples compile", () => {
   });
 
   it("the schema version is declared and matches the snapshot", () => {
-    expect(COMMANDER_PLAN_SCHEMA_VERSION).toBe("1.0.0");
+    expect(COMMANDER_PLAN_SCHEMA_VERSION).toBe("1.2.0");
   });
 });

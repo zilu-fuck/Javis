@@ -3,12 +3,13 @@ import {
   createArtifactEnvelope,
   computeContentHash,
   isArtifactEnvelope,
+  validateArtifactEnvelope,
   sanitizeArtifactForPersistence,
   summarizeArtifactForHandoff,
   resetArtifactIdCounter,
 } from "./artifact-envelope";
 import type { ArtifactEnvelope } from "./artifact-envelope";
-import { createSharedTaskContext, buildHandoffReport } from "./shared-context";
+import { createSharedTaskContext, buildHandoffReport, formatHandoffReportMarkdown } from "./shared-context";
 
 describe("artifact-envelope", () => {
   beforeEach(() => {
@@ -132,6 +133,74 @@ describe("artifact-envelope", () => {
     });
   });
 
+  describe("validateArtifactEnvelope", () => {
+    it("validates artifact identity, timestamp, and expected producer provenance", () => {
+      const envelope = createArtifactEnvelope({ data: 1 }, {
+        taskId: "task-1",
+        runId: "run-1",
+        type: "test",
+        producer: {
+          workflowId: "commander-dag",
+          stepId: "collect-evidence",
+          agentKind: "code",
+          agentId: "code-agent",
+          toolName: "code.searchRepository",
+        },
+      });
+
+      expect(validateArtifactEnvelope(envelope, {
+        taskId: "task-1",
+        runId: "run-1",
+        artifactId: envelope.artifactId,
+        createdAt: envelope.createdAt,
+        producer: {
+          workflowId: "commander-dag",
+          stepId: "collect-evidence",
+          agentKind: "code",
+          agentId: "code-agent",
+          toolName: "code.searchRepository",
+        },
+      })).toBe(true);
+    });
+
+    it.each([
+      ["workflowId", "other-workflow"],
+      ["stepId", "other-step"],
+      ["agentKind", "research"],
+      ["agentId", "other-agent"],
+      ["toolName", "web.search"],
+    ] as const)("rejects a mismatched producer %s", (field, expectedValue) => {
+      const envelope = createArtifactEnvelope({ data: 1 }, {
+        taskId: "task-1",
+        runId: "run-1",
+        type: "test",
+        producer: {
+          workflowId: "commander-dag",
+          stepId: "collect-evidence",
+          agentKind: "code",
+          agentId: "code-agent",
+          toolName: "code.searchRepository",
+        },
+      });
+
+      expect(validateArtifactEnvelope(envelope, {
+        producer: { [field]: expectedValue },
+      })).toBe(false);
+    });
+
+    it("rejects malformed artifact ids and non-canonical timestamps", () => {
+      const envelope = createArtifactEnvelope({ data: 1 }, {
+        taskId: "task-1",
+        runId: "run-1",
+        type: "test",
+        producer: { stepId: "step-1" },
+      });
+
+      expect(validateArtifactEnvelope({ ...envelope, artifactId: "forged-artifact" })).toBe(false);
+      expect(validateArtifactEnvelope({ ...envelope, createdAt: "not-a-date" })).toBe(false);
+    });
+  });
+
   describe("sanitizeArtifactForPersistence", () => {
     it("redacts secret artifacts entirely", () => {
       const envelope: ArtifactEnvelope = {
@@ -149,7 +218,8 @@ describe("artifact-envelope", () => {
       };
       const sanitized = sanitizeArtifactForPersistence(envelope);
       expect(sanitized.payload).toBe("[redacted:secret]");
-      expect(sanitized.contentHash).toBe("hash-1");
+      expect(sanitized.contentHash).toBe(computeContentHash("[redacted:secret]"));
+      expect(sanitized.sourceContentHash).toBe("hash-1");
     });
 
     it("redacts image data URLs in non-secret artifacts", () => {
@@ -167,6 +237,34 @@ describe("artifact-envelope", () => {
       };
       const sanitized = sanitizeArtifactForPersistence(envelope);
       expect((sanitized.payload as { image: string }).image).toContain("[redacted:image data URL]");
+    });
+
+    it("redacts secret-like fields and strings in non-secret artifacts", () => {
+      const envelope = createArtifactEnvelope({
+        apiKey: "sk-project-secret-value",
+        nested: {
+          password: "hunter2",
+          message: "Authorization: Bearer bearer-secret-value and token=plain-secret",
+          url: "https://alice:password123@example.com/path",
+        },
+      }, {
+        taskId: "t",
+        runId: "r",
+        type: "toolResult",
+        producer: { stepId: "s" },
+        sensitivity: "workspace",
+      });
+
+      const sanitized = sanitizeArtifactForPersistence(envelope);
+      const serialized = JSON.stringify(sanitized.payload);
+      expect(serialized).not.toContain("sk-project-secret-value");
+      expect(serialized).not.toContain("hunter2");
+      expect(serialized).not.toContain("bearer-secret-value");
+      expect(serialized).not.toContain("plain-secret");
+      expect(serialized).not.toContain("password123");
+      expect(serialized).toContain("[redacted:secret]");
+      expect(sanitized.sourceContentHash).toBe(envelope.contentHash);
+      expect(sanitized.contentHash).not.toBe(envelope.contentHash);
     });
 
     it("truncates long strings", () => {
@@ -204,6 +302,43 @@ describe("artifact-envelope", () => {
       };
       const sanitized = sanitizeArtifactForPersistence(envelope);
       expect((sanitized.payload as unknown[]).length).toBe(200);
+    });
+
+    it("normalizes undefined values before JSON persistence", () => {
+      const envelope = createArtifactEnvelope({
+        omitted: undefined,
+        nested: [1, undefined, { kept: "value", omitted: undefined }],
+      }, {
+        taskId: "t",
+        runId: "r",
+        type: "toolResult",
+        producer: { stepId: "s" },
+      });
+
+      const persisted = JSON.parse(JSON.stringify(sanitizeArtifactForPersistence(envelope)));
+
+      expect(persisted.payload).toEqual({
+        nested: [1, null, { kept: "value" }],
+      });
+      expect(validateArtifactEnvelope(persisted)).toBe(true);
+    });
+
+    it("preserves untrusted object keys without changing the sanitized prototype", () => {
+      const payload = JSON.parse('{"__proto__":{"polluted":true},"value":"kept"}');
+      const envelope = createArtifactEnvelope(payload, {
+        taskId: "t",
+        runId: "r",
+        type: "toolResult",
+        producer: { stepId: "s" },
+      });
+
+      const sanitized = sanitizeArtifactForPersistence(envelope);
+      const sanitizedPayload = sanitized.payload as Record<string, unknown>;
+
+      expect(Object.getPrototypeOf(sanitizedPayload)).toBeNull();
+      expect(Object.prototype.hasOwnProperty.call(sanitizedPayload, "__proto__")).toBe(true);
+      expect(({} as { polluted?: boolean }).polluted).toBeUndefined();
+      expect(validateArtifactEnvelope(JSON.parse(JSON.stringify(sanitized)))).toBe(true);
     });
   });
 
@@ -281,6 +416,41 @@ describe("SharedTaskContext envelope support", () => {
 });
 
 describe("buildHandoffReport with artifact provenance", () => {
+  it("keeps secret handoff summaries metadata-only in JSON and Markdown", () => {
+    const ctx = createSharedTaskContext();
+    ctx.setEnvelope("apiSecret", createArtifactEnvelope(
+      { apiKey: "sk-secret-123", password: "hunter2" },
+      {
+        taskId: "t",
+        runId: "r",
+        type: "apiSecret",
+        producer: { stepId: "secret-step", agentKind: "code" },
+        sensitivity: "secret",
+      },
+    ));
+
+    const report = buildHandoffReport(
+      [{ id: "secret-step", assignedAgentKind: "code", outputContextKey: "apiSecret" }],
+      ctx,
+      { previewLength: 120 },
+    );
+    const handoff = report.handoffs[0];
+    expect(handoff?.valueSummary).toEqual({ type: "object", present: true });
+
+    const json = JSON.stringify(report);
+    expect(json).not.toContain("sk-secret-123");
+    expect(json).not.toContain("hunter2");
+    expect(json).not.toContain('"preview"');
+    expect(json).not.toContain('"keyCount"');
+    expect(json).not.toContain('"itemCount"');
+
+    const markdown = formatHandoffReportMarkdown(report);
+    expect(markdown).not.toContain("sk-secret-123");
+    expect(markdown).not.toContain("hunter2");
+    expect(markdown).not.toContain("key(s)");
+    expect(markdown).not.toContain("item(s)");
+  });
+
   it("includes artifact info in handoffs when envelopes are present", () => {
     const ctx = createSharedTaskContext();
     ctx.setEnvelope("diffPreview", createArtifactEnvelope(

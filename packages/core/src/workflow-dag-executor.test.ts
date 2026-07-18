@@ -6,6 +6,23 @@ import type { AgentCapabilityTag } from "./agent-capability";
 import type { WorkbenchWorkflow } from "./workflows";
 
 describe("executeWorkflow", () => {
+  it("rejects cyclic dependencies before executing any workflow step", async () => {
+    let executed = false;
+    const workflow = createWorkflow([
+      step("first", ["second"], false),
+      step("second", ["first"], false),
+    ]);
+
+    await expect(executeWorkflow({
+      workflow,
+      executeStep: async () => {
+        executed = true;
+        return { output: "unexpected" };
+      },
+    })).rejects.toThrow(/cyclic dependency: first -> second -> first/);
+    expect(executed).toBe(false);
+  });
+
   it("executes ready workflow steps by dependency order and stores outputs in context", async () => {
     const order: string[] = [];
     const workflow = createWorkflow([
@@ -197,6 +214,63 @@ describe("executeWorkflow", () => {
     expect(result.completedStepIds).toEqual(["fetch-source"]);
   });
 
+  it("clears failed-attempt outputs and observations before retrying", async () => {
+    let attempts = 0;
+    const workflow = createWorkflow([{
+      ...step("fetch-source", [], false),
+      outputContextKey: "searchResults",
+    }]);
+
+    const result = await executeWorkflow({
+      workflow,
+      executeStep: async (workflowStep, context) => {
+        attempts += 1;
+        if (attempts === 1) {
+          context.set("searchResults", { stale: true });
+          context.set(`step:${workflowStep.id}`, { stale: true });
+          context.set(`react:${workflowStep.id}:0`, { output: "stale" });
+          throw new Error("network timeout");
+        }
+        expect(context.has("searchResults")).toBe(false);
+        expect(context.has(`step:${workflowStep.id}`)).toBe(false);
+        expect(context.has(`react:${workflowStep.id}:0`)).toBe(false);
+        return { output: [] };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.contextSnapshot.searchResults).toEqual([]);
+  });
+
+  it("does not expose an abandoned step's partial output to recovery work", async () => {
+    const workflow = createWorkflow([
+      { ...step("collect", [], false), outputContextKey: "searchResults" },
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      maxStepRetries: 0,
+      executeStep: async (workflowStep, context) => {
+        if (workflowStep.id === "collect") {
+          context.set("searchResults", [{ stale: true }]);
+          context.set(`react:${workflowStep.id}:0`, { output: "stale" });
+          throw new Error("collection failed");
+        }
+        expect(context.has("searchResults")).toBe(false);
+        expect(context.has("react:collect:0")).toBe(false);
+        return { output: "recovered" };
+      },
+      onStepFailureReplan: () => ({
+        abandonFailedStep: true,
+        steps: [step("recover", ["collect"], false)],
+      }),
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.contextSnapshot.searchResults).toBeUndefined();
+    expect(result.contextSnapshot["react:collect:0"]).toBeUndefined();
+  });
+
   it("does not retry non-transient permission failures", async () => {
     let attempts = 0;
     const workflow = createWorkflow([
@@ -267,9 +341,10 @@ describe("executeWorkflow", () => {
     });
 
     expect(result.status).toBe("completed");
-    expect(result.completedStepIds).toEqual(["inspect"]);
-    expect(result.abandonedStepIds).toEqual(["verify"]);
-    expect(replanned[0]).toContain("verify:Handoff validation failed after step inspect");
+    expect(result.completedStepIds).toEqual([]);
+    expect(result.abandonedStepIds).toEqual(["inspect", "verify"]);
+    expect(result.contextSnapshot.diffPreview).toBeUndefined();
+    expect(replanned[0]).toContain("inspect:Handoff validation failed after step inspect");
     expect(replanned[0]).toContain("expected object { diff: string, changedFiles: string[] }");
   });
 
@@ -297,7 +372,7 @@ describe("executeWorkflow", () => {
         return { output: workflowStep.id };
       },
       onStepFailureReplan: ({ step: failedStep }) => {
-        if (failedStep.id !== "verify") {
+        if (failedStep.id !== "inspect") {
           return undefined;
         }
         return {
@@ -313,8 +388,8 @@ describe("executeWorkflow", () => {
     });
 
     expect(result.status).toBe("completed");
-    expect(result.completedStepIds).toEqual(["inspect", "repair-diff"]);
-    expect(result.abandonedStepIds).toEqual(["verify"]);
+    expect(result.completedStepIds).toEqual(["repair-diff", "verify"]);
+    expect(result.abandonedStepIds).toEqual(["inspect"]);
     expect(result.contextSnapshot.diffPreview).toEqual({
       diff: "diff --git",
       changedFiles: ["src/app.ts"],
@@ -434,7 +509,7 @@ describe("executeWorkflow", () => {
     expect(result.abandonedStepIds).toEqual(["hung"]);
   });
 
-  it("skips duplicate replanned steps and continues existing downstream work", async () => {
+  it("fails closed when a recovery plan reuses an existing step id", async () => {
     const workflow = createWorkflow([
       step("scan-files", [], false),
       step("fallback-scan", ["scan-files"], false),
@@ -456,10 +531,11 @@ describe("executeWorkflow", () => {
       }),
     });
 
-    expect(result.status).toBe("completed");
-    expect(executed).toEqual(["scan-files", "fallback-scan"]);
-    expect(result.completedStepIds).toEqual(["fallback-scan"]);
-    expect(result.abandonedStepIds).toEqual(["scan-files"]);
+    expect(result.status).toBe("failed");
+    expect(executed).toEqual(["scan-files"]);
+    expect(result.completedStepIds).toEqual([]);
+    expect(result.abandonedStepIds).toBeUndefined();
+    expect(result.error).toContain("duplicate or existing step id");
     expect(result.replannedStepIds).toBeUndefined();
   });
 
@@ -521,13 +597,18 @@ describe("executeWorkflow", () => {
         taskId: "task-1",
         runId: "run-1",
         type: "diffPreview",
-        producer: { stepId: "scan-files", agentKind: "file" },
+        producer: { workflowId: workflow.id, stepId: "scan-files", agentKind: "file" },
       },
     );
 
     const result = await executeWorkflow({
       workflow,
       context: createSharedTaskContext({ taskId: "task-1" }),
+      artifactExpectation: {
+        taskId: "task-1",
+        runId: "run-1",
+        producer: { workflowId: workflow.id },
+      },
       resumeFrom: {
         completedStepIds: ["scan-files"],
         contextSnapshot: {
@@ -549,6 +630,90 @@ describe("executeWorkflow", () => {
 
     expect(result.status).toBe("completed");
     expect(result.completedStepIds).toEqual(["scan-files", "verify"]);
+  });
+
+  it("rejects a resume artifact bound to another task or run", async () => {
+    const workflow = createWorkflow([
+      {
+        ...step("scan-files", [], false),
+        outputContextKey: "diffPreview",
+      },
+    ]);
+    const envelope = createArtifactEnvelope(
+      { diff: "diff", changedFiles: [] },
+      {
+        taskId: "task-1",
+        runId: "run-1",
+        type: "diffPreview",
+        producer: {
+          workflowId: workflow.id,
+          stepId: "scan-files",
+          agentKind: "file",
+        },
+      },
+    );
+
+    await expect(executeWorkflow({
+      workflow,
+      artifactExpectation: {
+        taskId: "task-1",
+        runId: "run-2",
+        producer: { workflowId: workflow.id },
+      },
+      resumeFrom: {
+        completedStepIds: ["scan-files"],
+        contextSnapshot: { diffPreview: envelope },
+      },
+      executeStep: async () => ({ output: "unreachable" }),
+    })).rejects.toThrow("invalid artifact envelope");
+  });
+
+  it("rejects partially-shaped artifact data instead of downgrading it to context", async () => {
+    const workflow = createWorkflow([step("scan-files", [], false)]);
+
+    await expect(executeWorkflow({
+      workflow,
+      resumeFrom: {
+        contextSnapshot: {
+          diffPreview: {
+            artifactId: "art-invalid",
+            payload: { diff: "tampered" },
+          },
+        },
+      },
+      executeStep: async () => ({ output: "unreachable" }),
+    })).rejects.toThrow("malformed artifact envelope");
+  });
+
+  it("rejects unknown and overlapping resume step states at the executor boundary", async () => {
+    const workflow = createWorkflow([
+      step("scan-files", [], false),
+      step("verify", ["scan-files"], false),
+    ]);
+
+    await expect(executeWorkflow({
+      workflow,
+      resumeFrom: { completedStepIds: ["unknown-step"] },
+      executeStep: async () => ({ output: "unreachable" }),
+    })).rejects.toThrow("references unknown step unknown-step");
+
+    await expect(executeWorkflow({
+      workflow,
+      resumeFrom: {
+        completedStepIds: ["scan-files"],
+        abandonedStepIds: ["scan-files"],
+      },
+      executeStep: async () => ({ output: "unreachable" }),
+    })).rejects.toThrow("appears in both completed and abandoned state");
+
+    await expect(executeWorkflow({
+      workflow,
+      resumeFrom: {
+        completedStepIds: ["scan-files"],
+        retryStepIds: ["scan-files"],
+      },
+      executeStep: async () => ({ output: "unreachable" }),
+    })).rejects.toThrow("appears in both completed and retry state");
   });
 
   it("treats checkpoint running steps as retryable pending work", async () => {
@@ -577,6 +742,156 @@ describe("executeWorkflow", () => {
     expect(executed).toEqual(["preview-write"]);
     expect(result.completedStepIds).toEqual(["scan-files", "preview-write"]);
     expect(result.contextSnapshot["step:preview-write"]).toEqual({ retried: "preview-write" });
+  });
+
+  it("runs an independent travel-planning fan-out through a bounded pool before synthesis", async () => {
+    const completedRoots = new Set<string>();
+    const backpressure: Array<{ readyCount: number; admittedCount: number }> = [];
+    let active = 0;
+    let maxActive = 0;
+    const workflow = createWorkflow([
+      step("find-flights", [], true),
+      step("find-hotels", [], true),
+      step("check-weather", [], true),
+      step("build-trip-plan", ["find-flights", "find-hotels", "check-weather"], false),
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      executionPolicy: {
+        maxConcurrency: 2,
+        maxReadyQueueSize: 2,
+      },
+      onBackpressure: ({ readyCount, admittedCount }) => {
+        backpressure.push({ readyCount, admittedCount });
+      },
+      executeStep: async (workflowStep) => {
+        if (workflowStep.id === "build-trip-plan") {
+          expect([...completedRoots].sort()).toEqual([
+            "check-weather",
+            "find-flights",
+            "find-hotels",
+          ]);
+          return { output: "trip-plan" };
+        }
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        completedRoots.add(workflowStep.id);
+        active -= 1;
+        return { output: workflowStep.id };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(maxActive).toBe(2);
+    expect(backpressure).toContainEqual({ readyCount: 3, admittedCount: 2 });
+    expect(result.completedStepIds[result.completedStepIds.length - 1]).toBe("build-trip-plan");
+  });
+
+  it("rate-limits step starts while preserving parallel eligibility", async () => {
+    const startedAt: number[] = [];
+    const workflow = createWorkflow([
+      step("first-source", [], true),
+      step("second-source", [], true),
+      step("third-source", [], true),
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      executionPolicy: {
+        maxConcurrency: 3,
+        rateLimitPerSecond: 20,
+      },
+      executeStep: async (workflowStep) => {
+        startedAt.push(Date.now());
+        return { output: workflowStep.id };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(startedAt).toHaveLength(3);
+    expect(startedAt[1] - startedAt[0]).toBeGreaterThanOrEqual(35);
+    expect(startedAt[2] - startedAt[1]).toBeGreaterThanOrEqual(35);
+  });
+
+  it("aborts a timed-out step attempt", async () => {
+    let aborted = false;
+    const workflow = createWorkflow([step("hung-step", [], false)]);
+
+    const result = await executeWorkflow({
+      workflow,
+      executionPolicy: {
+        stepTimeoutMs: 20,
+        maxStepRetries: 0,
+      },
+      executeStep: async (_workflowStep, _context, attemptSignal) =>
+        new Promise((_resolve, reject) => {
+          attemptSignal?.addEventListener("abort", () => {
+            aborted = true;
+            reject(attemptSignal.reason);
+          }, { once: true });
+        }),
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("timed out");
+    expect(aborted).toBe(true);
+  });
+
+  it("opens the circuit and lets Commander recovery dynamically expand the pool", async () => {
+    let policy = {
+      maxConcurrency: 1,
+      maxStepRetries: 0,
+      circuitBreakerFailureThreshold: 1,
+    };
+    let circuitOpenCount = 0;
+    let active = 0;
+    let maxActive = 0;
+    const workflow = createWorkflow([step("primary-provider", [], false)]);
+
+    const result = await executeWorkflow({
+      workflow,
+      getExecutionPolicy: () => policy,
+      onCircuitBreakerOpen: () => {
+        circuitOpenCount += 1;
+      },
+      executeStep: async (workflowStep) => {
+        if (workflowStep.id === "primary-provider") {
+          throw new Error("provider unavailable");
+        }
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        active -= 1;
+        return { output: workflowStep.id };
+      },
+      onStepFailureReplan: ({ step: failedStep }) => {
+        policy = {
+          maxConcurrency: 3,
+          maxStepRetries: 1,
+          circuitBreakerFailureThreshold: 2,
+        };
+        return {
+          abandonFailedStep: true,
+          steps: [
+            step("fallback-flights", [failedStep.id], true),
+            step("fallback-hotels", [failedStep.id], true),
+            step("fallback-weather", [failedStep.id], true),
+          ],
+        };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(circuitOpenCount).toBe(1);
+    expect(maxActive).toBe(3);
+    expect(result.abandonedStepIds).toEqual(["primary-provider"]);
+    expect(result.completedStepIds.sort()).toEqual([
+      "fallback-flights",
+      "fallback-hotels",
+      "fallback-weather",
+    ]);
   });
 });
 

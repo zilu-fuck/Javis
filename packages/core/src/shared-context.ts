@@ -1,6 +1,7 @@
 import {
   createArtifactEnvelope,
   isArtifactEnvelope,
+  validateArtifactEnvelope,
   type ArtifactEnvelope,
   type ArtifactSensitivity,
 } from "./artifact-envelope";
@@ -9,6 +10,7 @@ export interface SharedTaskContext {
   set<T>(key: string, value: T): void;
   get<T>(key: string): T | undefined;
   has(key: string): boolean;
+  delete(key: string): void;
   snapshot(): Record<string, unknown>;
   clear(): void;
   resolveKey(key: ContextKey, locale?: string): string;
@@ -22,6 +24,7 @@ export interface SharedTaskContext {
 export interface StepArtifactOutputContext {
   taskId: string;
   runId: string;
+  workflowId?: string;
   stepId: string;
   agentKind?: string;
   agentId?: string;
@@ -167,6 +170,11 @@ export function createSharedTaskContext(
     has(key) {
       return store.has(key);
     },
+    delete(key) {
+      store.delete(key);
+      envelopeStore.delete(key);
+      envelopeHistory.delete(key);
+    },
     snapshot() {
       return Object.fromEntries(store);
     },
@@ -252,7 +260,23 @@ function toArtifactEnvelope(
   context: StepArtifactOutputContext,
 ): ArtifactEnvelope {
   if (isArtifactEnvelope(value)) {
-    return value;
+    const candidate: unknown = value;
+    const payload = value.payload;
+    const expectedProducer = {
+      workflowId: context.workflowId,
+      stepId: context.stepId,
+      agentKind: context.agentKind,
+      agentId: context.agentId,
+      toolName: context.toolName,
+    };
+    if (validateArtifactEnvelope(candidate, {
+      taskId: context.taskId,
+      runId: context.runId,
+      producer: expectedProducer,
+    })) {
+      return candidate;
+    }
+    value = payload;
   }
   return createArtifactEnvelope(value, {
     taskId: context.taskId,
@@ -260,6 +284,7 @@ function toArtifactEnvelope(
     type: context.type ?? outputContextKey,
     schemaVersion: context.schemaVersion,
     producer: {
+      workflowId: context.workflowId,
       stepId: context.stepId,
       agentKind: context.agentKind,
       agentId: context.agentId,
@@ -298,25 +323,20 @@ export const DEFAULT_CONTEXT_KEY_SCHEMAS: readonly ContextKeySchema[] = [
 ];
 
 /**
- * SharedContext keys that are preloaded by the runtime before any DAG
- * step runs. The plan compiler treats these as legitimate consumers
- * without requiring a producer step.
- *
- * Built from the documented `CONTEXT_KEYS` plus every key declared in
- * `DEFAULT_CONTEXT_KEY_SCHEMAS`, so the allowlist tracks the runtime's
- * own preloaded set. Keep both sources in sync when adding new
- * preloaded keys.
+ * SharedContext keys that the runtime actually seeds before a DAG step can
+ * run. Output artifacts are intentionally absent: consumers must declare a
+ * producer handoff so a plan cannot silently read an unproduced placeholder.
  */
-export const DEFAULT_PRELOADED_CONTEXT_KEYS: readonly string[] = (() => {
-  const keys = new Set<string>();
-  for (const value of Object.values(CONTEXT_KEYS)) {
-    keys.add(value.en);
-  }
-  for (const schema of DEFAULT_CONTEXT_KEY_SCHEMAS) {
-    keys.add(schema.key);
-  }
-  return [...keys].sort();
-})();
+export const DEFAULT_PRELOADED_CONTEXT_KEYS: readonly string[] = [
+  "userGoal",
+  "taskId",
+  "priorMessages",
+  "omittedPriorMessageCount",
+  "imagePath",
+  "commanderPlan",
+  "askUserQuestion",
+  "askUserResponse",
+];
 
 export function validateContextValue(
   key: string,
@@ -463,6 +483,7 @@ export function buildHandoffReport(
       },
       ...((previousArtifacts?.length ?? 0) > 0 ? { previousArtifacts } : {}),
     } : undefined;
+    const sensitivity = envelope?.sensitivity ?? "public";
     return {
       contextKey,
       producedByStepId: producer?.id,
@@ -473,7 +494,15 @@ export function buildHandoffReport(
         hasConsumers: consumingSteps.length > 0,
         schemaValid: schemaValidation?.valid ?? true,
       }),
-      valueSummary: summarizeHandoffValue(snapshot[contextKey], previewLength),
+      // Secret payloads may still be present in the in-memory snapshot so the
+      // owning step can use them, but reports are persisted/exported. Keep
+      // their summary metadata-only and never include a preview or cardinality
+      // that could reveal credential structure.
+      valueSummary: summarizeHandoffValue(
+        snapshot[contextKey],
+        previewLength,
+        sensitivity === "secret",
+      ),
       ...(schemaError ? { schemaError } : {}),
       ...(artifact ? { artifact } : {}),
     };
@@ -589,12 +618,26 @@ function resolveHandoffStatus(input: {
 function summarizeHandoffValue(
   value: unknown,
   previewLength: number,
+  redactSensitive = false,
 ): HandoffReportValueSummary {
   if (value === undefined) {
     return { type: "undefined", present: false };
   }
   if (value === null) {
     return { type: "null", present: true };
+  }
+  if (redactSensitive) {
+    if (Array.isArray(value)) {
+      return { type: "array", present: true };
+    }
+    const valueType = typeof value;
+    if (valueType === "string" || valueType === "number" || valueType === "boolean") {
+      return { type: valueType, present: true };
+    }
+    if (valueType === "object") {
+      return { type: "object", present: true };
+    }
+    return { type: "unknown", present: true };
   }
   if (Array.isArray(value)) {
     return { type: "array", present: true, itemCount: value.length };
@@ -628,8 +671,16 @@ function sanitizeArtifactBaseName(value: string): string {
 
 function formatHandoffValueSummary(value: HandoffReportValueSummary): string {
   if (!value.present) return value.type;
-  if (value.type === "array") return `${value.type}: ${value.itemCount ?? 0} item(s)`;
-  if (value.type === "object") return `${value.type}: ${value.keyCount ?? 0} key(s)`;
+  if (value.type === "array") {
+    return value.itemCount === undefined
+      ? value.type
+      : `${value.type}: ${value.itemCount} item(s)`;
+  }
+  if (value.type === "object") {
+    return value.keyCount === undefined
+      ? value.type
+      : `${value.type}: ${value.keyCount} key(s)`;
+  }
   if (value.preview) return `${value.type}: ${value.preview}`;
   return value.type;
 }

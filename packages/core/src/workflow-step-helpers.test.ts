@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ShellTool } from "@javis/tools";
+import { createDefaultAgentRegistry } from "./agents";
 import type { WorkspaceRuntime } from "./workspace-runtime";
 import {
   canExecuteWorkspaceWrite,
+  formatAgentDisplayName,
   runProjectReadOnlyCommands,
   runWorkspaceCodeApplyOperation,
   runWorkspaceGitCommitCommand,
@@ -11,6 +13,25 @@ import {
 } from "./workflow-step-helpers";
 
 describe("workflow-step-helpers", () => {
+  it("uses the live registry display name for a same-kind workspace agent", () => {
+    const registry = createDefaultAgentRegistry();
+    const customAgent = {
+      id: "agent-custom-display-code",
+      kind: "code" as const,
+      displayName: "Workspace Code Specialist",
+      description: "Workspace-specific code agent",
+      allowedToolNames: ["code.searchRepository"],
+      modelRequirements: { prefersVision: false, prefersCode: true, minContextTokens: 8000 },
+      systemPrompt: { en: "Review code.", zhCN: "Review code." },
+    };
+    registry.register(customAgent);
+    try {
+      expect(formatAgentDisplayName("code")).toBe(customAgent.displayName);
+    } finally {
+      registry.unregister(customAgent.id);
+    }
+  });
+
   it("routes read-only shell commands through WorkspaceRuntime when provided", async () => {
     const shellTool = {
       runReadOnlyCommand: vi.fn(async () => {

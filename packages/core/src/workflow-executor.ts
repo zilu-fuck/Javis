@@ -27,7 +27,15 @@ import type {
   VerifierTool,
   WorkspaceTool,
 } from "@javis/tools";
-import { CommanderPlanResultShape, decodeMcpToolServerName, initialToolDescriptors, isDisabledBrowserWriteToolName } from "@javis/tools";
+import {
+  CommanderPlanResultShape,
+  decodeMcpToolServerName,
+  encodeMcpToolServerName,
+  initialToolDescriptors,
+  isDisabledBrowserWriteToolName,
+  sanitizeMcpInputSchema,
+  validateMcpInput,
+} from "@javis/tools";
 import { summarizeMarkdownDocuments } from "@javis/tools";
 import {
   createDefaultAgentRegistry,
@@ -47,12 +55,19 @@ import {
   type WorkflowCheckpoint,
 } from "./workflow-checkpoint";
 import {
+  computeContentHash,
+  isArtifactEnvelope,
+  validateArtifactEnvelope,
+  type ArtifactEnvelope,
+} from "./artifact-envelope";
+import {
   createWorkflowResumeStateFromReconciliation,
   reconcileCheckpointWithEventLog,
 } from "./workflow-checkpoint-reconciliation";
 import { compileCommanderPlan, formatDiagnosticSummary } from "./planning/commander-plan-compiler";
 import {
   appendStepsToCompiledPlan,
+  trustAsCompiled,
   type CompiledCommanderPlan,
   type PlanDiagnostic,
 } from "./planning/commander-plan-diagnostics";
@@ -68,8 +83,18 @@ import { DEFAULT_PRELOADED_CONTEXT_KEYS } from "./shared-context";
 import type { FlowController } from "./flow-controller";
 import type { ChatMessage, ID, TaskSnapshot, TaskStep, AgentKind, Agent, StepTrace } from "./index";
 import { markStep } from "./plans";
-import { createSourceBackedReport } from "./research";
-import { buildHandoffReport, createSharedTaskContext } from "./shared-context";
+import {
+  createSourceBackedReport,
+  bindFetchedSourceToRequest,
+  validateSourceEvidence,
+  verifySourceBackedReport,
+  verifySourceCollection,
+  verifyTrendHotListResearchReport,
+} from "./research";
+import {
+  buildHandoffReport,
+  createSharedTaskContext,
+} from "./shared-context";
 import {
   buildRecoveryReport,
   createRecoveryAttempt,
@@ -106,13 +131,20 @@ import {
   isContextOverflowError,
   type ContextSummaryTool,
 } from "./context-recovery";
-import { executeWorkflow, type WorkflowResumeState } from "./workflow-dag-executor";
+import {
+  appendReplannedSteps,
+  executeWorkflow,
+  normalizeWorkflowExecutionPolicy,
+  type WorkflowExecutionPolicy,
+  type WorkflowResumeState,
+} from "./workflow-dag-executor";
 import {
   getWorkbenchWorkflow,
   type WorkbenchWorkflow,
   type WorkbenchWorkflowId,
   type WorkbenchWorkflowStep,
 } from "./workflows";
+import type { WorkflowRegistry } from "./workflow-registry";
 import {
   canExecuteWorkspaceWrite,
   formatAgentDisplayName,
@@ -126,18 +158,19 @@ import {
 import type { WorkspaceRuntime } from "./workspace-runtime";
 import { extractUrls, isComputerUseGoal } from "./routing";
 import type { CommanderDagStep, CommanderDagPlan } from "./commander-plan-schema";
-import type { AgentCapabilityTag } from "./agent-capability";
+import type { AgentCapabilityTag, AgentRegistry } from "./agent-capability";
 import {
   resolveStepInput,
   writeStepArtifactOutput,
   writeStepOutput,
   type SharedTaskContext,
 } from "./shared-context";
-import { runAgentReActLoop, type AgentReActDecision, type AgentReActTool } from "./agent-react-loop";
+import { runAgentReActLoop, sanitizeAgentReActOutput, type AgentReActDecision, type AgentReActTool } from "./agent-react-loop";
 import type { ReActDecisionRequest } from "./agent-react-decider";
 import { isTaskCancelledError, TaskTimeoutError, throwIfTaskAborted, withTaskTimeout } from "./task-wait";
 import { createAskUserRequest } from "./ask-user";
 import {
+  createDryRunBindingHash,
   createPendingPermissionRequest,
   resolvePermissionRequest,
   type PermissionDecision,
@@ -147,6 +180,13 @@ import type { ComputerUseStep, ComputerUseStepTrace } from "./computer-use-types
 const DEFAULT_AVAILABLE_TOOL_DESCRIPTORS = initialToolDescriptors.filter((descriptor) =>
   !isDisabledBrowserWriteToolName(descriptor.name)
 );
+
+function createUniqueRunId(taskId: string): string {
+  const randomSuffix = typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID().slice(0, 12)
+    : Math.random().toString(36).slice(2, 14);
+  return `run-${taskId}-${Date.now().toString(36)}-${randomSuffix}`;
+}
 
 function normalizeAvailableToolDescriptors(
   toolDescriptors: readonly ToolDescriptor[] | undefined,
@@ -162,6 +202,102 @@ function normalizeAvailableToolDescriptors(
     normalized.push(descriptor);
   }
   return normalized;
+}
+
+/**
+ * Workspace definitions can register agents after the core module loads.
+ * Runtime snapshots therefore use the live registry rather than only the
+ * built-in agent list.
+ */
+function getRegisteredAgentDefinitions(agentRegistry?: AgentRegistry): Agent[] {
+  return (agentRegistry ?? createDefaultAgentRegistry())
+    .list()
+    .map((registration) => registration.agent as Agent);
+}
+
+function getRegisteredAgentId(agentKind: string, agentRegistry?: AgentRegistry): string {
+  return (agentRegistry ?? createDefaultAgentRegistry()).findByKind(agentKind)?.agent.id
+    ?? `agent-${agentKind}`;
+}
+
+/**
+ * Keep the persisted Commander artifact and the executable workflow in lock
+ * step after recovery dependency injection. The runtime DAG helper operates
+ * on WorkbenchWorkflow steps; this mirrors those dependency changes back to
+ * the typed Commander plan before it is written to the handoff context.
+ */
+function synchronizeCommanderPlanDependencies(
+  plan: CompiledCommanderPlan,
+  workflow: WorkbenchWorkflow,
+): CompiledCommanderPlan {
+  const workflowSteps = new Map(workflow.steps.map((step) => [step.id, step]));
+  return {
+    ...plan,
+    steps: plan.steps.map((step) => {
+      const workflowStep = workflowSteps.get(step.id);
+      return workflowStep
+        ? { ...step, dependsOn: [...workflowStep.dependsOn] }
+        : step;
+    }),
+  };
+}
+
+/**
+ * Checkpoints describe the active graph that will be resumed. Dependencies on
+ * abandoned steps are already satisfied by the executor and should not affect
+ * the persisted plan hash; removing them here also makes old and new resume
+ * paths deterministic.
+ */
+function createActiveCheckpointWorkflow(
+  workflow: WorkbenchWorkflow,
+  abandonedStepIds: Iterable<string>,
+): WorkbenchWorkflow {
+  const abandoned = new Set(abandonedStepIds);
+  return {
+    ...workflow,
+    steps: workflow.steps.map((step) => ({
+      ...step,
+      dependsOn: step.dependsOn.filter((dependency) => !abandoned.has(dependency)),
+    })),
+  };
+}
+
+/**
+ * A restored recovery artifact contains abandoned steps for auditability, and
+ * may therefore contain an intentional duplicate output key. Compile the
+ * executable subgraph instead: remove abandoned nodes/edges and topologically
+ * order the remaining steps so the normal compiler can still enforce agents,
+ * tools, capabilities, context producers, and approval gates.
+ */
+function createRestoredActivePlanForCompilation(
+  plan: CommanderDagPlan,
+  abandonedStepIds: Iterable<string>,
+): CommanderDagPlan {
+  const abandoned = new Set(abandonedStepIds);
+  const remaining = plan.steps
+    .filter((step) => !abandoned.has(step.id))
+    .map((step) => ({
+      ...step,
+      dependsOn: (step.dependsOn ?? []).filter((dependency) => !abandoned.has(dependency)),
+    }));
+  const ordered: typeof remaining = [];
+  const orderedIds = new Set<string>();
+  while (remaining.length > 0) {
+    const readyIndex = remaining.findIndex((step) =>
+      (step.dependsOn ?? []).every((dependency) => orderedIds.has(dependency)),
+    );
+    if (readyIndex < 0) {
+      // Preserve the unresolved slice so compileCommanderPlan reports the
+      // actual missing/cyclic dependency instead of hiding it.
+      ordered.push(...remaining);
+      break;
+    }
+    const [readyStep] = remaining.splice(readyIndex, 1);
+    if (!readyStep) break;
+    ordered.push(readyStep);
+    orderedIds.add(readyStep.id);
+  }
+  return { ...plan, steps: ordered };
 }
 
 type RuntimeToolAvailability = Pick<
@@ -322,6 +458,7 @@ function filterAvailableToolDescriptorsForBlueprintWorkflow(
 
 interface ReadCurrentProjectWorkflowOptions {
   controller: FlowController;
+  agentRegistry?: AgentRegistry;
   fileTool: FileTool;
   commanderTool?: CommanderTool;
   projectTool: ProjectTool;
@@ -340,6 +477,7 @@ export function isReadCurrentProjectGoal(userGoal: string): boolean {
 
 export async function runReadCurrentProjectWorkflow({
   controller,
+  agentRegistry,
   fileTool,
   commanderTool,
   projectTool,
@@ -361,7 +499,8 @@ export async function runReadCurrentProjectWorkflow({
     workflowId: "read-current-project",
   });
   const agentTracker = createAgentStateTracker(
-    demoAgents.filter((agent) => workflow.participatingAgentKinds.includes(agent.kind)),
+    getRegisteredAgentDefinitions(agentRegistry)
+      .filter((agent) => workflow.participatingAgentKinds.includes(agent.kind)),
   );
   const taskEventBus = createTaskEventBus();
   const eventLogs: TaskSnapshot["logs"] = [];
@@ -411,13 +550,19 @@ export async function runReadCurrentProjectWorkflow({
         throw new Error(`Tool ${toolName} is not available.`);
       }
     };
-    const commanderPlan = await safePlanWorkflow(commanderTool, userGoal, "read-current-project", availableTools);
+    const commanderPlan = await safePlanWorkflow(
+      commanderTool,
+      userGoal,
+      "read-current-project",
+      availableTools,
+      agentRegistry,
+    );
     if (commanderPlan) {
       context.set("commanderPlan", commanderPlan);
       emit({
         ...snapshot,
         title: commanderPlan.title || snapshot.title,
-        commanderMessage: commanderPlan.reasoning,
+        commanderMessage: formatCommanderPlanReadyMessage(userGoal, commanderPlan.steps.length),
         logs: appendLog(snapshot, emitEvent({
           kind: "tool.completed",
           taskId,
@@ -535,6 +680,13 @@ export async function runReadCurrentProjectWorkflow({
       ["desktop_focus", async () => ({ status: "desktop_focus_delegated" })],
       ["desktop_input", async () => ({ status: "desktop_input_delegated" })],
     ]);
+    const concreteCapabilityExecutorNames = new Set([
+      "file_scan",
+      "shell_readonly",
+      "git_inspect",
+      "evidence_check",
+      "synthesis",
+    ]);
 
     const execution = await executeWorkflow({
       workflow,
@@ -544,7 +696,7 @@ export async function runReadCurrentProjectWorkflow({
         if (step.requiredCapabilities && step.requiredCapabilities.length > 0) {
           for (const cap of step.requiredCapabilities) {
             const executor = capabilityExecutors.get(cap);
-            if (executor) {
+            if (executor && concreteCapabilityExecutorNames.has(cap)) {
               return { output: await executor() };
             }
           }
@@ -713,6 +865,7 @@ export async function runReadCurrentProjectWorkflow({
 
 interface GenericWorkbenchWorkflowOptions {
   controller: FlowController;
+  agentRegistry?: AgentRegistry;
   commanderTool?: CommanderTool;
   codeTool?: CodeTool;
   computerTool?: ComputerTool;
@@ -725,11 +878,13 @@ interface GenericWorkbenchWorkflowOptions {
   taskId: ID;
   userGoal: string;
   workflowId: Exclude<WorkbenchWorkflowId, "read-current-project"> | Exclude<WorkbenchWorkflowId, "read-current-project">[];
+  workflowRegistry?: WorkflowRegistry;
   availableToolDescriptors?: ToolDescriptor[];
 }
 
 export async function runGenericWorkbenchWorkflow({
   controller,
+  agentRegistry,
   commanderTool,
   codeTool,
   computerTool,
@@ -742,21 +897,26 @@ export async function runGenericWorkbenchWorkflow({
   taskId,
   userGoal,
   workflowId,
+  workflowRegistry,
   availableToolDescriptors,
 }: GenericWorkbenchWorkflowOptions) {
   const workflow = Array.isArray(workflowId)
-    ? createCombinedWorkflow(workflowId)
-    : getWorkbenchWorkflow(workflowId);
+    ? createCombinedWorkflow(workflowId, workflowRegistry)
+    : workflowRegistry?.get(workflowId) ?? getWorkbenchWorkflow(workflowId);
   if (!workflow) {
     throw new Error(`Missing workflow definition: ${String(workflowId)}.`);
   }
 
+  const runId = createUniqueRunId(taskId);
   const context = createSharedTaskContext({
     userGoal,
+    taskId,
+    runId,
     workflowId,
   });
   const agentTracker = createAgentStateTracker(
-    demoAgents.filter((agent) => workflow.participatingAgentKinds.includes(agent.kind)),
+    getRegisteredAgentDefinitions(agentRegistry)
+      .filter((agent) => workflow.participatingAgentKinds.includes(agent.kind)),
   );
   const taskEventBus = createTaskEventBus();
   const eventLogs: TaskSnapshot["logs"] = [];
@@ -803,13 +963,19 @@ export async function runGenericWorkbenchWorkflow({
       { browserTool, codeTool, trendTool },
     );
     const availableToolNames = new Set(availableTools.map((descriptor) => descriptor.name));
-    const commanderPlan = await safePlanWorkflow(commanderTool, userGoal, workflow.id, availableTools);
+    const commanderPlan = await safePlanWorkflow(
+      commanderTool,
+      userGoal,
+      workflow.id,
+      availableTools,
+      agentRegistry,
+    );
     if (commanderPlan) {
       context.set("commanderPlan", commanderPlan);
       emit({
         ...snapshot,
         title: commanderPlan.title || snapshot.title,
-        commanderMessage: commanderPlan.reasoning,
+        commanderMessage: formatCommanderPlanReadyMessage(userGoal, commanderPlan.steps.length),
         logs: appendLog(snapshot, emitEvent({
           kind: "tool.completed",
           taskId,
@@ -831,17 +997,19 @@ export async function runGenericWorkbenchWorkflow({
           fileTool,
           controller,
           emit,
-          emitEvent,
-          schedulerTool,
-          trendTool,
-          step,
-          taskId,
-          userGoal,
+           emitEvent,
+           schedulerTool,
+           trendTool,
+           step,
+           taskId,
+           runId,
+           userGoal,
           availableToolNames,
           availableTools,
           webTool,
           workflow,
           contextSnapshot: context.snapshot(),
+          agentRegistry,
         }),
       }),
       onStepStarted: (step) => {
@@ -857,8 +1025,18 @@ export async function runGenericWorkbenchWorkflow({
         });
       },
       onStepCompleted: (step, output) => {
-        context.set(step.id, output);
-        const stepOutput = output as Partial<GenericStepOutput> | undefined;
+        const stepOutput = isGenericStepOutput(output, {
+          workflowId: workflow.id,
+          stepId: step.id,
+          taskId,
+          runId,
+        })
+          ? output
+          : undefined;
+        if (!stepOutput) {
+          throw new Error(`Generic workflow step ${step.id} returned an invalid provenance envelope.`);
+        }
+        context.set(step.id, stepOutput);
         const nextStatus = stepOutput?.status === "unsupported" ? "skipped" : "completed";
         if (stepOutput?.status === "unsupported") {
           unsupportedStepIds.add(step.id);
@@ -892,7 +1070,7 @@ export async function runGenericWorkbenchWorkflow({
     }
 
     const verifierCheck = await safeVerifyGenericWorkflow(verifierTool, workflow, context.snapshot());
-    const verified = verifierCheck?.status !== "fail";
+    const verified = verifierCheck?.status === "pass";
     const blockedByUnsupportedSteps = unsupportedStepIds.size > 0;
     const unsupportedStepList = [...unsupportedStepIds].join(", ");
     const finalPlan = snapshot.plan.map((step) => ({
@@ -901,12 +1079,18 @@ export async function runGenericWorkbenchWorkflow({
     }));
 
     // Commander synthesizes a user-facing conclusion from all evidence
-    const synthesis = await safeSynthesizeConclusion(
-      commanderTool,
-      userGoal,
-      workflow.title,
-      context.snapshot(),
-    );
+    // Never ask Commander to turn unverified research context into a user
+    // facing conclusion.  The generic verifier is a required independent
+    // gate; source-backed reports also receive the deterministic URL/excerpt
+    // check before synthesis.
+    const synthesis = verified && !blockedByUnsupportedSteps
+      ? await safeSynthesizeConclusion(
+          commanderTool,
+          userGoal,
+          workflow.title,
+          context.snapshot(),
+        )
+      : undefined;
     const conclusion = blockedByUnsupportedSteps
       ? `${workflow.title} could not complete because required approval-gated step(s) were not executed: ${unsupportedStepList}.`
       : synthesis?.message
@@ -920,7 +1104,7 @@ export async function runGenericWorkbenchWorkflow({
       task: finalStatus === "completed" ? "Workflow conclusion written" : "Workflow verification failed",
     });
     for (const agent of workflow.participatingAgentKinds) {
-      const agentId = `agent-${agent}`;
+      const agentId = getRegisteredAgentId(agent, agentRegistry);
       if (agentId !== "agent-commander" && agentTracker.getState(agentId)) {
         agentTracker.setState(agentId, {
           status: finalStatus === "completed" ? "completed" : "failed",
@@ -977,12 +1161,14 @@ export function getAvailableAgentsForPlanning(
   availableToolDescriptors?: readonly ToolDescriptor[],
   userGoal?: string,
   delegationPolicy?: DelegationPolicy,
+  agentRegistry?: AgentRegistry,
 ): Array<{ kind: string; allowedToolNames: string[]; capabilities: string[] }> {
+  const registry = agentRegistry ?? createDefaultAgentRegistry();
   const normalizedToolDescriptors = availableToolDescriptors
     ? normalizeAvailableToolDescriptors(availableToolDescriptors)
     : undefined;
   const planningScope = filterPlanningScopeForGoal(userGoal, {
-    agents: createDefaultAgentRegistry().list().map((reg) => reg.agent.kind),
+    agents: registry.list().map((reg) => reg.agent.kind),
     tools: normalizedToolDescriptors,
   });
   const availableToolNames = normalizedToolDescriptors
@@ -992,15 +1178,15 @@ export function getAvailableAgentsForPlanning(
     ? filterDelegableToolDescriptors(planningScope.tools, delegationPolicy)
     : planningScope.tools;
   const delegableToolNames = new Set(tools.map((descriptor) => descriptor.name));
-  return createDefaultAgentRegistry().list()
+  return registry.list()
     .filter((reg) => planningScope.agentKinds.has(reg.agent.kind))
     .map((reg) => {
     const allowedToolNames = normalizedToolDescriptors
-      ? getAllowedToolNamesForAgent(reg.agent.kind, planningScope.tools)
+      ? getAllowedToolNamesForAgent(reg.agent.kind, planningScope.tools, registry)
           .filter((toolName) => availableToolNames?.has(toolName))
           .filter((toolName) => !delegationPolicy || delegableToolNames.has(toolName))
       : reg.agent.allowedToolNames;
-    const capabilities = deriveAgentCapabilities(reg.agent.kind, tools, allowedToolNames);
+    const capabilities = deriveAgentCapabilities(tools, allowedToolNames);
     return {
       kind: reg.agent.kind,
       allowedToolNames,
@@ -1013,11 +1199,13 @@ export function getDelegableSubAgentsForPlanning(
   availableToolDescriptors?: readonly ToolDescriptor[],
   userGoal?: string,
   delegationPolicy?: DelegationPolicy,
+  agentRegistry?: AgentRegistry,
 ): Array<{ kind: string; allowedToolNames: string[]; capabilities: string[] }> {
   return getAvailableAgentsForPlanning(
     availableToolDescriptors,
     userGoal,
     delegationPolicy ?? READ_PREVIEW_SUBAGENT_DELEGATION_POLICY,
+    agentRegistry,
   ).filter((agent) => agent.kind !== "commander");
 }
 
@@ -1077,7 +1265,6 @@ export function filterPlanningScopeForGoal(
 }
 
 function deriveAgentCapabilities(
-  agentKind: string,
   toolDescriptors: readonly ToolDescriptor[],
   allowedToolNames: string[],
 ): string[] {
@@ -1085,10 +1272,8 @@ function deriveAgentCapabilities(
   const allowedSet = new Set(allowedToolNames);
   for (const descriptor of toolDescriptors) {
     if (!allowedSet.has(descriptor.name)) continue;
-    if (descriptor.ownerAgentKinds.includes(agentKind)) {
-      for (const tag of descriptor.capabilityTags) {
-        capabilitySet.add(tag);
-      }
+    for (const tag of descriptor.capabilityTags) {
+      capabilitySet.add(tag);
     }
   }
   return [...capabilitySet];
@@ -1097,15 +1282,50 @@ function deriveAgentCapabilities(
 function getAllowedToolNamesForAgent(
   agentKind: string,
   availableToolDescriptors: readonly ToolDescriptor[],
+  agentRegistry?: AgentRegistry,
 ): string[] {
-  const agentDef = demoAgents.find((agent) => agent.kind === agentKind);
-  const allowed = new Set(agentDef?.allowedToolNames ?? []);
+  const agentDef = (agentRegistry ?? createDefaultAgentRegistry()).findByKind(agentKind)?.agent;
+  if (!agentDef) return [];
+  const builtInAgent = demoAgents.find((agent) => agent.kind === agentKind);
+  const isBuiltInAgent = builtInAgent?.id === agentDef.id;
+  const explicitlyAllowed = new Set(agentDef.allowedToolNames);
+  const allowed = new Set<string>();
   for (const descriptor of availableToolDescriptors) {
-    if (descriptor.ownerAgentKinds.includes(agentKind)) {
+    const explicitlyAllowedByAgent = explicitlyAllowed.has(descriptor.name);
+    const ownerMatches = descriptor.ownerAgentKinds.includes(agentKind) ||
+      (agentKind.startsWith("workspace.") && explicitlyAllowedByAgent);
+    if (
+      ownerMatches &&
+      (explicitlyAllowedByAgent ||
+        (isBuiltInAgent && isRuntimeMcpDescriptorAllowed(descriptor))) &&
+      (!descriptor.name.startsWith("mcp.") || isRuntimeMcpDescriptorAllowed(descriptor))
+    ) {
       allowed.add(descriptor.name);
     }
   }
   return [...allowed];
+}
+
+/** MCP call-tool descriptors are runtime-discovered, so their names cannot be
+ * predeclared in the static Agent definition. They remain bounded to read-only
+ * discovery metadata and an encoded tool name that matches that metadata. */
+function isRuntimeMcpDescriptorAllowed(descriptor: ToolDescriptor): boolean {
+  if (descriptor.permissionLevel !== "read" || !descriptor.name.startsWith("mcp.")) return false;
+  const metadata = descriptor.metadata;
+  if (metadata?.mcpAction !== "callTool" && metadata?.mcpAction !== "listTools") return false;
+  if (typeof metadata.mcpServerName !== "string" || metadata.mcpServerName.trim().length === 0) return false;
+  if (typeof metadata.mcpSource !== "string" || metadata.mcpSource.trim().length === 0) return false;
+  const encodedServerName = encodeMcpToolServerName(
+    `${metadata.mcpSource.trim()}:${metadata.mcpServerName.trim()}`,
+  );
+  if (!encodedServerName) return false;
+  if (metadata.mcpAction === "listTools") {
+    return descriptor.name === `mcp.${encodedServerName}.listTools`;
+  }
+  if (typeof metadata.mcpToolName !== "string" || metadata.mcpToolName.trim().length === 0) return false;
+  const encodedToolName = encodeMcpToolServerName(metadata.mcpToolName.trim());
+  return Boolean(encodedToolName) &&
+    descriptor.name === `mcp.${encodedServerName}.tool.${encodedToolName}`;
 }
 
 function toolDescriptorsForPlanner(
@@ -1119,6 +1339,7 @@ function toolDescriptorsForPlanner(
     capabilityTags: descriptor.capabilityTags,
     ownerAgentKinds: descriptor.ownerAgentKinds,
     ...(descriptor.requiredInputs ? { requiredInputs: descriptor.requiredInputs } : {}),
+    ...(descriptor.metadata ? { metadata: descriptor.metadata } : {}),
   }));
 }
 
@@ -1126,16 +1347,20 @@ async function planCommanderDagWithContextRecovery(input: {
   commanderTool: CommanderTool;
   contextSummaryTool?: ContextSummaryTool;
   userGoal: string;
+  workspacePath?: string;
   priorMessages: ChatMessage[];
   fullPriorMessages: ChatMessage[];
   omittedPriorMessageCount: number;
   availableAgents: Array<{ kind: string; allowedToolNames: string[] }>;
   availableTools: ToolDescriptor[];
   workflowId: string;
+  modelImages?: string[];
   context: SharedTaskContext;
 }): Promise<CommanderPlanResult> {
   const request = {
     userGoal: input.userGoal,
+    ...(input.workspacePath ? { workspacePath: input.workspacePath } : {}),
+    ...(input.modelImages?.length ? { images: input.modelImages } : {}),
     priorMessages: input.priorMessages,
     omittedPriorMessageCount: input.omittedPriorMessageCount,
     availableAgents: input.availableAgents,
@@ -1174,14 +1399,16 @@ async function safePlanWorkflow(
   userGoal: string,
   workflowId: string,
   availableToolDescriptors?: ToolDescriptor[],
+  agentRegistry?: AgentRegistry,
 ): Promise<CommanderPlanResult | undefined> {
   if (!commanderTool) {
     return undefined;
   }
   try {
     const availableTools = normalizeAvailableToolDescriptors(availableToolDescriptors);
+    const registry = agentRegistry ?? createDefaultAgentRegistry();
     const planningScope = filterPlanningScopeForGoal(userGoal, {
-      agents: createDefaultAgentRegistry().list().map((reg) => reg.agent.kind),
+      agents: registry.list().map((reg) => reg.agent.kind),
       tools: availableTools,
     });
     return await commanderTool.plan({
@@ -1190,6 +1417,8 @@ async function safePlanWorkflow(
       availableAgents: getAvailableAgentsForPlanning(
         planningScope.tools,
         userGoal,
+        undefined,
+        registry,
       ),
       availableTools: toolDescriptorsForPlanner(planningScope.tools),
     });
@@ -1241,9 +1470,10 @@ function createFailureRecoveryOutput(
 
 function createCombinedWorkflow(
   workflowIds: Exclude<WorkbenchWorkflowId, "read-current-project">[],
+  workflowRegistry?: WorkflowRegistry,
 ): WorkbenchWorkflow {
   const workflows = workflowIds.map((id) => {
-    const workflow = getWorkbenchWorkflow(id);
+    const workflow = workflowRegistry?.get(id) ?? getWorkbenchWorkflow(id);
     if (!workflow) {
       throw new Error(`Missing workflow definition: ${id}.`);
     }
@@ -1291,12 +1521,14 @@ async function runGenericWorkflowStep({
   trendTool,
   step,
   taskId,
+  runId,
   userGoal,
   availableToolNames,
   availableTools,
   webTool,
   workflow,
   contextSnapshot,
+  agentRegistry,
 }: {
   agentTracker: ReadCurrentProjectAgentTracker;
   browserTool?: BrowserTool;
@@ -1310,14 +1542,16 @@ async function runGenericWorkflowStep({
   trendTool?: TrendTool;
   step: WorkbenchWorkflowStep;
   taskId: ID;
+  runId: string;
   userGoal: string;
   availableToolNames: ReadonlySet<string>;
   availableTools: readonly ToolDescriptor[];
   webTool?: WebTool;
   workflow: WorkbenchWorkflow;
   contextSnapshot: Record<string, unknown>;
+  agentRegistry?: AgentRegistry;
 }) {
-  const agentId = `agent-${step.agentKind}`;
+  const agentId = getRegisteredAgentId(step.agentKind, agentRegistry);
   const approvalGated = isApprovalGatedPermissionLevel(step.permissionLevel);
   if (agentTracker.getState(agentId)) {
     agentTracker.setState(agentId, {
@@ -1346,7 +1580,7 @@ async function runGenericWorkflowStep({
 
   await controller.wait();
 
-  const output = await executeConcreteGenericStep({
+  const draft = await executeConcreteGenericStep({
     browserTool,
     codeTool,
     computerTool,
@@ -1360,6 +1594,12 @@ async function runGenericWorkflowStep({
     webTool,
     workflow,
     contextSnapshot,
+  });
+  const output = sealGenericStepOutput(draft, {
+    workflow,
+    step,
+    taskId,
+    runId,
   });
 
   if (agentTracker.getState(agentId)) {
@@ -1392,147 +1632,6 @@ async function runGenericWorkflowStep({
   });
 
   return output;
-}
-
-function dispatchGenericByCapability(
-  step: WorkbenchWorkflowStep,
-  tools: {
-    browserTool?: BrowserTool;
-    codeTool?: CodeTool;
-    computerTool?: ComputerTool;
-  schedulerTool?: SchedulerTool;
-  trendTool?: TrendTool;
-  webTool?: WebTool;
-    userGoal: string;
-    workflow: WorkbenchWorkflow;
-    contextSnapshot: Record<string, unknown>;
-  },
-): GenericStepOutput | undefined {
-  const { browserTool, codeTool, computerTool, schedulerTool, webTool, workflow } = tools;
-
-  for (const cap of step.requiredCapabilities!) {
-    switch (cap) {
-      // ── Web ──
-      case "web_search":
-        if (!webTool?.searchWeb) continue;
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: web_search for ${step.id}`, expectedOutput: step.output };
-      case "web_fetch":
-        if (!webTool) continue;
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: web_fetch for ${step.id}`, expectedOutput: step.output };
-
-      // ── Scheduling ──
-      case "schedule_create":
-        if (!schedulerTool) continue;
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: schedule_create for ${step.id}`, expectedOutput: step.output };
-
-      // ── Evidence & Planning ──
-      case "evidence_check":
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: evidence_check for ${step.id}`, expectedOutput: step.output };
-      case "planning":
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: planning for ${step.id}`, expectedOutput: step.output };
-      case "clarification":
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: clarification for ${step.id}`, expectedOutput: step.output };
-
-      // ── Local ──
-      case "local_search":
-        if (!computerTool) continue;
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: local_search for ${step.id}`, expectedOutput: step.output };
-      case "directory_list":
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: directory_list for ${step.id}`, expectedOutput: step.output };
-
-      // ── Browser ──
-      case "browser_navigate":
-        if (!browserTool) continue;
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: browser_navigate for ${step.id}`, expectedOutput: step.output };
-      case "browser_interact":
-        if (!browserTool) continue;
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: browser_interact for ${step.id}`, expectedOutput: step.output };
-      case "browser_test":
-        if (!browserTool) continue;
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: browser_test for ${step.id}`, expectedOutput: step.output };
-
-      // ── File ──
-      case "file_scan":
-      case "image_scan":
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: ${cap} for ${step.id}`, expectedOutput: step.output };
-      case "file_execute":
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: file_execute for ${step.id}`, expectedOutput: step.output };
-      case "document_classify":
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: document_classify for ${step.id}`, expectedOutput: step.output };
-
-      // ── Code ──
-      case "git_inspect":
-      case "code_propose":
-        if (!codeTool) continue;
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: ${cap} for ${step.id}`, expectedOutput: step.output };
-      case "code_apply":
-        if (!codeTool) continue;
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: code_apply for ${step.id}`, expectedOutput: step.output };
-
-      // ── Shell ──
-      case "shell_readonly":
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: shell_readonly for ${step.id}`, expectedOutput: step.output };
-
-      // ── Workspace ──
-      case "workspace_list":
-      case "workspace_scaffold":
-      case "workspace_create":
-      case "workspace_delete":
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: ${cap} for ${step.id}`, expectedOutput: step.output };
-
-      // ── Vision / Image ──
-      case "image_analyze":
-      case "image_describe":
-      case "image_ocr":
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: ${cap} for ${step.id}`, expectedOutput: step.output };
-
-      // ── Desktop / Computer Use ──
-      case "desktop_screenshot":
-      case "desktop_list_windows":
-      case "desktop_focus":
-      case "desktop_input":
-        if (!computerTool) continue;
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: ${cap} for ${step.id}`, expectedOutput: step.output };
-
-      // ── Synthesis ──
-      case "synthesis":
-        return { workflowId: workflow.id, stepId: step.id, status: "completed",
-          summary: `Capability dispatch: synthesis for ${step.id}`, expectedOutput: step.output };
-
-      default:
-        // Unknown capability — emit warning but don't fail; treat as generic reasoning step
-        console.warn(`[CapabilityDispatch] Unknown capability tag: "${cap}" for step ${step.id}. Treating as generic reasoning step.`);
-        return {
-          workflowId: workflow.id,
-          stepId: step.id,
-          status: "completed",
-          summary: `Generic reasoning step for ${step.id} (capability tag "${cap}" not yet registered as a concrete executor).`,
-          expectedOutput: step.output,
-        };
-    }
-  }
-
-  return undefined;
 }
 
 function getGenericStepToolNames(step: WorkbenchWorkflowStep): string[] {
@@ -1628,7 +1727,7 @@ async function executeConcreteGenericStep({
   webTool?: WebTool;
   workflow: WorkbenchWorkflow;
   contextSnapshot: Record<string, unknown>;
-}): Promise<GenericStepOutput> {
+}): Promise<GenericStepOutputDraft> {
   const disabledToolName = findDisabledRequiredToolName(step, availableToolNames, availableTools);
   if (disabledToolName) {
     return unsupportedOutput(workflow, step, `Required tool or capability is disabled: ${disabledToolName}`);
@@ -1636,16 +1735,6 @@ async function executeConcreteGenericStep({
 
   if (isApprovalGatedPermissionLevel(step.permissionLevel)) {
     return unsupportedOutput(workflow, step);
-  }
-
-  // Capability-based dispatch: if the step declares requiredCapabilities,
-  // try to match against the generic capability-to-executor map before
-  // falling through to the legacy step-key chain.
-  if (step.requiredCapabilities && step.requiredCapabilities.length > 0) {
-    const result = dispatchGenericByCapability(step, {
-      browserTool, codeTool, computerTool, schedulerTool, webTool, userGoal, workflow, contextSnapshot,
-    });
-    if (result) return result;
   }
 
   const stepKey = getWorkflowStepKey(step.id);
@@ -1674,14 +1763,25 @@ async function executeConcreteGenericStep({
   }
   if (stepKey === "fetch-details" && webTool) {
     const candidates = getSourcesFromContext(contextSnapshot).slice(0, 5);
-    const fetched = await Promise.all(
-      candidates.map((source) =>
-        webTool.fetchWebSource({ url: source.url }).catch(() => source),
-      ),
+    const fetchResults = await Promise.allSettled(
+      candidates.map(async (source) => {
+        const fetched = await webTool.fetchWebSource({ url: source.url });
+        return bindFetchedSourceToRequest(source.url, fetched);
+      }),
     );
-    return concreteOutput(workflow, step, `Fetched ${fetched.length} public detail page(s).`, {
-      sources: fetched,
-    });
+    const fetched = fetchResults.flatMap((result) =>
+      result.status === "fulfilled" ? [result.value] : []
+    );
+    const failedFetchCount = fetchResults.length - fetched.length;
+    return concreteOutput(
+      workflow,
+      step,
+      `Fetched ${fetched.length}/${candidates.length} public detail page(s).`,
+      {
+        sources: fetched,
+        ...(failedFetchCount > 0 ? { failedFetchCount } : {}),
+      },
+    );
   }
   if (stepKey === "merge-trends") {
     const hotList = getTrendHotListFromContext(contextSnapshot);
@@ -1693,8 +1793,12 @@ async function executeConcreteGenericStep({
         researchReport: report,
       });
     }
-    const sources = getSourcesFromContext(contextSnapshot);
-    const report = createSourceBackedReport(sources, { sourceMode: "search" });
+    const sources = getLatestSourceCollectionFromContext(contextSnapshot) ?? [];
+    const failedFetchCount = getLatestFailedFetchCountFromContext(contextSnapshot);
+    const report = createSourceBackedReport(sources, {
+      sourceMode: "search",
+      ...(failedFetchCount > 0 ? { failedFetchCount } : {}),
+    });
     return concreteOutput(workflow, step, `Verifier merged ${sources.length} source-backed trend item(s).`, {
       sources,
       researchReport: report,
@@ -2001,11 +2105,15 @@ function findToolDescriptorByCapabilityIn(
   toolDescriptors: readonly ToolDescriptor[],
   capability: string,
   agentKind?: string,
+  agentRegistry?: AgentRegistry,
 ) {
+  const allowedToolNames = agentKind
+    ? new Set(getAllowedToolNamesForAgent(agentKind, toolDescriptors, agentRegistry))
+    : undefined;
   return toolDescriptors.find((td) =>
     !isMcpListToolsDescriptor(td) &&
     td.capabilityTags.includes(capability) &&
-    (!agentKind || td.ownerAgentKinds.includes(agentKind))
+    (!agentKind || td.ownerAgentKinds.includes(agentKind) || allowedToolNames?.has(td.name))
   );
 }
 
@@ -2023,17 +2131,21 @@ function findToolDescriptorByNameIn(
 function findToolDescriptorForDagStep(
   step: CommanderDagStep,
   toolDescriptors: readonly ToolDescriptor[] = DEFAULT_AVAILABLE_TOOL_DESCRIPTORS,
+  agentRegistry?: AgentRegistry,
 ): ToolDescriptor | undefined {
   if (step.toolName) return findToolDescriptorByNameIn(toolDescriptors, step.toolName);
   const capability = step.capability ?? step.requiredCapabilities?.[0];
-  return capability ? findToolDescriptorByCapabilityIn(toolDescriptors, capability, step.assignedAgentKind) : undefined;
+  return capability
+    ? findToolDescriptorByCapabilityIn(toolDescriptors, capability, step.assignedAgentKind, agentRegistry)
+    : undefined;
 }
 
 function getDagStepPermissionLevel(
   step: CommanderDagStep,
   toolDescriptors: readonly ToolDescriptor[] = DEFAULT_AVAILABLE_TOOL_DESCRIPTORS,
+  agentRegistry?: AgentRegistry,
 ): WorkbenchWorkflowStep["permissionLevel"] {
-  return findToolDescriptorForDagStep(step, toolDescriptors)?.permissionLevel ?? "read";
+  return findToolDescriptorForDagStep(step, toolDescriptors, agentRegistry)?.permissionLevel ?? "read";
 }
 
 function isApprovalGatedPermissionLevel(
@@ -2061,13 +2173,40 @@ function assertToolOwnedByAgent(
   toolName: string,
   agentKind: string,
   toolDescriptors: readonly ToolDescriptor[] = DEFAULT_AVAILABLE_TOOL_DESCRIPTORS,
+  agentRegistry?: AgentRegistry,
 ): void {
   const descriptor = findToolDescriptorByNameIn(toolDescriptors, toolName);
   if (!descriptor) {
     throw new Error(`Tool ${toolName} is not available.`);
   }
-  if (descriptor.ownerAgentKinds.includes(agentKind)) return;
-  throw new Error(`Tool ${toolName} is not owned by agent ${agentKind}.`);
+  const allowedToolNames = getAllowedToolNamesForAgent(agentKind, toolDescriptors, agentRegistry);
+  const ownerMatches = descriptor.ownerAgentKinds.includes(agentKind) ||
+    (agentKind.startsWith("workspace.") && allowedToolNames.includes(toolName));
+  if (!ownerMatches) {
+    throw new Error(`Tool ${toolName} is not owned by agent ${agentKind}.`);
+  }
+  if (allowedToolNames.includes(toolName)) {
+    if (descriptor.name.startsWith("mcp.") && !isRuntimeMcpDescriptorAllowed(descriptor)) {
+      throw new Error(`Invalid MCP tool descriptor: ${toolName}`);
+    }
+    return;
+  }
+  if (descriptor.name.startsWith("mcp.")) {
+    const parsedMcpTool = parseMcpToolName(toolName, descriptor);
+    if (!parsedMcpTool) {
+      throw new Error(`Invalid MCP tool name: ${toolName}`);
+    }
+    if (parsedMcpTool.action === "callTool") {
+      const mcpToolName = getAllowlistedMcpToolName(descriptor);
+      if (!mcpToolName) {
+        throw new Error(`MCP callTool descriptor ${toolName} is missing allowlisted mcpToolName metadata.`);
+      }
+      if (parsedMcpTool.toolName !== mcpToolName) {
+        throw new Error(`MCP callTool descriptor ${toolName} must encode the allowlisted mcpToolName in its tool name.`);
+      }
+    }
+  }
+  throw new Error(`Tool ${toolName} is not explicitly allowed for agent ${agentKind}.`);
 }
 
 /**
@@ -2128,6 +2267,13 @@ async function dispatchToolByName(
     const mcpArguments = parsedMcpTool.action === "callTool"
       ? extractMcpToolArguments(input)
       : undefined;
+    if (parsedMcpTool.action === "callTool") {
+      const schema = sanitizeMcpInputSchema(descriptor?.metadata?.mcpInputSchema);
+      const schemaError = validateMcpInput(schema, mcpArguments ?? {});
+      if (schemaError) {
+        throw new Error(`MCP tool ${mcpToolName} arguments rejected: ${schemaError}`);
+      }
+    }
     const mcpInput = parsedMcpTool.action === "callTool" && mcpToolName
       ? { ...input, toolName: mcpToolName }
       : input;
@@ -2156,7 +2302,20 @@ async function dispatchToolByName(
     }
     case "web.fetchSource": {
       if (!tools.webTool) throw new Error("web.fetchSource tool not available");
-      return tools.webTool.fetchWebSource({ url: input.url as string });
+      const requestedUrl = typeof input.url === "string" ? input.url : "";
+      const fetched = await tools.webTool.fetchWebSource({ url: requestedUrl });
+      const bound = bindFetchedSourceToRequest(requestedUrl, fetched);
+      const evidence = validateSourceEvidence(bound);
+      if (!evidence.valid) {
+        throw new Error(
+          `Fetched source evidence was rejected: ${evidence.reason ?? "invalid"}.`,
+        );
+      }
+      return {
+        ...bound,
+        url: evidence.url,
+        excerpt: evidence.excerpt,
+      };
     }
     case "trend.fetchHotList": {
       const request = {
@@ -2503,8 +2662,9 @@ async function dispatchToolByName(
       return tools.commanderTool.plan(input as unknown as Parameters<typeof tools.commanderTool.plan>[0]);
     }
     case "commander.synthesize": {
-      if (!tools.commanderTool?.synthesize) throw new Error("commander.synthesize tool not available");
-      return tools.commanderTool.synthesize(input as unknown as Parameters<NonNullable<typeof tools.commanderTool.synthesize>>[0]);
+      throw new Error(
+        "Tool commander.synthesize must use the evidence-validated direct_response path and cannot be dispatched generically.",
+      );
     }
     default:
       throw new Error(`Tool dispatch not implemented for: ${toolName}`);
@@ -2527,12 +2687,14 @@ export async function executeCapabilityStep(
     signal?: AbortSignal;
     timeoutMs?: number;
     availableToolDescriptors?: readonly ToolDescriptor[];
+    agentRegistry?: AgentRegistry;
   } = {},
 ): Promise<{ output: unknown; toolName: string }> {
   const {
     signal,
     timeoutMs = COMMANDER_TOOL_TIMEOUT_MS,
     availableToolDescriptors = DEFAULT_AVAILABLE_TOOL_DESCRIPTORS,
+    agentRegistry,
   } = options;
   const effectiveToolDescriptors = filterAvailableToolDescriptorsForRuntime(
     normalizeAvailableToolDescriptors(availableToolDescriptors),
@@ -2540,8 +2702,13 @@ export async function executeCapabilityStep(
   );
   throwIfTaskAborted(signal, `tool ${step.toolName ?? step.capability ?? step.id}`);
   if (step.toolName) {
-    assertToolOwnedByAgent(step.toolName, step.assignedAgentKind, effectiveToolDescriptors);
-    const input = mergeStepInput(step, context);
+    assertToolOwnedByAgent(step.toolName, step.assignedAgentKind, effectiveToolDescriptors, agentRegistry);
+    assertToolCanDispatchWithoutApproval(step.toolName, effectiveToolDescriptors);
+    const input = adaptCapabilityToolInput(step, mergeStepInput(step, context), context, step.toolName);
+    const descriptor = findToolDescriptorByNameIn(effectiveToolDescriptors, step.toolName);
+    if (descriptor) {
+      validateToolDescriptorInputs(descriptor, input);
+    }
     const output = await withTaskTimeout(
       () => dispatchToolByName(step.toolName!, input, tools, effectiveToolDescriptors),
       {
@@ -2564,6 +2731,7 @@ export async function executeCapabilityStep(
     effectiveToolDescriptors,
     capability,
     step.assignedAgentKind,
+    agentRegistry,
   );
   if (!descriptor) {
     throw new Error(
@@ -2571,13 +2739,15 @@ export async function executeCapabilityStep(
       `Ensure a ToolDescriptor declares this tag in its capabilityTags and ownerAgentKinds.`,
     );
   }
+  assertToolOwnedByAgent(descriptor.name, step.assignedAgentKind, effectiveToolDescriptors, agentRegistry);
   if (isApprovalGatedToolDescriptor(descriptor)) {
     throw new Error(
       `Tool ${descriptor.name} requires ${descriptor.permissionLevel} approval and cannot be dispatched by the generic DAG executor.`,
     );
   }
 
-  const input = mergeStepInput(step, context);
+  const input = adaptCapabilityToolInput(step, mergeStepInput(step, context), context, descriptor.name);
+  validateToolDescriptorInputs(descriptor, input);
   const output = await withTaskTimeout(
     () => dispatchToolByName(descriptor.name, input, tools, effectiveToolDescriptors),
     {
@@ -2590,6 +2760,123 @@ export async function executeCapabilityStep(
   writeStepOutput(step.outputContextKey, output, context);
 
   return { output, toolName: descriptor.name };
+}
+
+function adaptCapabilityToolInput(
+  step: CommanderDagStep,
+  input: Record<string, unknown>,
+  context: SharedTaskContext,
+  resolvedToolName: string | undefined,
+): Record<string, unknown> {
+  if (resolvedToolName !== "verifier.check") {
+    return input;
+  }
+  if (Array.isArray(input.evidence)) {
+    if (input.evidence.length === 0) {
+      throw new Error(`Verifier step ${step.id} requires at least one evidence item.`);
+    }
+    const invalidEvidenceIndex = input.evidence.findIndex((item) => !isVerifierEvidenceItem(item));
+    if (invalidEvidenceIndex >= 0) {
+      throw new Error(
+        `Verifier step ${step.id} evidence item ${invalidEvidenceIndex + 1} must include a valid kind, non-empty label, and data field.`,
+      );
+    }
+    return {
+      ...input,
+      stepId: typeof input.stepId === "string" ? input.stepId : step.id,
+      successCriteria: typeof input.successCriteria === "string"
+        ? input.successCriteria
+        : step.successCriteria,
+    };
+  }
+  const evidence = (step.inputContextKeys ?? [])
+    .map((key) => ({ key, value: context.get(key) }))
+    .filter((entry): entry is { key: string; value: unknown } => entry.value !== undefined)
+    .map(({ key, value }) => ({
+      kind: "log" as const,
+      label: `Handoff artifact: ${key}`,
+      data: value,
+    }));
+  if (evidence.length === 0 && (step.inputContextKeys ?? []).length === 0) {
+    const snapshot = context.snapshot();
+    if (Object.keys(snapshot).length > 0) {
+      evidence.push({
+        kind: "log",
+        label: "Shared workflow context",
+        data: snapshot,
+      });
+    }
+  }
+  if (evidence.length === 0) {
+    throw new Error(
+      `Verifier step ${step.id} requires evidence from inputContextKeys; no handoff artifact was available.`,
+    );
+  }
+  return {
+    stepId: step.id,
+    successCriteria: step.successCriteria,
+    evidence,
+  };
+}
+
+function isVerifierEvidenceItem(value: unknown): boolean {
+  if (!isPlainRecord(value)) return false;
+  if (
+    value.kind !== "file" &&
+    value.kind !== "command" &&
+    value.kind !== "source" &&
+    value.kind !== "log" &&
+    value.kind !== "permission"
+  ) {
+    return false;
+  }
+  return typeof value.label === "string" &&
+    value.label.trim().length > 0 &&
+    Object.prototype.hasOwnProperty.call(value, "data");
+}
+
+/** Defense-in-depth validation for plans that reach runtime with mutated context. */
+function validateToolDescriptorInputs(
+  descriptor: Pick<ToolDescriptor, "name" | "requiredInputs">,
+  input: Record<string, unknown>,
+): void {
+  // Preserve the more actionable, path/command-specific guards used by the
+  // concrete dispatcher while still validating every other descriptor here.
+  if (descriptor.name === "shell.runReadOnlyCommand") {
+    assertRequiredShellReadOnlyInput(input);
+    return;
+  }
+  if (descriptor.name === "computer.listDirectory" || descriptor.name === "computer.openPath") {
+    assertRequiredComputerPathInput(descriptor.name, input);
+    return;
+  }
+  for (const required of descriptor.requiredInputs ?? []) {
+    const value = input[required.name];
+    const valid = required.type === "string"
+      ? typeof value === "string" && (!required.nonEmpty || value.trim().length > 0)
+      : required.type === "string[]"
+        ? Array.isArray(value) && value.every((item) => typeof item === "string") &&
+          (!required.nonEmpty || (value.length > 0 && value.every((item) => item.trim().length > 0)))
+        : required.type === "number"
+          ? typeof value === "number" && Number.isFinite(value)
+          : required.type === "number[]"
+            ? Array.isArray(value) && value.every((item) => typeof item === "number" && Number.isFinite(item)) &&
+              (!required.nonEmpty || value.length > 0)
+            : required.type === "boolean"
+              ? typeof value === "boolean"
+              : required.type === "boolean[]"
+                ? Array.isArray(value) && value.every((item) => typeof item === "boolean") &&
+                  (!required.nonEmpty || value.length > 0)
+                : required.type === "object"
+                  ? typeof value === "object" && value !== null && !Array.isArray(value)
+                  : Array.isArray(value) && value.every((item) => typeof item === "object" && item !== null && !Array.isArray(item)) &&
+                    (!required.nonEmpty || value.length > 0);
+    if (!valid) {
+      throw new Error(
+        `Tool ${descriptor.name} requires input.${required.name} to match type ${required.type}${required.nonEmpty ? " (non-empty)" : ""}.`,
+      );
+    }
+  }
 }
 
 function isCodeRepositorySearchResult(value: unknown): value is import("@javis/tools").CodeRepositorySearchResult {
@@ -2626,6 +2913,13 @@ function filterToolDescriptorsForStep(
   const capability = step.capability ?? step.requiredCapabilities?.[0];
   const filtered = toolDescriptors.filter((descriptor) => {
     if (!allowedToolNames.includes(descriptor.name)) return false;
+    // Workspace agents may explicitly opt into a descriptor owned by a
+    // built-in role. The allowlist was derived from the live registry, so this
+    // exception does not broaden the set of tools exposed to the step.
+    if (
+      !descriptor.ownerAgentKinds.includes(step.assignedAgentKind) &&
+      !allowedToolNames.includes(descriptor.name)
+    ) return false;
     if (isApprovalGatedToolDescriptor(descriptor)) return false;
     if (step.toolName) return descriptor.name === step.toolName;
     if (capability) return descriptor.capabilityTags.includes(capability);
@@ -3016,7 +3310,7 @@ function formatWriteEvidenceSection(key: string, value: unknown): string[] {
   if (isTrendHotListResult(value)) {
     return formatTrendHotListMarkdownSection(value);
   }
-  if (isGenericStepOutput(value)) {
+  if (isCompletedGenericStepOutput(value)) {
     return formatGenericStepOutputMarkdownSection(key, value);
   }
   if (Array.isArray(value) && value.every(isWebSource)) {
@@ -3036,7 +3330,9 @@ function formatWriteEvidenceSection(key: string, value: unknown): string[] {
 }
 
 function formatGenericStepOutputMarkdownSection(key: string, output: GenericStepOutput): string[] {
-  const nestedTrendHotList = output.data ? getTrendHotListFromContext(output.data) : undefined;
+  const nestedTrendHotList = isTrendHotListResult(output.data.trendHotList)
+    ? output.data.trendHotList
+    : undefined;
   if (nestedTrendHotList) {
     return [
       `## ${humanizeContextKey(key)}`,
@@ -3047,7 +3343,9 @@ function formatGenericStepOutputMarkdownSection(key: string, output: GenericStep
     ];
   }
 
-  const nestedSources = output.data ? getSourcesFromContext(output.data) : [];
+  const nestedSources = Array.isArray(output.data.sources)
+    ? output.data.sources.filter(isWebSource)
+    : [];
   if (nestedSources.length > 0) {
     return [
       `## ${humanizeContextKey(key)}`,
@@ -3153,6 +3451,8 @@ async function executeFileWriteTextDagStep(options: {
   signal?: AbortSignal;
   toolTimeoutMs: number;
   userWaitTimeoutMs: number;
+  /** Drain durable lifecycle writes before invoking the filesystem mutation. */
+  beforeWrite: () => Promise<void>;
 }): Promise<unknown> {
   const {
     dagStep,
@@ -3169,6 +3469,7 @@ async function executeFileWriteTextDagStep(options: {
     signal,
     toolTimeoutMs,
     userWaitTimeoutMs,
+    beforeWrite,
   } = options;
 
   if (!fileTool?.planWriteText || !fileTool.writeText) {
@@ -3219,6 +3520,7 @@ async function executeFileWriteTextDagStep(options: {
     dryRun: plan.dryRun,
     allowAlways: false,
   });
+  const previewHash = createDryRunBindingHash(permissionRequest.dryRun);
   let resolvedPermissionRequest = permissionRequest;
 
   const approved = await withTaskTimeout(
@@ -3241,6 +3543,9 @@ async function executeFileWriteTextDagStep(options: {
           emitEvent({
             kind: "permission.requested",
             taskId,
+            stepId: dagStep.id,
+            toolName: FILE_WRITE_TEXT_TOOL_NAME,
+            previewHash,
             request: permissionRequest,
           }),
           emitEvent({
@@ -3266,6 +3571,9 @@ async function executeFileWriteTextDagStep(options: {
             logs: appendLog(getSnapshot(), emitEvent({
               kind: "permission.resolved",
               taskId,
+              stepId: dagStep.id,
+              toolName: FILE_WRITE_TEXT_TOOL_NAME,
+              previewHash,
               requestId: permissionRequest.id,
               decision: decision === "denied" ? "denied" : "approved",
             })),
@@ -3349,6 +3657,8 @@ async function executeFileWriteTextDagStep(options: {
     return output;
   }
 
+  await beforeWrite();
+
   if (agentTracker.getState(agentId)) {
     agentTracker.setState(agentId, {
       status: "running",
@@ -3407,6 +3717,8 @@ async function executeGitStageDagStep(options: {
   toolTimeoutMs: number;
   userWaitTimeoutMs: number;
   workspaceRuntime?: WorkspaceRuntime;
+  /** Drain durable lifecycle writes before invoking the Git mutation. */
+  beforeWrite: () => Promise<void>;
 }): Promise<unknown> {
   const {
     dagStep,
@@ -3423,6 +3735,7 @@ async function executeGitStageDagStep(options: {
     toolTimeoutMs,
     userWaitTimeoutMs,
     workspaceRuntime,
+    beforeWrite,
   } = options;
 
   if (!gitTool?.planStageFiles || !gitTool.executeStageFiles) {
@@ -3472,6 +3785,7 @@ async function executeGitStageDagStep(options: {
     dryRun: plan.preview.dryRun,
     allowAlways: false,
   });
+  const previewHash = createDryRunBindingHash(permissionRequest.dryRun);
 
   const approved = await withTaskTimeout(
     new Promise<boolean>((resolve, reject) => {
@@ -3487,12 +3801,16 @@ async function executeGitStageDagStep(options: {
         status: "waiting_permission",
         commanderMessage: `Git stage needs approval for ${paths.length} file(s).`,
         permissionRequest,
+        durableApprovalPlan: { toolName: GIT_STAGE_TOOL_NAME, payload: plan },
         agents: agentTracker.getSnapshots(),
         logs: [
           ...getSnapshot().logs,
           emitEvent({
             kind: "permission.requested",
             taskId,
+            stepId: dagStep.id,
+            toolName: GIT_STAGE_TOOL_NAME,
+            previewHash,
             request: permissionRequest,
           }),
           emitEvent({
@@ -3518,6 +3836,9 @@ async function executeGitStageDagStep(options: {
             logs: appendLog(getSnapshot(), emitEvent({
               kind: "permission.resolved",
               taskId,
+              stepId: dagStep.id,
+              toolName: GIT_STAGE_TOOL_NAME,
+              previewHash,
               requestId: permissionRequest.id,
               decision: decision === "denied" ? "denied" : "approved",
             })),
@@ -3600,6 +3921,8 @@ async function executeGitStageDagStep(options: {
     return output;
   }
 
+  await beforeWrite();
+
   if (agentTracker.getState(agentId)) {
     agentTracker.setState(agentId, {
       status: "running",
@@ -3664,6 +3987,8 @@ async function executeGitCommitDagStep(options: {
   toolTimeoutMs: number;
   userWaitTimeoutMs: number;
   workspaceRuntime?: WorkspaceRuntime;
+  /** Drain durable lifecycle writes before invoking the Git mutation. */
+  beforeWrite: () => Promise<void>;
 }): Promise<unknown> {
   const {
     dagStep,
@@ -3680,6 +4005,7 @@ async function executeGitCommitDagStep(options: {
     toolTimeoutMs,
     userWaitTimeoutMs,
     workspaceRuntime,
+    beforeWrite,
   } = options;
 
   if (!gitTool?.planCommit || !gitTool.executeCommit) {
@@ -3732,6 +4058,7 @@ async function executeGitCommitDagStep(options: {
     dryRun: plan.preview.dryRun,
     allowAlways: false,
   });
+  const previewHash = createDryRunBindingHash(permissionRequest.dryRun);
 
   const approved = await withTaskTimeout(
     new Promise<boolean>((resolve, reject) => {
@@ -3747,12 +4074,16 @@ async function executeGitCommitDagStep(options: {
         status: "waiting_permission",
         commanderMessage: `Git commit needs approval for ${scopeSummary}.`,
         permissionRequest,
+        durableApprovalPlan: { toolName: GIT_COMMIT_TOOL_NAME, payload: plan },
         agents: agentTracker.getSnapshots(),
         logs: [
           ...getSnapshot().logs,
           emitEvent({
             kind: "permission.requested",
             taskId,
+            stepId: dagStep.id,
+            toolName: GIT_COMMIT_TOOL_NAME,
+            previewHash,
             request: permissionRequest,
           }),
           emitEvent({
@@ -3778,6 +4109,9 @@ async function executeGitCommitDagStep(options: {
             logs: appendLog(getSnapshot(), emitEvent({
               kind: "permission.resolved",
               taskId,
+              stepId: dagStep.id,
+              toolName: GIT_COMMIT_TOOL_NAME,
+              previewHash,
               requestId: permissionRequest.id,
               decision: decision === "denied" ? "denied" : "approved",
             })),
@@ -3859,6 +4193,8 @@ async function executeGitCommitDagStep(options: {
     return output;
   }
 
+  await beforeWrite();
+
   if (agentTracker.getState(agentId)) {
     agentTracker.setState(agentId, {
       status: "running",
@@ -3923,6 +4259,8 @@ async function executeGitCreatePullRequestDagStep(options: {
   signal?: AbortSignal;
   toolTimeoutMs: number;
   userWaitTimeoutMs: number;
+  /** Drain durable lifecycle writes before invoking the remote mutation. */
+  beforeWrite: () => Promise<void>;
 }): Promise<unknown> {
   const {
     dagStep,
@@ -3938,6 +4276,7 @@ async function executeGitCreatePullRequestDagStep(options: {
     signal,
     toolTimeoutMs,
     userWaitTimeoutMs,
+    beforeWrite,
   } = options;
 
   if (!gitTool?.planCreatePullRequest || !gitTool.executeCreatePullRequest) {
@@ -3987,6 +4326,7 @@ async function executeGitCreatePullRequestDagStep(options: {
     dryRun: plan.preview.dryRun,
     allowAlways: false,
   });
+  const previewHash = createDryRunBindingHash(permissionRequest.dryRun);
 
   const approved = await withTaskTimeout(
     new Promise<boolean>((resolve, reject) => {
@@ -4002,12 +4342,16 @@ async function executeGitCreatePullRequestDagStep(options: {
         status: "waiting_permission",
         commanderMessage: `Git pull request creation needs approval for ${plan.preview.headBranch} -> ${plan.preview.baseBranch}.`,
         permissionRequest,
+        durableApprovalPlan: { toolName: GIT_CREATE_PR_TOOL_NAME, payload: plan },
         agents: agentTracker.getSnapshots(),
         logs: [
           ...getSnapshot().logs,
           emitEvent({
             kind: "permission.requested",
             taskId,
+            stepId: dagStep.id,
+            toolName: GIT_CREATE_PR_TOOL_NAME,
+            previewHash,
             request: permissionRequest,
           }),
           emitEvent({
@@ -4033,6 +4377,9 @@ async function executeGitCreatePullRequestDagStep(options: {
             logs: appendLog(getSnapshot(), emitEvent({
               kind: "permission.resolved",
               taskId,
+              stepId: dagStep.id,
+              toolName: GIT_CREATE_PR_TOOL_NAME,
+              previewHash,
               requestId: permissionRequest.id,
               decision: decision === "denied" ? "denied" : "approved",
             })),
@@ -4113,6 +4460,8 @@ async function executeGitCreatePullRequestDagStep(options: {
     return output;
   }
 
+  await beforeWrite();
+
   if (agentTracker.getState(agentId)) {
     agentTracker.setState(agentId, {
       status: "running",
@@ -4177,6 +4526,8 @@ async function executeGitCommentPullRequestDagStep(options: {
   signal?: AbortSignal;
   toolTimeoutMs: number;
   userWaitTimeoutMs: number;
+  /** Drain durable lifecycle writes before invoking the remote mutation. */
+  beforeWrite: () => Promise<void>;
 }): Promise<unknown> {
   const {
     dagStep,
@@ -4192,6 +4543,7 @@ async function executeGitCommentPullRequestDagStep(options: {
     signal,
     toolTimeoutMs,
     userWaitTimeoutMs,
+    beforeWrite,
   } = options;
 
   if (!gitTool?.planCommentPullRequest || !gitTool.executeCommentPullRequest) {
@@ -4241,6 +4593,7 @@ async function executeGitCommentPullRequestDagStep(options: {
     dryRun: plan.preview.dryRun,
     allowAlways: false,
   });
+  const previewHash = createDryRunBindingHash(permissionRequest.dryRun);
 
   const approved = await withTaskTimeout(
     new Promise<boolean>((resolve, reject) => {
@@ -4256,12 +4609,16 @@ async function executeGitCommentPullRequestDagStep(options: {
         status: "waiting_permission",
         commanderMessage: `Git pull request comment needs approval for ${plan.preview.pullRequest}.`,
         permissionRequest,
+        durableApprovalPlan: { toolName: GIT_COMMENT_PR_TOOL_NAME, payload: plan },
         agents: agentTracker.getSnapshots(),
         logs: [
           ...getSnapshot().logs,
           emitEvent({
             kind: "permission.requested",
             taskId,
+            stepId: dagStep.id,
+            toolName: GIT_COMMENT_PR_TOOL_NAME,
+            previewHash,
             request: permissionRequest,
           }),
           emitEvent({
@@ -4287,6 +4644,9 @@ async function executeGitCommentPullRequestDagStep(options: {
             logs: appendLog(getSnapshot(), emitEvent({
               kind: "permission.resolved",
               taskId,
+              stepId: dagStep.id,
+              toolName: GIT_COMMENT_PR_TOOL_NAME,
+              previewHash,
               requestId: permissionRequest.id,
               decision: decision === "denied" ? "denied" : "approved",
             })),
@@ -4366,6 +4726,8 @@ async function executeGitCommentPullRequestDagStep(options: {
     });
     return output;
   }
+
+  await beforeWrite();
 
   if (agentTracker.getState(agentId)) {
     agentTracker.setState(agentId, {
@@ -4597,10 +4959,21 @@ function redactedTextLength(value: string): number | undefined {
 }
 
 function redactImageDataUrlsForSummary(value: string): string {
-  return value.replace(
+  const imageRedacted = value.replace(
     /data:image(?:\/|\\\/)[a-z0-9.+-]+;base64,[a-z0-9+/=_-]+/gi,
     (match) => `[redacted:image data URL:${match.length} chars]`,
   );
+  return redactSecretLikeSummary(imageRedacted);
+}
+
+function redactSecretLikeSummary(value: string): string {
+  return value
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]{8,}/giu, "Bearer [redacted:secret]")
+    .replace(/\b(?:Basic|Token)\s+[A-Za-z0-9._~+\/-]{8,}/giu, (match) =>
+      `${match.split(/\s+/u)[0]} [redacted:secret]`
+    )
+    .replace(/\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|token|secret|password|passwd|credential))\s*[:=]\s*["']?[^\s,;"']+/giu, "$1=[redacted:secret]")
+    .replace(/\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_-]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{12,}|AIza[0-9A-Za-z_-]{20,}|eyJ[A-Za-z0-9_-]{20,})\b/gu, "[redacted:secret]");
 }
 
 function sanitizeComputerUseStepForContext(step: ComputerUseStep): ComputerUseStep {
@@ -4878,6 +5251,7 @@ function normalizeCommanderDagPlan(plan: CommanderPlanResult): CommanderDagPlan 
   return {
     title: normalized.title,
     reasoning: normalized.reasoning,
+    executionPolicy: normalized.executionPolicy,
     steps: normalized.steps.map((step) => ({
       ...step,
       capability: step.capability,
@@ -4949,6 +5323,8 @@ async function requestComputerUseApproval(options: {
     requestId: string,
     handler: ((decision: string) => void | Promise<void>) | undefined,
   ) => void;
+  /** Drain durable lifecycle writes before issuing native action approval. */
+  beforeWrite: () => Promise<void>;
 }): Promise<{ approvalId: string; taskId?: string; sessionWide?: boolean }> {
   const {
     action,
@@ -4963,6 +5339,7 @@ async function requestComputerUseApproval(options: {
     signal,
     timeoutMs = COMMANDER_USER_WAIT_TIMEOUT_MS,
     setPendingPermissionHandler,
+    beforeWrite,
   } = options;
 
   if (!computerTool.approveAction) {
@@ -4998,6 +5375,7 @@ async function requestComputerUseApproval(options: {
     },
     allowAlways: canUseTaskApproval,
   });
+  const previewHash = createDryRunBindingHash(permissionRequest.dryRun);
 
   const approvalPromise = new Promise<{ approvalId: string; taskId?: string; sessionWide?: boolean }>((resolve, reject) => {
     emitSnapshot({
@@ -5011,6 +5389,9 @@ async function requestComputerUseApproval(options: {
         emitEvent({
           kind: "permission.requested",
           taskId,
+          stepId,
+          toolName: action.tool,
+          previewHash,
           request: permissionRequest,
         }),
         emitEvent({
@@ -5037,6 +5418,9 @@ async function requestComputerUseApproval(options: {
           logs: appendLog(getSnapshot(), emitEvent({
             kind: "permission.resolved",
             taskId,
+            stepId,
+            toolName: action.tool,
+            previewHash,
             requestId: permissionRequest.id,
             decision: decision === "denied" ? "denied" : "approved",
           })),
@@ -5048,6 +5432,7 @@ async function requestComputerUseApproval(options: {
         }
 
         const sessionWide = canUseTaskApproval && decision === "approved_always";
+        await beforeWrite();
         const approval = await computerTool.approveAction!(
           { ...action, riskLevel: computerUseActionRiskLevel(action) },
           permissionRequest.id,
@@ -5315,9 +5700,196 @@ function updateAskUserConversation(
 
 const COMMANDER_DAG_WORKFLOW_ID = "commander-dag";
 
+function formatCommanderPlanReadyMessage(
+  userGoal: string,
+  stepCount: number,
+  restored = false,
+): string {
+  const isZh = /[\u3400-\u9fff]/u.test(userGoal);
+  if (isZh) {
+    return restored
+      ? `已从安全检查点恢复并验证 ${stepCount} 个执行步骤。`
+      : `Commander 已验证 ${stepCount} 个执行步骤，准备开始。`;
+  }
+  return restored
+    ? `Restored and validated ${stepCount} execution step(s) from the durable checkpoint.`
+    : `Commander validated ${stepCount} execution step(s) and is ready to start.`;
+}
+
+function resolveCommanderExecutionPolicy(
+  planPolicy: CommanderDagPlan["executionPolicy"],
+  runtimeTimeouts: {
+    toolTimeoutMs: number;
+    maxStepRetries: number;
+  },
+  runtimeConfig?: RuntimeExecutionConfig,
+): WorkflowExecutionPolicy {
+  const retryLimit = runtimeConfig?.maxStepRetries === undefined
+    ? 3
+    : runtimeTimeouts.maxStepRetries;
+  return normalizeWorkflowExecutionPolicy({
+    maxConcurrency: planPolicy?.maxConcurrency,
+    stepTimeoutMs: Math.min(
+      planPolicy?.stepTimeoutMs ?? runtimeTimeouts.toolTimeoutMs,
+      runtimeTimeouts.toolTimeoutMs,
+    ),
+    maxStepRetries: Math.min(
+      planPolicy?.maxRetries ?? runtimeTimeouts.maxStepRetries,
+      retryLimit,
+    ),
+    retryBackoffMs: planPolicy?.retryBackoffMs,
+    rateLimitPerSecond: planPolicy?.rateLimitPerSecond,
+    maxReadyQueueSize: planPolicy?.maxReadyQueueSize,
+    circuitBreakerFailureThreshold: planPolicy?.circuitBreakerFailureThreshold,
+  }, runtimeTimeouts.toolTimeoutMs, runtimeTimeouts.maxStepRetries);
+}
+
+function formatExecutionPolicyForLog(policy: WorkflowExecutionPolicy): string {
+  return [
+    `concurrency=${policy.maxConcurrency}`,
+    `timeoutMs=${policy.stepTimeoutMs}`,
+    `retries=${policy.maxStepRetries}`,
+    `backoffMs=${policy.retryBackoffMs}`,
+    `ratePerSecond=${policy.rateLimitPerSecond || "unlimited"}`,
+    `readyQueue=${policy.maxReadyQueueSize}`,
+    `circuitThreshold=${policy.circuitBreakerFailureThreshold}`,
+  ].join(", ");
+}
+
+interface CommanderExecutionAssessment {
+  status: "succeeded" | "failed";
+  reliabilityScore: number;
+  successfulFlow: string[];
+  completedStepIds: string[];
+  abandonedStepIds: string[];
+  retryCount: number;
+  recoveryCount: number;
+  backpressureEventCount: number;
+  circuitBreakerOpenCount: number;
+  executionPolicy: WorkflowExecutionPolicy;
+}
+
+function buildCommanderExecutionAssessment(options: {
+  plan: CommanderDagPlan;
+  completedStepIds: readonly string[];
+  abandonedStepIds?: readonly string[];
+  retryCount: number;
+  recoveryCount: number;
+  backpressureEventCount: number;
+  circuitBreakerOpenCount: number;
+  executionSucceeded: boolean;
+  verificationPassed: boolean;
+  executionPolicy: WorkflowExecutionPolicy;
+}): CommanderExecutionAssessment {
+  const completed = new Set(options.completedStepIds);
+  const abandonedStepIds = [...(options.abandonedStepIds ?? [])];
+  let reliabilityScore = 100
+    - abandonedStepIds.length * 12
+    - options.retryCount * 3
+    - options.recoveryCount * 4
+    - options.circuitBreakerOpenCount * 8;
+  if (!options.executionSucceeded || !options.verificationPassed) {
+    reliabilityScore = Math.min(reliabilityScore, 49);
+  }
+  return {
+    status: options.executionSucceeded && options.verificationPassed ? "succeeded" : "failed",
+    reliabilityScore: Math.max(0, Math.min(100, reliabilityScore)),
+    successfulFlow: options.plan.steps
+      .filter((step) => completed.has(step.id))
+      .map((step) => step.title),
+    completedStepIds: [...options.completedStepIds],
+    abandonedStepIds,
+    retryCount: options.retryCount,
+    recoveryCount: options.recoveryCount,
+    backpressureEventCount: options.backpressureEventCount,
+    circuitBreakerOpenCount: options.circuitBreakerOpenCount,
+    executionPolicy: options.executionPolicy,
+  };
+}
+
+function appendCommanderExecutionAssessment(
+  message: string,
+  assessment: CommanderExecutionAssessment,
+  userGoal: string,
+): string {
+  const flow = assessment.successfulFlow.join(" -> ");
+  const isZh = /[\u3400-\u9fff]/u.test(userGoal);
+  if (isZh) {
+    return `${message}\n\n\u6267\u884c\u53ef\u9760\u6027\u8bc4\u5206\uff1a${assessment.reliabilityScore}/100\u3002` +
+      `${flow ? `\u6210\u529f\u6d41\u7a0b\uff1a${flow}\u3002` : ""}`;
+  }
+  return `${message}\n\nExecution reliability score: ${assessment.reliabilityScore}/100.` +
+    `${flow ? ` Successful flow: ${flow}.` : ""}`;
+}
+
+function formatCommanderStepProgressMessage(
+  userGoal: string,
+  step: Pick<WorkbenchWorkflowStep, "agentKind" | "title">,
+  plan: readonly TaskStep[],
+  phase: "started" | "completed" | "failed" | "heartbeat",
+  elapsedMs?: number,
+): string {
+  const isZh = /[\u3400-\u9fff]/u.test(userGoal);
+  const agentName = formatAgentDisplayName(step.agentKind);
+  const completedCount = plan.filter((item) => item.status === "completed" || item.status === "skipped").length;
+  const progress = isZh
+    ? `\u8fdb\u5ea6 ${completedCount}/${plan.length}\u3002`
+    : `Progress: ${completedCount}/${plan.length}.`;
+  if (phase === "completed") {
+    return isZh
+      ? `${agentName} \u5df2\u5b8c\u6210\u201c${step.title}\u201d\uff0c\u7ed3\u679c\u5df2\u8fd4\u56de Commander\u3002${progress}`
+      : `${agentName} completed "${step.title}" and returned the result to Commander. ${progress}`;
+  }
+  if (phase === "failed") {
+    return isZh
+      ? `${agentName} \u62a5\u544a\u201c${step.title}\u201d\u6267\u884c\u5931\u8d25\uff0cCommander \u6b63\u5728\u8bc4\u4f30\u6062\u590d\u65b9\u6848\u3002${progress}`
+      : `${agentName} reported that "${step.title}" failed. Commander is evaluating recovery. ${progress}`;
+  }
+  if (phase === "heartbeat") {
+    const elapsedSeconds = Math.max(1, Math.round((elapsedMs ?? 0) / 1000));
+    return isZh
+      ? `Commander \u6b63\u5728\u76d1\u63a7 ${agentName} \u6267\u884c\u201c${step.title}\u201d\uff0c\u5df2\u8fd0\u884c ${elapsedSeconds} \u79d2\u3002${progress}`
+      : `Commander is monitoring ${agentName} on "${step.title}" after ${elapsedSeconds}s. ${progress}`;
+  }
+  return isZh
+    ? `Commander \u6b63\u5728\u76d1\u63a7 ${agentName} \u6267\u884c\u201c${step.title}\u201d\u3002${progress}`
+    : `Commander is monitoring ${agentName} on "${step.title}". ${progress}`;
+}
+
 interface CommanderResumeBuildResult {
   resumeState: WorkflowResumeState;
   metadata: NonNullable<TaskSnapshot["durableResume"]>;
+  replanAttemptCount: number;
+}
+
+/**
+ * A durable Commander checkpoint carries the complete model plan as an
+ * artifact because the workflow snapshot intentionally omits tool-specific
+ * fields (toolName, toolInput, executionMode). Restore that artifact before
+ * considering a new planner call; a tampered or truncated artifact must fail
+ * closed instead of silently producing a different DAG.
+ */
+function restoreCommanderPlanFromCheckpoint(
+  checkpoint: WorkflowCheckpoint,
+): CommanderDagPlan | undefined {
+  const candidate = checkpoint.contextSnapshot.commanderPlan;
+  if (candidate === undefined) {
+    // Checkpoints written before the Commander artifact was introduced are
+    // still accepted through the legacy planner path below.
+    return undefined;
+  }
+  if (!validateArtifactEnvelope(candidate, { taskId: checkpoint.taskId, runId: checkpoint.runId })) {
+    throw new Error(`Checkpoint ${checkpoint.runId} contains an invalid commanderPlan artifact.`);
+  }
+  try {
+    return normalizeCommanderDagPlan(candidate.payload as CommanderPlanResult);
+  } catch (error) {
+    throw new Error(
+      `Checkpoint ${checkpoint.runId} contains an invalid commander plan: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
 }
 
 function buildCommanderResumeState({
@@ -5337,6 +5909,15 @@ function buildCommanderResumeState({
     return undefined;
   }
   const { checkpoint, events } = resumeFromCheckpoint;
+  if (checkpoint.taskId !== taskId) {
+    emitEvent({
+      kind: "tool.completed",
+      taskId,
+      toolName: "workflow.resume.blocked",
+      detail: `Checkpoint ${checkpoint.runId} belongs to task ${checkpoint.taskId}, not ${taskId}.`,
+    });
+    throw new Error(`Checkpoint ${checkpoint.runId} belongs to another task.`);
+  }
   if (
     checkpoint.workflowId !== workflow.id ||
     checkpoint.planHash !== computePlanHash(workflow.steps)
@@ -5397,6 +5978,7 @@ function buildCommanderResumeState({
       approvalRequestIds: reconciliation.approvalRequestIds,
       rebuilt: resumeStateResult.source === "event-log",
     },
+    replanAttemptCount: reconciliation.replanAttemptCount,
   };
 }
 
@@ -5416,6 +5998,7 @@ interface CommanderDagTaskOptions {
       handler: ((decision: string) => void | Promise<void>) | undefined,
     ): void;
   };
+  agentRegistry?: AgentRegistry;
   commanderTool?: CommanderTool;
   codeTool?: CodeTool;
   computerTool?: ComputerTool;
@@ -5433,6 +6016,10 @@ interface CommanderDagTaskOptions {
   visionTool?: import("@javis/tools").VisionTool;
   taskId: string;
   userGoal: string;
+  /** Runtime-selected current workspace supplied to Commander planning. */
+  workspacePath?: string;
+  /** Image data URLs forwarded only to a vision-capable Commander provider. */
+  modelImages?: string[];
   priorMessages?: ChatMessage[];
   omittedPriorMessageCount?: number;
   fullPriorMessages?: ChatMessage[];
@@ -5464,6 +6051,7 @@ interface CommanderDagTaskOptions {
     contextSnapshot: Record<string, unknown>,
     failedStepId?: string,
     failureReason?: string,
+    modelImages?: string[],
   ) => Promise<CommanderDagPlan>;
   computerUseLoopRunner?: (options: {
     userGoal: string;
@@ -5485,6 +6073,48 @@ interface CommanderDagTaskOptions {
   workspaceRuntime?: WorkspaceRuntime;
 }
 
+const MAX_REACT_REASON_LOG_CHARS = 320;
+const REACT_REASONING_BLOCK_PATTERN =
+  /<\s*[\uFEFF\u200B\u200C\u200D\u2060]*(think|thinking|analysis|reasoning)\b[^>]*>[\s\S]*?<\s*\/\s*[\uFEFF\u200B\u200C\u200D\u2060]*\1\s*>/giu;
+const REACT_UNCLOSED_REASONING_PATTERN =
+  /<\s*[\uFEFF\u200B\u200C\u200D\u2060]*(?:think|thinking|analysis|reasoning)\b[^>]*>[\s\S]*$/iu;
+const REACT_REASONING_TAG_PATTERN =
+  /<\s*\/?\s*[\uFEFF\u200B\u200C\u200D\u2060]*(?:think|thinking|analysis|reasoning)\b[^>]*>/giu;
+
+// ReAct reasons are model-authored text and can contain credentials copied
+// from a tool observation. Keep the durable event log useful without making
+// it a second secret exfiltration channel.
+const REACT_PRIVATE_REASON_PATTERN =
+  /\b(?:private|hidden|internal)\s+(?:analysis|reasoning|chain(?:[- ]of[- ]thought)?)\s*[:：-]\s*[\s\S]*$/iu;
+const REACT_BEARER_SECRET_PATTERN =
+  /\bBearer\s+[A-Za-z0-9._~+\/-]{8,}/giu;
+const REACT_NAMED_SECRET_PATTERN =
+  /\b((?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authorization|token|secret|password|passwd|credential))\s*[:=]\s*["']?[^\s,;"']+/giu;
+const REACT_KNOWN_SECRET_PATTERN =
+  /\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_-]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{12,}|AIza[0-9A-Za-z_-]{20,}|eyJ[A-Za-z0-9_-]{20,})\b/gu;
+
+function sanitizeReActReasonForLog(reason: string): string {
+  const normalized = reason
+    .replace(REACT_PRIVATE_REASON_PATTERN, "[redacted:reasoning]")
+    .replace(REACT_REASONING_BLOCK_PATTERN, " ")
+    .replace(REACT_UNCLOSED_REASONING_PATTERN, " ")
+    .replace(REACT_REASONING_TAG_PATTERN, " ")
+    .replace(REACT_BEARER_SECRET_PATTERN, "Bearer [redacted:secret]")
+    .replace(REACT_NAMED_SECRET_PATTERN, "$1=[redacted:secret]")
+    .replace(REACT_KNOWN_SECRET_PATTERN, "[redacted:secret]")
+    .replace(/data:image(?:\/|\\\/)[a-z0-9.+-]+;base64,[a-z0-9+/=_-]+/giu, "[redacted:image data URL]")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (!normalized) {
+    return "Decision summary omitted.";
+  }
+  const characters = [...normalized];
+  if (characters.length <= MAX_REACT_REASON_LOG_CHARS) {
+    return normalized;
+  }
+  return `${characters.slice(0, MAX_REACT_REASON_LOG_CHARS).join("")}...[truncated]`;
+}
+
 /**
  * Execute a task via Commander-generated DAG with capability-based dispatch.
  *
@@ -5494,6 +6124,7 @@ interface CommanderDagTaskOptions {
  */
 export async function runCommanderDagTask({
   controller,
+  agentRegistry,
   commanderTool,
   codeTool,
   computerTool,
@@ -5511,6 +6142,8 @@ export async function runCommanderDagTask({
   visionTool,
   taskId,
   userGoal,
+  workspacePath,
+  modelImages,
   priorMessages = [],
   omittedPriorMessageCount = 0,
   fullPriorMessages,
@@ -5529,10 +6162,19 @@ export async function runCommanderDagTask({
 }: CommanderDagTaskOptions) {
   const { emit, getSnapshot, wait } = controller;
   const runtimeTimeouts = resolveCommanderTimeouts(runtimeConfig);
-  const runId = resumeFromCheckpoint?.checkpoint.runId ?? `run-${taskId}-${Date.now()}`;
+  const runId = resumeFromCheckpoint?.checkpoint.runId ?? createUniqueRunId(taskId);
   resetEnvelopeSequence(runId);
   if (resumeFromCheckpoint) {
-    seedEnvelopeSequence(runId, resumeFromCheckpoint.checkpoint.eventSequence);
+    // A crash can leave the event log ahead of the last checkpoint. Seed from
+    // both sources so the next envelope cannot reuse an already-persisted
+    // (run_id, sequence) pair.
+    const latestPersistedSequence = resumeFromCheckpoint.events.reduce(
+      (latest, event) => Number.isFinite(event.sequence)
+        ? Math.max(latest, Math.trunc(event.sequence))
+        : latest,
+      Math.max(0, Math.trunc(resumeFromCheckpoint.checkpoint.eventSequence)),
+    );
+    seedEnvelopeSequence(runId, latestPersistedSequence);
   }
   const availableTools = filterAvailableToolDescriptorsForRuntime(
     normalizeAvailableToolDescriptors(availableToolDescriptors),
@@ -5555,7 +6197,12 @@ export async function runCommanderDagTask({
     },
   );
   throwIfTaskAborted(signal, `Commander DAG task ${taskId}`);
-  const context = createSharedTaskContext({ userGoal, taskId });
+  const selectedWorkspacePath = workspacePath?.trim() || undefined;
+  const context = createSharedTaskContext({
+    userGoal,
+    taskId,
+    ...(selectedWorkspacePath ? { workspacePath: selectedWorkspacePath } : {}),
+  });
   if (priorMessages.length > 0) {
     context.set("priorMessages", priorMessages);
   }
@@ -5567,32 +6214,48 @@ export async function runCommanderDagTask({
     if (imagePath) context.set("imagePath", imagePath);
   }
   const agentTracker = createAgentStateTracker(
-    demoAgents,
+    getRegisteredAgentDefinitions(agentRegistry),
   );
+  const resolveAgentId = (agentKind: string) => getRegisteredAgentId(agentKind, agentRegistry);
   const taskEventBus = createTaskEventBus();
   const eventLogs: TaskSnapshot["logs"] = [];
   taskEventBus.on((event) => { eventLogs.push(taskEventToLogEntry(event)); });
 
   let snapshot = getSnapshot();
+  let checkpointPending = false;
+  let pendingCheckpointReason: WorkflowCheckpoint["waitingReason"] | undefined;
   function emitSnapshot(next: TaskSnapshot) {
     emit({
       ...next,
       runId,
     });
     snapshot = getSnapshot();
+    if (checkpointPending) {
+      const waitingReason = pendingCheckpointReason;
+      checkpointPending = false;
+      pendingCheckpointReason = undefined;
+      saveCheckpoint(waitingReason);
+    }
   }
 
   let syntheticWorkflow: WorkbenchWorkflow | undefined;
   const abandonedStepIds = new Set<string>();
   let durablePersistenceQueue = Promise.resolve();
+  let durablePersistenceFailure: Error | undefined;
   function enqueueDurablePersistence(label: string, operation: () => void | Promise<void>): void {
-    durablePersistenceQueue = durablePersistenceQueue
-      .then(() => Promise.resolve(operation()))
-      .catch((error) => {
-        // Durable persistence failures must not crash the live task, but
-        // later writes should still run so the queue does not get poisoned.
+    durablePersistenceQueue = durablePersistenceQueue.then(async () => {
+      try {
+        await operation();
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        durablePersistenceFailure ??= new Error(
+          `Durable persistence failed in ${label}: ${detail}`,
+        );
+        // Keep the queue usable so a terminal task.failed event still gets
+        // a best-effort persistence attempt after the live task fails closed.
         console.error(`[${label}] failed:`, error);
-      });
+      }
+    });
   }
   function buildCheckpointFromSnapshot(
     waitingReason?: WorkflowCheckpoint["waitingReason"],
@@ -5605,10 +6268,14 @@ export async function runCommanderDagTask({
       .filter((step) => step.status === "running")
       .map((step) => step.id);
     const permissionRequest = getSnapshot().permissionRequest;
+    const checkpointWorkflow = createActiveCheckpointWorkflow(
+      syntheticWorkflow!,
+      abandonedStepIds,
+    );
     return buildCheckpointFromDagState({
       taskId,
       runId,
-      workflow: syntheticWorkflow!,
+      workflow: checkpointWorkflow,
       completedStepIds,
       abandonedStepIds: [...abandonedStepIds],
       runningStepIds,
@@ -5640,13 +6307,15 @@ export async function runCommanderDagTask({
         case "step.started":
         case "step.completed":
         case "step.failed":
-          saveCheckpoint();
+          checkpointPending = true;
           break;
         case "permission.requested":
-          saveCheckpoint("human_approval");
+          checkpointPending = true;
+          pendingCheckpointReason = "human_approval";
           break;
         case "ask_user.requested":
-          saveCheckpoint("user_input");
+          checkpointPending = true;
+          pendingCheckpointReason = "user_input";
           break;
         case "task.replan_started":
         case "task.replan_failed":
@@ -5654,7 +6323,7 @@ export async function runCommanderDagTask({
         case "task.completed":
         case "task.failed":
         case "task.cancelled":
-          saveCheckpoint();
+          checkpointPending = true;
           break;
       }
     }
@@ -5662,7 +6331,14 @@ export async function runCommanderDagTask({
   }
 
   async function flushDurablePersistenceQueue(): Promise<void> {
-    await durablePersistenceQueue;
+    let pendingQueue: Promise<void>;
+    do {
+      pendingQueue = durablePersistenceQueue;
+      await pendingQueue;
+    } while (pendingQueue !== durablePersistenceQueue);
+    if (durablePersistenceFailure) {
+      throw durablePersistenceFailure;
+    }
   }
 
   const taskStartedAt = Date.now();
@@ -5697,9 +6373,23 @@ export async function runCommanderDagTask({
 
   const recoveryAttempts: RecoveryAttemptRecord[] = [];
   const recoveryReplanShapes: ReplanShapeInput[] = [];
+  let stepRetryCount = 0;
+  let backpressureEventCount = 0;
+  let circuitBreakerOpenCount = 0;
   const planStages: PlanGenerationStageRecord[] = [];
   const planRecoveryCompiles: PlanRecoveryCompileRecord[] = [];
+  const verifierChecks = new Map<string, VerifierCheckResult>();
+  function clearVerifierCheck(stepId: string): void {
+    const removed = verifierChecks.delete(stepId);
+    if (removed) {
+      context.set("verifierChecks", Object.fromEntries(verifierChecks));
+    }
+    // Prevent the legacy single-result fallback from resurrecting a verdict
+    // after a verifier step is retried or fails.
+    context.set("verifierCheck", undefined);
+  }
   let durableResumeMetadata: TaskSnapshot["durableResume"] | undefined;
+  let restoredReplanAttemptCount = 0;
   // Captured once after the initial plan call returns and survives the
   // try/catch boundary, so the catch handler can still attach it to
   // the PlanGenerationTrace even when the failure happened later in
@@ -5709,7 +6399,12 @@ export async function runCommanderDagTask({
 
   try {
     // Phase 1: Commander generates DAG plan
-    const availableAgents = getAvailableAgentsForPlanning(availableTools, userGoal);
+    const availableAgents = getAvailableAgentsForPlanning(
+      availableTools,
+      userGoal,
+      undefined,
+      agentRegistry,
+    );
     const planningScope = filterPlanningScopeForGoal(userGoal, {
       agents: availableAgents.map((agent) => agent.kind),
       tools: availableTools,
@@ -5723,12 +6418,32 @@ export async function runCommanderDagTask({
     // level — every code path that mutates or reads `dagPlan` from then
     // on knows the plan cleared the compile gate.
     let uncompiledPlan: CommanderDagPlan;
-    try {
+    const restoredCheckpointPlan = resumeFromCheckpoint
+      ? restoreCommanderPlanFromCheckpoint(resumeFromCheckpoint.checkpoint)
+      : undefined;
+    if (restoredCheckpointPlan) {
+      uncompiledPlan = restoredCheckpointPlan;
+      emitSnapshot({
+        ...getSnapshot(),
+        commanderMessage: formatCommanderPlanReadyMessage(
+          userGoal,
+          uncompiledPlan.steps.length,
+          true,
+        ),
+        logs: appendLog(getSnapshot(), emitEvent({
+          kind: "tool.completed",
+          taskId,
+          toolName: "commander.plan.restored",
+          detail: `Restored ${uncompiledPlan.steps.length} Commander DAG step(s) from checkpoint ${resumeFromCheckpoint!.checkpoint.runId}.`,
+        })),
+      });
+    } else {
+      try {
       if (!commanderTool && isComputerUseGoal(userGoal)) {
         uncompiledPlan = createFallbackComputerUseDagPlan(userGoal, "commander tool unavailable");
         emitSnapshot({
           ...getSnapshot(),
-          commanderMessage: uncompiledPlan.reasoning,
+          commanderMessage: formatCommanderPlanReadyMessage(userGoal, uncompiledPlan.steps.length),
           logs: appendLog(getSnapshot(), emitEvent({
             kind: "tool.completed",
             taskId,
@@ -5755,12 +6470,14 @@ export async function runCommanderDagTask({
             commanderTool,
             contextSummaryTool,
             userGoal,
+            workspacePath: selectedWorkspacePath,
             priorMessages,
             fullPriorMessages: fullPriorMessages ?? priorMessages,
             omittedPriorMessageCount,
             availableAgents,
             availableTools: plannerAvailableTools,
             workflowId: COMMANDER_DAG_WORKFLOW_ID,
+            modelImages,
             context,
           }),
           {
@@ -5823,7 +6540,7 @@ export async function runCommanderDagTask({
       uncompiledPlan = createFallbackComputerUseDagPlan(userGoal, detail);
       emitSnapshot({
         ...getSnapshot(),
-        commanderMessage: uncompiledPlan.reasoning,
+        commanderMessage: formatCommanderPlanReadyMessage(userGoal, uncompiledPlan.steps.length),
         logs: appendLog(getSnapshot(), emitEvent({
           kind: "tool.completed",
           taskId,
@@ -5831,6 +6548,7 @@ export async function runCommanderDagTask({
           detail: `Commander JSON plan failed; using Computer Use fallback plan. ${detail}`,
         })),
       });
+      }
     }
 
     if (!uncompiledPlan.steps || uncompiledPlan.steps.length === 0) {
@@ -5857,13 +6575,33 @@ export async function runCommanderDagTask({
     // assertToolCanDispatchWithoutApproval).
     const supportedApprovalGatedTools: string[] = [...SUPPORTED_APPROVAL_GATED_TOOLS];
     const preloadedContextKeys = [...DEFAULT_PRELOADED_CONTEXT_KEYS];
+    const compilesRestoredActiveSubgraph = Boolean(
+      restoredCheckpointPlan &&
+      resumeFromCheckpoint &&
+      resumeFromCheckpoint.checkpoint.abandonedStepIds.length > 0,
+    );
+    const planForCompilation = compilesRestoredActiveSubgraph
+      ? createRestoredActivePlanForCompilation(
+          uncompiledPlan,
+          resumeFromCheckpoint!.checkpoint.abandonedStepIds,
+        )
+      : uncompiledPlan;
     let compilationResult = compileCommanderPlan({
-      plan: uncompiledPlan,
+      plan: planForCompilation,
       availableAgents,
       availableTools: planningAvailableTools,
       supportedApprovalGatedTools,
       preloadedContextKeys,
     });
+    if (compilesRestoredActiveSubgraph && compilationResult.ok) {
+      // The active subgraph passed the full gate. The complete artifact is
+      // retained for abandoned-step audit history and is subsequently bound
+      // against the checkpoint's workflow hash before executeWorkflow runs.
+      compilationResult = {
+        ...compilationResult,
+        plan: trustAsCompiled(uncompiledPlan),
+      };
+    }
 
     // PlanGenerationTrace collection. The arrays are declared at the
     // function scope so the catch handler can also build a partial
@@ -5887,7 +6625,10 @@ export async function runCommanderDagTask({
     // --- Plan Repair Loop (Phase 3) --------------------------------------
     // When the first compilation fails, ask the model to repair the plan.
     // Bounded by maxAttempts; only runs when diagnostics are repairable.
-    if (!compilationResult.ok && compilationResult.repairable && commanderTool) {
+    // A restored checkpoint is an immutable, already-issued execution plan.
+    // Never let an LLM repair it: repair could change toolName/toolInput while
+    // leaving the checkpoint's workflow hash and approval binding unchanged.
+    if (!restoredCheckpointPlan && !compilationResult.ok && compilationResult.repairable && commanderTool) {
       emitSnapshot({
         ...getSnapshot(),
         logs: appendLog(getSnapshot(), emitEvent({
@@ -5900,6 +6641,7 @@ export async function runCommanderDagTask({
       const repair = await attemptPlanRepair({
         commanderPlan: (request) => commanderTool.plan(request),
         originalUserGoal: userGoal,
+        modelImages,
         invalidPlan: uncompiledPlan,
         diagnostics: compilationResult.diagnostics,
         availableAgents,
@@ -5962,6 +6704,12 @@ export async function runCommanderDagTask({
     // or mutating it is statically guaranteed to operate on a
     // semantically-validated plan.
     let dagPlan: CompiledCommanderPlan = compilationResult.plan;
+    let activeExecutionPolicy = resolveCommanderExecutionPolicy(
+      dagPlan.executionPolicy,
+      runtimeTimeouts,
+      runtimeConfig,
+    );
+    context.set("executionPolicy", activeExecutionPolicy);
 
     if (compilationResult.warnings.length > 0) {
       const warningSummary = formatDiagnosticSummary(compilationResult.warnings);
@@ -5976,18 +6724,32 @@ export async function runCommanderDagTask({
       });
     }
 
+    const resumedAbandonedDependencies = new Set(
+      resumeFromCheckpoint?.checkpoint.abandonedStepIds ?? [],
+    );
     const workflowSteps = dagPlan.steps.map((step) => ({
       id: step.id,
       title: step.title,
       agentKind: step.assignedAgentKind as WorkbenchWorkflowStep["agentKind"],
       input: step.title,
       output: step.successCriteria,
-      permissionLevel: getDagStepPermissionLevel(step, availableTools),
-      dependsOn: step.dependsOn ?? [],
+      permissionLevel: getDagStepPermissionLevel(step, availableTools, agentRegistry),
+      // Recovery plans may retain a dependency on the failed step in the
+      // Commander artifact, while the live workflow intentionally removes it
+      // so the abandoned step is treated as a satisfied boundary.
+      dependsOn: (step.dependsOn ?? []).filter(
+        (dependency) => !resumedAbandonedDependencies.has(dependency),
+      ),
       canRunInParallel: true,
       requiredCapabilities: step.requiredCapabilities as AgentCapabilityTag[] | undefined,
       inputContextKeys: step.inputContextKeys,
       outputContextKey: step.outputContextKey,
+      toolName: step.toolName,
+      toolInput: step.toolInput,
+      executionMode: step.executionMode,
+      capability: step.capability,
+      choices: step.choices,
+      successCriteria: step.successCriteria,
     }));
 
     syntheticWorkflow = {
@@ -6013,12 +6775,25 @@ export async function runCommanderDagTask({
         {
           taskId,
           runId,
+          workflowId: COMMANDER_DAG_WORKFLOW_ID,
           stepId: dagStep.id,
           agentKind: dagStep.assignedAgentKind,
-          agentId: `agent-${dagStep.assignedAgentKind}`,
+          agentId: resolveAgentId(dagStep.assignedAgentKind),
           toolName,
         },
       );
+    };
+    const writeCommanderPlanArtifact = (plan: CommanderDagPlan) => {
+      writeStepArtifactOutput("commanderPlan", plan, context, {
+        taskId,
+        runId,
+        workflowId: COMMANDER_DAG_WORKFLOW_ID,
+        stepId: "commander-plan",
+        agentKind: "commander",
+        agentId: resolveAgentId("commander"),
+        toolName: "commander.plan",
+        type: "commanderPlan",
+      });
     };
     const resumeBuild = buildCommanderResumeState({
       resumeFromCheckpoint,
@@ -6034,11 +6809,83 @@ export async function runCommanderDagTask({
     });
     const resumeState = resumeBuild?.resumeState;
     durableResumeMetadata = resumeBuild?.metadata;
+    restoredReplanAttemptCount = resumeBuild?.replanAttemptCount ?? 0;
     const resumedCompletedStepIds = new Set(resumeState?.completedStepIds ?? []);
     const resumedAbandonedStepIds = new Set(resumeState?.abandonedStepIds ?? []);
     if (resumeState?.contextSnapshot) {
       for (const [key, value] of Object.entries(resumeState.contextSnapshot)) {
-        context.set(key, value);
+        const producerStepCandidates = dagPlan.steps.filter((step) =>
+          (step.outputContextKey ?? `step:${step.id}`) === key,
+        );
+        // Recovery steps may intentionally replace an abandoned producer
+        // under the same context key. Prefer the envelope's active producer,
+        // then the latest active candidate, instead of always selecting the
+        // first (now-abandoned) step.
+        const envelopeProducerStepId = isArtifactEnvelope(value)
+          ? value.producer.stepId
+          : undefined;
+        const activeProducerCandidates = producerStepCandidates.filter(
+          (step) => !resumedAbandonedStepIds.has(step.id),
+        );
+        const legacyProducerStep =
+          (envelopeProducerStepId
+            ? activeProducerCandidates.find((step) => step.id === envelopeProducerStepId)
+            : undefined) ??
+          activeProducerCandidates[activeProducerCandidates.length - 1] ??
+          producerStepCandidates[producerStepCandidates.length - 1];
+        const expectedProducer = key === "commanderPlan"
+          ? {
+              workflowId: COMMANDER_DAG_WORKFLOW_ID,
+              stepId: "commander-plan",
+              agentKind: "commander",
+              agentId: resolveAgentId("commander"),
+              toolName: "commander.plan",
+            }
+          : legacyProducerStep
+            ? {
+                workflowId: COMMANDER_DAG_WORKFLOW_ID,
+                stepId: legacyProducerStep.id,
+                agentKind: legacyProducerStep.assignedAgentKind,
+                agentId: resolveAgentId(legacyProducerStep.assignedAgentKind),
+                ...(legacyProducerStep.toolName ? { toolName: legacyProducerStep.toolName } : {}),
+              }
+            : undefined;
+        if (validateArtifactEnvelope(value, { taskId, runId })) {
+          const producer = value.producer;
+          const hasMismatchedPresentField = expectedProducer !== undefined &&
+            Object.entries(expectedProducer).some(([field, expected]) => {
+              const actual = producer[field as keyof typeof producer];
+              return actual !== undefined && actual !== expected;
+            });
+          if (hasMismatchedPresentField) {
+            throw new Error(`Checkpoint ${runId} contains an artifact with mismatched provenance for context key "${key}".`);
+          }
+          const needsLegacyMigration = expectedProducer !== undefined &&
+            Object.keys(expectedProducer).some((field) =>
+              producer[field as keyof typeof producer] === undefined,
+            );
+          if (needsLegacyMigration) {
+            writeStepArtifactOutput(key, value.payload, context, {
+              taskId,
+              runId,
+              workflowId: expectedProducer!.workflowId,
+              stepId: expectedProducer!.stepId,
+              agentKind: expectedProducer!.agentKind,
+              agentId: expectedProducer!.agentId,
+              toolName: expectedProducer!.toolName,
+            });
+            const migrated = context.getEnvelope(key);
+            if (migrated) {
+              resumeState.contextSnapshot[key] = migrated;
+            }
+          } else {
+            context.setEnvelope(key, value);
+          }
+        } else if (isArtifactEnvelope(value)) {
+          throw new Error(`Checkpoint ${runId} contains an invalid handoff artifact for context key "${key}".`);
+        } else {
+          throw new Error(`Checkpoint ${runId} contains an invalid context value for key "${key}".`);
+        }
       }
     }
     const completedSteps = new Set<string>(resumeState?.completedStepIds ?? []);
@@ -6050,7 +6897,7 @@ export async function runCommanderDagTask({
       id: step.id,
       title: step.title,
       assignedAgentKind: step.assignedAgentKind as TaskStep["assignedAgentKind"],
-      agentId: `agent-${step.assignedAgentKind}`,
+      agentId: resolveAgentId(step.assignedAgentKind),
       requiredCapabilities: step.requiredCapabilities,
       inputContextKeys: step.inputContextKeys,
       outputContextKey: step.outputContextKey,
@@ -6062,28 +6909,32 @@ export async function runCommanderDagTask({
       successCriteria: step.successCriteria,
     }));
 
-    context.set("commanderPlan", dagPlan);
+    writeCommanderPlanArtifact(dagPlan);
 
     await flushDurablePersistenceQueue();
     emitSnapshot({
       ...snapshot,
       title: dagPlan.title || "Commander DAG task",
       status: "running",
-      commanderMessage: dagPlan.reasoning,
+      commanderMessage: formatCommanderPlanReadyMessage(
+        userGoal,
+        dagPlan.steps.length,
+        Boolean(restoredCheckpointPlan),
+      ),
       plan,
       agents: agentTracker.getSnapshots(),
       logs: appendLog(snapshot, emitEvent({
         kind: "tool.completed",
         taskId,
         toolName: "commander.plan",
-        detail: `Commander produced ${dagPlan.steps.length} step(s): ${dagPlan.steps.map((s) => s.id).join(", ")}`,
+        detail: `Commander produced ${dagPlan.steps.length} step(s): ${dagPlan.steps.map((s) => s.id).join(", ")}. Execution policy: ${formatExecutionPolicyForLog(activeExecutionPolicy)}.`,
       })),
     });
 
     // Pre-set agents to queued and emit an explicit dispatch snapshot before tools start.
     const queuedSubAgentSteps = new Map<AgentKind, string[]>();
     for (const step of dagPlan.steps) {
-      const agentId = `agent-${step.assignedAgentKind}`;
+      const agentId = resolveAgentId(step.assignedAgentKind);
       if (agentTracker.getState(agentId)) {
         agentTracker.setState(agentId, { status: "queued", task: step.title });
         const agentKind = step.assignedAgentKind as AgentKind;
@@ -6114,7 +6965,11 @@ export async function runCommanderDagTask({
       }
       emitSnapshot({
         ...getSnapshot(),
-        commanderMessage: `${dagPlan.reasoning}\n\nCommander dispatched: ${dispatchSummary}.`,
+        commanderMessage: `${formatCommanderPlanReadyMessage(
+          userGoal,
+          dagPlan.steps.length,
+          Boolean(restoredCheckpointPlan),
+        )}\n\nCommander dispatched: ${dispatchSummary}.`,
         agents: agentTracker.getSnapshots(),
         logs: dispatchLogs,
       });
@@ -6156,6 +7011,7 @@ export async function runCommanderDagTask({
       if (dagPlan.steps.length === 1) {
         return runCommanderDagTask({
           controller,
+          agentRegistry,
           commanderTool,
           codeTool,
           computerTool,
@@ -6173,6 +7029,7 @@ export async function runCommanderDagTask({
           visionTool,
           taskId,
           userGoal: `${userGoal}\n\nUser clarification: ${askResult}`,
+          modelImages,
           priorMessages,
           omittedPriorMessageCount,
           fullPriorMessages,
@@ -6212,12 +7069,14 @@ export async function runCommanderDagTask({
     async function executeStepWithReAct(
       wfStep: WorkbenchWorkflowStep,
       _ctx: SharedTaskContext,
+      stepSignal: AbortSignal = signal ?? new AbortController().signal,
     ): Promise<{ output: unknown }> {
       const dagStep = dagPlan.steps.find((s) => s.id === wfStep.id);
       if (!dagStep) {
         throw new Error(`Step ${wfStep.id} not found in Commander plan.`);
       }
-      const agentId = `agent-${dagStep.assignedAgentKind}`;
+      await flushDurablePersistenceQueue();
+      const agentId = resolveAgentId(dagStep.assignedAgentKind);
 
       // Handle askUser steps — either already resolved in Phase 1.5
       // (answer in context) or needs inline handling when it has dependencies.
@@ -6255,7 +7114,7 @@ export async function runCommanderDagTask({
             emitEvent,
             agentTracker,
             setPendingAskUserHandler: controller.setPendingAskUserHandler,
-            signal,
+            signal: stepSignal,
             timeoutMs: runtimeTimeouts.userWaitTimeoutMs,
           });
           completedSteps.add(dagStep.id);
@@ -6306,10 +7165,11 @@ export async function runCommanderDagTask({
             emitEvent,
             agentTracker,
             setPendingPermissionHandler: controller.setPendingPermissionHandler,
-            signal,
+            signal: stepSignal,
             toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
             userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
             workspaceRuntime,
+            beforeWrite: flushDurablePersistenceQueue,
           });
           completedSteps.add(dagStep.id);
           writeCommanderStepOutput(dagStep, output, descriptor.name);
@@ -6358,10 +7218,11 @@ export async function runCommanderDagTask({
             emitEvent,
             agentTracker,
             setPendingPermissionHandler: controller.setPendingPermissionHandler,
-            signal,
+            signal: stepSignal,
             toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
             userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
             workspaceRuntime,
+            beforeWrite: flushDurablePersistenceQueue,
           });
           completedSteps.add(dagStep.id);
           writeCommanderStepOutput(dagStep, output, GIT_COMMIT_TOOL_NAME);
@@ -6410,9 +7271,10 @@ export async function runCommanderDagTask({
             emitEvent,
             agentTracker,
             setPendingPermissionHandler: controller.setPendingPermissionHandler,
-            signal,
+            signal: stepSignal,
             toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
             userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
+            beforeWrite: flushDurablePersistenceQueue,
           });
           completedSteps.add(dagStep.id);
           writeCommanderStepOutput(dagStep, output, GIT_CREATE_PR_TOOL_NAME);
@@ -6461,12 +7323,13 @@ export async function runCommanderDagTask({
             emitEvent,
             agentTracker,
             setPendingPermissionHandler: controller.setPendingPermissionHandler,
-            signal,
+            signal: stepSignal,
             toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
             userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
+            beforeWrite: flushDurablePersistenceQueue,
           });
           completedSteps.add(dagStep.id);
-          writeCommanderStepOutput(dagStep, output, `${dagStep.assignedAgentKind}.${dagStep.id}`);
+          writeCommanderStepOutput(dagStep, output, descriptor.name);
           return { output };
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : String(error);
@@ -6513,16 +7376,13 @@ export async function runCommanderDagTask({
             emitEvent,
             agentTracker,
             setPendingPermissionHandler: controller.setPendingPermissionHandler,
-            signal,
+            signal: stepSignal,
             toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
             userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
+            beforeWrite: flushDurablePersistenceQueue,
           });
           completedSteps.add(dagStep.id);
-          writeStepOutput(
-            (dagStep.outputContextKey ?? `step:${dagStep.id}`),
-            output,
-            context,
-          );
+          writeCommanderStepOutput(dagStep, output, descriptor.name);
           return { output };
         } catch (error) {
           const errorMsg = error instanceof Error ? error.message : String(error);
@@ -6549,7 +7409,7 @@ export async function runCommanderDagTask({
       }
 
       if (isComputerUseDagStep(dagStep) || isComputerUseCapability(capability)) {
-        const descriptor = findToolDescriptorForDagStep(dagStep, availableTools);
+        const descriptor = findToolDescriptorForDagStep(dagStep, availableTools, agentRegistry);
         if (!descriptor) {
           throw new Error(`No available Computer Use tool is registered for step ${dagStep.id}.`);
         }
@@ -6602,9 +7462,10 @@ export async function runCommanderDagTask({
               emitSnapshot,
               emitEvent,
               agentTracker,
-              signal,
+              signal: stepSignal,
               setPendingPermissionHandler: controller.setPendingPermissionHandler!,
               timeoutMs: approvalOptions?.timeoutMs ?? runtimeTimeouts.userWaitTimeoutMs,
+              beforeWrite: flushDurablePersistenceQueue,
             }),
           onStep: (step) => {
             const computerStep = step as ComputerUseStep;
@@ -6654,7 +7515,7 @@ export async function runCommanderDagTask({
               agents: agentTracker.getSnapshots(),
             });
           },
-          signal,
+          signal: stepSignal,
         });
         const failedStep = steps.find((step) =>
           step &&
@@ -6717,7 +7578,11 @@ export async function runCommanderDagTask({
       await wait();
 
       const executionMode = resolveStepExecutionMode(dagStep);
-      const allowedToolNames = getAllowedToolNamesForAgent(dagStep.assignedAgentKind, availableTools);
+      const allowedToolNames = getAllowedToolNamesForAgent(
+        dagStep.assignedAgentKind,
+        availableTools,
+        agentRegistry,
+      );
       const stepToolDescriptors = filterToolDescriptorsForStep(
         dagStep,
         allowedToolNames,
@@ -6728,18 +7593,28 @@ export async function runCommanderDagTask({
       const reactTools: AgentReActTool[] = stepToolDescriptors
         .map((td) => ({
           name: td.name,
-          execute: async ({ input: reactInput }) => {
-            const stepInput = mergeStepInput(dagStep, context, reactInput);
+          baseInput: mergeStepInput(dagStep, context),
+          requiredInputs: td.requiredInputs,
+          execute: async ({ input: stepInput = {} }) => {
+            assertToolOwnedByAgent(
+              td.name,
+              dagStep.assignedAgentKind,
+              availableTools,
+              agentRegistry,
+            );
+            const adaptedInput = adaptCapabilityToolInput(dagStep, stepInput, context, td.name);
+            validateToolDescriptorInputs(td, adaptedInput);
             const output = await withTaskTimeout(
-              () => dispatchToolByName(td.name, stepInput, tools, availableTools),
+              () => dispatchToolByName(td.name, adaptedInput, tools, availableTools),
               {
                 label: `ReAct tool ${td.name}`,
                 timeoutMs: runtimeTimeouts.toolTimeoutMs,
-                signal,
+                signal: stepSignal,
               },
             );
-            writeCommanderStepOutput(dagStep, output, td.name);
-            return output;
+            const sanitizedOutput = sanitizeAgentReActOutput(output);
+            writeCommanderStepOutput(dagStep, sanitizedOutput, td.name);
+            return sanitizedOutput;
           },
         }));
 
@@ -6750,8 +7625,9 @@ export async function runCommanderDagTask({
           step: wfStep,
           context,
           tools: reactTools,
+          liveAgentKinds: getRegisteredAgentDefinitions(agentRegistry).map((agent) => agent.kind),
           maxIterations: runtimeTimeouts.agentMaxIterations,
-          signal,
+          signal: stepSignal,
           decisionTimeoutMs: runtimeTimeouts.modelTimeoutMs,
           toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
           decideNext: (req) =>
@@ -6769,8 +7645,15 @@ export async function runCommanderDagTask({
                   name: t.name,
                   summary: td?.summary ?? "",
                   capabilityTags: td?.capabilityTags ?? [],
+                  requiredInputs: td?.requiredInputs,
                 };
               }),
+              availableContextKeys: Object.keys(context.snapshot()),
+              handoffContext: Object.fromEntries(
+                (dagStep.inputContextKeys ?? [])
+                  .map((key) => [key, context.get(key)] as const)
+                  .filter((entry) => entry[1] !== undefined),
+              ),
             }),
           onWaiting: (phase, iteration, detail) => {
             emitWaitingLog({
@@ -6803,6 +7686,8 @@ export async function runCommanderDagTask({
           },
         });
 
+        const reactReasonForLog = sanitizeReActReasonForLog(reactResult.reason);
+
         if (reactResult.status === "completed") {
           completedSteps.add(dagStep.id);
           if (agentTracker.getState(agentId)) {
@@ -6819,7 +7704,7 @@ export async function runCommanderDagTask({
               kind: "tool.completed",
               taskId,
               toolName: `${dagStep.assignedAgentKind}.${dagStep.id}`,
-              detail: `Step ${dagStep.id}: ReAct completed after ${reactResult.observations.length} iteration(s). ${reactResult.reason}`,
+              detail: `Step ${dagStep.id}: ReAct completed after ${reactResult.observations.length} iteration(s). ${reactReasonForLog}`,
             })),
           });
           return { output: reactResult.output };
@@ -6834,12 +7719,12 @@ export async function runCommanderDagTask({
             ? ` Suggested agent: ${reactResult.requestedAgentKind}.`
             : "";
           throw new Error(
-            `ReAct request_input for step ${dagStep.id}: ${reactResult.reason}.${requestedKeys}${requestedAgent}`,
+            `ReAct request_input for step ${dagStep.id}: ${reactReasonForLog}.${requestedKeys}${requestedAgent}`,
           );
         }
 
         throw new Error(
-          `ReAct loop failed for step ${dagStep.id}: ${reactResult.reason}`,
+          `ReAct loop failed for step ${dagStep.id}: ${reactReasonForLog}`,
         );
       }
 
@@ -6855,17 +7740,18 @@ export async function runCommanderDagTask({
           emitSnapshot,
           emitEvent,
         });
-        const synthesis = await withTaskTimeout(
+        const modelSynthesis = await withTaskTimeout(
           () => safeSynthesizeConclusion(
             commanderTool,
             userGoal,
             dagStep.title,
             context.snapshot(),
+            modelImages,
           ),
           {
             label: `commander.synthesize ${dagStep.id}`,
             timeoutMs: runtimeTimeouts.modelTimeoutMs,
-            signal,
+            signal: stepSignal,
             onTimeout: () => emitTimeoutLog({
               taskId,
               phase: "waiting_model",
@@ -6890,8 +7776,25 @@ export async function runCommanderDagTask({
             }),
           },
         );
-        const output = synthesis?.message ?? dagStep.title;
-        writeCommanderStepOutput(dagStep, output, "commander.synthesize");
+        const deterministicSynthesis = modelSynthesis
+          ? undefined
+          : createVerifiedTrendHotListConclusion(context.snapshot(), userGoal);
+        const synthesis = modelSynthesis ?? deterministicSynthesis;
+        if (!synthesis) {
+          // A plan title is model-authored metadata, not an evidence-bound
+          // answer. Never persist it as a step artifact when synthesis was
+          // rejected or unavailable; fail the step so the existing recovery
+          // path can gather evidence or report the missing conclusion.
+          throw new Error(
+            `Evidence-bound Commander synthesis was unavailable for direct_response step ${dagStep.id}.`,
+          );
+        }
+        const output = synthesis.message;
+        writeCommanderStepOutput(
+          dagStep,
+          output,
+          deterministicSynthesis ? "commander.deterministicTrendSummary" : "commander.synthesize",
+        );
         completedSteps.add(dagStep.id);
 
         if (agentTracker.getState(agentId)) {
@@ -6904,12 +7807,14 @@ export async function runCommanderDagTask({
           ...getSnapshot(),
           plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
           agents: agentTracker.getSnapshots(),
-          logs: appendLog(getSnapshot(), emitEvent({
-            kind: "tool.completed",
-            taskId,
-            toolName: `${dagStep.assignedAgentKind}.direct_response`,
-            detail: `Step ${dagStep.id}: direct response completed without ReAct.`,
-          })),
+            logs: appendLog(getSnapshot(), emitEvent({
+              kind: "tool.completed",
+              taskId,
+              toolName: `${dagStep.assignedAgentKind}.direct_response`,
+              detail: deterministicSynthesis
+                ? `Step ${dagStep.id}: direct response used verified structured trend evidence.`
+                : `Step ${dagStep.id}: direct response completed without ReAct.`,
+            })),
         });
 
         return { output };
@@ -6935,15 +7840,16 @@ export async function runCommanderDagTask({
             context,
             tools,
             {
-              signal,
+              signal: stepSignal,
               timeoutMs: runtimeTimeouts.toolTimeoutMs,
               availableToolDescriptors: availableTools,
+              agentRegistry,
             },
           ),
           {
             label: `tool dispatch ${dagStep.id}`,
             timeoutMs: runtimeTimeouts.toolTimeoutMs,
-            signal,
+            signal: stepSignal,
             onTimeout: () => emitTimeoutLog({
               taskId,
               phase: "waiting_tool",
@@ -6970,6 +7876,7 @@ export async function runCommanderDagTask({
           },
         );
         completedSteps.add(dagStep.id);
+        writeCommanderStepOutput(dagStep, result.output, result.toolName);
 
         if (agentTracker.getState(agentId)) {
           agentTracker.setState(agentId, {
@@ -6989,7 +7896,7 @@ export async function runCommanderDagTask({
 
         emitSnapshot({
           ...getSnapshot(),
-          ...(deriveGenericWorkflowSnapshotData(context.snapshot())),
+          ...(deriveGenericWorkflowSnapshotData(context.snapshot(), context.envelopeSnapshot())),
           ...(repoSearchReport ? { repoSearchReport } : {}),
           ...(repoTraceReport ? { repoTraceReport } : {}),
           plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
@@ -7032,6 +7939,7 @@ export async function runCommanderDagTask({
     // P0-3: Failure replanning — when a step fails, ask Commander to generate
     // recovery steps. If replanning succeeds, the failed step is abandoned and
     // recovery steps are appended to the DAG.
+    let replanAttemptCount = restoredReplanAttemptCount;
     async function handleStepFailureReplan(request: {
       step: WorkbenchWorkflowStep;
       error: string;
@@ -7039,6 +7947,35 @@ export async function runCommanderDagTask({
       context: SharedTaskContext;
       completedStepIds: string[];
     }) {
+      const summarizedFailure = createRecoveryAttempt({
+        step: request.step,
+        error: request.error,
+        completedStepIds: request.completedStepIds,
+      });
+      request.context.set("commanderFailureSummary", {
+        failedStepId: summarizedFailure.failedStepId,
+        failedStepTitle: summarizedFailure.failedStepTitle,
+        agentKind: summarizedFailure.agentKind,
+        failureKind: summarizedFailure.failureKind,
+        errorSummary: summarizedFailure.errorSummary,
+        completedStepIds: request.completedStepIds,
+        priorAttempts: recoveryAttempts.map((attempt) => ({
+          failedStepId: attempt.failedStepId,
+          failureKind: attempt.failureKind,
+          errorSummary: attempt.errorSummary,
+          replanStatus: attempt.replanStatus,
+        })),
+        executionPolicy: activeExecutionPolicy,
+      });
+      if (dagPlan.executionPolicy?.degradationStrategy === "fail_fast") {
+        recoveryAttempts.push(createRecoveryAttempt({
+          step: request.step,
+          error: request.error,
+          completedStepIds: request.completedStepIds,
+          detail: "Commander selected fail_fast degradation for this plan.",
+        }));
+        return undefined;
+      }
       if (runtimeConfig?.failureRecoveryEnabled === false || !replanDag) {
         recoveryAttempts.push(createRecoveryAttempt({
           step: request.step,
@@ -7050,6 +7987,28 @@ export async function runCommanderDagTask({
             ? "Failure recovery is disabled by runtime configuration."
             : "No Commander replan implementation is available.",
         }));
+        return undefined;
+      }
+
+      if (replanAttemptCount >= runtimeTimeouts.maxReplans) {
+        const detail = `Maximum recovery replan limit (${runtimeTimeouts.maxReplans}) reached.`;
+        recoveryAttempts.push(createRecoveryAttempt({
+          step: request.step,
+          error: request.error,
+          completedStepIds: request.completedStepIds,
+          replanAttempted: false,
+          replanStatus: "not_attempted",
+          detail,
+        }));
+        emitSnapshot({
+          ...getSnapshot(),
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "task.replan_failed",
+            taskId,
+            failedStepId: request.step.id,
+            error: detail,
+          })),
+        });
         return undefined;
       }
 
@@ -7067,6 +8026,7 @@ export async function runCommanderDagTask({
       }
 
       try {
+        replanAttemptCount += 1;
         emitSnapshot({
           ...getSnapshot(),
           logs: [
@@ -7095,6 +8055,7 @@ export async function runCommanderDagTask({
             request.context.snapshot(),
             request.step.id,
             request.error,
+            modelImages,
           ),
           {
             label: `commander.replan ${request.step.id}`,
@@ -7161,12 +8122,20 @@ export async function runCommanderDagTask({
         const recoveryPlanNormalized = normalizeCommanderDagPlan(
           recoveryPlan as Parameters<typeof normalizeCommanderDagPlan>[0],
         );
+        if (recoveryPlanNormalized.executionPolicy) {
+          activeExecutionPolicy = resolveCommanderExecutionPolicy(
+            recoveryPlanNormalized.executionPolicy,
+            runtimeTimeouts,
+            runtimeConfig,
+          );
+          context.set("executionPolicy", activeExecutionPolicy);
+        }
         recoveryReplanShapes.push({
           steps: recoveryPlanNormalized.steps.map((step) => ({
             agentKind: step.assignedAgentKind as WorkbenchWorkflowStep["agentKind"],
             inputContextKeys: step.inputContextKeys,
             outputContextKey: step.outputContextKey,
-            permissionLevel: getDagStepPermissionLevel(step, availableTools),
+            permissionLevel: getDagStepPermissionLevel(step, availableTools, agentRegistry),
           })),
         });
         const recoveryExistingSteps = dagPlan.steps.map((s) => ({
@@ -7174,6 +8143,43 @@ export async function runCommanderDagTask({
           dependsOn: s.dependsOn ?? [],
           outputContextKey: s.outputContextKey,
         }));
+        const existingWorkflowStepIds = new Set(recoveryExistingSteps.map((step) => step.id));
+        const duplicateRecoveryStepIds = recoveryPlanNormalized.steps
+          .filter((step) => existingWorkflowStepIds.has(step.id))
+          .map((step) => step.id);
+        if (duplicateRecoveryStepIds.length > 0) {
+          const duplicateIds = [...new Set(duplicateRecoveryStepIds)].join(", ");
+          const detail =
+            `Commander recovery plan contains step id(s) already present in the active DAG: ${duplicateIds}. ` +
+            "Recovery steps must use new ids; the failed step was not abandoned.";
+          planRecoveryCompiles.push({
+            stage: "recovery",
+            attempt: 1,
+            failedStepId: request.step.id,
+            status: "failed_non_repairable",
+            diagnostics: [],
+            stepIds: recoveryPlanNormalized.steps.map((s) => s.id),
+            detail,
+          });
+          recoveryAttempts.push(createRecoveryAttempt({
+            step: request.step,
+            error: request.error,
+            completedStepIds: request.completedStepIds,
+            replanAttempted: true,
+            replanStatus: "failed",
+            detail,
+          }));
+          emitSnapshot({
+            ...getSnapshot(),
+            logs: appendLog(getSnapshot(), emitEvent({
+              kind: "task.replan_failed",
+              taskId,
+              failedStepId: request.step.id,
+              error: detail,
+            })),
+          });
+          return undefined;
+        }
         const recoveryCompile = compileCommanderPlan({
           plan: recoveryPlanNormalized,
           availableAgents,
@@ -7228,36 +8234,61 @@ export async function runCommanderDagTask({
         // Convert recovery steps to workflow steps.
         // Use the Commander's declared dependsOn, filtering out the failed step
         // (which is abandoned, so depending on it would deadlock).
+        // The duplicate-id and compile gates above guarantee that every
+        // recovery step is new; do not filter steps after deciding to abandon.
         // failedId is already declared by the recovery compile gate above.
-        const existingWorkflowStepIds = new Set(request.workflow.steps.map((step) => step.id));
-        const uniqueRecoveryDagSteps = recoveryPlanNormalized.steps.filter((step) => !existingWorkflowStepIds.has(step.id));
-        const skippedDuplicateStepIds = recoveryPlanNormalized.steps
-          .filter((step) => existingWorkflowStepIds.has(step.id))
-          .map((step) => step.id);
-        const recoverySteps: WorkbenchWorkflowStep[] = uniqueRecoveryDagSteps.map((s) => ({
+        const recoveryDagSteps = recoveryPlanNormalized.steps;
+        const recoverySteps: WorkbenchWorkflowStep[] = recoveryDagSteps.map((s) => ({
           id: s.id,
           title: s.title,
           agentKind: s.assignedAgentKind as WorkbenchWorkflowStep["agentKind"],
           input: s.title,
           output: s.successCriteria,
-          permissionLevel: getDagStepPermissionLevel(s, availableTools),
+          permissionLevel: getDagStepPermissionLevel(s, availableTools, agentRegistry),
           dependsOn: (s.dependsOn ?? []).filter((depId) => depId !== failedId),
           canRunInParallel: true,
           requiredCapabilities: s.requiredCapabilities as AgentCapabilityTag[] | undefined,
           inputContextKeys: s.inputContextKeys,
           outputContextKey: s.outputContextKey,
+          toolName: s.toolName,
+          toolInput: s.toolInput,
+          executionMode: s.executionMode,
+          capability: s.capability,
+          choices: s.choices,
+          successCriteria: s.successCriteria,
         }));
 
         // Add recovery steps to the dagPlan for tracking. We rebuild
         // the compiled plan rather than mutating `dagPlan.steps` so
         // the brand survives the merge — see appendStepsToCompiledPlan
         // and trustAsCompiled for the escape-hatch policy.
-        if (uniqueRecoveryDagSteps.length > 0) {
-          dagPlan = appendStepsToCompiledPlan(
+        // Mark the failed step abandoned before persisting the recovery
+        // checkpoint so it cannot be resurrected as pending work on resume.
+        if (recoveryDagSteps.length > 0) {
+          const nextDagPlan = appendStepsToCompiledPlan(
             dagPlan,
-            uniqueRecoveryDagSteps as CompiledCommanderPlan["steps"],
+            recoveryDagSteps as CompiledCommanderPlan["steps"],
+            recoveryPlanNormalized.executionPolicy ?? dagPlan.executionPolicy,
           );
+          // Mirror the executor's dependency injection on the synthetic
+          // workflow so checkpoint hashes describe the same active DAG that
+          // will be resumed. The failed step remains represented in the
+          // Commander artifact for auditability; checkpoint serialization
+          // removes its abandoned dependency via createActiveCheckpointWorkflow.
+          const nextSyntheticWorkflow: WorkbenchWorkflow = {
+            ...syntheticWorkflow!,
+            steps: syntheticWorkflow!.steps.map((step) => ({
+              ...step,
+              dependsOn: [...step.dependsOn],
+            })),
+          };
+          appendReplannedSteps(nextSyntheticWorkflow, recoverySteps, failedId);
+          dagPlan = synchronizeCommanderPlanDependencies(nextDagPlan, nextSyntheticWorkflow);
+          syntheticWorkflow = nextSyntheticWorkflow;
+          writeCommanderPlanArtifact(dagPlan);
         }
+        abandonedStepIds.add(request.step.id);
+        saveCheckpoint("tool_result");
         recoveryAttempts.push(createRecoveryAttempt({
           step: request.step,
           error: request.error,
@@ -7266,27 +8297,20 @@ export async function runCommanderDagTask({
           replanStatus: "planned",
           abandonedFailedStep: true,
           recoveryStepIds: recoverySteps.map((step) => step.id),
-          detail: skippedDuplicateStepIds.length > 0
-            ? `Commander produced ${recoverySteps.length} new recovery step(s); skipped duplicate existing step(s): ${skippedDuplicateStepIds.join(", ")}.`
-            : `Commander produced ${recoverySteps.length} recovery step(s).`,
+          detail: `Commander produced ${recoverySteps.length} recovery step(s).`,
         }));
 
         emitSnapshot({
           ...getSnapshot(),
-          commanderMessage: skippedDuplicateStepIds.length > 0
-            ? `Step ${request.step.id} failed. Commander re-plan reused existing step(s): ${skippedDuplicateStepIds.join(", ")}. Continuing with the existing DAG.`
-            : `Step ${request.step.id} failed. Commander re-planned ${recoverySteps.length} recovery step(s): ${recoverySteps.map((s) => s.id).join(", ")}`,
+          commanderMessage: `Step ${request.step.id} failed. Commander re-planned ${recoverySteps.length} recovery step(s): ${recoverySteps.map((s) => s.id).join(", ")}`,
           logs: appendLog(getSnapshot(), emitEvent({
             kind: "tool.planned",
             taskId,
             toolName: "commander.plan",
-            detail: skippedDuplicateStepIds.length > 0
-              ? `Re-plan: ${recoverySteps.length} new recovery step(s), skipped duplicate existing step(s): ${skippedDuplicateStepIds.join(", ")}.`
-              : `Re-plan: ${recoverySteps.length} recovery step(s) for failed step ${request.step.id}.`,
+            detail: `Re-plan: ${recoverySteps.length} recovery step(s) for failed step ${request.step.id}.`,
           })),
         });
 
-        abandonedStepIds.add(request.step.id);
         return { abandonFailedStep: true, steps: recoverySteps };
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
@@ -7315,14 +8339,22 @@ export async function runCommanderDagTask({
       workflow: syntheticWorkflow,
       context,
       resumeFrom: resumeState,
+      artifactExpectation: {
+        taskId,
+        runId,
+        producer: { workflowId: COMMANDER_DAG_WORKFLOW_ID },
+      },
       signal,
-      stepTimeoutMs: runtimeTimeouts.toolTimeoutMs,
-      maxStepRetries: runtimeTimeouts.maxStepRetries,
+      executionPolicy: activeExecutionPolicy,
+      getExecutionPolicy: () => activeExecutionPolicy,
       executeStep: executeStepWithReAct,
       onStepStarted: (step) => {
+        clearVerifierCheck(step.id);
+        const nextPlan = markStep(getSnapshot().plan, step.id, "running");
         emitSnapshot({
           ...getSnapshot(),
-          plan: markStep(getSnapshot().plan, step.id, "running"),
+          commanderMessage: formatCommanderStepProgressMessage(userGoal, step, nextPlan, "started"),
+          plan: nextPlan,
           logs: appendLog(getSnapshot(), emitEvent({
             kind: "step.started",
             taskId,
@@ -7333,12 +8365,25 @@ export async function runCommanderDagTask({
       },
       onStepCompleted: (_step, _output, _ctx) => {
         const dagStep = dagPlan.steps.find((s) => s.id === _step.id);
-        if (dagStep?.toolName === "verifier.check") {
-          context.set("verifierCheck", _output);
+        const isVerifierStep =
+          dagStep?.toolName === "verifier.check" ||
+          dagStep?.requiredCapabilities?.includes("evidence_check" as AgentCapabilityTag) ||
+          dagStep?.assignedAgentKind === "verifier";
+        if (isVerifierStep) {
+          const result = isVerifierCheckResult(_output)
+            ? _output
+            : invalidVerifierCheckResult();
+          verifierChecks.set(_step.id, result);
+          context.set("verifierChecks", Object.fromEntries(verifierChecks));
+          // Keep the legacy single-result key for existing generic consumers;
+          // final Commander completion uses the per-step map below.
+          context.set("verifierCheck", result);
         }
+        const nextPlan = markStep(getSnapshot().plan, _step.id, "completed");
         emitSnapshot({
           ...getSnapshot(),
-          plan: markStep(getSnapshot().plan, _step.id, "completed"),
+          commanderMessage: formatCommanderStepProgressMessage(userGoal, _step, nextPlan, "completed"),
+          plan: nextPlan,
           logs: appendLog(getSnapshot(), emitEvent({
             kind: "step.completed",
             taskId,
@@ -7349,9 +8394,12 @@ export async function runCommanderDagTask({
         });
       },
       onStepFailed: (step, error) => {
+        clearVerifierCheck(step.id);
+        const nextPlan = markStep(getSnapshot().plan, step.id, "failed");
         emitSnapshot({
           ...getSnapshot(),
-          plan: markStep(getSnapshot().plan, step.id, "failed"),
+          commanderMessage: formatCommanderStepProgressMessage(userGoal, step, nextPlan, "failed"),
+          plan: nextPlan,
           logs: appendLog(getSnapshot(), emitEvent({
             kind: "step.failed",
             taskId,
@@ -7362,8 +8410,16 @@ export async function runCommanderDagTask({
         });
       },
       onStepHeartbeat: (step, elapsedMs) => {
+        const currentPlan = getSnapshot().plan;
         emitSnapshot({
           ...getSnapshot(),
+          commanderMessage: formatCommanderStepProgressMessage(
+            userGoal,
+            step,
+            currentPlan,
+            "heartbeat",
+            elapsedMs,
+          ),
           logs: appendLog(getSnapshot(), emitEvent({
             kind: "step.progress",
             taskId,
@@ -7398,15 +8454,17 @@ export async function runCommanderDagTask({
         });
       },
       onStepRetry: (step, error, attempt) => {
+        stepRetryCount += 1;
+        clearVerifierCheck(step.id);
         emitSnapshot({
           ...getSnapshot(),
           status: "retrying",
-          commanderMessage: `Retrying ${step.id} after a transient failure (${attempt}/${runtimeTimeouts.maxStepRetries}).`,
+          commanderMessage: `Retrying ${step.id} after a transient failure (${attempt}/${activeExecutionPolicy.maxStepRetries}).`,
           logs: appendLog(getSnapshot(), emitEvent({
             kind: "tool.planned",
             taskId,
             toolName: `${step.agentKind}.${step.id}`,
-            detail: `Retry ${attempt}/${runtimeTimeouts.maxStepRetries} after transient failure: ${error}`,
+            detail: `Retry ${attempt}/${activeExecutionPolicy.maxStepRetries} after transient failure: ${error}`,
           })),
         });
       },
@@ -7416,7 +8474,7 @@ export async function runCommanderDagTask({
           id: s.id,
           title: s.title,
           assignedAgentKind: s.agentKind as TaskStep["assignedAgentKind"],
-          agentId: `agent-${s.agentKind}`,
+          agentId: resolveAgentId(s.agentKind),
           requiredCapabilities: s.requiredCapabilities,
           status: "pending" as const,
           successCriteria: s.output,
@@ -7432,64 +8490,143 @@ export async function runCommanderDagTask({
           })),
         });
       },
+      onBackpressure: ({ readyCount, admittedCount, policy }) => {
+        backpressureEventCount += 1;
+        emitSnapshot({
+          ...getSnapshot(),
+          commanderMessage: `Commander applied backpressure: admitted ${admittedCount}/${readyCount} ready steps with pool size ${policy.maxConcurrency}.`,
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "tool.planned",
+            taskId,
+            toolName: "commander.scheduler.backpressure",
+            detail: `Deferred ${readyCount - admittedCount} ready step(s). ${formatExecutionPolicyForLog(policy)}.`,
+          })),
+        });
+      },
+      onCircuitBreakerOpen: ({ step, error, consecutiveFailures, policy }) => {
+        circuitBreakerOpenCount += 1;
+        emitSnapshot({
+          ...getSnapshot(),
+          commanderMessage: `Circuit breaker opened after ${consecutiveFailures} consecutive failures. Commander will re-plan from completed evidence.`,
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "tool.completed",
+            taskId,
+            toolName: "commander.scheduler.circuit_open",
+            detail: `Circuit opened at ${step.id}: ${redactImageDataUrlsForSummary(error)}. ${formatExecutionPolicyForLog(policy)}.`,
+          })),
+        });
+      },
     });
 
     if (execution.status === "failed" && completedSteps.size === 0) {
       throw new Error(execution.error ?? "Commander DAG execution failed.");
     }
 
-    // Phase 3: Commander synthesizes conclusion
-    emitWaitingLog({
-      taskId,
-      phase: "waiting_model",
-      label: "commander.synthesize final",
-      detail: "Waiting for Commander final synthesis.",
-      agentKind: "commander",
-      getSnapshot,
-      emitSnapshot,
-      emitEvent,
-    });
-    const synthesis = await withTaskTimeout(
-      () => safeSynthesizeConclusion(
-        commanderTool,
-        userGoal,
-        dagPlan.title || "Commander DAG task",
-        context.snapshot(),
-      ),
-      {
-        label: "commander.synthesize final",
-        timeoutMs: runtimeTimeouts.modelTimeoutMs,
-        signal,
-        onTimeout: () => emitTimeoutLog({
+    const allCompleted = execution.status === "completed";
+    const verifierSteps = dagPlan.steps.filter((step) =>
+      step.toolName === "verifier.check" ||
+      step.requiredCapabilities?.includes("evidence_check" as AgentCapabilityTag) ||
+      step.assignedAgentKind === "verifier",
+    );
+    const implicitSynthesisRequiresVerifier = Boolean(commanderTool?.synthesize) &&
+      dagPlan.steps.some((step) =>
+        isCommanderEvidenceProducingStep(step) && !execution.abandonedStepIds?.includes(step.id),
+      ) &&
+      verifierSteps.length === 0;
+    const verifierRequired = verifierSteps.length > 0 || implicitSynthesisRequiresVerifier;
+    const explicitVerifierCheck = verifierSteps.length > 0
+      ? aggregateVerifierChecks(verifierSteps, context.snapshot())
+      : undefined;
+    // Provenance is an independent verifier, even when the plan also asks a
+    // model verifier to approve the evidence. A model can be fooled by a
+    // forged producer label; the local hash/task/run/step binding cannot.
+    const provenanceVerifierCheck = verifierRequired
+      ? runImplicitCommanderVerifier(
+          dagPlan,
+          context,
           taskId,
-          phase: "waiting_model",
+          runId,
+          new Set(execution.abandonedStepIds ?? []),
+        )
+      : undefined;
+    const verifierCheck = combineVerifierChecks(explicitVerifierCheck, provenanceVerifierCheck);
+    if (implicitSynthesisRequiresVerifier && verifierCheck) {
+      context.set("verifierChecks", { "implicit-provenance-verifier": verifierCheck });
+      context.set("verifierCheck", verifierCheck);
+    }
+    const verificationPassed = !verifierRequired || verifierCheck?.status === "pass";
+    const executionAssessment = buildCommanderExecutionAssessment({
+      plan: dagPlan,
+      completedStepIds: execution.completedStepIds,
+      abandonedStepIds: execution.abandonedStepIds,
+      retryCount: stepRetryCount,
+      recoveryCount: recoveryAttempts.length,
+      backpressureEventCount,
+      circuitBreakerOpenCount,
+      executionSucceeded: allCompleted,
+      verificationPassed,
+      executionPolicy: activeExecutionPolicy,
+    });
+    context.set("executionAssessment", executionAssessment);
+    // Do not ask Commander to synthesize an answer from evidence that a
+    // required verifier has rejected or failed to produce.
+    let synthesis = verificationPassed
+      ? getCompletedDirectResponseConclusion(dagPlan, execution.completedStepIds, context)
+      : undefined;
+    if (verificationPassed && !synthesis) {
+      emitWaitingLog({
+        taskId,
+        phase: "waiting_model",
+        label: "commander.synthesize final",
+        detail: "Waiting for Commander final synthesis.",
+        agentKind: "commander",
+        getSnapshot,
+        emitSnapshot,
+        emitEvent,
+      });
+      synthesis = await withTaskTimeout(
+        () => safeSynthesizeConclusion(
+          commanderTool,
+          userGoal,
+          dagPlan.title || "Commander DAG task",
+          context.snapshot(),
+          modelImages,
+        ),
+        {
           label: "commander.synthesize final",
           timeoutMs: runtimeTimeouts.modelTimeoutMs,
-          detail: "Commander final synthesis timed out.",
-          agentKind: "commander",
-          getSnapshot,
-          emitSnapshot,
-          emitEvent,
-        }),
-        onAbort: () => emitCancelledLog({
-          taskId,
-          label: "commander.synthesize final",
-          detail: "Commander final synthesis cancelled.",
-          agentKind: "commander",
-          getSnapshot,
-          emitSnapshot,
-          emitEvent,
-        }),
-      },
-    );
-    const allCompleted = execution.status === "completed";
-    const verifierCheck = context.snapshot().verifierCheck as VerifierCheckResult | undefined;
-    const verificationPassed = verifierCheck?.status !== "fail";
+          signal,
+          onTimeout: () => emitTimeoutLog({
+            taskId,
+            phase: "waiting_model",
+            label: "commander.synthesize final",
+            timeoutMs: runtimeTimeouts.modelTimeoutMs,
+            detail: "Commander final synthesis timed out.",
+            agentKind: "commander",
+            getSnapshot,
+            emitSnapshot,
+            emitEvent,
+          }),
+          onAbort: () => emitCancelledLog({
+            taskId,
+            label: "commander.synthesize final",
+            detail: "Commander final synthesis cancelled.",
+            agentKind: "commander",
+            getSnapshot,
+            emitSnapshot,
+            emitEvent,
+          }),
+        },
+      );
+    }
     const finalCompleted = allCompleted && verificationPassed;
-    const conclusion = synthesis?.message
+    const baseConclusion = synthesis?.message
       ?? (verificationPassed
         ? `Task completed: ${completedSteps.size}/${dagPlan.steps.length} step(s) executed.`
         : `Task failed verification: ${verifierCheck?.summary ?? "Verifier reported failed evidence."}`);
+    const conclusion = dagPlan.steps.length > 1 || recoveryAttempts.length > 0 || stepRetryCount > 0
+      ? appendCommanderExecutionAssessment(baseConclusion, executionAssessment, userGoal)
+      : baseConclusion;
 
     agentTracker.setState("agent-commander", {
       status: finalCompleted ? "completed" : "failed",
@@ -7498,6 +8635,10 @@ export async function runCommanderDagTask({
 
     const now = Date.now();
     const priorVerificationSummary = getSnapshot().verificationSummary;
+    const priorToolSummary = [...getSnapshot().logs]
+      .reverse()
+      .map((log) => log.detail)
+      .find((detail) => typeof detail === "string" && /(?:Staged \d+ file|Created commit |Created draft pull request |Posted pull request comment )/u.test(detail));
     const trace = getSnapshot().executionTrace;
     const handoffReport = buildHandoffReport(dagPlan.steps, context, {
       generatedAt: new Date(now).toISOString(),
@@ -7524,7 +8665,7 @@ export async function runCommanderDagTask({
     await flushDurablePersistenceQueue();
     emitSnapshot({
       ...getSnapshot(),
-      ...(deriveGenericWorkflowSnapshotData(context.snapshot())),
+      ...(deriveGenericWorkflowSnapshotData(context.snapshot(), context.envelopeSnapshot())),
       title: dagPlan.title || "Task completed",
       status: finalCompleted ? "completed" : "failed",
       commanderMessage: conclusion,
@@ -7534,7 +8675,9 @@ export async function runCommanderDagTask({
       })),
       agents: agentTracker.getSnapshots(),
       verificationSummary: verifierCheck
-        ? `${verifierCheck.status}: ${verifierCheck.summary}`
+        ? verifierSteps.length === 0 && (priorVerificationSummary || priorToolSummary)
+          ? `${priorVerificationSummary ?? priorToolSummary} ${verifierCheck.status}: ${verifierCheck.summary}`
+          : `${verifierCheck.status}: ${verifierCheck.summary}`
         : finalCompleted && priorVerificationSummary
           ? priorVerificationSummary
         : finalCompleted
@@ -7621,7 +8764,13 @@ export async function runCommanderDagTask({
       planGenerationTrace,
       logs: appendLog(snapshot, emitEvent(completionEvent)),
     });
-    await flushDurablePersistenceQueue();
+    try {
+      await flushDurablePersistenceQueue();
+    } catch (persistenceError) {
+      // The task is already reported as failed/cancelled. Do not replace
+      // that terminal snapshot with an unhandled persistence rejection.
+      console.error("[durable-persistence] failed while persisting terminal task state:", persistenceError);
+    }
   }
 }
 
@@ -7631,10 +8780,75 @@ async function safeVerifyGenericWorkflow(
   contextSnapshot: Record<string, unknown>,
 ): Promise<VerifierCheckResult | undefined> {
   if (!verifierTool) {
-    return undefined;
+    return {
+      status: "fail",
+      summary: "Verifier tool is unavailable.",
+      detail: "The workflow cannot be marked complete without an independent verifier result.",
+    };
+  }
+  const trendHotList = getTrendHotListFromContext(contextSnapshot);
+  const trendHotListCandidate = getTrendHotListCandidateFromContext(contextSnapshot);
+  if (trendHotListCandidate && !isTrendHotListResult(trendHotListCandidate)) {
+    return {
+      status: "fail",
+      summary: "Trend payload validation failed.",
+      detail: "The trend payload contains an invalid provider, item, or fetch-diagnostic shape.",
+    };
+  }
+  const researchReport = getResearchReportFromContext(contextSnapshot);
+  if (trendHotList && researchReport) {
+    const deterministicCheck = verifyTrendHotListResearchReport(trendHotList, researchReport);
+    if (!deterministicCheck.valid) {
+      return {
+        status: "fail",
+        summary: "Trend research evidence validation failed.",
+        detail: deterministicCheck.failures.length > 0
+          ? deterministicCheck.failures.join(", ")
+          : "Structured trend report did not match the fetched hot-list payload.",
+      };
+    }
+  }
+  const sourceBackedEvidence = getSourceBackedResearchEvidence(contextSnapshot);
+  if (sourceBackedEvidence) {
+    const deterministicCheck = verifySourceBackedReport(
+      sourceBackedEvidence.sources,
+      sourceBackedEvidence.report,
+    );
+    if (!deterministicCheck.valid) {
+      return {
+        status: "fail",
+        summary: "Research source evidence validation failed.",
+        detail: deterministicCheck.failures.length > 0
+          ? deterministicCheck.failures.join(", ")
+          : "Source-backed report did not match the fetched source evidence.",
+      };
+    }
+  } else if (!trendHotList) {
+    const sourceCollection = getLatestSourceCollectionFromContext(contextSnapshot);
+    const sourceCollectionRequired = workflow.id === "plan-spring-boot-project" ||
+      workflow.steps.some((step) => getWorkflowStepKey(step.id) === "retrieve-guidance");
+    if (sourceCollectionRequired && !sourceCollection) {
+      return {
+        status: "fail",
+        summary: "Research source collection validation failed.",
+        detail: "The source-only research workflow produced no guidance sources.",
+      };
+    }
+    if (sourceCollection) {
+      const deterministicCheck = verifySourceCollection(sourceCollection);
+      if (!deterministicCheck.valid) {
+        return {
+          status: "fail",
+          summary: "Research source collection validation failed.",
+          detail: deterministicCheck.failures.length > 0
+            ? deterministicCheck.failures.join(", ")
+            : "Source-only research handoff did not contain valid URL-backed excerpts.",
+        };
+      }
+    }
   }
   try {
-    return await verifierTool.check({
+    const result = await verifierTool.check({
       stepId: `${workflow.id}:generic-summary`,
       successCriteria: `Workflow ${workflow.id} is routed through the DAG executor and implementation gaps are explicit.`,
       evidence: [
@@ -7659,8 +8873,13 @@ async function safeVerifyGenericWorkflow(
         },
       ],
     });
-  } catch {
-    return undefined;
+    return isVerifierCheckResult(result) ? result : invalidVerifierCheckResult();
+  } catch (error) {
+    return {
+      status: "fail",
+      summary: "Verifier execution failed.",
+      detail: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 
@@ -7668,13 +8887,29 @@ type SnapshotEmitter = (nextSnapshot: TaskSnapshot) => void;
 type RuntimeEventEmitter = (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number];
 type ReadCurrentProjectAgentTracker = ReturnType<typeof createAgentStateTracker>;
 
-interface GenericStepOutput {
+interface GenericStepProducer {
+  workflowId: string;
+  stepId: string;
+  agentKind: string;
+  toolName: string;
+}
+
+interface GenericStepOutputDraft {
   workflowId: string;
   stepId: string;
   status: "completed" | "unsupported";
   summary: string;
   expectedOutput: string;
   data?: Record<string, unknown>;
+}
+
+interface GenericStepOutput extends Omit<GenericStepOutputDraft, "data"> {
+  taskId: string;
+  runId: string;
+  toolName: string;
+  producer: GenericStepProducer;
+  data: Record<string, unknown>;
+  contentHash: string;
 }
 
 interface ProjectInspectionStepOutput {
@@ -7692,14 +8927,14 @@ function concreteOutput(
   step: WorkbenchWorkflowStep,
   summary: string,
   data?: Record<string, unknown>,
-): GenericStepOutput {
+): GenericStepOutputDraft {
   return {
     workflowId: workflow.id,
     stepId: step.id,
     status: "completed",
     summary,
     expectedOutput: step.output,
-    data,
+    ...(data ? { data } : {}),
   };
 }
 
@@ -7707,7 +8942,7 @@ function unsupportedOutput(
   workflow: WorkbenchWorkflow,
   step: WorkbenchWorkflowStep,
   reason?: string,
-): GenericStepOutput {
+): GenericStepOutputDraft {
   return {
     workflowId: workflow.id,
     stepId: step.id,
@@ -7719,7 +8954,51 @@ function unsupportedOutput(
         ? "Approval-gated workflow steps are not dispatched by the generic executor."
         : "No concrete read tool is wired for this workflow step yet.",
     expectedOutput: step.output,
+    data: {},
   };
+}
+
+function sealGenericStepOutput(
+  draft: GenericStepOutputDraft,
+  context: {
+    workflow: WorkbenchWorkflow;
+    step: WorkbenchWorkflowStep;
+    taskId: string;
+    runId: string;
+  },
+): GenericStepOutput {
+  const toolName = getGenericStepToolNames(context.step)[0] ??
+    `${context.step.agentKind}.${getWorkflowStepKey(context.step.id)}`;
+  const payload: Omit<GenericStepOutput, "contentHash"> = {
+    workflowId: draft.workflowId,
+    stepId: draft.stepId,
+    status: draft.status,
+    summary: draft.summary,
+    expectedOutput: draft.expectedOutput,
+    taskId: context.taskId,
+    runId: context.runId,
+    toolName,
+    producer: {
+      workflowId: draft.workflowId,
+      stepId: draft.stepId,
+      agentKind: context.step.agentKind,
+      toolName,
+    },
+    data: draft.data ?? {},
+  };
+  const output: GenericStepOutput = {
+    ...payload,
+    contentHash: computeContentHash(payload),
+  };
+  if (!isGenericStepOutput(output, {
+    workflowId: context.workflow.id,
+    stepId: context.step.id,
+    taskId: context.taskId,
+    runId: context.runId,
+  })) {
+    throw new Error(`Generic workflow step ${context.step.id} produced an invalid output schema.`);
+  }
+  return output;
 }
 
 function getWorkflowStepKey(stepId: string): string {
@@ -7968,7 +9247,7 @@ function normalizeBrowserTrendItem(
   if (!title) return undefined;
   const url = firstStringValue(item, ["url", "link", "href"]) ?? buildTrendSearchUrl(provider, title);
   return {
-    rank: firstNumberValue(item, ["rank", "realpos", "pos"]) ?? index + 1,
+    rank: index + 1,
     title,
     url,
     hotScore: firstNumberValue(item, ["raw_hot", "num", "hot_value", "hotValue", "hot", "score"]),
@@ -8071,7 +9350,7 @@ function sanitizeTrendRawItem(item: Record<string, unknown>): Record<string, unk
   const raw: Record<string, unknown> = {};
   for (const key of [
     "word", "word_scheme", "note", "title", "name", "url", "link",
-    "raw_hot", "num", "hot_value", "label_name", "flag_desc", "category",
+    "rank", "realpos", "pos", "raw_hot", "num", "hot_value", "label_name", "flag_desc", "category",
   ]) {
     const value = item[key];
     if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
@@ -8112,31 +9391,166 @@ function summarizeToolError(error: unknown): string {
   return message.trim().replace(/\s+/gu, " ").slice(0, 240) || "Unknown tool error";
 }
 
-function getSourcesFromContext(contextSnapshot: Record<string, unknown>): WebSource[] {
-  return Object.values(contextSnapshot)
+type ContextArtifactSnapshot = Record<string, ArtifactEnvelope>;
+
+function getValidatedArtifactPayloads(
+  artifactSnapshot: ContextArtifactSnapshot | undefined,
+): unknown[] {
+  if (!artifactSnapshot) return [];
+  return Object.values(artifactSnapshot)
+    .filter((artifact) => validateArtifactEnvelope(artifact))
+    .map((artifact) => artifact.payload);
+}
+
+function getSourcesFromContext(
+  contextSnapshot: Record<string, unknown>,
+  artifactSnapshot?: ContextArtifactSnapshot,
+): WebSource[] {
+  const values = [
+    ...Object.values(contextSnapshot),
+    ...getValidatedArtifactPayloads(artifactSnapshot),
+  ];
+  return values
     .flatMap((value) => {
-      if (isTrendHotListResult(value)) {
-        return trendHotListToSources(value);
-      }
-      if (isGenericStepOutput(value)) {
+      if (isCompletedGenericStepOutput(value)) {
         const sources = Array.isArray(value.data?.sources) ? value.data.sources : [];
         const trendHotList = value.data?.trendHotList;
         return isTrendHotListResult(trendHotList)
           ? [...sources, ...trendHotListToSources(trendHotList)]
           : sources;
       }
+      if (isTrendHotListResult(value)) return trendHotListToSources(value);
       return [];
     })
     .filter(isWebSource);
 }
 
-function getTrendHotListFromContext(contextSnapshot: Record<string, unknown>): TrendHotListResult | undefined {
-  return Object.values(contextSnapshot)
+function getTrendHotListFromContext(
+  contextSnapshot: Record<string, unknown>,
+  artifactSnapshot?: ContextArtifactSnapshot,
+): TrendHotListResult | undefined {
+  const directHotList = Object.values(contextSnapshot).find(isTrendHotListResult);
+  if (directHotList) return directHotList;
+  const genericHotList = Object.values(contextSnapshot)
     .map((value) => {
-      if (isTrendHotListResult(value)) return value;
-      return isGenericStepOutput(value) ? value.data?.trendHotList : undefined;
+      return isCompletedGenericStepOutput(value) ? value.data?.trendHotList : undefined;
     })
     .find(isTrendHotListResult);
+  if (genericHotList) return genericHotList;
+  return getValidatedArtifactPayloads(artifactSnapshot).find(isTrendHotListResult);
+}
+
+function getCompletedDirectResponseConclusion(
+  plan: CompiledCommanderPlan,
+  completedStepIds: readonly string[],
+  context: SharedTaskContext,
+): CommanderSynthesizeResult | undefined {
+  const completed = new Set(completedStepIds);
+  const stepsById = new Map(plan.steps.map((step) => [step.id, step] as const));
+  for (let index = plan.steps.length - 1; index >= 0; index -= 1) {
+    const step = plan.steps[index];
+    if (!step || step.executionMode !== "direct_response" || !completed.has(step.id)) continue;
+    const coveredStepIds = new Set<string>();
+    const pendingDependencies = [...(step.dependsOn ?? [])];
+    while (pendingDependencies.length > 0) {
+      const dependencyId = pendingDependencies.pop();
+      if (!dependencyId || coveredStepIds.has(dependencyId)) continue;
+      coveredStepIds.add(dependencyId);
+      pendingDependencies.push(...(stepsById.get(dependencyId)?.dependsOn ?? []));
+    }
+    if ([...completed].some((stepId) => stepId !== step.id && !coveredStepIds.has(stepId))) {
+      continue;
+    }
+    const output = context.get(step.outputContextKey ?? `step:${step.id}`);
+    if (typeof output === "string" && output.trim()) {
+      return { message: output.trim() };
+    }
+  }
+  return undefined;
+}
+
+function createVerifiedTrendHotListConclusion(
+  contextSnapshot: Record<string, unknown>,
+  userGoal: string,
+): CommanderSynthesizeResult | undefined {
+  const verificationPassed = Object.values(contextSnapshot).some(
+    (value) => isVerifierCheckResult(value) && value.status === "pass",
+  );
+  if (!verificationPassed) return undefined;
+  const hotList = getTrendHotListFromContext(contextSnapshot);
+  if (!hotList) return undefined;
+  return { message: formatVerifiedTrendHotListConclusion(hotList, userGoal) };
+}
+
+function formatVerifiedTrendHotListConclusion(
+  hotList: TrendHotListResult,
+  userGoal: string,
+): string {
+  const isZh = /\p{Script=Han}/u.test(userGoal);
+  const providerLabel = formatTrendProviderLabel(hotList.provider);
+  const labelCounts = new Map<string, number>();
+  for (const item of hotList.items) {
+    const label = item.category ?? item.label;
+    if (label) labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
+  }
+  const labelSummary = [...labelCounts.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([label, count]) => `${label} ${count}`)
+    .join(isZh ? "、" : ", ");
+  const firstScore = hotList.items[0]?.hotScore;
+  const secondScore = hotList.items[1]?.hotScore;
+  const ratio = typeof firstScore === "number" && typeof secondScore === "number" && secondScore > 0
+    ? firstScore / secondScore
+    : undefined;
+  const lines = isZh
+    ? [
+        `## 微博热搜 Top ${hotList.expectedCount}`,
+        "",
+        `数据时间：${hotList.fetchedAt}`,
+        `来源：${hotList.sourceUrl}`,
+        `完整度：${hotList.items.length}/${hotList.expectedCount}`,
+        "",
+        "| 排名 | 话题 | 热度 | 标签 |",
+        "| ---: | --- | ---: | --- |",
+        ...hotList.items.map((item, index) =>
+          `| ${index + 1} | ${escapeMarkdownTableCell(item.title)} | ${typeof item.hotScore === "number" ? item.hotScore.toLocaleString("zh-CN") : "-"} | ${escapeMarkdownTableCell(item.category ?? item.label ?? "-")} |`
+        ),
+        "",
+        "## 数据观察",
+        "",
+        ...(hotList.items[0]
+          ? [`- 榜首是“${hotList.items[0].title}”${typeof firstScore === "number" ? `，热度 ${firstScore.toLocaleString("zh-CN")}` : ""}。`]
+          : []),
+        ...(ratio ? [`- 榜首热度约为第二名的 ${ratio.toFixed(1)} 倍。`] : []),
+        ...(labelSummary ? [`- 显式标签分布：${labelSummary}。`] : []),
+        "- 本摘要仅按榜单标题、热度和显式标签归纳，不对相关事件真实性作额外判断。",
+      ]
+    : [
+        `## ${providerLabel} Hot List Top ${hotList.expectedCount}`,
+        "",
+        `Fetched at: ${hotList.fetchedAt}`,
+        `Source: ${hotList.sourceUrl}`,
+        `Completeness: ${hotList.items.length}/${hotList.expectedCount}`,
+        "",
+        "| Rank | Topic | Heat | Label |",
+        "| ---: | --- | ---: | --- |",
+        ...hotList.items.map((item, index) =>
+          `| ${index + 1} | ${escapeMarkdownTableCell(item.title)} | ${typeof item.hotScore === "number" ? item.hotScore.toLocaleString("en-US") : "-"} | ${escapeMarkdownTableCell(item.category ?? item.label ?? "-")} |`
+        ),
+        "",
+        "## Data observations",
+        "",
+        ...(hotList.items[0]
+          ? [`- The top topic is “${hotList.items[0].title}”${typeof firstScore === "number" ? ` with heat ${firstScore.toLocaleString("en-US")}` : ""}.`]
+          : []),
+        ...(ratio ? [`- Its heat is about ${ratio.toFixed(1)} times the second-ranked topic.`] : []),
+        ...(labelSummary ? [`- Explicit label counts: ${labelSummary}.`] : []),
+        "- This summary uses only the list titles, heat values, and explicit labels; it does not independently verify the underlying events.",
+      ];
+  if (hotList.warnings.length > 0) {
+    lines.push("", isZh ? "数据提示：" : "Data warnings:", ...hotList.warnings.map((warning) => `- ${warning}`));
+  }
+  return lines.join("\n");
 }
 
 type TrendProvider = TrendHotListResult["provider"];
@@ -8250,18 +9664,46 @@ function formatTrendDiagnosticUnknown(diagnostic: TrendHotListResult["diagnostic
 function isTrendHotListResult(value: unknown): value is TrendHotListResult {
   if (!isPlainRecord(value)) return false;
   return isTrendProvider(value.provider) &&
-    typeof value.fetchedAt === "string" &&
-    typeof value.sourceUrl === "string" &&
+    typeof value.fetchedAt === "string" && value.fetchedAt.trim().length > 0 &&
+    typeof value.sourceUrl === "string" && value.sourceUrl.trim().length > 0 &&
     Array.isArray(value.items) &&
-    typeof value.expectedCount === "number" &&
+    value.items.length > 0 &&
+    value.items.every(isTrendHotListItem) &&
+    typeof value.expectedCount === "number" && Number.isInteger(value.expectedCount) && value.expectedCount > 0 &&
     typeof value.complete === "boolean" &&
-    Array.isArray(value.warnings) &&
-    Array.isArray(value.diagnostics);
+    Array.isArray(value.warnings) && value.warnings.every((warning) => typeof warning === "string") &&
+    Array.isArray(value.diagnostics) && value.diagnostics.every(isTrendFetchDiagnostic);
 }
 
-function getCandidatesFromContext(contextSnapshot: Record<string, unknown>): ComputerFileCandidate[] {
-  return Object.values(contextSnapshot)
-    .flatMap((value) => isGenericStepOutput(value) && Array.isArray(value.data?.candidates)
+function isTrendHotListItem(value: unknown): value is TrendHotListResult["items"][number] {
+  if (!isPlainRecord(value)) return false;
+  return typeof value.rank === "number" && Number.isInteger(value.rank) && value.rank > 0 &&
+    typeof value.title === "string" && value.title.trim().length > 0 &&
+    (value.url === undefined || (typeof value.url === "string" && value.url.trim().length > 0)) &&
+    (value.hotScore === undefined || (typeof value.hotScore === "number" && Number.isFinite(value.hotScore))) &&
+    (value.label === undefined || typeof value.label === "string") &&
+    (value.category === undefined || typeof value.category === "string");
+}
+
+function isTrendFetchDiagnostic(value: unknown): boolean {
+  if (!isPlainRecord(value)) return false;
+  return typeof value.provider === "string" && value.provider.trim().length > 0 &&
+    typeof value.requestedLimit === "number" && Number.isInteger(value.requestedLimit) && value.requestedLimit > 0 &&
+    typeof value.startedAt === "string" && value.startedAt.trim().length > 0 &&
+    typeof value.finishedAt === "string" && value.finishedAt.trim().length > 0 &&
+    typeof value.durationMs === "number" && Number.isFinite(value.durationMs) && value.durationMs >= 0 &&
+    (value.status === "completed" || value.status === "failed");
+}
+
+function getCandidatesFromContext(
+  contextSnapshot: Record<string, unknown>,
+  artifactSnapshot?: ContextArtifactSnapshot,
+): ComputerFileCandidate[] {
+  return [
+    ...Object.values(contextSnapshot),
+    ...getValidatedArtifactPayloads(artifactSnapshot),
+  ]
+    .flatMap((value) => isCompletedGenericStepOutput(value) && Array.isArray(value.data?.candidates)
       ? value.data.candidates
       : [])
     .filter(isComputerFileCandidate);
@@ -8269,7 +9711,7 @@ function getCandidatesFromContext(contextSnapshot: Record<string, unknown>): Com
 
 function getQueryFromContext(contextSnapshot: Record<string, unknown>): string | undefined {
   for (const value of Object.values(contextSnapshot)) {
-    if (isGenericStepOutput(value) && typeof value.data?.query === "string") {
+    if (isCompletedGenericStepOutput(value) && typeof value.data?.query === "string") {
       return value.data.query;
     }
   }
@@ -8280,7 +9722,7 @@ function getScheduleDraftFromContext(
   contextSnapshot: Record<string, unknown>,
 ): Parameters<SchedulerTool["createTask"]>[0] | undefined {
   for (const value of Object.values(contextSnapshot)) {
-    if (isGenericStepOutput(value) && isScheduleDraft(value.data?.scheduledTaskDraft)) {
+    if (isCompletedGenericStepOutput(value) && isScheduleDraft(value.data?.scheduledTaskDraft)) {
       return value.data.scheduledTaskDraft;
     }
   }
@@ -8291,7 +9733,7 @@ function getScheduledTaskFromContext(
   contextSnapshot: Record<string, unknown>,
 ): Awaited<ReturnType<SchedulerTool["createTask"]>> | undefined {
   for (const value of Object.values(contextSnapshot)) {
-    if (isGenericStepOutput(value) && isScheduledTaskResult(value.data?.scheduledTask)) {
+    if (isCompletedGenericStepOutput(value) && isScheduledTaskResult(value.data?.scheduledTask)) {
       return value.data.scheduledTask;
     }
   }
@@ -8300,31 +9742,34 @@ function getScheduledTaskFromContext(
 
 function getTestScriptFromContext(contextSnapshot: Record<string, unknown>): string | undefined {
   for (const value of Object.values(contextSnapshot)) {
-    if (isGenericStepOutput(value) && typeof value.data?.testScript === "string") {
+    if (isCompletedGenericStepOutput(value) && typeof value.data?.testScript === "string") {
       return value.data.testScript;
     }
   }
   return undefined;
 }
 
-function deriveGenericWorkflowSnapshotData(contextSnapshot: Record<string, unknown>): Partial<TaskSnapshot> {
-  const sources = getSourcesFromContext(contextSnapshot);
-  const candidates = getCandidatesFromContext(contextSnapshot);
+function deriveGenericWorkflowSnapshotData(
+  contextSnapshot: Record<string, unknown>,
+  artifactSnapshot?: ContextArtifactSnapshot,
+): Partial<TaskSnapshot> {
+  const sources = getSourcesFromContext(contextSnapshot, artifactSnapshot);
+  const candidates = getCandidatesFromContext(contextSnapshot, artifactSnapshot);
   const fileScan = contextSnapshot.fileScan as { documents?: MarkdownDocumentSummary[] } | undefined;
   const scannedDocuments = Array.isArray(fileScan?.documents) ? fileScan.documents : [];
-  const trendHotList = getTrendHotListFromContext(contextSnapshot);
+  const trendHotList = getTrendHotListFromContext(contextSnapshot, artifactSnapshot);
   const researchReport = Object.values(contextSnapshot)
-    .map((value) => isGenericStepOutput(value) ? value.data?.researchReport : undefined)
+    .map((value) => isCompletedGenericStepOutput(value) ? value.data?.researchReport : undefined)
     .find((value): value is NonNullable<TaskSnapshot["researchReport"]> =>
       Boolean(value && typeof value === "object"),
     ) ?? (trendHotList ? createTrendHotListResearchReport(trendHotList) : undefined);
   const codeReviewPreview = Object.values(contextSnapshot)
-    .map((value) => isGenericStepOutput(value) ? value.data?.codeReviewPreview : undefined)
+    .map((value) => isCompletedGenericStepOutput(value) ? value.data?.codeReviewPreview : undefined)
     .find((value): value is NonNullable<TaskSnapshot["codeReviewPreview"]> =>
       Boolean(value && typeof value === "object"),
     );
   const verificationSummary = Object.values(contextSnapshot)
-    .map((value) => isGenericStepOutput(value) ? value.data?.verificationSummary : undefined)
+    .map((value) => isCompletedGenericStepOutput(value) ? value.data?.verificationSummary : undefined)
     .find((value): value is string => typeof value === "string");
 
   return {
@@ -8400,8 +9845,80 @@ function createScheduleDraft(userGoal: string): Parameters<SchedulerTool["create
   };
 }
 
-function isGenericStepOutput(value: unknown): value is GenericStepOutput {
-  return value !== null && typeof value === "object" && "status" in value && "stepId" in value;
+function isGenericStepOutput(
+  value: unknown,
+  expected?: {
+    workflowId?: string;
+    stepId?: string;
+    taskId?: string;
+    runId?: string;
+  },
+): value is GenericStepOutput {
+  if (!isStrictPlainRecord(value)) return false;
+  const allowedKeys = new Set([
+    "workflowId",
+    "stepId",
+    "status",
+    "summary",
+    "expectedOutput",
+    "taskId",
+    "runId",
+    "toolName",
+    "producer",
+    "data",
+    "contentHash",
+  ]);
+  if (Object.keys(value).some((key) => !allowedKeys.has(key))) return false;
+  if (
+    !hasNonEmptyString(value.workflowId) ||
+    !hasNonEmptyString(value.stepId) ||
+    (value.status !== "completed" && value.status !== "unsupported") ||
+    !hasNonEmptyString(value.summary) ||
+    !hasNonEmptyString(value.expectedOutput) ||
+    !hasNonEmptyString(value.taskId) ||
+    !hasNonEmptyString(value.runId) ||
+    !hasNonEmptyString(value.toolName) ||
+    !isStrictPlainRecord(value.data) ||
+    !isStrictGenericStepProducer(value.producer) ||
+    !/^[0-9a-f]{64}$/u.test(typeof value.contentHash === "string" ? value.contentHash : "")
+  ) {
+    return false;
+  }
+  if (expected?.workflowId !== undefined && value.workflowId !== expected.workflowId) return false;
+  if (expected?.stepId !== undefined && value.stepId !== expected.stepId) return false;
+  if (expected?.taskId !== undefined && value.taskId !== expected.taskId) return false;
+  if (expected?.runId !== undefined && value.runId !== expected.runId) return false;
+  if (value.producer.workflowId !== value.workflowId || value.producer.stepId !== value.stepId) return false;
+  if (value.producer.toolName !== value.toolName) return false;
+  const { contentHash, ...payload } = value;
+  return computeContentHash(payload) === contentHash;
+}
+
+function isCompletedGenericStepOutput(
+  value: unknown,
+  expected?: Parameters<typeof isGenericStepOutput>[1],
+): value is GenericStepOutput {
+  return isGenericStepOutput(value, expected) && value.status === "completed";
+}
+
+function isStrictGenericStepProducer(value: unknown): value is GenericStepProducer {
+  if (!isStrictPlainRecord(value)) return false;
+  const allowedKeys = new Set(["workflowId", "stepId", "agentKind", "toolName"]);
+  return Object.keys(value).every((key) => allowedKeys.has(key)) &&
+    hasNonEmptyString(value.workflowId) &&
+    hasNonEmptyString(value.stepId) &&
+    hasNonEmptyString(value.agentKind) &&
+    hasNonEmptyString(value.toolName);
+}
+
+function hasNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isStrictPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function isWebSource(value: unknown): value is WebSource {
@@ -8687,7 +10204,9 @@ async function runSummarizeProjectStep({
   await controller.wait();
 
   const verifierCheck = await safeVerifyWorkflow(verifierTool, contextSnapshot);
-  const verificationStatus = verifierCheck?.status === "fail" ? "failed" : evidenceStatus;
+  const verificationStatus = verifierCheck?.status === "pass" && evidenceStatus === "completed"
+    ? "completed"
+    : "failed";
   const verificationSummary = verifierCheck
     ? `${verifierCheck.status}: ${verifierCheck.summary}`
     : `${verificationStatus === "completed" ? "verified" : "failed"}: read-current-project scanned ${fileScan?.count ?? 0} Markdown document(s), inspected ${project?.scripts.length ?? 0} script(s), and checked ${passingCommands}/${commands.length} read-only command(s).`;
@@ -8759,14 +10278,19 @@ async function runCommanderSynthesisStep({
   contextSnapshot: Record<string, unknown>;
 }): Promise<CommanderSynthesizeResult | undefined> {
   const verifierCheck = contextSnapshot.verifierCheck as VerifierCheckResult | undefined;
-  const evidencePassed = verifierCheck?.status !== "fail";
+  const evidencePassed = verifierCheck?.status === "pass";
 
-  const result = await safeSynthesizeConclusion(
-    commanderTool,
-    userGoal,
-    workflowTitle,
-    contextSnapshot,
-  );
+  // Do not ask Commander to turn unverified evidence into a user-facing
+  // conclusion. A failed or missing verifier gets only the deterministic
+  // fallback below.
+  const result = evidencePassed
+    ? await safeSynthesizeConclusion(
+        commanderTool,
+        userGoal,
+        workflowTitle,
+        contextSnapshot,
+      )
+    : undefined;
 
   const conclusion = result?.message ?? createFallbackConclusion(contextSnapshot, userGoal);
   const hasConclusion = Boolean(result);
@@ -8819,18 +10343,375 @@ export async function safeSynthesizeConclusion(
   userGoal: string,
   workflowTitle: string,
   contextSnapshot: Record<string, unknown>,
+  modelImages?: string[],
 ): Promise<CommanderSynthesizeResult | undefined> {
   if (!commanderTool?.synthesize) return undefined;
   try {
-    return await commanderTool.synthesize({
+    const result = await commanderTool.synthesize({
       userGoal,
       workflowTitle,
       evidence: contextSnapshot,
+      ...(modelImages?.length ? { images: modelImages } : {}),
     });
+    const validated = validateSynthesisResult(result, contextSnapshot);
+    if (!validated) {
+      console.warn(
+        "[synthesis] rejected a model conclusion that was not evidence-bound.",
+      );
+      return undefined;
+    }
+    return validated;
   } catch (error) {
     console.error("Commander synthesis failed, falling back to rule-based conclusion:", error);
     return undefined;
   }
+}
+
+/**
+ * Validate a Commander conclusion before exposing it to a streaming surface.
+ *
+ * `safeSynthesizeConclusion` is the task-level boundary and falls back when
+ * this check fails. Desktop callers that stream model output need the same
+ * predicate before publishing any chunks, otherwise an invalid draft can be
+ * visible briefly even though the final task snapshot is corrected.
+ */
+export function validateSynthesisConclusion(
+  value: unknown,
+  evidence: Record<string, unknown>,
+): CommanderSynthesizeResult | undefined {
+  return validateSynthesisResult(value, evidence);
+}
+
+const MAX_SYNTHESIS_MESSAGE_CHARS = 12_000;
+const MAX_SYNTHESIS_EVIDENCE_CHARS = 120_000;
+const MAX_SYNTHESIS_ANCHORS = 64;
+const SYNTHESIS_URL_PATTERN = /https?:\/\/[^\s<>"'`\]}),;]+/giu;
+const SYNTHESIS_PATH_PATTERN = /(?:(?:[A-Za-z]:)?[A-Za-z0-9_.@-]+[\\/])+[A-Za-z0-9_.@-]+(?:\.[A-Za-z0-9_-]+)?/gu;
+const SYNTHESIS_FILE_PATTERN = /\b[A-Za-z0-9_.@-]+\.(?:ts|tsx|js|jsx|mjs|cjs|rs|py|json|md|toml|yaml|yml|css|html|sql|csv)\b/giu;
+const SYNTHESIS_NUMBER_PATTERN = /(?<![\p{L}\p{N}_])\d+(?:\.\d+)?%?(?![\p{L}\p{N}_])/gu;
+const SYNTHESIS_QUOTED_ANCHOR_PATTERN = /["“「『]([^"”」』\r\n]{3,80})["”」』]/gu;
+const SYNTHESIS_CLAUSE_SEPARATOR_PATTERN = /(?:[;；\r\n]+|[.!?。！？]+(?=\s|$)|\s+(?:and|but|while|whereas|yet)\s+|，\s*(?:并且|并|而且|而|但是|但|且|同时)\s*)/giu;
+const SYNTHESIS_GENERIC_MESSAGE_PATTERN = /^(?:ok(?:ay)?|done|completed?|finished|evidence (?:was )?(?:summarized|collected|verified)|here(?:'s| is) (?:the )?(?:answer|summary)|(?:the )?answer is ready|(?:grounded|source-backed|evidence-based) synthesis)[.!。！]?$/iu;
+const SYNTHESIS_UNCERTAINTY_ONLY_PATTERN = /^(?:(?:the|this)\s+(?:answer|result|conclusion|claim|status)\s+(?:is|remains)\s+)?(?:unknown|uncertain|inconclusive|insufficient evidence|no evidence|unable to verify|not enough evidence|cannot verify)[.!?。！？]?$|^(?:(?:结论|结果|答案|状态|该项|此项)(?:是|为|仍然|仍|尚)*)?(?:未知|不确定|证据不足|无法验证|无法确认)[。！？.!?]?$/iu;
+const SYNTHESIS_DIRECT_GENERIC_PATTERN = /^here(?:'s| is) the direct answer[.!。！]?$/iu;
+const SYNTHESIS_STATUS_ACK_PATTERN = /^(?:commander|javis|the assistant)\s+(?:handled|completed|finished|answered)\s+(?:the\s+)?[\p{L}\p{N}_ -]{1,80}(?:task|request|question)[.!。！]?$/iu;
+const SYNTHESIS_EMPTY_EVIDENCE_ACK_PATTERN = /^(?:ok(?:ay)?|here(?:'s| is) (?:(?:the )?(?:direct )?(?:answer|summary))|(?:the )?answer is ready)[.!。！]?$/iu;
+const SYNTHESIS_NEGATION_WORDS = new Set([
+  "not", "no", "never", "none", "neither", "without", "disabled", "failed",
+  "rejected", "denied", "unapproved", "missing", "unavailable", "cannot", "can't",
+]);
+const SYNTHESIS_UNCERTAINTY_WORDS = new Set([
+  "rumor", "rumour", "false", "alleged", "allegedly",
+  "dispute", "disputes", "disputed", "reportedly", "may", "might", "possibly", "uncertain",
+]);
+const SYNTHESIS_CJK_NEGATION_PATTERN = /(?:不|未|无|無|没|沒有|没有|并非|並非|不是|禁止|无法|無法|不能|尚未)/u;
+const SYNTHESIS_CJK_UNCERTAINTY_PATTERN = /(?:传闻|傳聞|谣言|謠言|据称|據稱|据报道|據報導|声称|聲稱|可能|或许|或許|疑似|未经证实|未經證實|争议|爭議|否认|否認|不确定|不確定|假设|假設|如果)/u;
+const SYNTHESIS_STOP_WORDS = new Set([
+  "about", "after", "also", "answer", "because", "been", "being", "below", "between", "could", "does", "from", "have", "here", "into", "just", "more", "only", "project", "result", "show", "shows", "that", "the", "their", "there", "these", "this", "through", "using", "what", "when", "where", "which", "with", "would",
+]);
+const SYNTHESIS_UNTRUSTED_EVIDENCE_KEYS = new Set([
+  "userGoal", "taskId", "runId", "workflowId", "stepId", "artifactId", "contentHash",
+  "priorMessages", "fullPriorMessages", "omittedPriorMessageCount", "commanderPlan",
+  "toolInput", "successCriteria", "imagePath", "askUserQuestion", "askUserAnswer",
+  "finalAnswer", "commanderConclusion", "observations", "reactObservations",
+]);
+const SYNTHESIS_ANCHOR_FRAMING_WORDS = new Set([
+  "contains", "include", "includes", "located", "location", "entry", "point", "file", "files", "path",
+  "scanned", "scan", "were", "was", "has", "have",
+  "at", "inside", "under", "is", "are", "the", "this", "that", "项目", "入口", "主入口", "文件",
+  "路径", "位于", "在", "是", "为", "包含", "显示", "指出",
+]);
+
+type SynthesisAnchorKind = "url" | "path" | "number" | "quoted";
+
+interface SynthesisAnchor {
+  kind: SynthesisAnchorKind;
+  value: string;
+}
+
+/** Keep model-written conclusions bounded and reject concrete facts absent from evidence. */
+function validateSynthesisResult(
+  value: unknown,
+  evidence: Record<string, unknown>,
+): CommanderSynthesizeResult | undefined {
+  if (!isPlainRecord(value) || typeof value.message !== "string") return undefined;
+  const message = redactImageDataUrlsForSummary(value.message).trim();
+  if (
+    !message ||
+    message.length > MAX_SYNTHESIS_MESSAGE_CHARS ||
+    /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/u.test(message)
+  ) {
+    return undefined;
+  }
+
+  const evidenceText = serializeSynthesisEvidence(evidence);
+  const anchors = extractSynthesisAnchors(message);
+  const unsupportedAnchors = anchors.filter(
+    (anchor) => !synthesisEvidenceContainsAnchor(evidenceText, anchor),
+  );
+  if (unsupportedAnchors.length > 0) return undefined;
+
+  const isGenericMessage = SYNTHESIS_GENERIC_MESSAGE_PATTERN.test(message) ||
+    SYNTHESIS_DIRECT_GENERIC_PATTERN.test(message) ||
+    SYNTHESIS_STATUS_ACK_PATTERN.test(message);
+  const isUncertaintyMessage = SYNTHESIS_UNCERTAINTY_ONLY_PATTERN.test(message);
+  // With no trusted evidence there is nothing from which to derive a factual
+  // claim. Only an acknowledgement or an explicit uncertainty result is safe.
+  if (!evidenceText && !SYNTHESIS_EMPTY_EVIDENCE_ACK_PATTERN.test(message) && !isUncertaintyMessage) {
+    return undefined;
+  }
+
+  // A short acknowledgement is not a factual claim. Each unanchored clause
+  // must share at least two substantive terms with the evidence; a supported
+  // anchor in one clause must not excuse an unrelated claim in another.
+  if (
+    evidenceText &&
+    !isGenericMessage &&
+    !isUncertaintyMessage &&
+    hasUnsupportedSynthesisClause(message, evidenceText)
+  ) {
+    return undefined;
+  }
+
+  return { message };
+}
+
+function serializeSynthesisEvidence(value: unknown): string {
+  try {
+    const serialized = JSON.stringify(value, (_key, nested) => {
+      if (_key && SYNTHESIS_UNTRUSTED_EVIDENCE_KEYS.has(_key)) return undefined;
+      if (typeof nested === "string") {
+        return redactImageDataUrlsForSummary(nested).slice(0, 8_000);
+      }
+      return nested;
+    });
+    if (!serialized || serialized === "{}" || serialized === "[]" || serialized === "null") {
+      return "";
+    }
+    return serialized.slice(0, MAX_SYNTHESIS_EVIDENCE_CHARS);
+  } catch {
+    return "";
+  }
+}
+
+function extractSynthesisAnchors(message: string): SynthesisAnchor[] {
+  const anchors: SynthesisAnchor[] = [];
+  const seen = new Set<string>();
+  const add = (kind: SynthesisAnchorKind, rawValue: string) => {
+    const value = normalizeSynthesisAnchor(rawValue);
+    if (!value) return;
+    const key = `${kind}:${value.toLocaleLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    anchors.push({ kind, value });
+  };
+
+  for (const match of message.matchAll(SYNTHESIS_URL_PATTERN)) {
+    add("url", match[0]);
+  }
+  for (const match of message.matchAll(SYNTHESIS_PATH_PATTERN)) {
+    add("path", match[0]);
+  }
+  for (const match of message.matchAll(SYNTHESIS_FILE_PATTERN)) {
+    add("path", match[0]);
+  }
+  for (const match of message.matchAll(SYNTHESIS_NUMBER_PATTERN)) {
+    add("number", match[0]);
+  }
+  for (const match of message.matchAll(SYNTHESIS_QUOTED_ANCHOR_PATTERN)) {
+    add("quoted", match[1]);
+  }
+  return anchors.slice(0, MAX_SYNTHESIS_ANCHORS);
+}
+
+function normalizeSynthesisAnchor(value: string): string {
+  return value
+    .trim()
+    .replace(/[.,;:!?，。；：！？、]+$/gu, "")
+    .replace(/[)\]}）】》」』]+$/gu, "")
+    .replace(/[\\/]+/gu, "/");
+}
+
+function synthesisEvidenceContainsAnchor(
+  evidenceText: string,
+  anchor: SynthesisAnchor,
+): boolean {
+  const normalizedEvidence = evidenceText
+    .toLocaleLowerCase()
+    .replace(/[\\/]+/gu, "/");
+  const normalizedAnchor = anchor.value.toLocaleLowerCase();
+  if (anchor.kind === "number") {
+    return new RegExp(
+      `(?<![\\p{L}\\p{N}_])${escapeRegExp(normalizedAnchor)}(?![\\p{L}\\p{N}_])`,
+      "u",
+    ).test(normalizedEvidence);
+  }
+  return normalizedEvidence.includes(normalizedAnchor);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function hasSynthesisEvidenceTokenOverlap(message: string, evidenceText: string): boolean {
+  const messageTokens = new Set(synthesisEvidenceTokens(message));
+  const evidenceTokens = new Set(synthesisEvidenceTokens(evidenceText));
+  let overlap = 0;
+  for (const token of messageTokens) {
+    if (evidenceTokens.has(token)) overlap += 1;
+  }
+  return overlap >= 2;
+}
+
+function hasUnsupportedSynthesisClause(message: string, evidenceText: string): boolean {
+  return message
+    .split(SYNTHESIS_CLAUSE_SEPARATOR_PATTERN)
+    .map((clause) => clause.trim())
+    .filter(Boolean)
+    .some((clause) => {
+      const anchors = extractSynthesisAnchors(clause);
+      if (SYNTHESIS_GENERIC_MESSAGE_PATTERN.test(clause) || SYNTHESIS_DIRECT_GENERIC_PATTERN.test(clause) || SYNTHESIS_STATUS_ACK_PATTERN.test(clause) || SYNTHESIS_UNCERTAINTY_ONLY_PATTERN.test(clause)) {
+        return false;
+      }
+      if (hasContradictorySynthesisPolarity(clause, evidenceText)) {
+        return true;
+      }
+      if (anchors.length === 0) return !hasSynthesisEvidenceTokenOverlap(clause, evidenceText);
+      const residual = anchors.reduce(
+        (text, anchor) => text.replace(new RegExp(escapeRegExp(anchor.value), "giu"), " "),
+        clause,
+      )
+        .replace(/\b(?:contains|include|includes|located|location|entry|point|file|files|path|scanned|scan|were|was|has|have|at|inside|under|is|are|the|this|that)\b/giu, " ")
+        .replace(/(?:项目|主入口|入口|文件|路径|位于|在|是|为|包含|显示|指出|\u8fd9\u4e2a|\u8be5)/gu, " ");
+      const residualTokens = synthesisEvidenceTokens(residual)
+        .filter((token) => !SYNTHESIS_ANCHOR_FRAMING_WORDS.has(token));
+      // An anchor may carry a supported path/URL/number, but it cannot
+      // smuggle an unrelated concrete claim in the same clause.
+      return residualTokens.length > 0 &&
+        !hasSynthesisEvidenceTokenOverlap(residualTokens.join(" "), evidenceText);
+    });
+}
+
+/**
+ * Token overlap alone cannot distinguish "enabled" from "not enabled", or a
+ * verified fact from a disputed rumor. Reject a definite clause when the
+ * matching evidence window carries the opposite polarity or uncertainty.
+ */
+function hasContradictorySynthesisPolarity(clause: string, evidenceText: string): boolean {
+  return clause
+    .split(/[,，]+/u)
+    .map((relation) => relation.trim())
+    .filter(Boolean)
+    .some((relation) =>
+      hasContradictoryEnglishSynthesisPolarity(relation, evidenceText) ||
+      hasContradictoryCjkSynthesisPolarity(relation, evidenceText)
+    );
+}
+
+function hasContradictoryEnglishSynthesisPolarity(
+  clause: string,
+  evidenceText: string,
+): boolean {
+  const clauseTokens = synthesisPolarityTokens(clause);
+  const evidenceTokens = synthesisPolarityTokens(evidenceText);
+  const substantive = clauseTokens.filter((token) =>
+    token.length >= 3 &&
+    !SYNTHESIS_STOP_WORDS.has(token) &&
+    !SYNTHESIS_NEGATION_WORDS.has(token) &&
+    !SYNTHESIS_UNCERTAINTY_WORDS.has(token),
+  );
+  if (substantive.length === 0 || evidenceTokens.length === 0) return false;
+
+  const clauseNegated = clauseTokens.some((token) => SYNTHESIS_NEGATION_WORDS.has(token));
+  const clauseUncertain = clauseTokens.some((token) => SYNTHESIS_UNCERTAINTY_WORDS.has(token));
+  const requiredOverlap = Math.min(2, substantive.length);
+  let foundCandidate = false;
+  for (let start = 0; start < evidenceTokens.length; start += 1) {
+    if (evidenceTokens[start] !== substantive[0]) continue;
+    const positions = [start];
+    let cursor = start;
+    for (const token of substantive.slice(1, 8)) {
+      const next = evidenceTokens.indexOf(token, cursor + 1);
+      if (next < 0 || next - start > 12) continue;
+      positions.push(next);
+      cursor = next;
+    }
+    if (positions.length < requiredOverlap) continue;
+    foundCandidate = true;
+    const polarityWindow = evidenceTokens.slice(
+      positions[0],
+      positions[positions.length - 1] + 2,
+    );
+    const uncertaintyWindow = evidenceTokens.slice(
+      Math.max(0, positions[0] - 5),
+      positions[positions.length - 1] + 3,
+    );
+    const evidenceNegated = polarityWindow.some((token) => SYNTHESIS_NEGATION_WORDS.has(token));
+    const evidenceUncertain = uncertaintyWindow.some((token) => SYNTHESIS_UNCERTAINTY_WORDS.has(token));
+    if (
+      evidenceNegated === clauseNegated &&
+      (!evidenceUncertain || clauseUncertain)
+    ) {
+      return false;
+    }
+  }
+  return foundCandidate;
+}
+
+function hasContradictoryCjkSynthesisPolarity(
+  clause: string,
+  evidenceText: string,
+): boolean {
+  const clauseTokens = synthesisCjkTokens(clause);
+  if (clauseTokens.length === 0) return false;
+  const clauseNegated = SYNTHESIS_CJK_NEGATION_PATTERN.test(clause);
+  const clauseUncertain = SYNTHESIS_CJK_UNCERTAINTY_PATTERN.test(clause);
+  const requiredOverlap = Math.min(2, new Set(clauseTokens).size);
+  let foundCandidate = false;
+  const evidenceSegments = evidenceText
+    .split(/[,，。！？；;\n"{}\[\]:]+/u)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  for (const segment of evidenceSegments) {
+    const evidenceTokens = new Set(synthesisCjkTokens(segment));
+    const overlap = new Set(clauseTokens.filter((token) => evidenceTokens.has(token))).size;
+    if (overlap < requiredOverlap) continue;
+    foundCandidate = true;
+    const evidenceNegated = SYNTHESIS_CJK_NEGATION_PATTERN.test(segment);
+    const evidenceUncertain = SYNTHESIS_CJK_UNCERTAINTY_PATTERN.test(segment);
+    if (
+      evidenceNegated === clauseNegated &&
+      (!evidenceUncertain || clauseUncertain)
+    ) {
+      return false;
+    }
+  }
+  return foundCandidate;
+}
+
+function synthesisPolarityTokens(value: string): string[] {
+  return value.toLocaleLowerCase().match(/[a-z][a-z0-9_'-]*|\d+/gu) ?? [];
+}
+
+function synthesisCjkTokens(value: string): string[] {
+  return synthesisEvidenceTokens(value).filter((token) => /\p{Script=Han}/u.test(token));
+}
+
+function synthesisEvidenceTokens(value: string): string[] {
+  const normalized = value.toLocaleLowerCase();
+  const wordTokens = (normalized
+    .replace(/\p{Script=Han}+/gu, " ")
+    .match(/[\p{L}\p{N}]{3,}/gu) ?? [])
+    .filter((token) => !SYNTHESIS_STOP_WORDS.has(token));
+  const hanTokens = (normalized.match(/\p{Script=Han}{2,}/gu) ?? [])
+    .flatMap((sequence) => {
+      const characters = Array.from(sequence);
+      if (characters.length === 2) return [sequence];
+      return characters.slice(0, -2).map((_, index) =>
+        characters.slice(index, index + 3).join("")
+      );
+    });
+  return [...wordTokens, ...hanTokens];
 }
 
 function createFallbackConclusion(
@@ -8890,14 +10771,18 @@ async function safeVerifyWorkflow(
   contextSnapshot: Record<string, unknown>,
 ): Promise<VerifierCheckResult | undefined> {
   if (!verifierTool) {
-    return undefined;
+    return {
+      status: "fail",
+      summary: "Verifier tool is unavailable.",
+      detail: "The workflow cannot be marked complete without an independent verifier result.",
+    };
   }
   const fileScan = contextSnapshot.fileScan as { count?: number } | undefined;
   const shellCommands = Array.isArray(contextSnapshot.shellCommands)
     ? contextSnapshot.shellCommands as ShellCommandOutput[]
     : [];
   try {
-    return await verifierTool.check({
+    const result = await verifierTool.check({
       stepId: "summarize-project",
       successCriteria: "Human-readable summary with evidence and unknowns",
       evidence: [
@@ -8933,8 +10818,241 @@ async function safeVerifyWorkflow(
         },
       ],
     });
-  } catch {
-    return undefined;
+    return isVerifierCheckResult(result) ? result : invalidVerifierCheckResult();
+  } catch (error) {
+    return {
+      status: "fail",
+      summary: "Verifier execution failed.",
+      detail: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 
+interface SourceBackedResearchEvidence {
+  report: ResearchReport;
+  sources: WebSource[];
+}
+
+function getResearchReportFromContext(
+  contextSnapshot: Record<string, unknown>,
+): ResearchReport | undefined {
+  for (const value of Object.values(contextSnapshot)) {
+    if (!isCompletedGenericStepOutput(value)) continue;
+    const report = value.data.researchReport;
+    if (isResearchReport(report)) return report;
+  }
+  return undefined;
+}
+
+function getTrendHotListCandidateFromContext(
+  contextSnapshot: Record<string, unknown>,
+): unknown {
+  for (const value of Object.values(contextSnapshot)) {
+    if (!isCompletedGenericStepOutput(value)) continue;
+    if (value.data.trendHotList !== undefined) return value.data.trendHotList;
+  }
+  return undefined;
+}
+
+function getLatestSourceCollectionFromContext(
+  contextSnapshot: Record<string, unknown>,
+): WebSource[] | undefined {
+  const values = Object.values(contextSnapshot);
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    const value = values[index];
+    if (!isCompletedGenericStepOutput(value) || !Array.isArray(value.data.sources)) continue;
+    const sources = value.data.sources.map((source) =>
+      isWebSource(source)
+        ? source
+        : { url: "", excerpt: "", fetchedAt: "" },
+    );
+    return sources;
+  }
+  return undefined;
+}
+
+function getLatestFailedFetchCountFromContext(
+  contextSnapshot: Record<string, unknown>,
+): number {
+  const values = Object.values(contextSnapshot);
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    const value = values[index];
+    if (!isCompletedGenericStepOutput(value)) continue;
+    const failedFetchCount = value.data.failedFetchCount;
+    if (typeof failedFetchCount === "number" && Number.isInteger(failedFetchCount) && failedFetchCount > 0) {
+      return failedFetchCount;
+    }
+    if (Array.isArray(value.data.sources)) return 0;
+  }
+  return 0;
+}
+
+function getSourceBackedResearchEvidence(
+  contextSnapshot: Record<string, unknown>,
+): SourceBackedResearchEvidence | undefined {
+  for (const value of Object.values(contextSnapshot)) {
+    if (!isCompletedGenericStepOutput(value)) continue;
+    const report = value.data.researchReport;
+    if (!isSourceBackedResearchReport(report)) continue;
+    const sources = Array.isArray(value.data.sources)
+      ? value.data.sources.filter(isWebSource)
+      : [];
+    return { report, sources };
+  }
+  return undefined;
+}
+
+function isResearchReport(value: unknown): value is ResearchReport {
+  return isPlainRecord(value) &&
+    typeof value.title === "string" &&
+    typeof value.summary === "string" &&
+    Array.isArray(value.rows) &&
+    Array.isArray(value.unknowns);
+}
+
+function isSourceBackedResearchReport(value: unknown): value is ResearchReport {
+  return isPlainRecord(value) &&
+    value.title === "Source-backed research report" &&
+    typeof value.summary === "string" &&
+    Array.isArray(value.rows) &&
+    Array.isArray(value.unknowns);
+}
+
+function isVerifierCheckResult(value: unknown): value is VerifierCheckResult {
+  return isPlainRecord(value) &&
+    (value.status === "pass" || value.status === "warn" || value.status === "fail") &&
+    typeof value.summary === "string" &&
+    value.summary.trim().length > 0 &&
+    typeof value.detail === "string" &&
+    value.detail.trim().length > 0;
+}
+
+function aggregateVerifierChecks(
+  verifierSteps: readonly CommanderDagStep[],
+  contextSnapshot: Record<string, unknown>,
+): VerifierCheckResult | undefined {
+  if (verifierSteps.length === 0) return undefined;
+  const rawMap = contextSnapshot.verifierChecks;
+  const checks = new Map<string, VerifierCheckResult>();
+  if (isPlainRecord(rawMap)) {
+    for (const [stepId, value] of Object.entries(rawMap)) {
+      if (isVerifierCheckResult(value)) checks.set(stepId, value);
+    }
+  }
+  const legacy = isVerifierCheckResult(contextSnapshot.verifierCheck)
+    ? contextSnapshot.verifierCheck
+    : undefined;
+  if (checks.size === 0 && verifierSteps.length === 1 && legacy) {
+    checks.set(verifierSteps[0].id, legacy);
+  }
+
+  const missing = verifierSteps
+    .filter((step) => !checks.has(step.id))
+    .map((step) => step.id);
+  if (missing.length > 0) {
+    return {
+      status: "fail",
+      summary: "One or more required verifier steps did not produce a result.",
+      detail: `Missing verifier result(s): ${missing.join(", ")}.`,
+    };
+  }
+
+  const results = verifierSteps.map((step) => checks.get(step.id)!);
+  const failed = results.find((result) => result.status === "fail");
+  if (failed) return failed;
+  const warned = results.find((result) => result.status === "warn");
+  if (warned) return warned;
+  return {
+    status: "pass",
+    summary: `All ${results.length} required verifier step(s) passed.`,
+    detail: results.map((result) => result.detail).join(" "),
+  };
+}
+
+function isCommanderEvidenceProducingStep(step: CommanderDagStep): boolean {
+  const isVerifier = step.assignedAgentKind === "verifier" ||
+    step.toolName === "verifier.check" ||
+    step.capability === "evidence_check" ||
+    step.requiredCapabilities.includes("evidence_check");
+  const isSynthesis = step.toolName === "commander.synthesize" ||
+    step.capability === "synthesis" ||
+    step.requiredCapabilities.includes("synthesis") ||
+    step.executionMode === "direct_response";
+  return !isVerifier && !isSynthesis &&
+    step.toolName !== "commander.askUser" && step.capability !== "clarification";
+}
+
+function runImplicitCommanderVerifier(
+  plan: CompiledCommanderPlan,
+  context: SharedTaskContext,
+  taskId: string,
+  runId: string,
+  abandonedStepIds: ReadonlySet<string> = new Set(),
+): VerifierCheckResult {
+  const evidenceSteps = plan.steps.filter((step) =>
+    isCommanderEvidenceProducingStep(step) && !abandonedStepIds.has(step.id),
+  );
+  const failures: string[] = [];
+  for (const step of evidenceSteps) {
+    const key = step.outputContextKey ?? `step:${step.id}`;
+    const value = context.get(key);
+    if (value === undefined || value === null || (typeof value === "string" && value.trim().length === 0)) {
+      failures.push(`${step.id}:missing_output`);
+      continue;
+    }
+    const envelope = context.getEnvelope(key);
+    if (!envelope || !validateArtifactEnvelope(envelope, {
+      taskId,
+      runId,
+      producer: {
+        workflowId: COMMANDER_DAG_WORKFLOW_ID,
+        stepId: step.id,
+        agentKind: step.assignedAgentKind,
+        ...(step.toolName ? { toolName: step.toolName } : {}),
+      },
+    }) || !hasNonEmptyString(envelope.producer.toolName)) {
+      failures.push(`${step.id}:invalid_artifact_provenance`);
+      continue;
+    }
+    if (computeContentHash(value) !== envelope.contentHash) {
+      failures.push(`${step.id}:context_payload_hash_mismatch`);
+    }
+  }
+  if (failures.length > 0) {
+    return {
+      status: "fail",
+      summary: "Implicit provenance verifier rejected one or more DAG outputs.",
+      detail: `Failures: ${failures.join(", ")}.`,
+    };
+  }
+  return {
+    status: "pass",
+    summary: `Implicit provenance verifier checked ${evidenceSteps.length} DAG output(s).`,
+    detail: "All outputs carry the current task/run/workflow provenance, producer agent/tool, artifact identity, timestamp, and content hash.",
+  };
+}
+
+function invalidVerifierCheckResult(): VerifierCheckResult {
+  return {
+    status: "fail",
+    summary: "Verifier returned an invalid result.",
+    detail: "The verifier result did not match the required status, summary, and detail schema.",
+  };
+}
+
+function combineVerifierChecks(
+  explicit: VerifierCheckResult | undefined,
+  provenance: VerifierCheckResult | undefined,
+): VerifierCheckResult | undefined {
+  if (!explicit) return provenance;
+  if (!provenance) return explicit;
+  if (explicit.status === "fail") return explicit;
+  if (provenance.status === "fail") return provenance;
+  if (explicit.status === "warn") return explicit;
+  if (provenance.status === "warn") return provenance;
+  return {
+    status: "pass",
+    summary: "Explicit and local provenance verifier checks passed.",
+    detail: `${explicit.detail} ${provenance.detail}`.trim(),
+  };
+}

@@ -254,14 +254,14 @@ export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnosti
     const isOwnedByAgent = tool.ownerAgentKinds.includes(step.assignedAgentKind);
     const isExplicitlyAllowed = agentAllowed.has(step.toolName);
 
-    if (!isOwnedByAgent && !isExplicitlyAllowed) {
+    if (!isOwnedByAgent || !isExplicitlyAllowed) {
       diagnostics.push({
         code: "TOOL_NOT_ALLOWED",
         severity: "error",
         stepId: step.id,
         path: `steps[${i}].toolName`,
-        message: `Tool "${step.toolName}" is not allowed for agent "${step.assignedAgentKind}".`,
-        suggestedFix: `Assign the step to an agent that owns this tool, or use a different tool.`,
+        message: `Tool "${step.toolName}" is not both owned and explicitly allowed for agent "${step.assignedAgentKind}".`,
+        suggestedFix: `Assign the step to an owning agent whose effective allowlist includes this tool, or use a different tool.`,
       });
     }
   }
@@ -316,6 +316,34 @@ export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnosti
     });
   }
 
+  // --- Rule: Capability-only steps with required inputs --------------------
+  // A capability tag may map to more than one concrete tool. If any
+  // allowlisted candidate needs fields, implicit selection would make the
+  // input contract ambiguous and could defer a missing field until dispatch.
+  // Require the planner to name the concrete tool and provide its input.
+  for (let i = 0; i < plan.steps.length; i++) {
+    const step = plan.steps[i];
+    if (step.toolName) continue;
+    const capabilities = stepCapabilities(step).filter(isValidCapabilityTag);
+    if (capabilities.length === 0 || isComputerUseApprovalLoopStep(step, capabilities)) continue;
+    const agentAllowed = agentToolMap.get(step.assignedAgentKind) ?? new Set<string>();
+    const candidate = availableTools.find((tool) =>
+      agentAllowed.has(tool.name) &&
+      tool.ownerAgentKinds.includes(step.assignedAgentKind) &&
+      capabilities.some((capability) => tool.capabilityTags.includes(capability)) &&
+      (tool.requiredInputs?.length ?? 0) > 0,
+    );
+    if (!candidate) continue;
+    diagnostics.push({
+      code: "MISSING_TOOL_INPUT",
+      severity: "error",
+      stepId: step.id,
+      path: `steps[${i}].toolName`,
+      message: `Capability-only step resolves to tool "${candidate.name}" which requires explicit toolName and toolInput fields.`,
+      suggestedFix: `Set toolName to "${candidate.name}" and provide every required toolInput field declared by its descriptor.`,
+    });
+  }
+
   // --- Rule: Missing Required Tool Input ------------------------------------
   // Read the requirement set from the ToolDescriptor so the rule stays in
   // sync with whatever the planner prompt and runtime dispatch guard use.
@@ -340,6 +368,20 @@ export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnosti
       // single-level `toolInput` map the first segment is the field
       // name. Empty path means the whole toolInput object was wrong.
       const fieldName = typeof issue.path[0] === "string" ? issue.path[0] : reqNameForIssue(issue);
+      // file.writeText derives content from a declared upstream artifact;
+      // keep targetPath static while letting the runtime validate evidence.
+      if (
+        fieldName === "content" &&
+        step.toolName === "file.writeText" &&
+        consumesProducerArtifact(
+          step,
+          plan.steps,
+          existingSteps ?? [],
+          new Set(preloadedContextKeys),
+        )
+      ) {
+        continue;
+      }
       diagnostics.push({
         code: "MISSING_TOOL_INPUT",
         severity: "error",
@@ -370,6 +412,25 @@ export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnosti
   // --- Rule: Execution Mode Constraints -------------------------------------
   for (let i = 0; i < plan.steps.length; i++) {
     const step = plan.steps[i];
+    const selectsSynthesis = step.toolName === "commander.synthesize" ||
+      (!step.toolName && (
+        step.capability === "synthesis" ||
+        step.requiredCapabilities.includes("synthesis")
+      ));
+    if (
+      selectsSynthesis &&
+      step.executionMode !== undefined &&
+      step.executionMode !== "direct_response"
+    ) {
+      diagnostics.push({
+        code: "INVALID_EXECUTION_MODE",
+        severity: "error",
+        stepId: step.id,
+        path: `steps[${i}].executionMode`,
+        message: `Commander synthesis must use executionMode "direct_response" so its conclusion passes the evidence guard.`,
+        suggestedFix: `Set executionMode to "direct_response" for commander.synthesize/synthesis steps.`,
+      });
+    }
     if (step.executionMode === "direct_tool_call") {
       const hasCap = step.capability || step.requiredCapabilities.length > 0;
       if (!step.toolName && !hasCap) {
@@ -518,7 +579,99 @@ export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnosti
     }
   }
 
+  // --- Rule: Evidence-backed synthesis requires an independent verifier -----
+  // Internal worker handoffs are not user-visible claims by themselves.  Gate
+  // only the point where a user-facing synthesis step actually consumes a
+  // non-preloaded producer artifact.  This keeps small/legacy direct-response
+  // plans and tool-only DAGs valid while ensuring evidence-backed answers are
+  // independently checked. Recovery plans are compiled against an existing
+  // DAG and may rely on its verifier.
+  if (!existingSteps || existingSteps.length === 0) {
+    const verifierSteps = plan.steps.filter(isVerifierStep);
+    const verifierToolAvailable = availableTools.some((tool) =>
+      tool.name === "verifier.check" || tool.capabilityTags.includes("evidence_check"),
+    );
+    const preloadedSet = new Set(preloadedContextKeys);
+    const explicitSynthesisStep = plan.steps.find((step) =>
+      isUserVisibleSynthesisStep(step) &&
+      consumesProducerArtifact(step, plan.steps, existingSteps ?? [], preloadedSet),
+    );
+    const synthesisEvidenceStep = explicitSynthesisStep;
+    if (synthesisEvidenceStep && verifierSteps.length === 0 && verifierToolAvailable) {
+      diagnostics.push({
+        code: "MISSING_VERIFIER",
+        severity: "error",
+        stepId: synthesisEvidenceStep.id,
+        path: `steps[${plan.steps.indexOf(synthesisEvidenceStep)}]`,
+        message: "Evidence-backed user-visible synthesis requires an independent verifier step.",
+        suggestedFix: "Add a verifier agent step using verifier.check/evidence_check and connect it to a producer artifact before synthesis.",
+      });
+    }
+  }
+
+  // Every verifier must consume at least one artifact produced by another
+  // step.  Preloaded values such as userGoal/taskId are task metadata, not
+  // independent evidence and cannot satisfy this gate.
+  const verifierSteps = plan.steps.filter(isVerifierStep);
+  for (const verifier of verifierSteps) {
+    const verifierIndex = plan.steps.indexOf(verifier);
+    const producerKeys = (verifier.inputContextKeys ?? [])
+      .filter((key) => !preloadedSet.has(key))
+      .filter((key) => {
+        const producer = plan.steps.find(
+          (candidate) => candidate.id !== verifier.id &&
+            (candidate.outputContextKey === key || `step:${candidate.id}` === key),
+        ) ?? (existingSteps ?? []).find(
+          (candidate) => candidate.id !== verifier.id &&
+            (candidate.outputContextKey === key || `step:${candidate.id}` === key),
+        );
+        return producer !== undefined;
+      });
+    if (producerKeys.length === 0) {
+      diagnostics.push({
+        code: "VERIFIER_MISSING_EVIDENCE",
+        severity: "error",
+        stepId: verifier.id,
+        path: `steps[${verifierIndex}].inputContextKeys`,
+        message: `Verifier step "${verifier.id}" must consume at least one non-preloaded producer artifact.`,
+        suggestedFix: "Add an upstream producer outputContextKey and list that key in the verifier inputContextKeys (with a dependsOn edge).",
+      });
+    }
+  }
+
   return diagnostics;
+}
+
+function isVerifierStep(step: CommanderDagStep): boolean {
+  return step.assignedAgentKind === "verifier" ||
+    step.toolName === "verifier.check" ||
+    step.capability === "evidence_check" ||
+    step.requiredCapabilities.includes("evidence_check");
+}
+
+function isUserVisibleSynthesisStep(step: CommanderDagStep): boolean {
+  return step.toolName === "commander.synthesize" ||
+    step.capability === "synthesis" ||
+    step.requiredCapabilities.includes("synthesis") ||
+    step.executionMode === "direct_response";
+}
+
+function consumesProducerArtifact(
+  step: CommanderDagStep,
+  planSteps: readonly CommanderDagStep[],
+  existingSteps: readonly NonNullable<PlanValidationInput["existingSteps"]>[number][],
+  preloadedContextKeys: ReadonlySet<string>,
+): boolean {
+  return (step.inputContextKeys ?? []).some((key) => {
+    if (preloadedContextKeys.has(key)) return false;
+    return planSteps.some((candidate) =>
+      candidate.id !== step.id &&
+      (candidate.outputContextKey === key || `step:${candidate.id}` === key),
+    ) || existingSteps.some((candidate) =>
+      candidate.id !== step.id &&
+      (candidate.outputContextKey === key || `step:${candidate.id}` === key),
+    );
+  });
 }
 
 // --- Cycle Detection ---------------------------------------------------------

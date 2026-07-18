@@ -44,6 +44,50 @@ describe("taskEventToLogEntry", () => {
     expect(log.agentId).toBe("agent-shell");
   });
 
+  it("links permission logs to explicit step and tool owners without changing detail", () => {
+    const requested = taskEventToLogEntry({
+      kind: "permission.requested",
+      taskId: "task-1",
+      stepId: "write-report",
+      toolName: "file.writeText",
+      previewHash: "dryrun-fnv1a-12345678",
+      request: {
+        id: "permission-1",
+        level: "confirmed_write",
+        title: "Approve",
+        reason: "Needs confirmation.",
+        dryRun: {
+          operation: "file.writeText",
+          affectedPaths: [],
+          riskSummary: "Writes a report.",
+          reversible: true,
+        },
+        status: "pending",
+        createdAt: "2026-06-07T00:00:00.000Z",
+      },
+    });
+    const resolved = taskEventToLogEntry({
+      kind: "permission.resolved",
+      taskId: "task-1",
+      stepId: "write-report",
+      toolName: "file.writeText",
+      previewHash: "dryrun-fnv1a-12345678",
+      requestId: "permission-1",
+      decision: "approved",
+    });
+
+    expect(requested).toMatchObject({
+      stepId: "write-report",
+      agentId: "agent-file",
+    });
+    expect(requested.devDetail).toBe("Needs confirmation.");
+    expect(resolved).toMatchObject({
+      stepId: "write-report",
+      agentId: "agent-file",
+    });
+    expect(resolved.devDetail).toBe("Permission permission-1 was approved.");
+  });
+
   it("keeps raw errors in developer detail while shortening user text", () => {
     const log = taskEventToLogEntry({
       kind: "task.failed",
@@ -105,6 +149,9 @@ describe("taskEventToLogEntry", () => {
       {
         kind: "permission.requested",
         taskId: "task-1",
+        stepId: "step-1",
+        toolName: "file.writeText",
+        previewHash: "dryrun-fnv1a-12345678",
         request: {
           id: "permission-1",
           level: "confirmed_write",
@@ -120,7 +167,15 @@ describe("taskEventToLogEntry", () => {
           createdAt: "2026-06-07T00:00:00.000Z",
         },
       },
-      { kind: "permission.resolved", taskId: "task-1", requestId: "permission-1", decision: "approved" },
+      {
+        kind: "permission.resolved",
+        taskId: "task-1",
+        stepId: "step-1",
+        toolName: "file.writeText",
+        previewHash: "dryrun-fnv1a-12345678",
+        requestId: "permission-1",
+        decision: "approved",
+      },
       {
         kind: "ask_user.requested",
         taskId: "task-1",

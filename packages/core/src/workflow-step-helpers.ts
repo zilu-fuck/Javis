@@ -11,7 +11,7 @@ import type {
   ShellCommandRequest,
   ShellTool,
 } from "@javis/tools";
-import { demoAgents } from "./agents";
+import { createDefaultAgentRegistry } from "./agents";
 import type { AgentKind, TaskStep } from "./index";
 import type { WorkspaceRuntime } from "./workspace-runtime";
 import { getWorkbenchWorkflow } from "./workflows";
@@ -23,7 +23,7 @@ export function workflowStepToTaskStep(
     id: step.id,
     title: step.title,
     assignedAgentKind: step.agentKind,
-    agentId: `agent-${step.agentKind}`,
+    agentId: createDefaultAgentRegistry().findByKind(step.agentKind)?.agent.id ?? `agent-${step.agentKind}`,
     status: "pending",
     successCriteria: step.output,
   };
@@ -166,7 +166,7 @@ function normalizeWorkspaceRelativePath(path: string, workspaceRoot: string): st
 }
 
 export function formatAgentDisplayName(agentKind: AgentKind): string {
-  return demoAgents.find((agent) => agent.kind === agentKind)?.displayName ?? `${agentKind} Agent`;
+  return createDefaultAgentRegistry().findByKind(agentKind)?.agent.displayName ?? `${agentKind} Agent`;
 }
 
 export async function safeInspectRepository(codeTool: CodeTool) {

@@ -24,6 +24,8 @@ export type PlanDiagnosticCode =
   | "MISSING_CONTEXT_PRODUCER"
   | "CONTEXT_PRODUCER_NOT_DEPENDED_ON"
   | "DUPLICATE_OUTPUT_CONTEXT_KEY"
+  | "MISSING_VERIFIER"
+  | "VERIFIER_MISSING_EVIDENCE"
   | "INVALID_EXECUTION_MODE"
   | "INVALID_PLAN_SHAPE";
 
@@ -112,9 +114,11 @@ export function trustAsCompiled(plan: CommanderDagPlan): CompiledCommanderPlan {
 export function appendStepsToCompiledPlan(
   base: CompiledCommanderPlan,
   additional: ReadonlyArray<CompiledCommanderPlan["steps"][number]>,
+  executionPolicy: CompiledCommanderPlan["executionPolicy"] = base.executionPolicy,
 ): CompiledCommanderPlan {
   return {
     ...base,
+    executionPolicy,
     steps: [...base.steps, ...additional],
   };
 }

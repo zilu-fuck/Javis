@@ -42,6 +42,8 @@ export interface RepairAttemptRecord {
 export interface AttemptPlanRepairInput {
   commanderPlan: (request: CommanderPlanRequest) => Promise<CommanderPlanResult>;
   originalUserGoal: string;
+  /** Transport-only image data for vision-capable repair calls. */
+  modelImages?: string[];
   invalidPlan: CommanderDagPlan;
   diagnostics: PlanDiagnostic[];
   availableAgents: Array<{
@@ -136,6 +138,7 @@ function normalizeResultToDagPlan(result: CommanderPlanResult): CommanderDagPlan
   const candidate: CommanderDagPlan = {
     title: parsed.title,
     reasoning: parsed.reasoning,
+    executionPolicy: parsed.executionPolicy,
     steps: normalizedSteps,
   };
   // Stage 3: final structural sanity check. The validator runs a
@@ -227,6 +230,7 @@ export async function attemptPlanRepair(
 
     const request: CommanderPlanRequest = {
       userGoal: input.originalUserGoal,
+      ...(input.modelImages?.length ? { images: input.modelImages } : {}),
       availableAgents: input.availableAgents.map((a) => ({
         kind: a.kind,
         allowedToolNames: [...a.allowedToolNames],

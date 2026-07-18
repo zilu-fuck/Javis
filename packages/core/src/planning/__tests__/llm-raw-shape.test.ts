@@ -132,6 +132,16 @@ describe("LLM-raw ↔ strict shape contract", () => {
     const llmRaw: CommanderPlanResult = {
       title: "Do the thing",
       reasoning: "I will do the thing.",
+      executionPolicy: {
+        maxConcurrency: 3,
+        stepTimeoutMs: 45_000,
+        maxRetries: 2,
+        retryBackoffMs: 500,
+        rateLimitPerSecond: 4,
+        maxReadyQueueSize: 6,
+        circuitBreakerFailureThreshold: 2,
+        degradationStrategy: "replan",
+      },
       steps: [
         {
           id: "step-1",
@@ -184,6 +194,7 @@ describe("LLM-raw ↔ strict shape contract", () => {
     const normalized = {
       title: llmRaw.title,
       reasoning: llmRaw.reasoning,
+      executionPolicy: llmRaw.executionPolicy,
       steps: llmRaw.steps.map((step) => ({
         ...step,
         requiredCapabilities: step.requiredCapabilities ?? [],

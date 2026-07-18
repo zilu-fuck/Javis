@@ -36,7 +36,7 @@ describe("prompt quality gates", () => {
     });
 
     expect(prompt.length).toBeLessThan(4_500);
-    expect(prompt).toContain("{title:string, reasoning:string, steps:Step[1..12]}");
+    expect(prompt).toContain("{title:string, reasoning:string, executionPolicy?:ExecutionPolicy, steps:Step[1..12]}");
     expect(prompt).not.toContain('"properties"');
     expect(prompt).not.toContain("Available agents / 可用 Agent");
     expect(prompt).not.toContain("Rules / 规则");

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createArtifactEnvelope } from "./artifact-envelope";
+import { computeContentHash, createArtifactEnvelope, sanitizeArtifactForPersistence } from "./artifact-envelope";
 import type { RuntimeEventEnvelope } from "./runtime-event-envelope";
 import type { WorkflowCheckpoint } from "./workflow-checkpoint";
 import {
@@ -8,6 +8,29 @@ import {
 } from "./workflow-checkpoint-reconciliation";
 
 describe("reconcileCheckpointWithEventLog", () => {
+  it("blocks checkpoints whose step states are unknown, overlapping, or incomplete", () => {
+    const unknown = reconcileCheckpointWithEventLog(createCheckpoint({
+      eventSequence: 0,
+      pendingStepIds: ["scan", "approve", "unknown"],
+    }), []);
+    const overlapping = reconcileCheckpointWithEventLog(createCheckpoint({
+      eventSequence: 0,
+      completedStepIds: ["scan"],
+      pendingStepIds: ["scan", "approve"],
+    }), []);
+    const incomplete = reconcileCheckpointWithEventLog(createCheckpoint({
+      eventSequence: 0,
+      pendingStepIds: ["scan"],
+    }), []);
+
+    expect(unknown.status).toBe("blocked");
+    expect(unknown.reason).toContain("unknown step");
+    expect(overlapping.status).toBe("blocked");
+    expect(overlapping.reason).toContain("both completed and pending");
+    expect(incomplete.status).toBe("blocked");
+    expect(incomplete.reason).toContain("omits state");
+  });
+
   it("returns resumable when checkpoint state is covered by matching events", () => {
     const checkpoint = createCheckpoint({
       completedStepIds: ["scan"],
@@ -54,6 +77,23 @@ describe("reconcileCheckpointWithEventLog", () => {
     expect(result.reason).toContain("Event log is empty");
   });
 
+  it("blocks an unreconciled running confirmed-write step even at sequence zero", () => {
+    const result = reconcileCheckpointWithEventLog(
+      createCheckpoint({
+        eventSequence: 0,
+        completedStepIds: ["scan"],
+        pendingStepIds: [],
+        runningStepIds: ["approve"],
+      }),
+      [],
+    );
+
+    expect(result.status).toBe("blocked");
+    expect(result.reason).toContain("confirmed-write");
+    expect(result.reason).toContain("without an event log");
+    expect(result.retryStepIds).toEqual([]);
+  });
+
   it("blocks when replayed events are older than the checkpoint sequence", () => {
     const result = reconcileCheckpointWithEventLog(
       createCheckpoint({ eventSequence: 5 }),
@@ -79,9 +119,23 @@ describe("reconcileCheckpointWithEventLog", () => {
     expect(result.reason).toContain("different task or run");
   });
 
+  it("blocks when an event belongs to a different workflow in the same run", () => {
+    const result = reconcileCheckpointWithEventLog(
+      createCheckpoint({ eventSequence: 1 }),
+      [{
+        ...event(1, { kind: "step.completed", stepId: "scan" }),
+        workflowId: "other-workflow",
+      }],
+    );
+
+    expect(result.status).toBe("blocked");
+    expect(result.reason).toContain("different task or run");
+  });
+
   it("requires rebuild when checkpoint step state conflicts with event log", () => {
     const checkpoint = createCheckpoint({
       completedStepIds: ["scan"],
+      pendingStepIds: ["approve"],
       eventSequence: 2,
     });
     const result = reconcileCheckpointWithEventLog(checkpoint, [
@@ -97,6 +151,7 @@ describe("reconcileCheckpointWithEventLog", () => {
   it("requires rebuild when a checkpoint-completed step has no completion event", () => {
     const checkpoint = createCheckpoint({
       completedStepIds: ["scan"],
+      pendingStepIds: ["approve"],
       eventSequence: 2,
     });
     const result = reconcileCheckpointWithEventLog(checkpoint, [
@@ -112,6 +167,7 @@ describe("reconcileCheckpointWithEventLog", () => {
   it("builds resume state from event log when reconciliation requires rebuild", () => {
     const checkpoint = createCheckpoint({
       completedStepIds: ["scan"],
+      pendingStepIds: ["approve"],
       eventSequence: 2,
     });
     const reconciliation = reconcileCheckpointWithEventLog(checkpoint, [
@@ -149,6 +205,69 @@ describe("reconcileCheckpointWithEventLog", () => {
     expect(result.reason).toContain("confirmed-write");
     expect(result.retryStepIds).toEqual([]);
     expect(resume.status).toBe("blocked");
+  });
+
+  it("blocks when the event log shows an unfinished confirmed-write step even if the checkpoint omitted running state", () => {
+    const result = reconcileCheckpointWithEventLog(
+      createCheckpoint({
+        eventSequence: 2,
+        completedStepIds: ["scan"],
+        runningStepIds: [],
+        pendingStepIds: ["approve"],
+      }),
+      [
+        event(1, { kind: "task.created", taskId: "task-1" }),
+        event(2, { kind: "step.started", stepId: "approve" }),
+      ],
+    );
+
+    expect(result.status).toBe("blocked");
+    expect(result.reason).toContain("confirmed-write");
+  });
+
+  it("blocks when an event sequence is missing", () => {
+    const result = reconcileCheckpointWithEventLog(
+      createCheckpoint({ eventSequence: 3 }),
+      [
+        event(1, { kind: "task.created", taskId: "task-1" }),
+        event(3, { kind: "task.waiting", taskId: "task-1" }),
+      ],
+    );
+
+    expect(result.status).toBe("blocked");
+    expect(result.reason).toContain("sequence gap");
+  });
+
+  it("accepts a compacted streaming range only when its declared count fills the gap", () => {
+    const result = reconcileCheckpointWithEventLog(
+      createCheckpoint({ eventSequence: 4 }),
+      [
+        event(1, { kind: "task.created", taskId: "task-1" }),
+        event(4, { kind: "task.completed", taskId: "task-1" }),
+        event(5, {
+          kind: "runtime.compacted",
+          taskId: "task-1",
+          compactedEventCount: 2,
+          originalSequenceRange: { first: 2, last: 3 },
+        }),
+      ],
+    );
+
+    expect(result.status).toBe("resumable");
+  });
+
+  it("counts replan starts from the event log", () => {
+    const result = reconcileCheckpointWithEventLog(
+      createCheckpoint({ eventSequence: 3 }),
+      [
+        event(1, { kind: "task.created", taskId: "task-1" }),
+        event(2, { kind: "task.replan_started", failedStepId: "scan" }),
+        event(3, { kind: "task.replan_failed", failedStepId: "scan" }),
+      ],
+    );
+
+    expect(result.status).toBe("resumable");
+    expect(result.replanAttemptCount).toBe(1);
   });
 
   it("allows a restored approval checkpoint advanced after permission approval", () => {
@@ -266,6 +385,64 @@ describe("reconcileCheckpointWithEventLog", () => {
     if (result.status === "blocked") {
       expect(result.reason).toContain("Event log is empty");
     }
+  });
+
+  it("rebuilds completed read steps whose persisted artifact was truncated or redacted", () => {
+    const source = createArtifactEnvelope({ files: ["complete source"] }, {
+      taskId: "task-1",
+      runId: "run-1",
+      type: "files",
+      producer: { stepId: "scan", agentKind: "file" },
+      sensitivity: "workspace",
+    });
+    const persisted = sanitizeArtifactForPersistence({
+      ...source,
+      payload: { files: ["x".repeat(25_000)] },
+      contentHash: computeContentHash({ files: ["x".repeat(25_000)] }),
+    });
+    const checkpoint = createCheckpoint({
+      completedStepIds: ["scan"],
+      pendingStepIds: ["approve"],
+      eventSequence: 2,
+      contextSnapshot: { files: persisted },
+    });
+    const result = reconcileCheckpointWithEventLog(checkpoint, [
+      event(1, { kind: "step.started", stepId: "scan" }),
+      event(2, { kind: "step.completed", stepId: "scan" }),
+    ]);
+
+    expect(result.status).toBe("rebuild_required");
+    expect(result.completedStepIds).toEqual([]);
+    expect(result.retryStepIds).toEqual(["scan"]);
+    const resume = createWorkflowResumeStateFromReconciliation(result);
+    expect(resume.status).toBe("ready");
+    if (resume.status === "ready") {
+      expect(resume.resumeState.contextSnapshot).toEqual({});
+    }
+  });
+
+  it("blocks recovery when incomplete artifact data would require replaying a write step", () => {
+    const source = createArtifactEnvelope({ status: "written" }, {
+      taskId: "task-1",
+      runId: "run-1",
+      type: "approvalResult",
+      producer: { stepId: "approve", agentKind: "commander" },
+      sensitivity: "workspace",
+    });
+    const persisted = sanitizeArtifactForPersistence({
+      ...source,
+      payload: { status: "written", output: "x".repeat(25_000) },
+      contentHash: computeContentHash({ status: "written", output: "x".repeat(25_000) }),
+    });
+    const result = reconcileCheckpointWithEventLog(createCheckpoint({
+      completedStepIds: ["scan", "approve"],
+      pendingStepIds: [],
+      eventSequence: 0,
+      contextSnapshot: { approval: persisted },
+    }), []);
+
+    expect(result.status).toBe("blocked");
+    expect(result.reason).toContain("completed write step");
   });
 });
 
