@@ -695,6 +695,75 @@ describe("task history persistence", () => {
     expect(restored[0]?.conversationMessages).toEqual(task.conversationMessages);
   });
 
+  it("preserves conversation messages beyond the generic persistence array limit", async () => {
+    const database = createMemoryTaskHistoryDatabase();
+    const repository = createTaskHistoryRepository(database);
+    const conversationMessages = Array.from({ length: 202 }, (_, index) => ({
+      id: `message-${index}`,
+      role: index % 2 === 0 ? "user" as const : "assistant" as const,
+      content: `conversation-message-${index}`,
+    }));
+    const task = {
+      ...createTask("task-long-conversation"),
+      conversationMessages,
+    } satisfies TaskSnapshot;
+
+    await repository.upsert(task);
+    const restored = await createTaskHistoryRepository(database).list();
+
+    expect(restored[0]?.conversationMessages).toHaveLength(202);
+    expect(restored[0]?.conversationMessages?.[200]?.content).toBe("conversation-message-200");
+    expect(restored[0]?.conversationMessages?.[201]?.content).toBe("conversation-message-201");
+  });
+
+  it("keeps initial and latest logs with an accumulated truncation marker", async () => {
+    const database = createMemoryTaskHistoryDatabase();
+    const repository = createTaskHistoryRepository(database);
+    const task = {
+      ...createTask("task-long-logs"),
+      logs: Array.from({ length: 500 }, (_, index) => ({
+        id: `log-${index}`,
+        kind: index === 499 ? "verification" as const : "event" as const,
+        title: index === 499 ? "task.completed" : "task.progress",
+        detail: `log detail ${index}`,
+      })),
+    } satisfies TaskSnapshot;
+
+    await repository.upsert(task);
+    let restored = await createTaskHistoryRepository(database).list();
+
+    expect(restored[0]?.logs).toHaveLength(201);
+    expect(restored[0]?.logs.slice(0, 20).map((log) => log.id)).toEqual(
+      Array.from({ length: 20 }, (_, index) => `log-${index}`),
+    );
+    expect(restored[0]?.logs[20]).toMatchObject({
+      id: "history-logs-truncated",
+      detail: "300 intermediate log entries were omitted from persisted history.",
+    });
+    expect(restored[0]?.logs[21]?.id).toBe("log-320");
+    expect(restored[0]?.logs[restored[0]!.logs.length - 1]?.title).toBe("task.completed");
+
+    const continuedTask = {
+      ...restored[0]!,
+      logs: [
+        ...restored[0]!.logs,
+        ...Array.from({ length: 10 }, (_, index) => ({
+          id: `continued-log-${index}`,
+          kind: "event" as const,
+          title: "task.progress",
+          detail: `continued log ${index}`,
+        })),
+      ],
+    } satisfies TaskSnapshot;
+    await repository.upsert(continuedTask);
+    restored = await createTaskHistoryRepository(database).list();
+
+    expect(restored[0]?.logs[20]?.detail).toBe(
+      "310 intermediate log entries were omitted from persisted history.",
+    );
+    expect(restored[0]?.logs[restored[0]!.logs.length - 1]?.id).toBe("continued-log-9");
+  });
+
   it("derives generic history titles from the first user message", () => {
     const task = {
       ...createTask("task-1000"),

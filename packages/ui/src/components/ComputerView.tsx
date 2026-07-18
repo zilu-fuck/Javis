@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { WorkbenchDetailItem, WorkbenchFileEntry, WorkbenchLocale, WorkbenchTrustedComputerApp } from "../types";
+import type { WorkbenchDetailItem, WorkbenchFileEntry, WorkbenchLocale } from "../types";
 import { createFileDetailItem } from "../detail-items";
 import { formatModifiedTime, formatSize, isChineseLocale } from "../utils";
 import { ProgressBar } from "./ProgressBar";
@@ -15,8 +15,6 @@ interface ComputerViewProps {
   onNavigate?: (path: string) => void;
   onOpen?: (path: string) => void;
   onOpenDetail?: (detail: WorkbenchDetailItem) => void;
-  onRemoveTrustedApp?: (title: string) => void;
-  trustedApps?: WorkbenchTrustedComputerApp[];
   mountRoots?: { name: string; path: string }[];
 }
 
@@ -40,8 +38,6 @@ export function ComputerView({
   onNavigate,
   onOpen,
   onOpenDetail,
-  onRemoveTrustedApp,
-  trustedApps = [],
   mountRoots = [],
 }: ComputerViewProps) {
   const labels = locale.labels;
@@ -314,26 +310,6 @@ export function ComputerView({
             ))
           : null}
       </nav>
-      {trustedApps.length > 0 ? (
-        <section className="javis-computer-trust-list" aria-label={labels.trustedComputerApps}>
-          <div className="javis-document-row">
-            <strong>{labels.trustedComputerApps}</strong>
-            <span>{trustedApps.length}</span>
-          </div>
-          <div className="javis-computer-list">
-            {trustedApps.map((app) => (
-              <div className="javis-computer-row" key={app.title}>
-                <span className="javis-computer-icon file small" aria-hidden="true">APP</span>
-                <span className="javis-computer-name">{app.title}</span>
-                <span className="javis-computer-date">{formatModifiedTime(app.trustedAt)}</span>
-                <button type="button" onClick={() => onRemoveTrustedApp?.(app.title)}>
-                  {labels.removeTrustedApp}
-                </button>
-              </div>
-            ))}
-          </div>
-        </section>
-      ) : null}
       {visibleEntries.length === 0 ? (
         <div className="javis-view-empty">
           <p>{labels.fileExplorerEmpty}</p>

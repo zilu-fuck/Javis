@@ -49,6 +49,9 @@ const LOCAL_VISION_MODEL_EXTENSIONS = [".onnx", ".engine", ".xml", ".bin"];
 const PERSISTED_TEXT_MAX_LENGTH = 20_000;
 const PERSISTED_ARRAY_MAX_ITEMS = 200;
 const PERSISTED_OBJECT_MAX_ENTRIES = 120;
+const PERSISTED_LOG_HEAD_RETAIN_COUNT = 20;
+const PERSISTED_LOG_TAIL_RETAIN_COUNT = 180;
+const PERSISTED_LOG_TRUNCATION_ID = "history-logs-truncated";
 
 type PersistedRecoveryReport = Omit<
   NonNullable<TaskSnapshot["recoveryReport"]>,
@@ -463,16 +466,63 @@ export function sanitizeTaskSnapshot(value: unknown): TaskSnapshot | null {
 }
 
 export function redactTaskSnapshotForPersistence(task: TaskSnapshot): TaskSnapshot {
-  const withoutAttachments: TaskSnapshot = {
-    ...task,
-    conversationMessages: task.conversationMessages?.map((message) => {
-      const redacted = { ...message };
-      delete redacted.attachments;
-      return redacted;
-    }),
-  };
+  const { conversationMessages, logs, ...snapshot } = task;
+  const redactedSnapshot = redactLargePersistenceValues(snapshot) as Omit<
+    TaskSnapshot,
+    "conversationMessages" | "logs"
+  >;
+  const redactedConversationMessages = conversationMessages?.map((message) => {
+    const redacted = { ...message };
+    delete redacted.attachments;
+    return redactLargePersistenceValues(redacted) as typeof message;
+  });
 
-  return redactLargePersistenceValues(withoutAttachments) as TaskSnapshot;
+  return {
+    ...redactedSnapshot,
+    logs: redactPersistedTaskLogs(logs),
+    ...(redactedConversationMessages
+      ? { conversationMessages: redactedConversationMessages }
+      : {}),
+  };
+}
+
+function redactPersistedTaskLogs(logs: TaskSnapshot["logs"]): TaskSnapshot["logs"] {
+  const maxRetainedEntries = PERSISTED_LOG_HEAD_RETAIN_COUNT +
+    PERSISTED_LOG_TAIL_RETAIN_COUNT +
+    1;
+  const selected = logs.length <= maxRetainedEntries
+    ? logs
+    : [
+        ...logs.slice(0, PERSISTED_LOG_HEAD_RETAIN_COUNT),
+        createPersistedLogTruncationEntry(logs),
+        ...logs.slice(-PERSISTED_LOG_TAIL_RETAIN_COUNT),
+      ];
+  return selected.map((log) => redactLargePersistenceValues(log) as typeof log);
+}
+
+function createPersistedLogTruncationEntry(
+  logs: TaskSnapshot["logs"],
+): TaskSnapshot["logs"][number] {
+  const omittedLogs = logs.slice(
+    PERSISTED_LOG_HEAD_RETAIN_COUNT,
+    -PERSISTED_LOG_TAIL_RETAIN_COUNT,
+  );
+  const omittedCount = omittedLogs.reduce(
+    (total, log) => total + getPersistedLogOmittedCount(log),
+    0,
+  );
+  return {
+    id: PERSISTED_LOG_TRUNCATION_ID,
+    kind: "event",
+    title: "history.logs_truncated",
+    detail: `${omittedCount} intermediate log entr${omittedCount === 1 ? "y was" : "ies were"} omitted from persisted history.`,
+  };
+}
+
+function getPersistedLogOmittedCount(log: TaskSnapshot["logs"][number]): number {
+  if (log.id !== PERSISTED_LOG_TRUNCATION_ID) return 1;
+  const match = /^(\d+) intermediate log entr(?:y was|ies were) omitted/u.exec(log.detail);
+  return match ? Number.parseInt(match[1] ?? "0", 10) : 1;
 }
 
 function redactImageDataUrls(value: string): string {

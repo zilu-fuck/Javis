@@ -14,6 +14,7 @@ import { useSmoothStream } from "../use-smooth-stream";
 import {
   getTaskStatusLabel,
   getTaskStatusProgress,
+  isChineseLocale,
   stripVisionContextMarkers,
   translateWorkbenchText,
 } from "../utils";
@@ -26,7 +27,6 @@ import { ContextRing } from "./ContextRing";
 import { ContextStats } from "./ContextStats";
 import { Markdown } from "./Markdown";
 import { StreamingMessage } from "./StreamingMessage";
-import { TaskProgressRing } from "./TaskProgressRing";
 import { TaskSections } from "./TaskSections";
 
 interface ThreadViewProps {
@@ -119,7 +119,7 @@ export function ThreadView({
     : createFallbackConversationMessages(task);
   const conversationMessages = localConversationMessages ?? sourceConversationMessages;
   const hasConversationMessages = conversationMessages.length > 0;
-  const lastAssistantMessageIndex = findLastAssistantMessageIndex(conversationMessages);
+  const lastConversationMessage = conversationMessages[conversationMessages.length - 1];
   const actionLabels = getMessageActionLabels(locale);
   const composerStatusHint = hasPendingAskUserQuestion
     ? translateWorkbenchText("Answer the question card above to continue.", locale)
@@ -287,7 +287,7 @@ export function ThreadView({
             const canMutateMessage = message.role === "user" && !isActiveTask;
             const shouldInsertExecutionPanels = !showStreaming &&
               message.role === "assistant" &&
-              index === lastAssistantMessageIndex;
+              index === conversationMessages.length - 1;
             return (
               <Fragment key={messageKey}>
                 {shouldInsertExecutionPanels ? renderExecutionPanels() : null}
@@ -378,6 +378,9 @@ export function ThreadView({
                     ) : null}
                   </div>
                   {message.role === "assistant" && index === conversationMessages.length - 1 ? (
+                    <ToolActivityCards task={task} locale={locale} />
+                  ) : null}
+                  {message.role === "assistant" && index === conversationMessages.length - 1 ? (
                     <ArtifactCards
                       task={task}
                       locale={locale}
@@ -398,6 +401,10 @@ export function ThreadView({
             <Markdown className="javis-message-body" text={translateWorkbenchText(task.userGoal, locale)} />
           </article>
         )}
+
+        {!showStreaming && lastConversationMessage?.role === "user"
+          ? renderExecutionPanels()
+          : null}
 
         {showStreaming ? (
           <>
@@ -424,6 +431,7 @@ export function ThreadView({
               <span className="javis-expand-arrow">{commanderExpanded ? "▾" : "▸"}</span>
             </button>
             <Markdown className="javis-message-body" text={getSafeAssistantContent(task.commanderMessage, task, locale)} />
+            <ToolActivityCards task={task} locale={locale} />
             <ArtifactCards
               task={task}
               locale={locale}
@@ -457,16 +465,12 @@ export function ThreadView({
         className="javis-composer"
         composeMode={composeMode}
         contextControl={
-          isActiveTask ? (
-            <TaskProgressRing task={task} locale={locale} />
-          ) : (
-            <ContextRing
-              labels={labels}
-              locale={locale}
-              task={task}
-              modelConfiguration={modelConfiguration}
-            />
-          )
+          <ContextRing
+            labels={labels}
+            locale={locale}
+            task={task}
+            modelConfiguration={modelConfiguration}
+          />
         }
         currentWorkspacePath={currentWorkspacePath}
         isStreaming={showStreaming}
@@ -620,15 +624,6 @@ function getConversationMessageKey(message: WorkbenchChatMessage, index: number)
   return message.id ?? `${message.role}-${index}`;
 }
 
-function findLastAssistantMessageIndex(messages: WorkbenchChatMessage[]): number {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index]?.role === "assistant") {
-      return index;
-    }
-  }
-  return -1;
-}
-
 function createFallbackConversationMessages(task: WorkbenchTask): WorkbenchChatMessage[] {
   const messages: WorkbenchChatMessage[] = [];
   if (task.userGoal.trim()) {
@@ -741,6 +736,95 @@ function getThinkingMessages(locale: WorkbenchLocale): string[] {
 }
 
 type ArtifactKind = "doc" | "md" | "code" | "cmd";
+
+type ToolActivityStatus = "planned" | "running" | "completed" | "failed";
+
+interface ThreadToolActivity {
+  id: string;
+  name: string;
+  description: string;
+  status: ToolActivityStatus;
+}
+
+function ToolActivityCards({ task, locale }: { task: WorkbenchTask; locale: WorkbenchLocale }) {
+  const activities = buildToolActivities(task, locale);
+  if (activities.length === 0) return null;
+  const isChinese = isChineseLocale(locale);
+  return (
+    <div aria-label={isChinese ? "调用记录" : "Calls"} className="javis-tool-call-list">
+      {activities.map((activity) => (
+        <article className={`javis-tool-call-card status-${activity.status}`} key={activity.id}>
+          <span className="javis-tool-call-icon" aria-hidden="true" />
+          <span className="javis-tool-call-copy">
+            <strong>{activity.name}</strong>
+            <small>{activity.description}</small>
+          </span>
+          <span className="javis-tool-call-status">
+            {getToolActivityStatusLabel(activity.status, isChinese)}
+          </span>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function buildToolActivities(task: WorkbenchTask, locale: WorkbenchLocale): ThreadToolActivity[] {
+  const isChinese = isChineseLocale(locale);
+  const activities = new Map<string, ThreadToolActivity>();
+  if ((task.tokenUsage?.modelCalls ?? 0) > 0) {
+    const callCount = task.tokenUsage?.modelCalls ?? 0;
+    const totalTokens = task.tokenUsage?.totalTokens ?? 0;
+    activities.set("model-generation", {
+      id: "model-generation",
+      name: isChinese ? "文本生成模型" : "Text generation model",
+      description: isChinese
+        ? `${callCount} 次调用 · ${totalTokens.toLocaleString()} tokens`
+        : `${callCount} call${callCount === 1 ? "" : "s"} · ${totalTokens.toLocaleString()} tokens`,
+      status: task.status === "failed" ? "failed" : task.status === "completed" ? "completed" : "running",
+    });
+  }
+
+  for (const log of task.logs) {
+    const toolNames = log.detail.match(
+      /\b(?:browser|code|computer|file|git|scheduler|shell|web|workspace)\.[A-Za-z][\w.]*/gu,
+    ) ?? [];
+    for (const toolName of toolNames) {
+      const nextStatus = inferToolActivityStatus(log);
+      const current = activities.get(toolName);
+      activities.set(toolName, {
+        id: `tool-${toolName}`,
+        name: toolName,
+        description: translateWorkbenchText(log.userMessage || log.detail, locale),
+        status: current && toolActivityStatusRank(current.status) > toolActivityStatusRank(nextStatus)
+          ? current.status
+          : nextStatus,
+      });
+    }
+  }
+  return [...activities.values()].slice(0, 4);
+}
+
+function inferToolActivityStatus(log: WorkbenchTask["logs"][number]): ToolActivityStatus {
+  const value = `${log.title} ${log.detail}`.toLocaleLowerCase();
+  if (/failed|error/.test(value)) return "failed";
+  if (/completed|succeeded|task\.completed|\bwrote\b/.test(value)) return "completed";
+  if (/started|running/.test(value)) return "running";
+  return "planned";
+}
+
+function toolActivityStatusRank(status: ToolActivityStatus): number {
+  return { planned: 0, running: 1, completed: 2, failed: 3 }[status];
+}
+
+function getToolActivityStatusLabel(status: ToolActivityStatus, isChinese: boolean): string {
+  if (!isChinese) return status === "completed" ? "Completed" : status[0].toUpperCase() + status.slice(1);
+  switch (status) {
+    case "planned": return "已计划";
+    case "running": return "运行中";
+    case "completed": return "已完成";
+    case "failed": return "失败";
+  }
+}
 
 interface ThreadArtifact {
   id: string;

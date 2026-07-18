@@ -109,12 +109,13 @@ function createScanId(prefix: string): string {
 
 export async function listDirectory(
   path: string,
-  options?: { workspaceRoot?: string; allowedRootIds?: string[] },
+  options?: { workspaceRoot?: string; allowedRootIds?: string[]; browseRoot?: string },
 ): Promise<FileEntry[]> {
   return invoke<FileEntry[]>("list_directory", {
     path,
     workspaceRoot: options?.workspaceRoot ?? null,
     allowedRootIds: options?.allowedRootIds ?? null,
+    browseRoot: options?.browseRoot ?? null,
   });
 }
 

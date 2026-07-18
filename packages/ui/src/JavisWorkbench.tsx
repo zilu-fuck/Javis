@@ -19,6 +19,7 @@ import { ScheduledTasksView } from "./components/ScheduledTasksView";
 import { Sidebar } from "./components/Sidebar";
 import { SkillMarketView } from "./components/SkillMarketView";
 import { defaultWorkbenchLocale } from "./locale";
+import { isChineseLocale } from "./utils";
 import type {
   ActiveView,
   JavisWorkbenchProps,
@@ -242,6 +243,7 @@ export function JavisWorkbench({
     useState<ActiveView>("chat");
   const [activeSkillPage, setActiveSkillPage] = useState<WorkbenchSkillPage>("mine");
   const [detailItem, setDetailItem] = useState<WorkbenchDetailItem | null>(null);
+  const filePreviewRequestRef = useRef(0);
   const [selectedAgentId, setSelectedAgentId] = useState<string | undefined>(undefined);
   const [openTabs, setOpenTabs] = useState<WorkbenchWorkspaceToolTab[]>(
     workspaceToolTabsProp ?? controlledWorkspaceToolTabs(openTabsProp),
@@ -375,13 +377,62 @@ export function JavisWorkbench({
     onInspectorOpenChange?.(true);
   }
 
-  function handleSelectAgent(agentId: string) {
+  function handleClearDetail() {
+    filePreviewRequestRef.current += 1;
     setDetailItem(null);
+  }
+
+  function handlePreviewFile(path: string) {
+    if (!fileService?.read) {
+      onOpenFile?.(path);
+      return;
+    }
+    const requestId = filePreviewRequestRef.current + 1;
+    filePreviewRequestRef.current = requestId;
+    const title = path.split(/[/\\]/).pop() || path;
+    const isChinese = isChineseLocale(effectiveLocale);
+    handleOpenDetail({
+      title,
+      description: isChinese ? "正在读取生成的文件..." : "Loading generated file...",
+      contentFormat: "markdown",
+      kind: "Markdown",
+      source: path,
+      metadata: [{ label: isChinese ? "路径" : "Path", value: path }],
+    });
+    void fileService.read(agentSession, path).then((content) => {
+      if (filePreviewRequestRef.current !== requestId) return;
+      handleOpenDetail({
+        title,
+        description: isChinese ? "生成的 Markdown 文件" : "Generated Markdown file",
+        content,
+        contentFormat: "markdown",
+        kind: "Markdown",
+        source: path,
+        metadata: [{ label: isChinese ? "路径" : "Path", value: path }],
+      });
+    }).catch((error) => {
+      if (filePreviewRequestRef.current !== requestId) return;
+      handleOpenDetail({
+        title,
+        description: isChinese
+          ? `无法在 Javis 中读取文件：${error instanceof Error ? error.message : String(error)}`
+          : `Could not read the file in Javis: ${error instanceof Error ? error.message : String(error)}`,
+        contentFormat: "markdown",
+        kind: "Markdown",
+        source: path,
+        metadata: [{ label: isChinese ? "路径" : "Path", value: path }],
+      });
+    });
+  }
+
+  function handleSelectAgent(agentId: string) {
+    handleClearDetail();
     setSelectedAgentId(agentId);
     setInspectorOpenState(true);
   }
 
   function handleWorkspaceToolAction(action: WorkbenchWorkspaceToolAction) {
+    handleClearDetail();
     onOpenWorkspaceTool?.(action);
     if (
       action === "files" || action === "sideChat" ||
@@ -655,7 +706,7 @@ export function JavisWorkbench({
         onConversationMessageResubmit={(messages, goal) =>
           onConversationMessageResubmit?.(task.id, messages, goal)}
         onOpenDetail={handleOpenDetail}
-        onOpenFile={onOpenFile}
+        onOpenFile={handlePreviewFile}
         onOpenWorkspaceTool={handleWorkspaceToolAction}
         onSelectAgent={handleSelectAgent}
         selectedAgentId={selectedAgentId}
@@ -673,7 +724,7 @@ export function JavisWorkbench({
       onPauseGoal, onResumeGoal, onCompleteGoal, onClearGoal,
       onPermissionDecision, modelConfiguration, onRetryTask, onStopTask,
       onConversationMessageResubmit, onConversationMessagesChange,
-      handleOpenDetail, handleWorkspaceToolAction, onOpenFile,
+      handleOpenDetail, handleWorkspaceToolAction, handlePreviewFile,
       onSelectComposeMode, onSubmitGoal, onUseWorkspacePath, onWorkspacePathChange,
       recentWorkspacePaths, task, userDocuments, selectedAgentId, newChatRecommendations,
       currentGoal, currentGoalEvents, currentGoalEvaluations,
@@ -855,15 +906,12 @@ export function JavisWorkbench({
         onNavigate={onNavigateDirectory}
         onOpen={onOpenFile}
         onOpenDetail={handleOpenDetail}
-        onRemoveTrustedApp={onRemoveTrustedComputerApp}
-        trustedApps={trustedComputerApps}
         mountRoots={mountRoots}
       />
     ),
     [
       computerPath, computerEntries, computerError, computerLoading,
       effectiveLocale, mountRoots, onListDirectory, onNavigateDirectory, onOpenFile, handleOpenDetail,
-      onRemoveTrustedComputerApp, trustedComputerApps,
     ],
   );
 
@@ -1077,6 +1125,7 @@ export function JavisWorkbench({
         locale={effectiveLocale}
         onOpenUrl={onOpenUrl}
         onOpenDetail={handleOpenDetail}
+        onClearDetail={handleClearDetail}
         selectedAgentId={selectedAgentId}
         systemResources={systemResources}
         openTabs={openTabs}

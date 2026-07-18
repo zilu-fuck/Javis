@@ -4,7 +4,7 @@ import {
   createInitialTaskSnapshot,
   getAdapter,
   hasImageAttachments,
-  injectDocumentContext,
+  buildDocumentContextBlocks,
   isGoalTerminal,
   isTerminalTaskStatus,
   PROVIDER_DEFINITIONS,
@@ -13,10 +13,15 @@ import {
   type GoalEvaluation,
   type GoalEvent,
   type GoalState,
+  type RuntimeEventEnvelope,
   type TaskSnapshot,
 } from "@javis/core";
 import { bridgeVisionIfNeeded } from "./vision-bridge";
-import { resolveVisionBridgeRuntimeMode } from "./submission-routing";
+import {
+  extractAtReferences,
+  resolveContinuationTask,
+  resolveVisionBridgeRuntimeMode,
+} from "./submission-routing";
 import { buildRuntimeCapabilityVerification } from "./capability-verification";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -78,11 +83,23 @@ import { useTaskRuntime, type ScheduledTasksRepositoryLike, type TaskHistoryRepo
 import {
   createApprovalRecordFromPermissionRequest,
   expireApprovalRecord,
+  findRecoverableApprovalExecutionRecord,
   isApprovalRecordExpired,
   loadApprovalRecords,
+  markApprovalContinuationPending,
+  markApprovalExecutionStarted,
+  markApprovalExecutionSucceeded,
+  markApprovalExecutionTerminal,
   resolveApprovalRecord,
+  saveApprovalRecords,
+  sanitizeApprovalRecord,
   upsertApprovalRecord,
   type DurableApprovalRecord,
+  type DurableGitCommentPullRequestPlan,
+  type DurableGitCommitPlan,
+  type DurableGitCreatePullRequestPlan,
+  type DurableGitPushPlan,
+  type DurableGitStagePlan,
 } from "./approval-records";
 import {
   APPROVAL_RECORDS_MIGRATIONS,
@@ -90,6 +107,7 @@ import {
 } from "./approval-records-persistence";
 import {
   createJavisRuntime,
+  resolveModelProfileForAgent,
   type BrowserWriteApprovalDecision,
   type BrowserWriteApprovalRequest,
   type RuntimeWorkspaceToolActivity,
@@ -323,6 +341,12 @@ import {
   advanceRestoredApprovalResumeSeed,
   buildRestoredApprovalResumeStartRequest,
   createRestoredApprovalResumeStore,
+  RestoredApprovalResumePersistenceError,
+  isRestoredApprovalResumePersistenceError,
+  persistRestoredApprovalResumeCheckpoint,
+  persistRestoredApprovalResumeEvents,
+  reconcileApprovalExecutionFromEventLog,
+  type RestoredApprovalResumeSeed,
 } from "./restored-approval-resume";
 import {
   createUserPreferencesRepository,
@@ -532,7 +556,6 @@ interface CodexMcpServerSummary {
   url?: string;
   args: string[];
   cwd?: string;
-  env?: Record<string, string>;
   enabled: boolean;
   source: string;
   removable: boolean;
@@ -591,27 +614,6 @@ function scheduledTaskToWorkbench(
     lastRunStatus,
     createdAt: task.createdAt,
   };
-}
-
-function extractAtReferences(goal: string): Array<{ raw: string; path: string }> {
-  const bracketRefs: Array<{ raw: string; path: string }> = [];
-  const bracketPattern = /@\[((?:\\\]|[^\]])+)\]/g;
-  let bracketMatch: RegExpExecArray | null;
-  while ((bracketMatch = bracketPattern.exec(goal))) {
-    const bracketPath = bracketMatch[1] ?? "";
-    bracketRefs.push({
-      raw: bracketMatch[0],
-      path: bracketPath.replace(/\\]/g, "]"),
-    });
-  }
-  if (bracketRefs.length > 0) return bracketRefs;
-
-  const matches = goal.match(/@([^\s,，。；;]+)/g);
-  if (!matches) return [];
-  return matches.map((raw) => {
-    const path = raw.slice(1); // strip leading @
-    return { raw, path };
-  });
 }
 
 function getAllowedRootScopeForReference(
@@ -890,6 +892,7 @@ function App() {
   const taskHistoryRepoRef = useRef<TaskHistoryRepositoryLike>(null);
   const workspaceSessionRepoRef = useRef<WorkspaceSessionRepository | null>(null);
   const approvalRecordsRepoRef = useRef<ReturnType<typeof createApprovalRecordsRepository> | null>(null);
+  const approvalPersistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
   const modelSettingsRepoRef = useRef<ModelSettingsRepository | null>(null);
   const userProfileMemoryRepoRef = useRef<UserProfileMemoryRepository | null>(null);
   const agentMemoryRepoRef = useRef<AgentMemoryRepository | null>(null);
@@ -1096,6 +1099,9 @@ function App() {
       getCapabilityVerification: () => buildRuntimeCapabilityVerification({
         toolAuditRecords: recentToolCallAuditRecordsRef.current,
       }),
+      agentRegistry: agentRegistryRef.current,
+      routeRegistry: routeRegistryRef.current,
+      workflowRegistry: workflowRegistryRef.current,
       recordToolCallAudit,
       onWorkspaceToolActivity: handleRuntimeWorkspaceToolActivity,
       requestBrowserWriteApproval,
@@ -1157,16 +1163,34 @@ function App() {
       },
       callMcpTool: async (request) => {
         if ((request.action ?? "callTool") === "callTool") {
-          const enabledDescriptors = getEnabledToolDescriptors(
-            disabledBuiltinToolNamesRef.current,
+          const source = request.source?.trim();
+          const server = buildMcpRuntimeServers(
             mcpConfigRef.current,
             codexMcpServersRef.current,
-            mcpToolDescriptorsRef.current,
-            mcpDiscoveryErrorsRef.current,
+          ).find((candidate) =>
+            candidate.enabled &&
+            candidate.name === request.serverName &&
+            candidate.source === source
           );
-          if (!isAllowlistedMcpCallToolRequest(enabledDescriptors, request)) {
+          if (!source || !server || !isExecutableMcpServer(server)) {
+            throw new Error(`MCP server identity is not enabled: ${source ?? "unknown"}:${request.serverName}.`);
+          }
+          // Persistent descriptors are planning hints only. Rebuild the
+          // execution allowlist from the live manifest for this exact server.
+          const listToolsResult = await invoke<unknown>("call_mcp_server_tool", {
+            request: {
+              serverName: server.name,
+              source: server.source,
+              action: "listTools",
+              timeoutMs: request.timeoutMs,
+            },
+          });
+          const liveDescriptors = buildMcpToolDescriptorsFromList(server, listToolsResult);
+          const boundRequest = { ...request, source };
+          if (!isAllowlistedMcpCallToolRequest(liveDescriptors, boundRequest)) {
             throw new Error(`MCP tool ${request.toolName ?? String(request.input?.toolName ?? "")} is not allowlisted for ${request.source ?? "unknown"}:${request.serverName}.`);
           }
+          return invoke("call_mcp_server_tool", { request: boundRequest });
         }
         return invoke("call_mcp_server_tool", { request });
       },
@@ -1226,7 +1250,7 @@ function App() {
   const [areDurableApprovalRecordsReady, setDurableApprovalRecordsReady] = useState(false);
   const [isDatabaseInitializing, setDatabaseInitializing] = useState(true);
   const [knowledgeRepositoriesReadyKey, setKnowledgeRepositoriesReadyKey] = useState(0);
-  const didCheckRestoredApproval = useRef(false);
+  const restoredApprovalRecordIdRef = useRef<string | undefined>(undefined);
   const didInitDatabaseRef = useRef(false);
   const auditRecordIdsRef = useRef(new Set<string>());
   const savedAgentSessionSummaryIdsRef = useRef(new Set<string>());
@@ -2204,9 +2228,10 @@ function App() {
       labels,
       scheduledTasks.filter((t) => t.enabled).length,
       skillEntries.length,
+      { mountRoots },
     );
     return mergeSidebarNavItems(builtin, buildWorkspaceNavItems(workspaceDefs));
-  }, [workspaceDefs, scheduledTasks, skillEntries, localePreference]);
+  }, [workspaceDefs, scheduledTasks, skillEntries, localePreference, mountRoots]);
 
   // ── Load MCP config on mount ──────────────────────────────────────
   useEffect(() => {
@@ -2550,11 +2575,47 @@ function App() {
       // Load workspace definitions from disk
       try {
         const defs = await loadWorkspaceDefinitions();
-        setWorkspaceDefs(defs);
-        registerWorkspaceAgents(defs, agentRegistryRef.current);
-        registerWorkspaceWorkflows(defs, workflowRegistryRef.current);
-        registerWorkspaceRoutes(defs, routeRegistryRef.current);
+        const existingAgentIds = new Set(
+          agentRegistryRef.current.list().map((registration) => registration.agent.id),
+        );
+        const existingWorkflowIds = new Set(
+          workflowRegistryRef.current.list().map((workflow) => workflow.id),
+        );
+        const workspaceRouteKinds = defs.flatMap((definition) =>
+          (definition.routes ?? []).map((route) => route.routeKind),
+        );
+        const existingRouteKinds = new Set(
+          workspaceRouteKinds.filter((routeKind) => routeRegistryRef.current.getWorkflowId(routeKind) !== undefined),
+        );
+        try {
+          registerWorkspaceAgents(defs, agentRegistryRef.current);
+          registerWorkspaceWorkflows(defs, workflowRegistryRef.current);
+          registerWorkspaceRoutes(defs, routeRegistryRef.current);
+          setWorkspaceDefs(defs);
+        } catch (registrationError) {
+          const agentIdsToRemove = agentRegistryRef.current
+            .list()
+            .map((registration) => registration.agent.id)
+            .filter((agentId) => !existingAgentIds.has(agentId));
+          for (const agentId of agentIdsToRemove) {
+            agentRegistryRef.current.unregister(agentId);
+          }
+          const workflowIdsToRemove = workflowRegistryRef.current
+            .list()
+            .map((workflow) => workflow.id)
+            .filter((workflowId) => !existingWorkflowIds.has(workflowId));
+          for (const workflowId of workflowIdsToRemove) {
+            workflowRegistryRef.current.unregister(workflowId);
+          }
+          const routeKindsToRemove = workspaceRouteKinds
+            .filter((routeKind) => !existingRouteKinds.has(routeKind));
+          for (const routeKind of routeKindsToRemove) {
+            routeRegistryRef.current.unregister(routeKind);
+          }
+          throw registrationError;
+        }
       } catch (error) {
+        setWorkspaceDefs([]);
         logNonFatalError("Failed to load workspace definitions", error);
       }
 
@@ -2568,10 +2629,21 @@ function App() {
   }, [replaceWorkspaceSession]);
 
   useEffect(() => {
-    if (!areDurableApprovalRecordsReady) {
+    if (!areDurableApprovalRecordsReady || isTaskActive) {
       return;
     }
-    if (didCheckRestoredApproval.current) {
+    const activeApprovalId = restoredApprovalRecordIdRef.current;
+    if (activeApprovalId) {
+      const activeRecord = approvalRecords.find((record) => record.approvalId === activeApprovalId);
+      if (activeRecord?.status === "pending" ||
+        restoredApprovalResumeSeedRef.current.isInFlight(activeApprovalId)) return;
+      restoredApprovalRecordIdRef.current = undefined;
+    }
+    const recoverableExecution = findRecoverableApprovalExecutionRecord(approvalRecords);
+    if (recoverableExecution) {
+      if (restoredApprovalResumeSeedRef.current.isInFlight(recoverableExecution.approvalId)) return;
+      restoredApprovalRecordIdRef.current = recoverableExecution.approvalId;
+      void resumeDurableApprovalContinuation(recoverableExecution);
       return;
     }
     const pendingRecord = findRestorableApprovalRecord(approvalRecords);
@@ -2583,42 +2655,60 @@ function App() {
       return;
     }
     const restoreTask = (createTask: () => TaskSnapshot) => {
-      didCheckRestoredApproval.current = true;
+      restoredApprovalRecordIdRef.current = pendingRecord.approvalId;
       clearQueuedTaskSnapshots();
       const restoredTask = createTask();
       setTask(restoredTask);
       const loadResumeSeed = (async () => {
-          const checkpoint = pendingRecord.runId
-            ? await workflowCheckpointStoreRef.current?.latestByRunId(pendingRecord.runId)
-            : undefined;
+        const checkpoint = pendingRecord.runId
+          ? await workflowCheckpointStoreRef.current?.latestByRunId(pendingRecord.runId)
+          : undefined;
         if (!checkpoint) {
           restoredApprovalResumeSeedRef.current.delete(pendingRecord.approvalId);
+          if (pendingRecord.workflowBound) {
+            await blockPendingRestoredApproval(
+              pendingRecord,
+              "The workflow-bound approval has no durable checkpoint; the native operation was not executed.",
+            );
+          }
           return;
         }
-        const runtimeEvents = await runtimeEventStoreRef.current?.replayByRunIdThroughSequence(
-          checkpoint.runId,
-          checkpoint.eventSequence,
-        );
+        // Events may be durably ahead of the checkpoint when the process
+        // crashed between the event batch and checkpoint write. Replaying the
+        // full run lets reconciliation observe that completion boundary and
+        // prevents the approved side effect from being offered a second time.
+        const eventStore = runtimeEventStoreRef.current;
+        if (!eventStore) {
+          throw new Error("The runtime event store is unavailable.");
+        }
+        const runtimeEvents = await eventStore.replayByRunId(checkpoint.runId);
         const linkResult = reconcileRestoredApprovalTaskToCheckpoint(
           restoredTask,
           checkpoint,
-          runtimeEvents ?? [],
+          runtimeEvents,
         );
         if (linkResult.status === "linked") {
           restoredApprovalResumeSeedRef.current.set(pendingRecord.approvalId, {
             checkpoint,
-            events: runtimeEvents ?? [],
+            events: runtimeEvents,
           });
           setTask(linkResult.linkedTask);
         } else if (linkResult.status === "blocked") {
           restoredApprovalResumeSeedRef.current.delete(pendingRecord.approvalId);
-          setTask(linkResult.linkedTask);
+          await blockPendingRestoredApproval(
+            pendingRecord,
+            linkResult.reason ?? "The restored approval cannot be bound to its workflow checkpoint.",
+          );
         } else {
           restoredApprovalResumeSeedRef.current.delete(pendingRecord.approvalId);
         }
       })().catch((error) => {
         restoredApprovalResumeSeedRef.current.delete(pendingRecord.approvalId);
         console.warn("Failed to link restored approval to workflow checkpoint", error);
+        return blockPendingRestoredApproval(
+          pendingRecord,
+          `The complete workflow event replay could not be loaded: ${String(error)}`,
+        );
       });
       restoredApprovalResumeSeedRef.current.setLoading(
         pendingRecord.approvalId,
@@ -2674,7 +2764,7 @@ function App() {
       return;
     }
     restoreTask(() => createRestoredPdfApprovalTask(pendingRecord));
-  }, [approvalRecords, areDurableApprovalRecordsReady]);
+  }, [approvalRecords, areDurableApprovalRecordsReady, isTaskActive]);
 
   function queueGoalSubmission(submission: PendingGoalSubmission): void {
     pendingGoalQueueRef.current.push(submission);
@@ -3119,15 +3209,13 @@ function App() {
       canContinueHistory && forceStart && !goalOverride && !workspacePathOverride && !scheduledTaskId
         ? queuedContinuationTaskRef.current
         : null;
-    const continuationTask =
-      queuedContinuationTask ??
-      (canContinueHistory && !goalOverride && !workspacePathOverride && !scheduledTaskId
-        ? activeHistoryEntryId
-          ? historyCurrentRef.current.find((entry) => entry.id === activeHistoryEntryId)
-          : isArchivableTask(task)
-            ? task
-            : undefined
-        : undefined);
+    const continuationTask = resolveContinuationTask({
+      activeHistoryEntryId,
+      canContinueHistory: canContinueHistory && !goalOverride && !workspacePathOverride && !scheduledTaskId,
+      currentTask: task,
+      history: historyCurrentRef.current,
+      queuedContinuationTask,
+    });
     const startOptions = continuationTask
       ? {
           taskId: continuationTask.id,
@@ -3179,20 +3267,23 @@ function App() {
     async function resolveWithVisionBridge(rawGoal: string): Promise<{
       finalGoal: string;
       bridgeUsed: boolean;
+      passThroughImages: boolean;
     }> {
-      if (!hasImageAttachments(rawGoal)) return { finalGoal: rawGoal, bridgeUsed: false };
+      if (!hasImageAttachments(rawGoal)) {
+        return { finalGoal: rawGoal, bridgeUsed: false, passThroughImages: false };
+      }
       const config = modelConfigRef.current;
-      if (!config) return { finalGoal: rawGoal, bridgeUsed: false };
-      const primary = config.profiles.find((p) => p.slot === "primary");
-      const multimodal = config.profiles.find((p) => p.slot === "multimodal");
-      if (!primary || !multimodal) return { finalGoal: rawGoal, bridgeUsed: false };
-      const { enrichedMessage, bridgeUsed } = await bridgeVisionIfNeeded({
+      const chatProfile = config
+        ? resolveModelProfileForAgent("commander", config)
+        : undefined;
+      const multimodal = config?.profiles.find((p) => p.slot === "multimodal");
+      const { enrichedMessage, bridgeUsed, passThroughImages } = await bridgeVisionIfNeeded({
         userMessage: rawGoal,
-        primaryProfile: primary,
+        primaryProfile: chatProfile,
         multimodalProfile: multimodal,
         locale: localePreference,
       });
-      return { finalGoal: enrichedMessage, bridgeUsed };
+      return { finalGoal: enrichedMessage, bridgeUsed, passThroughImages };
     }
 
     // Determine display goal and attachments.
@@ -3207,7 +3298,7 @@ function App() {
     const atRefs = extractAtReferences(bridgeInput);
     if (atRefs.length > 0) {
       void (async () => {
-        let resolvedGoal = bridgeInput;
+        const referencedDocuments: Array<{ path: string; content: string }> = [];
         for (const ref of atRefs) {
           try {
             const readScope = getAllowedRootScopeForReference(
@@ -3216,17 +3307,38 @@ function App() {
               taskWorkspacePath ?? workspaceRef.current,
             );
             const content = await readFileChunk(ref.path, undefined, readScope);
-            resolvedGoal = injectDocumentContext(resolvedGoal, ref.path, content);
+            referencedDocuments.push({ path: ref.path, content });
           } catch (error) {
+            const detail = `Failed to read referenced file ${ref.path}: ${error instanceof Error ? error.message : String(error)}`;
             logNonFatalError(`Failed to read referenced file ${ref.path}`, error);
+            runtime.start(rawGoal, {
+              ...startOptions,
+              mode: resolveVisionBridgeRuntimeMode(startMode, false),
+              originMode: historyComposeMode,
+              appendUserMessage,
+              routingGoal: rawGoal,
+              displayGoal: hasImages ? rawGoal : undefined,
+              displayAttachments: hasImages ? imageDataUrls : undefined,
+              modelImages: undefined,
+              workspacePath: taskWorkspacePath,
+              preflightError: detail,
+            });
+            return;
           }
         }
+        const documentBlocks = buildDocumentContextBlocks(
+          referencedDocuments,
+          /[\u3400-\u9fff]/u.test(bridgeInput),
+        );
+        const resolvedGoal = [bridgeInput, ...documentBlocks].join("\n\n");
         // Vision bridge
         let finalGoal = resolvedGoal;
         let bridgeUsed = false;
+        let passThroughImages = false;
         if (hasImages) {
           const bridgeResult = await resolveWithVisionBridge(resolvedGoal);
           bridgeUsed = bridgeResult.bridgeUsed;
+          passThroughImages = bridgeResult.passThroughImages;
           finalGoal = bridgeResult.finalGoal;
         }
         runtime.start(finalGoal, {
@@ -3234,8 +3346,10 @@ function App() {
           mode: resolveVisionBridgeRuntimeMode(startMode, bridgeUsed),
           originMode: historyComposeMode,
           appendUserMessage,
+          routingGoal: rawGoal,
           displayGoal: hasImages ? rawGoal : undefined,
           displayAttachments: hasImages ? imageDataUrls : undefined,
+          modelImages: passThroughImages ? imageDataUrls : undefined,
           workspacePath: taskWorkspacePath,
         });
       })();
@@ -3245,9 +3359,11 @@ function App() {
     void (async () => {
       let finalGoal = bridgeInput;
       let bridgeUsed = false;
+      let passThroughImages = false;
       if (hasImages) {
         const bridgeResult = await resolveWithVisionBridge(bridgeInput);
         bridgeUsed = bridgeResult.bridgeUsed;
+        passThroughImages = bridgeResult.passThroughImages;
         finalGoal = bridgeResult.finalGoal;
       }
       runtime.start(finalGoal, {
@@ -3255,8 +3371,10 @@ function App() {
         mode: resolveVisionBridgeRuntimeMode(startMode, bridgeUsed),
         originMode: historyComposeMode,
         appendUserMessage,
+        routingGoal: rawGoal,
         displayGoal: hasImages ? rawGoal : undefined,
         displayAttachments: hasImages ? imageDataUrls : undefined,
+        modelImages: passThroughImages ? imageDataUrls : undefined,
         workspacePath: taskWorkspacePath,
       });
     })();
@@ -3339,9 +3457,15 @@ function App() {
     if (!toolName) {
       return;
     }
+    const durablePlan = nextTask.durableApprovalPlan;
+    const workflowBound = Boolean(
+      nextTask.runId &&
+      (nextTask.fileOrganizationPlan || nextTask.codeProposedEdit || durablePlan),
+    );
     const record = createApprovalRecordFromPermissionRequest({
       taskId: nextTask.id,
       runId: nextTask.runId,
+      workflowBound,
       toolName,
       workspacePath: getDurableApprovalWorkspacePath(nextTask, request.title),
       permissionRequest: request,
@@ -3349,17 +3473,42 @@ function App() {
         request.title === CODE_PATCH_APPROVAL_TITLE
           ? nextTask.codeProposedEdit
           : undefined,
+      gitPushPlan: toolName === GIT_PUSH_APPROVAL_TOOL_NAME
+        ? durablePlan?.payload as DurableGitPushPlan | undefined
+        : undefined,
+      gitCommitPlan: toolName === GIT_COMMIT_APPROVAL_TOOL_NAME
+        ? durablePlan?.payload as DurableGitCommitPlan | undefined
+        : undefined,
+      gitStagePlan: toolName === GIT_STAGE_APPROVAL_TOOL_NAME
+        ? durablePlan?.payload as DurableGitStagePlan | undefined
+        : undefined,
+      gitCreatePullRequestPlan: toolName === GIT_CREATE_PR_APPROVAL_TOOL_NAME
+        ? durablePlan?.payload as DurableGitCreatePullRequestPlan | undefined
+        : undefined,
+      gitCommentPullRequestPlan: toolName === GIT_COMMENT_PR_APPROVAL_TOOL_NAME
+        ? durablePlan?.payload as DurableGitCommentPullRequestPlan | undefined
+        : undefined,
     });
     if (!record) {
       return;
     }
     setApprovalRecords((current) => {
-      const updated = upsertApprovalRecord(current, record);
-      const repository = approvalRecordsRepoRef.current;
-      if (repository) {
-        void repository.upsert(record);
-      }
-      return updated;
+      const next = upsertApprovalRecord(current, record);
+      approvalRecordsCurrentRef.current = next;
+      return next;
+    });
+    void persistApprovalRecord(record, "approval request").catch((error) => {
+      clearQueuedTaskSnapshots();
+      setTask((current) => current.id === nextTask.id && current.permissionRequest?.id === request.id
+        ? {
+            ...current,
+            status: "failed",
+            permissionRequest: undefined,
+            title: "Approval persistence blocked",
+            commanderMessage: "Javis could not durably save the approval request; no native operation can be approved.",
+            verificationSummary: `blocked: ${error instanceof Error ? error.message : String(error)}`,
+          }
+        : current);
     });
   }
 
@@ -3445,41 +3594,146 @@ function App() {
 
   function updateApprovalRecord(record: DurableApprovalRecord) {
     setApprovalRecords((current) => {
-      const updated = upsertApprovalRecord(current, record);
-      const repository = approvalRecordsRepoRef.current;
-      if (repository) {
-        void repository.upsert(record);
-      }
-      return updated;
+      const next = upsertApprovalRecord(current, record);
+      approvalRecordsCurrentRef.current = next;
+      return next;
+    });
+    void persistApprovalRecord(record, "approval record").catch((error) => {
+      console.error("Failed to persist durable approval record", error);
     });
   }
 
-  function resolveApprovalRecordById(
+  async function persistApprovalRecord(
+    record: DurableApprovalRecord,
+    operation = "approval decision",
+  ) {
+    const previous = approvalPersistenceQueueRef.current;
+    const queued = previous.catch(() => undefined).then(async () => {
+      const repository = approvalRecordsRepoRef.current;
+      let savedRecord = record;
+      const persistToLocalStorage = () => {
+        const sanitized = sanitizeApprovalRecord(record);
+        if (!sanitized) {
+          throw new Error("Approval record failed validation before local persistence.");
+        }
+        savedRecord = sanitized;
+        const next = upsertApprovalRecord(approvalRecordsCurrentRef.current, savedRecord);
+        approvalRecordsCurrentRef.current = next;
+        saveApprovalRecords(window.localStorage, next);
+      };
+      if (repository) {
+        try {
+          const persisted = await repository.upsert(record);
+          if (!persisted) {
+            throw new Error("Approval record failed validation before persistence.");
+          }
+          savedRecord = persisted;
+        } catch (error) {
+          try {
+            persistToLocalStorage();
+          } catch {
+            throw new RestoredApprovalResumePersistenceError(operation, error);
+          }
+        }
+      } else {
+        try {
+          persistToLocalStorage();
+        } catch (error) {
+          throw new RestoredApprovalResumePersistenceError(operation, error);
+        }
+      }
+      setApprovalRecords((current) => {
+        const next = upsertApprovalRecord(current, savedRecord);
+        approvalRecordsCurrentRef.current = next;
+        return next;
+      });
+    });
+    approvalPersistenceQueueRef.current = queued;
+    try {
+      await queued;
+    } finally {
+      if (approvalPersistenceQueueRef.current === queued) {
+        approvalPersistenceQueueRef.current = Promise.resolve();
+      }
+    }
+  }
+
+  async function resolveApprovalRecordById(
     approvalId: string,
     decision: "approved" | "denied",
     resolvedAt = new Date().toISOString(),
-  ) {
+  ): Promise<void> {
+    const record = approvalRecordsCurrentRef.current.find((item) =>
+      item.approvalId === approvalId && item.status === "pending"
+    );
+    if (!record) return;
+    const resolved = resolveApprovalRecord(record, decision, resolvedAt);
+    const updated = upsertApprovalRecord(approvalRecordsCurrentRef.current, resolved);
+    approvalRecordsCurrentRef.current = updated;
     setApprovalRecords((current) => {
-      const record = current.find((item) => item.approvalId === approvalId);
-      if (!record || record.status !== "pending") {
-        return current;
-      }
-      const resolved = resolveApprovalRecord(record, decision, resolvedAt);
-      const updated = upsertApprovalRecord(current, resolved);
-      const repository = approvalRecordsRepoRef.current;
-      if (repository) {
-        void repository.upsert(resolved);
-      }
-      return updated;
+      const next = upsertApprovalRecord(current, resolved);
+      approvalRecordsCurrentRef.current = next;
+      return next;
     });
+    await persistApprovalRecord(resolved, "approval decision");
+  }
+
+  async function executeQuickActionApproval<T>(
+    approvalId: string,
+    execute: () => Promise<T>,
+  ): Promise<T> {
+    const pending = approvalRecordsCurrentRef.current.find(
+      (record) => record.approvalId === approvalId && record.status === "pending",
+    );
+    if (!pending) {
+      throw new Error("The durable approval record is missing or already resolved.");
+    }
+    const approved = resolveApprovalRecord(pending, "approved", new Date().toISOString());
+    const started = markApprovalExecutionStarted(approved, undefined);
+    await persistApprovalRecord(started, "execution intent");
+    let output: T;
+    try {
+      output = await execute();
+    } catch (error) {
+      try {
+        await persistApprovalRecord(
+          markApprovalExecutionTerminal(started, "blocked", error),
+          "execution failure",
+        );
+      } catch {
+        // The durable `started` state remains fail-closed on restart.
+      }
+      throw error;
+    }
+    const succeeded = markApprovalExecutionSucceeded(started, output);
+    await persistApprovalRecord(succeeded, "execution result");
+    await persistApprovalRecord(
+      markApprovalExecutionTerminal(succeeded, "completed"),
+      "execution completion",
+    );
+    return output;
   }
 
   async function resolveRestoredApproval(decision: "approved" | "denied") {
-    const record = findRestorableApprovalRecord(approvalRecords);
+    const activeApprovalId = restoredApprovalRecordIdRef.current;
+    const record = approvalRecords.find((candidate) =>
+      candidate.approvalId === activeApprovalId && candidate.status === "pending"
+    ) ?? findRestorableApprovalRecord(approvalRecords);
     if (!record) {
       return;
     }
+    if (!restoredApprovalResumeSeedRef.current.claim(record.approvalId)) {
+      return;
+    }
+    try {
     await restoredApprovalResumeSeedRef.current.waitUntilReady(record.approvalId);
+    if (decision === "approved" && record.workflowBound && !restoredApprovalResumeSeedRef.current.get(record.approvalId)) {
+      await blockDurableApprovalContinuation(
+        record,
+        "This workflow-bound approval is missing a trusted checkpoint; the native operation was not executed.",
+      );
+      return;
+    }
     if (record.toolName === CODE_PATCH_APPROVAL_TOOL_NAME) {
       await resolveRestoredCodePatchApproval(record, decision);
       return;
@@ -3508,21 +3762,32 @@ function App() {
     if (decision === "denied") {
       const deniedRecord = resolveApprovalRecord(record, "denied", resolvedAt);
       const deniedTask = createRestoredPdfDeniedTask(deniedRecord);
-      updateApprovalRecord(deniedRecord);
-      archiveRestoredTask(deniedTask);
+      try {
+        if (await persistAndContinueRestoredDenial(deniedRecord)) return;
+        archiveRestoredTask(deniedTask);
+      } catch (error) {
+        archiveRestoredApprovalFailure(deniedTask, error);
+      }
       return;
     }
 
-    const approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
-    updateApprovalRecord(approvedRecord);
+    let approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
     try {
-      const execution = await runRestoredPdfOrganization(approvedRecord);
+      const executed = await executeRestoredNativeApproval(
+        approvedRecord,
+        (startedRecord) => runRestoredPdfOrganization(startedRecord),
+      );
+      approvedRecord = executed.record;
+      const execution = executed.output;
       if (await continueRestoredApprovalWorkflow(approvedRecord, execution)) {
         return;
       }
       archiveRestoredTask(createRestoredPdfApprovedTask(approvedRecord, execution));
     } catch (error) {
-      archiveRestoredTask(createRestoredPdfFailedTask(approvedRecord, error));
+      archiveRestoredApprovalFailure(createRestoredPdfFailedTask(approvedRecord, error), error);
+    }
+    } finally {
+      restoredApprovalResumeSeedRef.current.release(record.approvalId);
     }
   }
 
@@ -3533,16 +3798,35 @@ function App() {
     const resolvedAt = new Date().toISOString();
     if (decision === "denied") {
       const deniedRecord = resolveApprovalRecord(record, "denied", resolvedAt);
-      updateApprovalRecord(deniedRecord);
-      archiveRestoredTask(createRestoredCodePatchDeniedTask(deniedRecord));
+      const deniedTask = createRestoredCodePatchDeniedTask(deniedRecord);
+      try {
+        if (await persistAndContinueRestoredDenial(deniedRecord)) return;
+        archiveRestoredTask(deniedTask);
+      } catch (error) {
+        archiveRestoredApprovalFailure(deniedTask, error);
+      }
       return;
     }
 
-    const approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
-    updateApprovalRecord(approvedRecord);
+    let approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
     try {
-      const applyResult = await applyRestoredCodePatch(approvedRecord);
-      const verification = await runRestoredCodePatchVerification(approvedRecord.workspacePath);
+      const executed = await executeRestoredNativeApproval(
+        approvedRecord,
+        (startedRecord) => applyRestoredCodePatch(startedRecord),
+      );
+      approvedRecord = executed.record;
+      const applyResult = executed.output;
+      let verification;
+      try {
+        verification = await runRestoredCodePatchVerification(approvedRecord.workspacePath);
+      } catch (error) {
+        throw new RestoredApprovalResumePersistenceError("execution result", error);
+      }
+      approvedRecord = markApprovalExecutionSucceeded(
+        approvedRecord,
+        { applyResult, verification },
+      );
+      await persistApprovalRecord(approvedRecord, "execution result");
       if (await continueRestoredApprovalWorkflow(approvedRecord, { applyResult, verification })) {
         return;
       }
@@ -3550,7 +3834,7 @@ function App() {
         createRestoredCodePatchApprovedTask(approvedRecord, applyResult, verification),
       );
     } catch (error) {
-      archiveRestoredTask(createRestoredCodePatchFailedTask(approvedRecord, error));
+      archiveRestoredApprovalFailure(createRestoredCodePatchFailedTask(approvedRecord, error), error);
     }
   }
 
@@ -3561,21 +3845,30 @@ function App() {
     const resolvedAt = new Date().toISOString();
     if (decision === "denied") {
       const deniedRecord = resolveApprovalRecord(record, "denied", resolvedAt);
-      updateApprovalRecord(deniedRecord);
-      archiveRestoredTask(createRestoredGitPushDeniedTask(deniedRecord));
+      const deniedTask = createRestoredGitPushDeniedTask(deniedRecord);
+      try {
+        if (await persistAndContinueRestoredDenial(deniedRecord)) return;
+        archiveRestoredTask(deniedTask);
+      } catch (error) {
+        archiveRestoredApprovalFailure(deniedTask, error);
+      }
       return;
     }
 
-    const approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
-    updateApprovalRecord(approvedRecord);
+    let approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
     try {
-      const execution = await runRestoredGitPush(approvedRecord);
+      const executed = await executeRestoredNativeApproval(
+        approvedRecord,
+        (startedRecord) => runRestoredGitPush(startedRecord),
+      );
+      approvedRecord = executed.record;
+      const execution = executed.output;
       if (await continueRestoredApprovalWorkflow(approvedRecord, execution)) {
         return;
       }
       archiveRestoredTask(createRestoredGitPushApprovedTask(approvedRecord, execution));
     } catch (error) {
-      archiveRestoredTask(createRestoredGitPushFailedTask(approvedRecord, error));
+      archiveRestoredApprovalFailure(createRestoredGitPushFailedTask(approvedRecord, error), error);
     }
   }
 
@@ -3586,21 +3879,30 @@ function App() {
     const resolvedAt = new Date().toISOString();
     if (decision === "denied") {
       const deniedRecord = resolveApprovalRecord(record, "denied", resolvedAt);
-      updateApprovalRecord(deniedRecord);
-      archiveRestoredTask(createRestoredGitCommitDeniedTask(deniedRecord));
+      const deniedTask = createRestoredGitCommitDeniedTask(deniedRecord);
+      try {
+        if (await persistAndContinueRestoredDenial(deniedRecord)) return;
+        archiveRestoredTask(deniedTask);
+      } catch (error) {
+        archiveRestoredApprovalFailure(deniedTask, error);
+      }
       return;
     }
 
-    const approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
-    updateApprovalRecord(approvedRecord);
+    let approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
     try {
-      const execution = await runRestoredGitCommit(approvedRecord);
+      const executed = await executeRestoredNativeApproval(
+        approvedRecord,
+        (startedRecord) => runRestoredGitCommit(startedRecord),
+      );
+      approvedRecord = executed.record;
+      const execution = executed.output;
       if (await continueRestoredApprovalWorkflow(approvedRecord, execution)) {
         return;
       }
       archiveRestoredTask(createRestoredGitCommitApprovedTask(approvedRecord, execution));
     } catch (error) {
-      archiveRestoredTask(createRestoredGitCommitFailedTask(approvedRecord, error));
+      archiveRestoredApprovalFailure(createRestoredGitCommitFailedTask(approvedRecord, error), error);
     }
   }
 
@@ -3611,21 +3913,30 @@ function App() {
     const resolvedAt = new Date().toISOString();
     if (decision === "denied") {
       const deniedRecord = resolveApprovalRecord(record, "denied", resolvedAt);
-      updateApprovalRecord(deniedRecord);
-      archiveRestoredTask(createRestoredGitStageDeniedTask(deniedRecord));
+      const deniedTask = createRestoredGitStageDeniedTask(deniedRecord);
+      try {
+        if (await persistAndContinueRestoredDenial(deniedRecord)) return;
+        archiveRestoredTask(deniedTask);
+      } catch (error) {
+        archiveRestoredApprovalFailure(deniedTask, error);
+      }
       return;
     }
 
-    const approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
-    updateApprovalRecord(approvedRecord);
+    let approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
     try {
-      const execution = await runRestoredGitStage(approvedRecord);
+      const executed = await executeRestoredNativeApproval(
+        approvedRecord,
+        (startedRecord) => runRestoredGitStage(startedRecord),
+      );
+      approvedRecord = executed.record;
+      const execution = executed.output;
       if (await continueRestoredApprovalWorkflow(approvedRecord, execution)) {
         return;
       }
       archiveRestoredTask(createRestoredGitStageApprovedTask(approvedRecord, execution));
     } catch (error) {
-      archiveRestoredTask(createRestoredGitStageFailedTask(approvedRecord, error));
+      archiveRestoredApprovalFailure(createRestoredGitStageFailedTask(approvedRecord, error), error);
     }
   }
 
@@ -3636,21 +3947,33 @@ function App() {
     const resolvedAt = new Date().toISOString();
     if (decision === "denied") {
       const deniedRecord = resolveApprovalRecord(record, "denied", resolvedAt);
-      updateApprovalRecord(deniedRecord);
-      archiveRestoredTask(createRestoredGitCreatePullRequestDeniedTask(deniedRecord));
+      const deniedTask = createRestoredGitCreatePullRequestDeniedTask(deniedRecord);
+      try {
+        if (await persistAndContinueRestoredDenial(deniedRecord)) return;
+        archiveRestoredTask(deniedTask);
+      } catch (error) {
+        archiveRestoredApprovalFailure(deniedTask, error);
+      }
       return;
     }
 
-    const approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
-    updateApprovalRecord(approvedRecord);
+    let approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
     try {
-      const execution = await runRestoredGitCreatePullRequest(approvedRecord);
+      const executed = await executeRestoredNativeApproval(
+        approvedRecord,
+        (startedRecord) => runRestoredGitCreatePullRequest(startedRecord),
+      );
+      approvedRecord = executed.record;
+      const execution = executed.output;
       if (await continueRestoredApprovalWorkflow(approvedRecord, execution)) {
         return;
       }
       archiveRestoredTask(createRestoredGitCreatePullRequestApprovedTask(approvedRecord, execution));
     } catch (error) {
-      archiveRestoredTask(createRestoredGitCreatePullRequestFailedTask(approvedRecord, error));
+      archiveRestoredApprovalFailure(
+        createRestoredGitCreatePullRequestFailedTask(approvedRecord, error),
+        error,
+      );
     }
   }
 
@@ -3661,31 +3984,80 @@ function App() {
     const resolvedAt = new Date().toISOString();
     if (decision === "denied") {
       const deniedRecord = resolveApprovalRecord(record, "denied", resolvedAt);
-      updateApprovalRecord(deniedRecord);
-      archiveRestoredTask(createRestoredGitCommentPullRequestDeniedTask(deniedRecord));
+      const deniedTask = createRestoredGitCommentPullRequestDeniedTask(deniedRecord);
+      try {
+        if (await persistAndContinueRestoredDenial(deniedRecord)) return;
+        archiveRestoredTask(deniedTask);
+      } catch (error) {
+        archiveRestoredApprovalFailure(deniedTask, error);
+      }
       return;
     }
 
-    const approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
-    updateApprovalRecord(approvedRecord);
+    let approvedRecord = resolveApprovalRecord(record, "approved", resolvedAt);
     try {
-      const execution = await runRestoredGitCommentPullRequest(approvedRecord);
+      const executed = await executeRestoredNativeApproval(
+        approvedRecord,
+        (startedRecord) => runRestoredGitCommentPullRequest(startedRecord),
+      );
+      approvedRecord = executed.record;
+      const execution = executed.output;
       if (await continueRestoredApprovalWorkflow(approvedRecord, execution)) {
         return;
       }
       archiveRestoredTask(createRestoredGitCommentPullRequestApprovedTask(approvedRecord, execution));
     } catch (error) {
-      archiveRestoredTask(createRestoredGitCommentPullRequestFailedTask(approvedRecord, error));
+      archiveRestoredApprovalFailure(
+        createRestoredGitCommentPullRequestFailedTask(approvedRecord, error),
+        error,
+      );
     }
   }
 
-  function archiveRestoredTask(restoredTask: TaskSnapshot) {
+  function archiveRestoredApprovalFailure(restoredTask: TaskSnapshot, error: unknown) {
+    if (!isRestoredApprovalResumePersistenceError(error)) {
+      archiveRestoredTask(restoredTask);
+      return;
+    }
+    const detail = error.message;
+    const approvalWasExecuted = !["approval decision", "execution intent"].includes(error.operation);
+    const summary = approvalWasExecuted
+      ? `blocked: the approved operation completed, but durable workflow continuation was not persisted; ${detail}`
+      : `blocked: the approval decision was not persisted, so no native operation was executed; ${detail}`;
+    archiveRestoredTask({
+      ...restoredTask,
+      title: "Workflow continuation blocked",
+      commanderMessage: approvalWasExecuted
+        ? "The approved operation completed, but Javis could not persist the workflow continuation. Downstream steps were not resumed."
+        : "Javis could not persist the approval decision, so the native operation was not executed.",
+      verificationSummary: summary,
+      verificationResult: {
+        status: "fail",
+        summary: "Durable workflow continuation was blocked.",
+        detail: summary,
+      },
+      logs: [
+        ...restoredTask.logs,
+        {
+          id: `${restoredTask.id}-resume-persistence-failed`,
+          kind: "event",
+          title: "workflow.resume.persistence_failed",
+          detail,
+        },
+      ],
+    }, { preserveResumeSeed: true });
+  }
+
+  function archiveRestoredTask(
+    restoredTask: TaskSnapshot,
+    options: { preserveResumeSeed?: boolean } = {},
+  ) {
     const approvalId = restoredTask.approvalOutcome?.approvalId ?? restoredTask.permissionRequest?.id;
     const resumeSeed = approvalId
       ? restoredApprovalResumeSeedRef.current.get(approvalId)
       : undefined;
     const taskWithResumeMetadata = attachRestoredApprovalDurableResume(restoredTask, resumeSeed);
-    if (approvalId) {
+    if (approvalId && !options.preserveResumeSeed) {
       restoredApprovalResumeSeedRef.current.delete(approvalId);
     }
     clearQueuedTaskSnapshots();
@@ -3706,23 +4078,53 @@ function App() {
   ): Promise<boolean> {
     const seed = restoredApprovalResumeSeedRef.current.get(record.approvalId);
     if (!seed) {
+      if (record.runId && record.execution?.status === "succeeded") {
+        throw new RestoredApprovalResumePersistenceError(
+          "continuation seed",
+          new Error("The workflow-bound approval has no trusted resume seed."),
+        );
+      }
+      if (record.execution?.status === "succeeded") {
+        await persistApprovalRecord(
+          markApprovalExecutionTerminal(record, "completed"),
+          "execution completion",
+        );
+      }
       return false;
     }
-    const advancedSeed = advanceRestoredApprovalResumeSeed(record, seed, approvalStepOutput);
+    const durableApprovalOutput = record.execution?.status === "succeeded" &&
+      Object.prototype.hasOwnProperty.call(record.execution, "output")
+      ? record.execution.output
+      : approvalStepOutput;
+    const advancedSeed = advanceRestoredApprovalResumeSeed(record, seed, durableApprovalOutput);
     if (!advancedSeed) {
+      if (record.workflowBound) {
+        throw new RestoredApprovalResumePersistenceError(
+          "continuation seed",
+          new Error("The approved execution cannot be bound to the waiting workflow step."),
+        );
+      }
       return false;
+    }
+    try {
+      await persistRestoredApprovalResumeEvents(
+        seed.events,
+        advancedSeed.events,
+        runtimeEventStoreRef.current,
+      );
+      await persistRestoredApprovalResumeCheckpoint(
+        advancedSeed.checkpoint,
+        workflowCheckpointStoreRef.current,
+      );
+      const continuationRecord = markApprovalContinuationPending(record, advancedSeed);
+      await persistApprovalRecord(continuationRecord, "continuation intent");
+    } catch (error) {
+      // Keep the post-side-effect state in memory so the blocked task carries
+      // the exact event/checkpoint boundary needed for a safe retry.
+      restoredApprovalResumeSeedRef.current.set(record.approvalId, advancedSeed);
+      throw error;
     }
     restoredApprovalResumeSeedRef.current.delete(record.approvalId);
-    const resumedEvents = advancedSeed.events.filter((candidate) =>
-      !seed.events.some((existing) => existing.eventId === candidate.eventId)
-    );
-    if (runtimeEventStoreRef.current && resumedEvents.length > 0) {
-      try {
-        await runtimeEventStoreRef.current.appendBatch(resumedEvents);
-      } catch (error) {
-        console.warn("Failed to append restored approval resume event", error);
-      }
-    }
     const startRequest = buildRestoredApprovalResumeStartRequest(record, advancedSeed, task.userGoal);
     clearQueuedTaskSnapshots();
     setActiveHistoryEntryId(record.taskId);
@@ -3732,7 +4134,308 @@ function App() {
     return true;
   }
 
-  function handlePermissionDecision(decision: WorkbenchPermissionDecision) {
+  async function executeRestoredNativeApproval<T>(
+    record: DurableApprovalRecord,
+    execute: (startedRecord: DurableApprovalRecord) => Promise<T>,
+  ): Promise<{ record: DurableApprovalRecord; output: T }> {
+    const resumeSeed = restoredApprovalResumeSeedRef.current.get(record.approvalId);
+    const startedRecord = markApprovalExecutionStarted(record, resumeSeed);
+    await persistApprovalRecord(startedRecord, "execution intent");
+    let output: T;
+    let nativeInvoked = false;
+    try {
+      nativeInvoked = true;
+      output = await execute(startedRecord);
+    } catch (error) {
+      try {
+        await persistApprovalRecord(
+          markApprovalExecutionTerminal(startedRecord, nativeInvoked ? "blocked" : "failed", error),
+          "execution failure",
+        );
+      } catch {
+        // Keep the original native error as the user-visible failure. A
+        // started record remains fail-closed if the failure state cannot save.
+      }
+      throw error;
+    }
+    // A native operation may have completed even if persisting its result or
+    // a subsequent verification fails. Leave the durable state as `started`
+    // when this write fails so restart blocks instead of retrying the side
+    // effect with an unknown outcome.
+    const succeededRecord = markApprovalExecutionSucceeded(
+      startedRecord,
+      output ?? { status: "approved", approvalId: record.approvalId },
+    );
+    await persistApprovalRecord(succeededRecord, "execution result");
+    return { record: succeededRecord, output };
+  }
+
+  async function persistAndContinueRestoredDenial(
+    deniedRecord: DurableApprovalRecord,
+  ): Promise<boolean> {
+    const seed = restoredApprovalResumeSeedRef.current.get(deniedRecord.approvalId);
+    if (deniedRecord.workflowBound && !seed) {
+      await persistApprovalRecord(deniedRecord, "approval decision");
+      return false;
+    }
+    const output = {
+      status: "denied",
+      approvalId: deniedRecord.approvalId,
+      toolName: deniedRecord.toolName,
+    };
+    const durableDeniedRecord = markApprovalExecutionSucceeded(
+      markApprovalExecutionStarted(deniedRecord, seed),
+      output,
+    );
+    await persistApprovalRecord(durableDeniedRecord, "approval decision");
+    return continueRestoredApprovalWorkflow(durableDeniedRecord, output);
+  }
+
+  async function resumeDurableApprovalContinuation(record: DurableApprovalRecord): Promise<void> {
+    if (!restoredApprovalResumeSeedRef.current.claim(record.approvalId)) return;
+    try {
+      let execution = record.execution;
+      if (execution?.status === "started") {
+        await blockDurableApprovalContinuation(record, "The native operation may have started before the app stopped; it will not be retried automatically.");
+        return;
+      }
+
+      const storedSeed = execution?.resumeSeed;
+      let checkpoint = storedSeed?.checkpoint;
+      let events: RuntimeEventEnvelope[] = [];
+      if (record.workflowBound && record.runId) {
+        try {
+          checkpoint = await workflowCheckpointStoreRef.current?.latestByRunId(record.runId) ?? checkpoint;
+        } catch (error) {
+          if (!checkpoint) {
+            await blockDurableApprovalContinuation(record, `Durable resume state could not be loaded: ${String(error)}`);
+            return;
+          }
+        }
+        const eventStore = runtimeEventStoreRef.current;
+        if (!eventStore) {
+          await blockDurableApprovalContinuation(record, "The complete workflow event replay is unavailable.");
+          return;
+        }
+        try {
+          events = await eventStore.replayByRunId(record.runId);
+        } catch (error) {
+          await blockDurableApprovalContinuation(
+            record,
+            `The complete workflow event replay could not be loaded: ${String(error)}`,
+          );
+          return;
+        }
+      }
+
+      if (!execution) {
+        const reconciliation = reconcileApprovalExecutionFromEventLog(record, checkpoint, events);
+        if (reconciliation.status === "blocked") {
+          await blockDurableApprovalContinuation(record, reconciliation.reason);
+          return;
+        }
+        await persistApprovalRecord(
+          reconciliation.record,
+          reconciliation.status === "terminal" ? "execution completion" : "continuation intent",
+        );
+        if (reconciliation.status === "terminal") return;
+
+        const startRequest = buildRestoredApprovalResumeStartRequest(
+          reconciliation.record,
+          reconciliation.seed,
+          task.userGoal,
+        );
+        clearQueuedTaskSnapshots();
+        setActiveHistoryEntryId(record.taskId);
+        setIsTaskActive(true);
+        isTaskActiveRef.current = true;
+        runtime.start(startRequest.userGoal, startRequest.options);
+        return;
+      }
+      if (!execution.workflowBound) {
+        await persistApprovalRecord(
+          markApprovalExecutionTerminal(record, "completed"),
+          "execution completion",
+        );
+        return;
+      }
+      if (!checkpoint || !execution.runId ||
+        checkpoint.taskId !== record.taskId ||
+        checkpoint.runId !== execution.runId ||
+        checkpoint.workflowId !== execution.workflowId ||
+        checkpoint.planHash !== execution.planHash ||
+        !execution.stepId
+      ) {
+        await blockDurableApprovalContinuation(record, "Durable resume state is missing or does not match the approved workflow.");
+        return;
+      }
+
+      let seed: RestoredApprovalResumeSeed = { checkpoint, events };
+      let continuationRecord = record;
+      if (execution.status === "succeeded") {
+        if (checkpoint.runningStepIds.includes(execution.stepId)) {
+          const advancedSeed = advanceRestoredApprovalResumeSeed(record, seed, execution.output);
+          if (!advancedSeed) {
+            await blockDurableApprovalContinuation(record, "The approved execution cannot be bound to the running workflow step.");
+            return;
+          }
+          await persistRestoredApprovalResumeEvents(seed.events, advancedSeed.events, runtimeEventStoreRef.current);
+          await persistRestoredApprovalResumeCheckpoint(advancedSeed.checkpoint, workflowCheckpointStoreRef.current);
+          seed = advancedSeed;
+        } else if (!checkpoint.completedStepIds.includes(execution.stepId)) {
+          await blockDurableApprovalContinuation(record, "The durable checkpoint no longer contains the approved workflow step.");
+          return;
+        } else {
+          const outputKey = checkpoint.workflowSnapshot.steps.find((step) => step.id === execution.stepId)?.outputContextKey
+            ?? `step:${execution.stepId}`;
+          if (!Object.prototype.hasOwnProperty.call(checkpoint.contextSnapshot, outputKey)) {
+            await blockDurableApprovalContinuation(record, "The completed checkpoint is missing the approved step output.");
+            return;
+          }
+        }
+        continuationRecord = markApprovalContinuationPending(record, seed);
+        await persistApprovalRecord(continuationRecord, "continuation intent");
+      } else if (execution.status === "continuation_pending") {
+        const step = checkpoint.workflowSnapshot.steps.find((candidate) => candidate.id === execution.stepId);
+        const outputKey = step?.outputContextKey ?? `step:${execution.stepId}`;
+        if (!step || !checkpoint.completedStepIds.includes(execution.stepId) ||
+          !Object.prototype.hasOwnProperty.call(checkpoint.contextSnapshot, outputKey)) {
+          await blockDurableApprovalContinuation(record, "The pending continuation checkpoint is incomplete.");
+          return;
+        }
+      }
+
+      const terminalEvent = findTerminalRuntimeEvent(events, record.taskId, checkpoint.eventSequence);
+      if (terminalEvent) {
+        const terminalKind = (terminalEvent.payload as { kind?: unknown }).kind;
+        await persistApprovalRecord(
+          markApprovalExecutionTerminal(
+            continuationRecord,
+            terminalKind === "task.failed" ? "failed" : "completed",
+            terminalKind === "task.failed"
+              ? terminalRuntimeEventFailureDetail(terminalEvent)
+              : undefined,
+          ),
+          "execution completion",
+        );
+        return;
+      }
+
+      const startRequest = buildRestoredApprovalResumeStartRequest(record, seed, task.userGoal);
+      clearQueuedTaskSnapshots();
+      setActiveHistoryEntryId(record.taskId);
+      setIsTaskActive(true);
+      isTaskActiveRef.current = true;
+      runtime.start(startRequest.userGoal, startRequest.options);
+    } catch (error) {
+      await blockDurableApprovalContinuation(record, `Durable workflow continuation failed closed: ${String(error)}`);
+    } finally {
+      restoredApprovalResumeSeedRef.current.release(record.approvalId);
+    }
+  }
+
+  async function blockDurableApprovalContinuation(
+    record: DurableApprovalRecord,
+    detail: string,
+  ): Promise<void> {
+    let blockedRecord = record;
+    if (!record.execution || !["completed", "failed", "blocked"].includes(record.execution.status)) {
+      try {
+        blockedRecord = markApprovalExecutionTerminal(record, "blocked", detail);
+        await persistApprovalRecord(blockedRecord, "continuation state");
+      } catch {
+        // Keep the in-memory record blocked as well; never retry a native
+        // operation when the durable state transition is uncertain.
+        setApprovalRecords((current) => {
+          const next = upsertApprovalRecord(current, blockedRecord);
+          approvalRecordsCurrentRef.current = next;
+          return next;
+        });
+      }
+    }
+    const blockedTask = createRestoredApprovalContinuationBlockedTask(blockedRecord, detail);
+    archiveRestoredTask(blockedTask);
+  }
+
+  async function blockPendingRestoredApproval(
+    record: DurableApprovalRecord,
+    detail: string,
+  ): Promise<void> {
+    const expiredRecord = expireApprovalRecord(record, new Date().toISOString());
+    const blockedRecord = markApprovalExecutionTerminal(expiredRecord, "blocked", detail);
+    try {
+      await persistApprovalRecord(blockedRecord, "recovery state");
+    } catch (error) {
+      setApprovalRecords((current) => {
+        const next = upsertApprovalRecord(current, blockedRecord);
+        approvalRecordsCurrentRef.current = next;
+        return next;
+      });
+      console.error("Failed to persist blocked restored approval", error);
+    }
+    archiveRestoredTask(createRestoredApprovalContinuationBlockedTask(blockedRecord, detail));
+  }
+
+  function createRestoredApprovalContinuationBlockedTask(
+    record: DurableApprovalRecord,
+    detail: string,
+  ): TaskSnapshot {
+    const base = record.toolName === CODE_PATCH_APPROVAL_TOOL_NAME
+      ? createRestoredCodePatchApprovalTask(record)
+      : record.toolName === GIT_PUSH_APPROVAL_TOOL_NAME
+        ? createRestoredGitPushApprovalTask(record)
+        : record.toolName === GIT_COMMIT_APPROVAL_TOOL_NAME
+          ? createRestoredGitCommitApprovalTask(record)
+          : record.toolName === GIT_STAGE_APPROVAL_TOOL_NAME
+            ? createRestoredGitStageApprovalTask(record)
+            : record.toolName === GIT_CREATE_PR_APPROVAL_TOOL_NAME
+              ? createRestoredGitCreatePullRequestApprovalTask(record)
+              : record.toolName === GIT_COMMENT_PR_APPROVAL_TOOL_NAME
+                ? createRestoredGitCommentPullRequestApprovalTask(record)
+                : createRestoredPdfApprovalTask(record);
+    return {
+      ...base,
+      title: "Workflow continuation blocked",
+      status: "failed",
+      commanderMessage: "Javis blocked automatic continuation because the approved native operation cannot be proven safe to retry.",
+      verificationSummary: `blocked: ${detail}`,
+      verificationResult: {
+        status: "fail",
+        summary: "Durable workflow continuation was blocked.",
+        detail,
+      },
+    };
+  }
+
+  function findTerminalRuntimeEvent(
+    events: readonly RuntimeEventEnvelope[],
+    taskId: string,
+    minimumSequence = 0,
+  ): RuntimeEventEnvelope | undefined {
+    return [...events].sort((left, right) => right.sequence - left.sequence).find((event) => {
+      if (event.sequence < minimumSequence) return false;
+      if (event.taskId !== taskId || typeof event.payload !== "object" || event.payload === null) {
+        return false;
+      }
+      const kind = (event.payload as { kind?: unknown }).kind;
+      return kind === "task.completed" || kind === "task.failed";
+    });
+  }
+
+  function terminalRuntimeEventFailureDetail(event: RuntimeEventEnvelope): string {
+    const payload = event.payload;
+    if (typeof payload === "object" && payload !== null) {
+      const record = payload as Record<string, unknown>;
+      for (const key of ["error", "reason", "summary", "detail"]) {
+        if (typeof record[key] === "string" && record[key].trim()) {
+          return `Durable task.failed event: ${record[key]}`;
+        }
+      }
+    }
+    return "The durable workflow event log records task.failed.";
+  }
+
+  async function handlePermissionDecision(decision: WorkbenchPermissionDecision) {
     const request = task.permissionRequest;
     if (
       decision === "approved_always" &&
@@ -3755,7 +4458,27 @@ function App() {
     ) {
       const record = approvalRecords.find((item) => item.approvalId === request.id);
       if (record?.status === "pending") {
-        updateApprovalRecord(resolveApprovalRecord(record, decision === "approved_always" ? "approved" : decision, new Date().toISOString()));
+        try {
+          await persistApprovalRecord(
+            resolveApprovalRecord(
+              record,
+              decision === "approved_always" ? "approved" : decision,
+              new Date().toISOString(),
+            ),
+            "approval decision",
+          );
+        } catch (error) {
+          clearQueuedTaskSnapshots();
+          setTask({
+            ...task,
+            status: "failed",
+            permissionRequest: undefined,
+            title: "Approval persistence blocked",
+            commanderMessage: "Javis could not durably record the approval decision; no native operation was released.",
+            verificationSummary: `blocked: ${error instanceof Error ? error.message : String(error)}`,
+          });
+          return;
+        }
       }
     }
     runtime.resolvePermission(decision, request?.id);
@@ -4335,6 +5058,7 @@ function App() {
           path: path || session.workspaceRoot,
           workspaceRoot: session.workspaceRoot,
           allowedRootIds: null,
+          browseRoot: null,
         });
       },
       async search(session: WorkbenchAgentSessionContext, query: string) {
@@ -4345,6 +5069,11 @@ function App() {
             query,
             maxResults: 80,
           },
+        });
+      },
+      async read(session: WorkbenchAgentSessionContext, path: string) {
+        return await readFileChunk(path, undefined, {
+          workspaceRoot: session.workspaceRoot,
         });
       },
       async watchStart(session: WorkbenchAgentSessionContext) {
@@ -4815,7 +5544,9 @@ function App() {
           const permissionRequest = createGitPushPermissionRequest(plan);
           const approvalRecord = createApprovalRecordFromPermissionRequest({
             taskId: session.taskId ?? session.sessionId,
-            runId: task.runId,
+            // Quick actions are standalone native operations; they do not
+            // have a Commander checkpoint to resume after a crash.
+            runId: undefined,
             toolName: GIT_PUSH_AUDIT_TOOL_NAME,
             workspacePath: root,
             permissionRequest,
@@ -4835,38 +5566,36 @@ function App() {
           }
           const startedAt = new Date().toISOString();
           try {
-            await invoke("git_approve_push", {
-              approvalId,
-              taskId: session.taskId,
+            const result = await executeQuickActionApproval(approvalId, async () => {
+              await invoke("git_approve_push", { approvalId, taskId: session.taskId });
+              const execution = await invoke<{
+                workspaceRoot: string;
+                branch: string;
+                upstream: string;
+                remoteName: string;
+                remoteBranch: string;
+                commitCount: number;
+                pushed: boolean;
+                output: string;
+              }>("git_execute_push", {
+                request: {
+                  approvalId,
+                  sessionId: session.sessionId,
+                  workspaceRoot: root,
+                  taskId: session.taskId,
+                },
+              });
+              return {
+                workspacePath: execution.workspaceRoot,
+                branch: execution.branch,
+                upstream: execution.upstream,
+                remoteName: execution.remoteName,
+                remoteBranch: execution.remoteBranch,
+                commitCount: execution.commitCount,
+                pushed: execution.pushed,
+                output: execution.output,
+              };
             });
-            resolveApprovalRecordById(approvalId, "approved");
-            const execution = await invoke<{
-              workspaceRoot: string;
-              branch: string;
-              upstream: string;
-              remoteName: string;
-              remoteBranch: string;
-              commitCount: number;
-              pushed: boolean;
-              output: string;
-            }>("git_execute_push", {
-              request: {
-                approvalId,
-                sessionId: session.sessionId,
-                workspaceRoot: root,
-                taskId: session.taskId,
-              },
-            });
-            const result = {
-              workspacePath: execution.workspaceRoot,
-              branch: execution.branch,
-              upstream: execution.upstream,
-              remoteName: execution.remoteName,
-              remoteBranch: execution.remoteBranch,
-              commitCount: execution.commitCount,
-              pushed: execution.pushed,
-              output: execution.output,
-            };
             recordToolCallAudit(createGitPushExecutionAuditRecord(session, approvalId, result, startedAt));
             return result;
           } catch (error) {
@@ -4875,7 +5604,7 @@ function App() {
           }
         }}
         onQuickActionGitPushCancel={async (_session, approvalId) => {
-          resolveApprovalRecordById(approvalId, "denied");
+          await resolveApprovalRecordById(approvalId, "denied");
         }}
         onQuickActionGitStagePlan={async (session, paths): Promise<GitStagePlanQuickResult> => {
           const root = session.workspaceRoot;
@@ -4893,7 +5622,7 @@ function App() {
           const permissionRequest = createGitStagePermissionRequest(plan);
           const approvalRecord = createApprovalRecordFromPermissionRequest({
             taskId: session.taskId ?? session.sessionId,
-            runId: task.runId,
+            runId: undefined,
             toolName: GIT_STAGE_AUDIT_TOOL_NAME,
             workspacePath: root,
             permissionRequest,
@@ -4913,33 +5642,31 @@ function App() {
           }
           const startedAt = new Date().toISOString();
           try {
-            await invoke("git_approve_stage_files", {
-              approvalId,
-              taskId: session.taskId,
+            const result = await executeQuickActionApproval(approvalId, async () => {
+              await invoke("git_approve_stage_files", { approvalId, taskId: session.taskId });
+              const execution = await invoke<{
+                workspaceRoot: string;
+                stagedPaths: string[];
+                fileCount: number;
+                staged: boolean;
+                output: string;
+              }>("git_execute_stage_files", {
+                request: {
+                  approvalId,
+                  sessionId: session.sessionId,
+                  workspaceRoot: root,
+                  taskId: session.taskId,
+                  paths,
+                },
+              });
+              return {
+                workspacePath: execution.workspaceRoot,
+                stagedPaths: execution.stagedPaths,
+                fileCount: execution.fileCount,
+                staged: execution.staged,
+                output: execution.output,
+              };
             });
-            resolveApprovalRecordById(approvalId, "approved");
-            const execution = await invoke<{
-              workspaceRoot: string;
-              stagedPaths: string[];
-              fileCount: number;
-              staged: boolean;
-              output: string;
-            }>("git_execute_stage_files", {
-              request: {
-                approvalId,
-                sessionId: session.sessionId,
-                workspaceRoot: root,
-                taskId: session.taskId,
-                paths,
-              },
-            });
-            const result = {
-              workspacePath: execution.workspaceRoot,
-              stagedPaths: execution.stagedPaths,
-              fileCount: execution.fileCount,
-              staged: execution.staged,
-              output: execution.output,
-            };
             recordToolCallAudit(createGitStageExecutionAuditRecord(session, approvalId, result, startedAt));
             return result;
           } catch (error) {
@@ -4948,7 +5675,7 @@ function App() {
           }
         }}
         onQuickActionGitStageCancel={async (_session, approvalId) => {
-          resolveApprovalRecordById(approvalId, "denied");
+          await resolveApprovalRecordById(approvalId, "denied");
         }}
         onQuickActionGitCommitPlan={async (session, message): Promise<GitCommitPlanQuickResult> => {
           const root = session.workspaceRoot;
@@ -4966,7 +5693,7 @@ function App() {
           const permissionRequest = createGitCommitPermissionRequest(plan);
           const approvalRecord = createApprovalRecordFromPermissionRequest({
             taskId: session.taskId ?? session.sessionId,
-            runId: task.runId,
+            runId: undefined,
             toolName: GIT_COMMIT_APPROVAL_TOOL_NAME,
             workspacePath: root,
             permissionRequest,
@@ -4986,37 +5713,35 @@ function App() {
           }
           const startedAt = new Date().toISOString();
           try {
-            await invoke("git_approve_commit", {
-              approvalId,
-              taskId: session.taskId,
+            const result = await executeQuickActionApproval(approvalId, async () => {
+              await invoke("git_approve_commit", { approvalId, taskId: session.taskId });
+              const execution = await invoke<{
+                workspaceRoot: string;
+                branch?: string;
+                commitHash: string;
+                subject: string;
+                fileCount: number;
+                committed: boolean;
+                output: string;
+              }>("git_execute_commit", {
+                request: {
+                  approvalId,
+                  sessionId: session.sessionId,
+                  workspaceRoot: root,
+                  taskId: session.taskId,
+                  message,
+                },
+              });
+              return {
+                workspacePath: execution.workspaceRoot,
+                branch: execution.branch,
+                commitHash: execution.commitHash,
+                subject: execution.subject,
+                fileCount: execution.fileCount,
+                committed: execution.committed,
+                output: execution.output,
+              };
             });
-            resolveApprovalRecordById(approvalId, "approved");
-            const execution = await invoke<{
-              workspaceRoot: string;
-              branch?: string;
-              commitHash: string;
-              subject: string;
-              fileCount: number;
-              committed: boolean;
-              output: string;
-            }>("git_execute_commit", {
-              request: {
-                approvalId,
-                sessionId: session.sessionId,
-                workspaceRoot: root,
-                taskId: session.taskId,
-                message,
-              },
-            });
-            const result = {
-              workspacePath: execution.workspaceRoot,
-              branch: execution.branch,
-              commitHash: execution.commitHash,
-              subject: execution.subject,
-              fileCount: execution.fileCount,
-              committed: execution.committed,
-              output: execution.output,
-            };
             recordToolCallAudit(createGitCommitExecutionAuditRecord(session, approvalId, result, startedAt));
             return result;
           } catch (error) {
@@ -5025,7 +5750,7 @@ function App() {
           }
         }}
         onQuickActionGitCommitCancel={async (_session, approvalId) => {
-          resolveApprovalRecordById(approvalId, "denied");
+          await resolveApprovalRecordById(approvalId, "denied");
         }}
         onQuickActionGitCreatePullRequestPlan={async (session, request): Promise<GitCreatePullRequestPlanQuickResult> => {
           const root = session.workspaceRoot;
@@ -5046,7 +5771,7 @@ function App() {
           const permissionRequest = createGitCreatePullRequestPermissionRequest(plan);
           const approvalRecord = createApprovalRecordFromPermissionRequest({
             taskId: session.taskId ?? session.sessionId,
-            runId: task.runId,
+            runId: undefined,
             toolName: GIT_CREATE_PR_AUDIT_TOOL_NAME,
             workspacePath: root,
             permissionRequest,
@@ -5066,44 +5791,42 @@ function App() {
           }
           const startedAt = new Date().toISOString();
           try {
-            await invoke("git_approve_create_pull_request", {
-              approvalId,
-              taskId: session.taskId,
+            const result = await executeQuickActionApproval(approvalId, async () => {
+              await invoke("git_approve_create_pull_request", { approvalId, taskId: session.taskId });
+              const execution = await invoke<{
+                workspaceRoot: string;
+                provider: string;
+                url: string;
+                title: string;
+                baseBranch: string;
+                headBranch: string;
+                draft: boolean;
+                created: boolean;
+                output: string;
+              }>("git_execute_create_pull_request", {
+                request: {
+                  approvalId,
+                  sessionId: session.sessionId,
+                  workspaceRoot: root,
+                  taskId: session.taskId,
+                  title: request.title,
+                  body: request.body ?? "",
+                  baseBranch: request.baseBranch,
+                  draft: request.draft ?? true,
+                },
+              });
+              return {
+                workspacePath: execution.workspaceRoot,
+                provider: execution.provider,
+                url: execution.url,
+                title: execution.title,
+                baseBranch: execution.baseBranch,
+                headBranch: execution.headBranch,
+                draft: execution.draft,
+                created: execution.created,
+                output: execution.output,
+              };
             });
-            resolveApprovalRecordById(approvalId, "approved");
-            const execution = await invoke<{
-              workspaceRoot: string;
-              provider: string;
-              url: string;
-              title: string;
-              baseBranch: string;
-              headBranch: string;
-              draft: boolean;
-              created: boolean;
-              output: string;
-            }>("git_execute_create_pull_request", {
-              request: {
-                approvalId,
-                sessionId: session.sessionId,
-                workspaceRoot: root,
-                taskId: session.taskId,
-                title: request.title,
-                body: request.body ?? "",
-                baseBranch: request.baseBranch,
-                draft: request.draft ?? true,
-              },
-            });
-            const result = {
-              workspacePath: execution.workspaceRoot,
-              provider: execution.provider,
-              url: execution.url,
-              title: execution.title,
-              baseBranch: execution.baseBranch,
-              headBranch: execution.headBranch,
-              draft: execution.draft,
-              created: execution.created,
-              output: execution.output,
-            };
             recordToolCallAudit(createGitCreatePullRequestExecutionAuditRecord(session, approvalId, result, startedAt));
             return result;
           } catch (error) {
@@ -5112,7 +5835,7 @@ function App() {
           }
         }}
         onQuickActionGitCreatePullRequestCancel={async (_session, approvalId) => {
-          resolveApprovalRecordById(approvalId, "denied");
+          await resolveApprovalRecordById(approvalId, "denied");
         }}
         onQuickActionGitCommentPullRequestPlan={async (session, request): Promise<GitCommentPullRequestPlanQuickResult> => {
           const root = session.workspaceRoot;
@@ -5131,7 +5854,7 @@ function App() {
           const permissionRequest = createGitCommentPullRequestPermissionRequest(plan);
           const approvalRecord = createApprovalRecordFromPermissionRequest({
             taskId: session.taskId ?? session.sessionId,
-            runId: task.runId,
+            runId: undefined,
             toolName: GIT_COMMENT_PR_APPROVAL_TOOL_NAME,
             workspacePath: root,
             permissionRequest,
@@ -5151,34 +5874,32 @@ function App() {
           }
           const startedAt = new Date().toISOString();
           try {
-            await invoke("git_approve_comment_pull_request", {
-              approvalId,
-              taskId: session.taskId,
+            const result = await executeQuickActionApproval(approvalId, async () => {
+              await invoke("git_approve_comment_pull_request", { approvalId, taskId: session.taskId });
+              const execution = await invoke<{
+                workspaceRoot: string;
+                provider: string;
+                pullRequest: string;
+                commented: boolean;
+                output: string;
+              }>("git_execute_comment_pull_request", {
+                request: {
+                  approvalId,
+                  sessionId: session.sessionId,
+                  workspaceRoot: root,
+                  taskId: session.taskId,
+                  pullRequest: request.pullRequest,
+                  body: request.body,
+                },
+              });
+              return {
+                workspacePath: execution.workspaceRoot,
+                provider: execution.provider,
+                pullRequest: execution.pullRequest,
+                commented: execution.commented,
+                output: execution.output,
+              };
             });
-            resolveApprovalRecordById(approvalId, "approved");
-            const execution = await invoke<{
-              workspaceRoot: string;
-              provider: string;
-              pullRequest: string;
-              commented: boolean;
-              output: string;
-            }>("git_execute_comment_pull_request", {
-              request: {
-                approvalId,
-                sessionId: session.sessionId,
-                workspaceRoot: root,
-                taskId: session.taskId,
-                pullRequest: request.pullRequest,
-                body: request.body,
-              },
-            });
-            const result = {
-              workspacePath: execution.workspaceRoot,
-              provider: execution.provider,
-              pullRequest: execution.pullRequest,
-              commented: execution.commented,
-              output: execution.output,
-            };
             recordToolCallAudit(createGitCommentPullRequestExecutionAuditRecord(session, approvalId, result, startedAt));
             return result;
           } catch (error) {
@@ -5187,7 +5908,7 @@ function App() {
           }
         }}
         onQuickActionGitCommentPullRequestCancel={async (_session, approvalId) => {
-          resolveApprovalRecordById(approvalId, "denied");
+          await resolveApprovalRecordById(approvalId, "denied");
         }}
         onQuickActionSideChat={async (session, message: string) => {
           const sessionPrompt = [

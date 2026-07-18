@@ -1016,6 +1016,27 @@ describe("JavisWorkbench permission cards", () => {
     expect(executionProgress).toBeLessThan(secondAnswer);
   });
 
+  it("renders active execution progress after a trailing user request", () => {
+    const html = renderWorkbench({
+      ...createOrchestrationTask(),
+      status: "running",
+      conversationMessages: [
+        { id: "message-1", role: "user", content: "Previous question" },
+        { id: "message-2", role: "assistant", content: "Previous answer" },
+        { id: "message-3", role: "user", content: "Current task request" },
+      ],
+    });
+
+    const previousQuestion = html.indexOf("Previous question");
+    const previousAnswer = html.indexOf("Previous answer");
+    const currentRequest = html.indexOf("Current task request");
+    const executionProgress = html.indexOf("Execution progress");
+
+    expect(previousQuestion).toBeLessThan(previousAnswer);
+    expect(previousAnswer).toBeLessThan(currentRequest);
+    expect(currentRequest).toBeLessThan(executionProgress);
+  });
+
   it("hides queued agents that are not assigned to current plan steps", () => {
     const html = renderWorkbench({
       id: "task-focused-agents",
@@ -2381,12 +2402,21 @@ describe("JavisWorkbench permission cards", () => {
         onDraftGoalChange={vi.fn()}
         onSubmitGoal={vi.fn()}
         task={createIdleTask()}
+        trustedComputerApps={[{
+          title: "QQ",
+          trustedAt: "2026-07-17T00:00:00.000Z",
+        }]}
       />,
     );
     const computerGrid = view.container.querySelector(".javis-computer-grid");
+    const sidebar = view.container.querySelector(".javis-sidebar");
 
     expect(computerGrid?.textContent).toContain("Data (D:)");
     expect(computerGrid?.textContent).not.toContain("C:");
+    expect(sidebar?.textContent).toContain("Data (D:)");
+    expect(sidebar?.textContent).not.toContain("C:");
+    expect(view.container.querySelector(".javis-computer-trust-list")).toBeNull();
+    expect(view.container.querySelector(".javis-main")?.textContent).not.toContain("QQ");
   });
 
   it("selects computer files into the inspector and opens them only on double click", () => {
@@ -2891,6 +2921,7 @@ describe("JavisWorkbench permission cards", () => {
         inputTokens: 257000,
         outputTokens: 140100,
         totalTokens: 397100,
+        peakContextTokens: 205100,
         modelCalls: 3,
         byAgentKind: [
           {
@@ -2947,7 +2978,7 @@ describe("JavisWorkbench permission cards", () => {
     });
 
     expect(usedHtml).toContain("javis-context-window-trigger");
-    expect(usedHtml).toContain("aria-label=\"Context window: 397.1k / 1.0M (40%)\"");
+    expect(usedHtml).toContain("aria-label=\"Context window: 205.1k / 1.0M (21%)\"");
     expect(usedHtml).toContain("aria-expanded=\"false\"");
     expect(usedHtml).toContain("javis-send-button");
     expect(usedHtml.indexOf("javis-context-window-trigger")).toBeLessThan(
@@ -2958,7 +2989,7 @@ describe("JavisWorkbench permission cards", () => {
     expect(unusedHtml).toContain("aria-label=\"Context window: 0 / 128k (0%)\"");
   });
 
-  it("renders task progress in the running composer instead of a zero context ring", () => {
+  it("keeps the context window control in the running composer", () => {
     const html = renderWorkbench({
       title: "Answering",
       userGoal: "Hello",
@@ -2985,18 +3016,18 @@ describe("JavisWorkbench permission cards", () => {
       agents: [],
       logs: [],
       tokenUsage: {
-        inputTokens: 0,
-        outputTokens: 0,
-        totalTokens: 0,
-        modelCalls: 0,
+        inputTokens: 10_000,
+        outputTokens: 2_800,
+        totalTokens: 12_800,
+        peakContextTokens: 12_800,
+        modelCalls: 1,
         byAgentKind: [],
       },
     });
 
     expect(html).toContain("javis-thread-view");
-    expect(html).toContain("javis-task-progress-ring");
-    expect(html).toContain("aria-label=\"Running: 50%\"");
-    expect(html).not.toContain("aria-label=\"Context window: 0 / 128k (0%)\"");
+    expect(html).toContain("aria-label=\"Context window: 12.8k / 128k (10%)\"");
+    expect(html).not.toContain("javis-task-progress-ring");
   });
 
   it("infers MiMo primary model context as 1M instead of the default 128k", () => {
@@ -3181,6 +3212,95 @@ describe("JavisWorkbench permission cards", () => {
       title: "pnpm --filter @javis/ui typecheck",
     }));
     expect(onOpenWorkspaceTool).toHaveBeenCalledWith("terminal");
+  });
+
+  it("shows text-write calls and previews a generated Markdown artifact inside Javis", async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const onOpenFile = vi.fn();
+    const read = vi.fn(async () => "# \u65f6\u5149\u4fee\u590d\u5e08\n\n\u8fd9\u662f\u751f\u6210\u7684\u6b63\u6587。");
+    const view = render(
+      <JavisWorkbench
+        currentWorkspacePath={"E:/\u6d4b\u8bd5"}
+        draftGoal={"\u5199\u5c0f\u8bf4"}
+        fileService={{
+          list: vi.fn(async () => []),
+          search: vi.fn(async () => []),
+          read,
+        }}
+        locale={zhCNWorkbenchLocale}
+        onDraftGoalChange={vi.fn()}
+        onOpenFile={onOpenFile}
+        onSubmitGoal={vi.fn()}
+        workspaceToolTabs={[{ id: "files-1", tool: "files" }]}
+        task={{
+          id: "task-text-artifact",
+          title: "\u6587\u672c\u6587\u4ef6\u5df2\u5199\u5165",
+          userGoal: "\u5199\u4e00\u7bc7\u5c0f\u8bf4",
+          status: "completed",
+          commanderMessage: "\u6587\u4ef6\u4ee3\u7406\u5df2\u5c06\u5185\u5bb9\u5199\u5165 E:/\u6d4b\u8bd5/\u65f6\u5149\u4fee\u590d\u5e08.md。",
+          plan: [],
+          agents: [],
+          logs: [
+            {
+              id: "preview",
+              kind: "tool",
+              title: "tool_call.completed",
+              detail: "file.planWriteText completed for E:/\u6d4b\u8bd5/\u65f6\u5149\u4fee\u590d\u5e08.md.",
+              userMessage: "\u6587\u4ef6\u5199\u5165\u9884\u89c8\u5df2\u5c31\u7eea。",
+            },
+            {
+              id: "write",
+              kind: "verification",
+              title: "task.completed",
+              detail: "file.writeText create wrote 1200 byte(s) to E:/\u6d4b\u8bd5/\u65f6\u5149\u4fee\u590d\u5e08.md.",
+              userMessage: "\u6587\u672c\u6587\u4ef6\u5df2\u6210\u529f\u5199\u5165。",
+            },
+          ],
+          tokenUsage: {
+            inputTokens: 120,
+            outputTokens: 1000,
+            totalTokens: 1120,
+            modelCalls: 1,
+            byAgentKind: [],
+          },
+          documents: [{
+            path: "E:/\u6d4b\u8bd5/\u65f6\u5149\u4fee\u590d\u5e08.md",
+            modifiedAt: "2026-07-16T00:00:00.000Z",
+            sizeBytes: 1200,
+            heading: "\u65f6\u5149\u4fee\u590d\u5e08",
+            excerpt: "\u8fd9\u662f\u751f\u6210\u7684\u6b63\u6587。",
+            purpose: "\u6839\u636e\u7528\u6237\u7684\u6587\u672c\u6587\u4ef6\u8bf7\u6c42\u751f\u6210。",
+          }],
+        }}
+      />,
+    );
+
+    const callCards = view.container.querySelectorAll(".javis-tool-call-card");
+    expect(callCards).toHaveLength(3);
+    expect(view.container.textContent).toContain("\u6587\u672c\u751f\u6210\u6a21\u578b");
+    expect(view.container.textContent).toContain("file.planWriteText");
+    expect(view.container.textContent).toContain("file.writeText");
+    expect(Array.from(view.container.querySelectorAll(".javis-tool-call-status"))
+      .map((status) => status.textContent))
+      .toEqual(["\u5df2\u5b8c\u6210", "\u5df2\u5b8c\u6210", "\u5df2\u5b8c\u6210"]);
+
+    fireEvent.click(view.container.querySelector(".javis-artifact-card")!);
+    await waitFor(() => {
+      expect(read).toHaveBeenCalledWith(
+        expect.objectContaining({ workspaceRoot: "E:/\u6d4b\u8bd5" }),
+        "E:/\u6d4b\u8bd5/\u65f6\u5149\u4fee\u590d\u5e08.md",
+      );
+      expect(view.container.querySelector(".javis-detail-content")?.textContent)
+        .toContain("\u8fd9\u662f\u751f\u6210\u7684\u6b63\u6587。");
+    });
+    expect(view.container.querySelector(".javis-shell")?.className).toContain("inspector-open");
+    expect(view.container.querySelector(".javis-inspector-details")?.className).toContain("has-detail-item");
+    expect(view.container.querySelector(".javis-tool-panel")).toBeNull();
+    expect(onOpenFile).not.toHaveBeenCalled();
+
+    fireEvent.click(view.container.querySelector(".javis-detail-close-button")!);
+    expect(view.container.querySelector(".javis-detail-content")).toBeNull();
+    expect(view.container.querySelector(".javis-tool-panel")).not.toBeNull();
   });
 
   it("shows workspace file tool entries in the inspector on click", () => {

@@ -35,10 +35,12 @@ export function ContextRing({
   const panelId = useId();
   const [panelMode, setPanelMode] = useState<ContextPanelMode>("closed");
   const maxTokens = resolveMaxTokens(modelConfiguration);
-  const usedTokens = task.tokenUsage?.totalTokens ?? 0;
+  const cumulativeTokens = task.tokenUsage?.totalTokens ?? 0;
   const inputTokens = task.tokenUsage?.inputTokens ?? 0;
   const outputTokens = task.tokenUsage?.outputTokens ?? 0;
   const modelCalls = task.tokenUsage?.modelCalls ?? 0;
+  const usedTokens = task.tokenUsage?.peakContextTokens
+    ?? (modelCalls > 0 ? Math.ceil(cumulativeTokens / modelCalls) : 0);
   const remainingTokens = Math.max(maxTokens - usedTokens, 0);
   const ratio = maxTokens > 0 ? Math.min(usedTokens / maxTokens, 1) : 0;
   const pct = Math.round(ratio * 100);
@@ -170,7 +172,7 @@ export function ContextRing({
               </p>
               {breakdown.length > 0 ? (
                 breakdown.map((entry) => {
-                  const share = totalShare(entry.totalTokens, usedTokens);
+                  const share = totalShare(entry.totalTokens, cumulativeTokens);
                   const agentLabel = formatAgentKindLabel(entry.agentKind, locale);
                   return (
                     <div
@@ -198,7 +200,7 @@ export function ContextRing({
                             {entry.modelCalls.toLocaleString()} {labels.tokenCalls}
                           </span>
                         ) : null}
-                        <span>{totalShareLabel(entry.totalTokens, usedTokens)}</span>
+                        <span>{totalShareLabel(entry.totalTokens, cumulativeTokens)}</span>
                       </div>
                     </div>
                   );

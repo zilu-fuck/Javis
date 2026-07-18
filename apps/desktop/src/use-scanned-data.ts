@@ -401,26 +401,7 @@ export function useScannedData({
         });
     }
 
-    if (activeView === "computer" && computerPath && computerEntries.length === 0 && !computerLoading) {
-      const requestId = computerRequestIdRef.current + 1;
-      computerRequestIdRef.current = requestId;
-      setComputerLoading(true);
-      setComputerError(undefined);
-      listDirectory(computerPath)
-        .then((result) => {
-          if (computerRequestIdRef.current !== requestId) return;
-          setComputerEntries(result.map(fileEntryToWorkbench));
-        })
-        .catch((error) => {
-          if (computerRequestIdRef.current !== requestId) return;
-          setComputerError(String(error));
-        })
-        .finally(() => {
-          if (computerRequestIdRef.current !== requestId) return;
-          setComputerLoading(false);
-        });
-    }
-  }, [activeView, appsLoading, computerEntries.length, computerLoading, computerPath, docsLoading, imagesLoading, installedApps.length, userDocuments.length, userImages.length, scanVersion, getEnabledRootsForKind]);
+  }, [activeView, appsLoading, docsLoading, imagesLoading, installedApps.length, userDocuments.length, userImages.length, scanVersion, getEnabledRootsForKind]);
 
   // ── Background deep scan (classification) ──────────────────────────────
   useEffect(() => {
@@ -548,7 +529,8 @@ export function useScannedData({
       return;
     }
     setComputerLoading(true);
-    void listDirectory(path)
+    const browseRoot = findMountRoot(path, mountRoots)?.path;
+    void listDirectory(path, { browseRoot })
       .then((result) => {
         if (computerRequestIdRef.current !== requestId) return;
         setComputerEntries(result.map(fileEntryToWorkbench));
@@ -561,12 +543,13 @@ export function useScannedData({
         if (computerRequestIdRef.current !== requestId) return;
         setComputerLoading(false);
       });
-  }, []);
+  }, [mountRoots]);
 
   const handleListDirectory = useCallback(async (path: string): Promise<WorkbenchFileEntry[]> => {
-    const result = await listDirectory(path);
+    const browseRoot = findMountRoot(path, mountRoots)?.path;
+    const result = await listDirectory(path, { browseRoot });
     return result.map(fileEntryToWorkbench);
-  }, []);
+  }, [mountRoots]);
 
   const handleRefreshScan = useCallback(async () => {
     const repo = fileClassificationRepoRef.current;
@@ -1064,6 +1047,15 @@ function fileToClassification(file: WorkbenchFileEntry): ClassifiedFile {
 
 function normalizePathKey(path: string): string {
   return path.trim().replace(/\\/g, "/").toLowerCase();
+}
+
+function findMountRoot(path: string, roots: { name: string; path: string }[]) {
+  const pathKey = normalizePathKey(path).replace(/\/+$/, "");
+  return roots.find((root) => {
+    const rootKey = normalizePathKey(root.path).replace(/\/+$/, "");
+    if (!rootKey) return pathKey.startsWith("/");
+    return pathKey === rootKey || pathKey.startsWith(`${rootKey}/`);
+  });
 }
 
 function shouldClassifyResourceEntry(entry: WorkbenchFileEntry): boolean {

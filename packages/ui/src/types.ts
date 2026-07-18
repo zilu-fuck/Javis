@@ -181,6 +181,7 @@ export interface WorkbenchTokenUsageSummary {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  peakContextTokens?: number;
   modelCalls: number;
   byAgentKind: Array<{
     agentKind: string;
@@ -210,7 +211,8 @@ export type WorkbenchStreamingAgentKind =
   | "refactor"
   | "verifier"
   | "workspace"
-  | "vision";
+  | "vision"
+  | `workspace.${string}.${string}`;
 
 export interface ProviderCatalogEntry {
   id: string;
@@ -842,6 +844,8 @@ export interface WorkbenchSkillSuggestion {
 export interface WorkbenchDetailItem {
   title: string;
   description?: string;
+  content?: string;
+  contentFormat?: "markdown" | "text";
   kind?: string;
   source?: string;
   url?: string;
@@ -1347,6 +1351,7 @@ export interface WorkbenchTerminalService {
 export interface WorkbenchFileService {
   list(session: WorkbenchAgentSessionContext, path?: string): Promise<WorkbenchFileEntry[]>;
   search(session: WorkbenchAgentSessionContext, query: string): Promise<WorkbenchFileSearchResult[]>;
+  read?(session: WorkbenchAgentSessionContext, path: string): Promise<string>;
   watchStart?(session: WorkbenchAgentSessionContext): Promise<void>;
   watchStop?(session: WorkbenchAgentSessionContext): Promise<void>;
   subscribeChanged?(

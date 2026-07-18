@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { useScannedData } from "./use-scanned-data";
 
 const {
@@ -154,6 +154,27 @@ describe("useScannedData", () => {
         { name: "D:", path: "D:\\" },
       ]);
     });
+  });
+
+  it("does not restart an empty computer directory request", async () => {
+    mockListDirectory.mockResolvedValue([]);
+    const { result } = renderHook(() =>
+      useScannedData(makeOptions({ activeView: "computer" })),
+    );
+
+    await waitFor(() => {
+      expect(result.current.mountRoots).toEqual([{ name: "C:", path: "C:\\" }]);
+    });
+    act(() => {
+      result.current.handleNavigateDirectory("C:\\");
+    });
+    await waitFor(() => {
+      expect(mockListDirectory).toHaveBeenCalled();
+      expect(result.current.computerLoading).toBe(false);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(mockListDirectory).toHaveBeenCalledTimes(1);
   });
 
   it("dispatches document scan via scanResourceFiles when activeView is documents", async () => {

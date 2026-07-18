@@ -32,6 +32,7 @@ import { getParticipatingAgents } from "./agent-visibility";
 import { AgentDetailPanel } from "./inspector/AgentDetailPanel";
 import { AgentGraphPanel } from "./inspector/AgentGraphPanel";
 import { ResourceStatusPanel } from "./inspector/ResourceStatusPanel";
+import { Markdown } from "./Markdown";
 import { WorkspaceToolPanels } from "./WorkspaceToolPanels";
 
 interface InspectorPanelProps {
@@ -94,6 +95,7 @@ interface InspectorPanelProps {
   onNavigateDirectory?: (path: string) => void;
   onOpenFile?: (path: string) => void;
   onOpenDetail?: (detail: WorkbenchDetailItem) => void;
+  onClearDetail?: () => void;
   onOpenUrl?: (url: string) => void;
   onSideChatSend?: (session: WorkbenchAgentSessionContext, message: string) => Promise<string>;
 }
@@ -154,6 +156,7 @@ export function InspectorPanel({
   onNavigateDirectory,
   onOpenFile,
   onOpenDetail,
+  onClearDetail,
   onOpenUrl,
   onSideChatSend,
 }: InspectorPanelProps) {
@@ -235,8 +238,9 @@ export function InspectorPanel({
   const agentTabs = agentTabIds
     .map((agentId) => participatingAgents.find((agent) => agent.id === agentId))
     .filter((agent): agent is WorkbenchAgent => Boolean(agent));
+  const isContentPreview = Boolean(detailItem?.contentFormat);
   const rawActiveTab = openTabs.find((tab) => tab.id === activeToolTabId) ?? openTabs[activeTabIndex] ?? openTabs[openTabs.length - 1] ?? null;
-  const activeTab = selectedAgent ? null : rawActiveTab;
+  const activeTab = selectedAgent || isContentPreview ? null : rawActiveTab;
   const activeTool = activeTab?.tool ?? null;
 
   return (
@@ -289,10 +293,10 @@ export function InspectorPanel({
             </h2>
           </header>
           {activeSection === "details" ? (
-            <section className={`javis-inspector-details${activeTool ? ` has-active-tool tool-${activeTool}` : ""}`}>
-              {activeTool || selectedAgent ? null : <InspectorQuickActions locale={locale} onQuickAction={onQuickAction} />}
+            <section className={`javis-inspector-details${isContentPreview ? " has-detail-item" : activeTool ? ` has-active-tool tool-${activeTool}` : ""}`}>
+              {isContentPreview || activeTool || selectedAgent ? null : <InspectorQuickActions locale={locale} onQuickAction={onQuickAction} />}
               {/* Tab bar */}
-              {openTabs.length > 0 || agentTabs.length > 0 ? (
+              {!isContentPreview && (openTabs.length > 0 || agentTabs.length > 0) ? (
                 <div className="javis-tool-tab-bar" role="tablist">
                   {agentTabs.map((agent) => {
                     const isActive = selectedAgentId === agent.id;
@@ -366,6 +370,7 @@ export function InspectorPanel({
                   task={task}
                   changedFiles={changedFiles}
                   detailsLabel={detailsLabel}
+                  onClearDetail={onClearDetail}
                   onOpenUrl={onOpenUrl}
                 />
               ) : null}
@@ -517,6 +522,7 @@ function DetailInspector({
   task,
   changedFiles,
   detailsLabel,
+  onClearDetail,
   onOpenUrl,
 }: {
   detailItem?: WorkbenchDetailItem | null;
@@ -525,6 +531,7 @@ function DetailInspector({
   task: WorkbenchTask;
   changedFiles: string[];
   detailsLabel: string;
+  onClearDetail?: () => void;
   onOpenUrl?: (url: string) => void;
 }) {
   const hasCodeReviewDetails = changedFiles.length > 0 || Boolean(task.codeReviewPreview || task.codeProposedEdit || task.codeApplyResult);
@@ -540,9 +547,27 @@ function DetailInspector({
         <article className="javis-review-card">
           <div className="javis-review-card-title">
             <strong>{detailItem.title}</strong>
-            {detailItem.kind ? <span>{detailItem.kind}</span> : null}
+            <div className="javis-detail-title-actions">
+              {detailItem.kind ? <span>{detailItem.kind}</span> : null}
+              {onClearDetail ? (
+                <button
+                  aria-label={isChineseLocale(locale) ? "关闭详情" : "Close details"}
+                  className="javis-detail-close-button"
+                  onClick={onClearDetail}
+                  title={isChineseLocale(locale) ? "关闭详情" : "Close details"}
+                  type="button"
+                />
+              ) : null}
+            </div>
           </div>
           {detailItem.description ? <p>{detailItem.description}</p> : null}
+          {detailItem.content ? (
+            detailItem.contentFormat === "markdown" ? (
+              <Markdown className="javis-detail-content" text={detailItem.content} />
+            ) : (
+              <pre className="javis-detail-content">{detailItem.content}</pre>
+            )
+          ) : null}
           {detailItem.url ? (
             <a
               className="javis-detail-link"

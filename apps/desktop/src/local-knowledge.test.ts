@@ -5,6 +5,7 @@ import type { Event } from "@tauri-apps/api/event";
 import {
   scanAllUserFiles,
   cancelScanAllFiles,
+  listDirectory,
   listMountRoots,
   classifyApps,
   classifyDocuments,
@@ -106,6 +107,21 @@ describe("local knowledge bridge", () => {
       const result = await listMountRoots();
       expect(result).toEqual(roots);
       expect(invokeMock).toHaveBeenCalledWith("list_mount_roots");
+    });
+  });
+
+  describe("listDirectory", () => {
+    it("binds a computer browse request to its enumerated mount root", async () => {
+      invokeMock.mockResolvedValueOnce([]);
+
+      await listDirectory("C:\\Projects", { browseRoot: "C:\\" });
+
+      expect(invokeMock).toHaveBeenCalledWith("list_directory", {
+        path: "C:\\Projects",
+        workspaceRoot: null,
+        allowedRootIds: null,
+        browseRoot: "C:\\",
+      });
     });
   });
 
