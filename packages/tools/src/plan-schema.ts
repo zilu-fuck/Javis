@@ -24,7 +24,7 @@
 import { z } from "zod";
 
 /** Bumped whenever this shape changes. */
-export const COMMANDER_PLAN_RESULT_SCHEMA_VERSION = "1.0.0";
+export const COMMANDER_PLAN_RESULT_SCHEMA_VERSION = "1.1.0";
 
 export const StepExecutionModeShape = z.enum([
   "direct_response",
@@ -39,6 +39,18 @@ export const AskUserChoiceShape = z.object({
   isRecommended: z.boolean().optional(),
 });
 export type AskUserChoiceT = z.infer<typeof AskUserChoiceShape>;
+
+export const CommanderExecutionPolicyShape = z.object({
+  maxConcurrency: z.number().int().min(1).max(8).optional(),
+  stepTimeoutMs: z.number().int().min(5_000).max(300_000).optional(),
+  maxRetries: z.number().int().min(0).max(3).optional(),
+  retryBackoffMs: z.number().int().min(0).max(30_000).optional(),
+  rateLimitPerSecond: z.number().positive().max(20).optional(),
+  maxReadyQueueSize: z.number().int().min(1).max(24).optional(),
+  circuitBreakerFailureThreshold: z.number().int().min(1).max(8).optional(),
+  degradationStrategy: z.enum(["replan", "partial_results", "fail_fast"]).optional(),
+});
+export type CommanderExecutionPolicy = z.infer<typeof CommanderExecutionPolicyShape>;
 
 export const CommanderPlanStepShape = z.object({
   id: z.string(),
@@ -62,6 +74,7 @@ export type CommanderPlanStepT = CommanderPlanStep;
 export const CommanderPlanResultShape = z.object({
   title: z.string(),
   reasoning: z.string(),
+  executionPolicy: CommanderExecutionPolicyShape.optional(),
   steps: z.array(CommanderPlanStepShape),
 });
 export type CommanderPlanResult = z.infer<typeof CommanderPlanResultShape>;

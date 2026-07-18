@@ -293,12 +293,22 @@ export interface TokenUsageSummary {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  /** Largest input plus output token count observed in one model call. */
+  peakContextTokens?: number;
   modelCalls: number;
   byAgentKind: TokenUsageByAgent[];
 }
 
 export interface CommanderPlanRequest {
   userGoal: string;
+  /** Runtime-selected current workspace. This is context, not user-authored instruction text. */
+  workspacePath?: string;
+  /**
+   * Image data URLs for a vision-capable Commander model. This field is
+   * transport-only and must never be interpolated into planner prompts or
+   * persisted task artifacts.
+   */
+  images?: string[];
   /**
    * Date context supplied by the runtime so Commander can plan date-based
    * filenames or labels without shelling out just to ask what day it is.
@@ -368,6 +378,8 @@ export interface CommanderSynthesizeRequest {
   userGoal: string;
   workflowTitle: string;
   evidence: Record<string, unknown>;
+  /** Transport-only image data for a vision-capable synthesis provider. */
+  images?: string[];
 }
 
 export interface CommanderSynthesizeResult {
@@ -1420,8 +1432,16 @@ export interface VisionTool {
 export interface ToolRequiredInput {
   /** Field name expected on `toolInput`. */
   name: string;
-  /** Expected JSON type. `string[]` enforces array-of-string. */
-  type: "string" | "string[]";
+  /** Expected JSON type. Array/object variants validate the container shape. */
+  type:
+    | "string"
+    | "string[]"
+    | "number"
+    | "number[]"
+    | "boolean"
+    | "boolean[]"
+    | "object"
+    | "object[]";
   /** When true, empty strings / empty arrays are rejected. */
   nonEmpty?: boolean;
 }

@@ -62,6 +62,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Classify scanned local documents into predefined categories using AI.",
     capabilityTags: ["document_classify"],
     ownerAgentKinds: ["file", "doc-updater"],
+    requiredInputs: [{ name: "files", type: "object[]", nonEmpty: true }],
   },
   {
     name: "file.planPdfOrganization",
@@ -86,6 +87,10 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Create a dry-run plan for writing text content to a file.",
     capabilityTags: ["file_scan"],
     ownerAgentKinds: ["file", "doc-updater"],
+    requiredInputs: [
+      { name: "targetPath", type: "string", nonEmpty: true },
+      { name: "content", type: "string" },
+    ],
   },
   {
     name: "file.writeText",
@@ -94,7 +99,10 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Write approved text content to a target file.",
     capabilityTags: ["file_execute"],
     ownerAgentKinds: ["file", "doc-updater"],
-    requiredInputs: [{ name: "targetPath", type: "string", nonEmpty: true }],
+    requiredInputs: [
+      { name: "targetPath", type: "string", nonEmpty: true },
+      { name: "content", type: "string" },
+    ],
   },
   {
     name: "shell.runReadOnlyCommand",
@@ -238,6 +246,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Search public web sources through a configured provider.",
     capabilityTags: ["web_search"],
     ownerAgentKinds: ["research"],
+    requiredInputs: [{ name: "query", type: "string", nonEmpty: true }],
   },
   {
     name: "web.fetchSource",
@@ -245,6 +254,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Fetch a user-provided public web source URL.",
     capabilityTags: ["web_fetch"],
     ownerAgentKinds: ["research"],
+    requiredInputs: [{ name: "url", type: "string", nonEmpty: true }],
   },
   {
     name: "trend.fetchHotList",
@@ -283,6 +293,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Search indexed local files by name, keyword, and metadata.",
     capabilityTags: ["local_search"],
     ownerAgentKinds: ["computer"],
+    requiredInputs: [{ name: "query", type: "string", nonEmpty: true }],
   },
   {
     name: "computer.listDirectory",
@@ -321,6 +332,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Inspect a window's UI Automation control tree without moving the mouse.",
     capabilityTags: ["desktop_ui_tree"],
     ownerAgentKinds: ["computer"],
+    requiredInputs: [{ name: "windowHandle", type: "number" }],
   },
   {
     name: "computer.focusWindow",
@@ -329,6 +341,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Bring a specific window to the foreground by handle. Requires user approval.",
     capabilityTags: ["desktop_focus"],
     ownerAgentKinds: ["computer"],
+    requiredInputs: [{ name: "handle", type: "number" }],
   },
   {
     name: "computer.moveMouse",
@@ -337,6 +350,10 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Move the mouse cursor to absolute screen coordinates. Requires user approval.",
     capabilityTags: ["desktop_input"],
     ownerAgentKinds: ["computer"],
+    requiredInputs: [
+      { name: "x", type: "number" },
+      { name: "y", type: "number" },
+    ],
   },
   {
     name: "computer.click",
@@ -345,6 +362,10 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Click at absolute screen coordinates. Requires user approval.",
     capabilityTags: ["desktop_input"],
     ownerAgentKinds: ["computer"],
+    requiredInputs: [
+      { name: "x", type: "number" },
+      { name: "y", type: "number" },
+    ],
   },
   {
     name: "computer.type",
@@ -353,6 +374,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Type text via keyboard input simulation. Requires user approval.",
     capabilityTags: ["desktop_input"],
     ownerAgentKinds: ["computer"],
+    requiredInputs: [{ name: "text", type: "string" }],
   },
   {
     name: "computer.keyCombo",
@@ -361,6 +383,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Press a key combination (e.g. Ctrl+C). Requires user approval and allowlist check.",
     capabilityTags: ["desktop_input"],
     ownerAgentKinds: ["computer"],
+    requiredInputs: [{ name: "keys", type: "string[]", nonEmpty: true }],
   },
   {
     name: "computer.scroll",
@@ -369,6 +392,11 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Scroll at absolute screen coordinates. Requires user approval.",
     capabilityTags: ["desktop_input"],
     ownerAgentKinds: ["computer"],
+    requiredInputs: [
+      { name: "x", type: "number" },
+      { name: "y", type: "number" },
+      { name: "delta", type: "number" },
+    ],
   },
   {
     name: "computer.invokeUi",
@@ -377,6 +405,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Invoke a UI Automation control by selector without moving the physical mouse. Requires user approval.",
     capabilityTags: ["desktop_ui_input"],
     ownerAgentKinds: ["computer"],
+    requiredInputs: [{ name: "selector", type: "object" }],
   },
   {
     name: "computer.setUiValue",
@@ -385,6 +414,10 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Set a UI Automation value by selector without moving the physical mouse. Requires user approval.",
     capabilityTags: ["desktop_ui_input"],
     ownerAgentKinds: ["computer"],
+    requiredInputs: [
+      { name: "selector", type: "object" },
+      { name: "value", type: "string" },
+    ],
   },
   {
     name: "computer.wait",
@@ -392,6 +425,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Wait for a specified duration (max 10 seconds).",
     capabilityTags: ["desktop_screenshot"],
     ownerAgentKinds: ["computer"],
+    requiredInputs: [{ name: "ms", type: "number" }],
   },
 
   // ── Scheduler ─────────────────────────────────────────────────────────
@@ -442,6 +476,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Navigate the browser to a URL and wait for page load.",
     capabilityTags: ["browser_navigate"],
     ownerAgentKinds: ["browser"],
+    requiredInputs: [{ name: "url", type: "string", nonEmpty: true }],
   },
   {
     name: "browser.screenshot",
@@ -464,6 +499,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Click an element on the page after visible confirmed-write approval.",
     capabilityTags: ["browser_interact"],
     ownerAgentKinds: ["browser"],
+    requiredInputs: [{ name: "selector", type: "string", nonEmpty: true }],
   },
   {
     name: "browser.type",
@@ -472,6 +508,10 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Type text into an input field after visible confirmed-write approval.",
     capabilityTags: ["browser_interact"],
     ownerAgentKinds: ["browser"],
+    requiredInputs: [
+      { name: "selector", type: "string", nonEmpty: true },
+      { name: "text", type: "string" },
+    ],
   },
   {
     name: "browser.evaluate",
@@ -480,6 +520,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Execute JavaScript in the page context after visible confirmed-write approval.",
     capabilityTags: ["browser_interact"],
     ownerAgentKinds: ["browser"],
+    requiredInputs: [{ name: "expression", type: "string", nonEmpty: true }],
   },
   {
     name: "browser.runTest",
@@ -488,6 +529,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Run a Playwright test script after visible confirmed-write approval and return pass/fail results.",
     capabilityTags: ["browser_test"],
     ownerAgentKinds: ["browser"],
+    requiredInputs: [{ name: "script", type: "string", nonEmpty: true }],
   },
   {
     name: "browser.extractLinks",
@@ -503,6 +545,10 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Upload local file(s) to a file input element on the page. Disabled until browser approvals are implemented.",
     capabilityTags: ["browser_interact"],
     ownerAgentKinds: ["browser"],
+    requiredInputs: [
+      { name: "selector", type: "string", nonEmpty: true },
+      { name: "filePaths", type: "string[]", nonEmpty: true },
+    ],
   },
   {
     name: "browser.followCandidateLinks",
@@ -510,6 +556,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Follow candidate links extracted from the current page and collect content excerpts.",
     capabilityTags: ["browser_navigate"],
     ownerAgentKinds: ["browser"],
+    requiredInputs: [{ name: "candidateLinks", type: "object[]", nonEmpty: true }],
   },
 
   // ── Vision ────────────────────────────────────────────────────────────
@@ -519,6 +566,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Analyze an image and answer questions about its visual content.",
     capabilityTags: ["image_analyze"],
     ownerAgentKinds: ["vision"],
+    requiredInputs: [{ name: "imagePath", type: "string", nonEmpty: true }],
   },
   {
     name: "vision.describe",
@@ -526,6 +574,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Generate a textual description of an image's visual content.",
     capabilityTags: ["image_describe"],
     ownerAgentKinds: ["vision"],
+    requiredInputs: [{ name: "imagePath", type: "string", nonEmpty: true }],
   },
   {
     name: "vision.extractText",
@@ -533,5 +582,6 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Extract visible text from an image using OCR.",
     capabilityTags: ["image_ocr"],
     ownerAgentKinds: ["vision"],
+    requiredInputs: [{ name: "imagePath", type: "string", nonEmpty: true }],
   },
 ];
