@@ -1,8 +1,17 @@
 import {
+  computeContentHash,
+  createArtifactEnvelope,
   createCodeApplyDryRun,
   createDryRunBindingHash,
+  sanitizeArtifactForPersistence,
+  type RuntimeEventEnvelope,
+  type WorkflowCheckpoint,
 } from "@javis/core";
 import type { CodeProposedEdit, PermissionRequest } from "@javis/tools";
+import {
+  sanitizeCheckpointForPersistence,
+  sanitizeWorkflowCheckpoint,
+} from "./workflow-checkpoint-store";
 
 export const APPROVAL_RECORDS_STORAGE_KEY = "javis.approvalRecords.v1";
 export const APPROVAL_RECORDS_STORAGE_VERSION = 1;
@@ -12,6 +21,13 @@ type ApprovalRecordReadStorage = Pick<Storage, "getItem">;
 type ApprovalRecordWriteStorage = Pick<Storage, "setItem">;
 
 export type DurableApprovalStatus = "pending" | "approved" | "denied" | "expired";
+export type DurableApprovalExecutionStatus =
+  | "started"
+  | "succeeded"
+  | "continuation_pending"
+  | "completed"
+  | "failed"
+  | "blocked";
 type PlannedPath = PermissionRequest["dryRun"]["affectedPaths"][number];
 type DryRunSummary = PermissionRequest["dryRun"];
 
@@ -19,6 +35,7 @@ export interface DurableApprovalRecord {
   approvalId: string;
   taskId: string;
   runId?: string;
+  workflowBound?: boolean;
   toolName: string;
   workspacePath: string;
   permissionLevel: "preview" | "confirmed_write";
@@ -35,6 +52,31 @@ export interface DurableApprovalRecord {
   gitStagePlan?: DurableGitStagePlan;
   gitCreatePullRequestPlan?: DurableGitCreatePullRequestPlan;
   gitCommentPullRequestPlan?: DurableGitCommentPullRequestPlan;
+  execution?: DurableApprovalExecution;
+}
+
+export interface DurableApprovalResumeSeedSnapshot {
+  checkpoint: WorkflowCheckpoint;
+  events: RuntimeEventEnvelope[];
+}
+
+export interface DurableApprovalExecution {
+  approvalId: string;
+  taskId: string;
+  runId?: string;
+  workflowBound?: boolean;
+  workflowId?: string;
+  planHash?: string;
+  stepId?: string;
+  toolName: string;
+  previewHash: string;
+  status: DurableApprovalExecutionStatus;
+  startedAt: string;
+  completedAt?: string;
+  resumeSeed?: DurableApprovalResumeSeedSnapshot;
+  output?: unknown;
+  outputHash?: string;
+  error?: string;
 }
 
 export interface DurableGitPushPlan {
@@ -123,6 +165,7 @@ export interface DurableGitCommentPullRequestPlan {
 export interface ApprovalRecordInput {
   taskId: string;
   runId?: string;
+  workflowBound?: boolean;
   toolName: string;
   workspacePath: string;
   permissionRequest: PermissionRequest;
@@ -151,10 +194,9 @@ export function loadApprovalRecords(storage: ApprovalRecordReadStorage): Durable
     if (!parsed) {
       return [];
     }
-    return parsed
+    return retainApprovalRecordHistory(parsed
       .map(sanitizeApprovalRecord)
-      .filter((record): record is DurableApprovalRecord => Boolean(record))
-      .slice(0, APPROVAL_RECORDS_LIMIT);
+      .filter((record): record is DurableApprovalRecord => Boolean(record)));
   } catch {
     return [];
   }
@@ -164,10 +206,9 @@ export function saveApprovalRecords(
   storage: ApprovalRecordWriteStorage,
   records: DurableApprovalRecord[],
 ): DurableApprovalRecord[] {
-  const sanitized = records
+  const sanitized = retainApprovalRecordHistory(records
     .map(sanitizeApprovalRecord)
-    .filter((record): record is DurableApprovalRecord => Boolean(record))
-    .slice(0, APPROVAL_RECORDS_LIMIT);
+    .filter((record): record is DurableApprovalRecord => Boolean(record)));
   const envelope: ApprovalRecordsEnvelope = {
     version: APPROVAL_RECORDS_STORAGE_VERSION,
     records: sanitized,
@@ -184,15 +225,45 @@ export function upsertApprovalRecord(
   if (!sanitized) {
     return current;
   }
-  return [
+  return retainApprovalRecordHistory([
     sanitized,
     ...current.filter((item) => item.approvalId !== sanitized.approvalId),
-  ].slice(0, APPROVAL_RECORDS_LIMIT);
+  ]);
+}
+
+export function retainApprovalRecordHistory(
+  records: DurableApprovalRecord[],
+  terminalLimit = APPROVAL_RECORDS_LIMIT,
+): DurableApprovalRecord[] {
+  const retainedTerminalIds = new Set(
+    records
+      .filter(isTerminalApprovalRecord)
+      .sort((left, right) => {
+        const createdAtOrder = right.createdAt.localeCompare(left.createdAt);
+        return createdAtOrder !== 0
+          ? createdAtOrder
+          : right.approvalId.localeCompare(left.approvalId);
+      })
+      .slice(0, terminalLimit)
+      .map((record) => record.approvalId),
+  );
+  return records.filter((record) => {
+    return !isTerminalApprovalRecord(record) || retainedTerminalIds.has(record.approvalId);
+  });
+}
+
+export function isTerminalApprovalRecord(record: DurableApprovalRecord): boolean {
+  if (record.status === "expired") return true;
+  if (record.status === "denied" && !record.workflowBound) return true;
+  return record.execution?.status === "completed" ||
+    record.execution?.status === "failed" ||
+    record.execution?.status === "blocked";
 }
 
 export function createApprovalRecordFromPermissionRequest({
   taskId,
   runId,
+  workflowBound,
   toolName,
   workspacePath,
   permissionRequest,
@@ -216,6 +287,7 @@ export function createApprovalRecordFromPermissionRequest({
     approvalId: permissionRequest.id,
     taskId,
     ...(runId ? { runId } : {}),
+    ...(workflowBound ? { workflowBound: true } : {}),
     toolName,
     workspacePath,
     permissionLevel: permissionRequest.level,
@@ -238,6 +310,160 @@ export function findPendingApprovalRecord(
   toolName: string,
 ): DurableApprovalRecord | undefined {
   return records.find((record) => record.toolName === toolName && record.status === "pending");
+}
+
+export function findRecoverableApprovalExecutionRecord(
+  records: DurableApprovalRecord[],
+): DurableApprovalRecord | undefined {
+  return records.find((record) =>
+    (record.status === "approved" || record.status === "denied") &&
+    (record.workflowBound && !record.execution ||
+      record.execution?.status === "started" ||
+      record.execution?.status === "succeeded" ||
+      record.execution?.status === "continuation_pending")
+  );
+}
+
+export function markApprovalExecutionStarted(
+  record: DurableApprovalRecord,
+  resumeSeed: DurableApprovalResumeSeedSnapshot | undefined,
+  startedAt = new Date().toISOString(),
+): DurableApprovalRecord {
+  if (record.status !== "approved" && record.status !== "denied") {
+    throw new Error("Only a resolved approval record can start durable execution state.");
+  }
+  if (record.workflowBound && !resumeSeed) {
+    throw new Error("A workflow-bound approval requires a durable resume seed before execution.");
+  }
+  const checkpoint = resumeSeed?.checkpoint;
+  if (checkpoint && (
+    checkpoint.taskId !== record.taskId ||
+    checkpoint.runId !== record.runId ||
+    checkpoint.runningStepIds.length !== 1
+  )) {
+    throw new Error("Approval resume seed does not match the approved task/run/step.");
+  }
+  const persistedCheckpoint = checkpoint
+    ? sanitizeCheckpointForPersistence(checkpoint)
+    : undefined;
+  const stepId = persistedCheckpoint?.runningStepIds[0];
+  const step = persistedCheckpoint?.workflowSnapshot.steps.find((candidate) => candidate.id === stepId);
+  const stepToolName = (step as (typeof step & { toolName?: string }) | undefined)?.toolName;
+  if (persistedCheckpoint && (!step ||
+      (step.permissionLevel !== "confirmed_write" && step.permissionLevel !== "dangerous") ||
+      (stepToolName && stepToolName !== record.toolName) ||
+      !hasApprovalResumeEvidence(resumeSeed?.events ?? [], persistedCheckpoint, record.approvalId, stepId)
+  )) {
+    throw new Error("Approval tool does not match the running workflow step.");
+  }
+
+  return {
+    ...record,
+    execution: {
+      approvalId: record.approvalId,
+      taskId: record.taskId,
+      ...(record.runId ? { runId: record.runId } : {}),
+      ...(record.workflowBound ? { workflowBound: true } : {}),
+      ...(persistedCheckpoint ? {
+        workflowId: persistedCheckpoint.workflowId,
+        planHash: persistedCheckpoint.planHash,
+        stepId,
+        resumeSeed: {
+          checkpoint: persistedCheckpoint,
+          events: selectApprovalResumeEvents(resumeSeed?.events ?? [], record, stepId),
+        },
+      } : {}),
+      toolName: record.toolName,
+      previewHash: record.previewHash,
+      status: "started",
+      startedAt,
+    },
+  };
+}
+
+export function markApprovalExecutionSucceeded(
+  record: DurableApprovalRecord,
+  output: unknown,
+  completedAt = new Date().toISOString(),
+): DurableApprovalRecord {
+  const execution = requireApprovalExecution(record, ["started", "succeeded"]);
+  const sanitizedOutput = sanitizeApprovalExecutionValue(record, output);
+  return {
+    ...record,
+    execution: {
+      ...execution,
+      status: "succeeded",
+      completedAt,
+      output: sanitizedOutput,
+      outputHash: computeContentHash(sanitizedOutput),
+    },
+  };
+}
+
+export function markApprovalContinuationPending(
+  record: DurableApprovalRecord,
+  resumeSeed: DurableApprovalResumeSeedSnapshot,
+  updatedAt = new Date().toISOString(),
+): DurableApprovalRecord {
+  const execution = requireApprovalExecution(record, ["succeeded", "continuation_pending"]);
+  if (!execution.stepId || !execution.runId ||
+    resumeSeed.checkpoint.taskId !== execution.taskId ||
+    resumeSeed.checkpoint.runId !== execution.runId ||
+    resumeSeed.checkpoint.workflowId !== execution.workflowId ||
+    resumeSeed.checkpoint.planHash !== execution.planHash) {
+    throw new Error("Advanced approval resume seed does not match the executed workflow step.");
+  }
+  return {
+    ...record,
+    execution: {
+      ...execution,
+      status: "continuation_pending",
+      completedAt: execution.completedAt ?? updatedAt,
+      resumeSeed: {
+        checkpoint: sanitizeCheckpointForPersistence(resumeSeed.checkpoint),
+        events: selectApprovalResumeEvents(resumeSeed.events, record, execution.stepId),
+      },
+    },
+  };
+}
+
+export function markApprovalExecutionTerminal(
+  record: DurableApprovalRecord,
+  status: "completed" | "failed" | "blocked",
+  detail?: unknown,
+  completedAt = new Date().toISOString(),
+): DurableApprovalRecord {
+  const execution = record.execution;
+  const error = detail === undefined
+    ? undefined
+    : String(sanitizeApprovalExecutionValue(record, detail));
+  if (!execution) {
+    if (status !== "blocked") throw new Error("Approval execution state is missing.");
+    return {
+      ...record,
+      execution: {
+        approvalId: record.approvalId,
+        taskId: record.taskId,
+        ...(record.runId ? { runId: record.runId } : {}),
+        ...(record.workflowBound ? { workflowBound: true } : {}),
+        toolName: record.toolName,
+        previewHash: record.previewHash,
+        status,
+        startedAt: record.resolvedAt ?? completedAt,
+        completedAt,
+        ...(error ? { error } : {}),
+      },
+    };
+  }
+  return {
+    ...record,
+    execution: {
+      ...execution,
+      status,
+      completedAt,
+      ...(error ? { error } : {}),
+    },
+  };
 }
 
 export function resolveApprovalRecord(
@@ -312,6 +538,7 @@ export function sanitizeApprovalRecord(value: unknown): DurableApprovalRecord | 
     !isString(value.approvalId) ||
     !isString(value.taskId) ||
     ("runId" in value && !isString(value.runId)) ||
+    ("workflowBound" in value && typeof value.workflowBound !== "boolean") ||
     !isString(value.toolName) ||
     !isString(value.workspacePath) ||
     !isPermissionLevel(value.permissionLevel) ||
@@ -348,6 +575,17 @@ export function sanitizeApprovalRecord(value: unknown): DurableApprovalRecord | 
   const gitStagePlan = sanitizeGitStagePlan(value.gitStagePlan);
   const gitCreatePullRequestPlan = sanitizeGitCreatePullRequestPlan(value.gitCreatePullRequestPlan);
   const gitCommentPullRequestPlan = sanitizeGitCommentPullRequestPlan(value.gitCommentPullRequestPlan);
+  const execution = sanitizeApprovalExecution(value.execution, {
+    approvalId: value.approvalId,
+    taskId: value.taskId,
+    runId: isString(value.runId) ? value.runId : undefined,
+    workflowBound: value.workflowBound === true,
+    toolName: value.toolName,
+    previewHash: value.previewHash,
+  });
+  if (value.execution !== undefined && !execution) {
+    return null;
+  }
   if (
     (codeProposedEdit && !isCodeProposedEditBoundToRequest(codeProposedEdit, value.toolName, value.workspacePath, permissionRequest)) ||
     (!codeProposedEdit && value.toolName === "code.applyProposedEdit")
@@ -389,6 +627,7 @@ export function sanitizeApprovalRecord(value: unknown): DurableApprovalRecord | 
     approvalId: value.approvalId,
     taskId: value.taskId,
     ...(isString(value.runId) ? { runId: value.runId } : {}),
+    ...(value.workflowBound === true ? { workflowBound: true } : {}),
     toolName: value.toolName,
     workspacePath: value.workspacePath,
     permissionLevel: value.permissionLevel,
@@ -416,6 +655,9 @@ export function sanitizeApprovalRecord(value: unknown): DurableApprovalRecord | 
   if (gitCommentPullRequestPlan) {
     record.gitCommentPullRequestPlan = gitCommentPullRequestPlan;
   }
+  if (execution) {
+    record.execution = execution;
+  }
   if (isString(value.resolvedAt)) {
     record.resolvedAt = value.resolvedAt;
   }
@@ -423,6 +665,183 @@ export function sanitizeApprovalRecord(value: unknown): DurableApprovalRecord | 
     record.decision = value.decision;
   }
   return record;
+}
+
+function sanitizeApprovalExecution(
+  value: unknown,
+  binding: {
+    approvalId: string;
+    taskId: string;
+    runId?: string;
+    workflowBound?: boolean;
+    toolName: string;
+    previewHash: string;
+  },
+): DurableApprovalExecution | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value) ||
+    value.approvalId !== binding.approvalId ||
+    value.taskId !== binding.taskId ||
+    value.toolName !== binding.toolName ||
+    value.previewHash !== binding.previewHash ||
+    (binding.runId ? value.runId !== binding.runId : value.runId !== undefined) ||
+    !isApprovalExecutionStatus(value.status) ||
+    !isString(value.startedAt)) {
+    return undefined;
+  }
+  const status = value.status;
+  const hasOutput = Object.prototype.hasOwnProperty.call(value, "output");
+  const outputHash = isString(value.outputHash) ? value.outputHash : undefined;
+  if (hasOutput && (!outputHash || computeContentHash(value.output) !== outputHash)) {
+    return undefined;
+  }
+  if ((status === "succeeded" || status === "continuation_pending" || status === "completed") && !hasOutput) {
+    return undefined;
+  }
+  if (status === "started" && (hasOutput || value.outputHash !== undefined)) {
+    return undefined;
+  }
+  if (!hasOutput && value.outputHash !== undefined) {
+    return undefined;
+  }
+  if (status !== "started" && !isString(value.completedAt)) return undefined;
+  if (status === "started" && value.completedAt !== undefined) return undefined;
+  if (value.error !== undefined && !isString(value.error)) return undefined;
+
+  let resumeSeed: DurableApprovalResumeSeedSnapshot | undefined;
+  if (value.resumeSeed !== undefined) {
+    if (!isRecord(value.resumeSeed)) return undefined;
+    const checkpoint = sanitizeWorkflowCheckpoint(value.resumeSeed.checkpoint);
+    const events = sanitizeApprovalResumeEvents(value.resumeSeed.events, binding, value);
+    if (!checkpoint || !events ||
+      checkpoint.taskId !== binding.taskId ||
+      checkpoint.runId !== binding.runId ||
+      checkpoint.workflowId !== value.workflowId ||
+      checkpoint.planHash !== value.planHash) {
+      return undefined;
+    }
+    resumeSeed = { checkpoint, events };
+  }
+  if (binding.workflowBound === true && status !== "blocked" && status !== "failed" && (
+    !isString(value.workflowId) ||
+    !isString(value.planHash) ||
+    !isString(value.stepId) ||
+    !resumeSeed
+  )) {
+    return undefined;
+  }
+
+  return {
+    approvalId: binding.approvalId,
+    taskId: binding.taskId,
+    ...(binding.runId ? { runId: binding.runId } : {}),
+    ...(binding.workflowBound ? { workflowBound: true } : {}),
+    ...(isString(value.workflowId) ? { workflowId: value.workflowId } : {}),
+    ...(isString(value.planHash) ? { planHash: value.planHash } : {}),
+    ...(isString(value.stepId) ? { stepId: value.stepId } : {}),
+    toolName: binding.toolName,
+    previewHash: binding.previewHash,
+    status,
+    startedAt: value.startedAt,
+    ...(isString(value.completedAt) ? { completedAt: value.completedAt } : {}),
+    ...(resumeSeed ? { resumeSeed } : {}),
+    ...(hasOutput ? { output: value.output, outputHash } : {}),
+    ...(isString(value.error) ? { error: value.error } : {}),
+  };
+}
+
+function sanitizeApprovalResumeEvents(
+  value: unknown,
+  binding: { taskId: string; runId?: string },
+  execution: Record<string, unknown>,
+): RuntimeEventEnvelope[] | undefined {
+  if (!Array.isArray(value) || value.length > 32) return undefined;
+  const workflowId = execution.workflowId;
+  const events: RuntimeEventEnvelope[] = [];
+  for (const item of value) {
+    if (!isRecord(item) || !isString(item.eventId) || item.eventVersion !== 1 ||
+      !Number.isInteger(item.sequence) || (item.sequence as number) < 1 ||
+      item.taskId !== binding.taskId || item.runId !== binding.runId ||
+      (workflowId !== undefined && item.workflowId !== undefined && item.workflowId !== workflowId) ||
+      !isString(item.occurredAt) || !isString(item.recordedAt) || !isRecord(item.payload)) {
+      return undefined;
+    }
+    events.push(item as unknown as RuntimeEventEnvelope);
+  }
+  return events;
+}
+
+function selectApprovalResumeEvents(
+  events: RuntimeEventEnvelope[],
+  record: DurableApprovalRecord,
+  stepId: string | undefined,
+): RuntimeEventEnvelope[] {
+  return events.filter((event) => {
+    if (event.taskId !== record.taskId || event.runId !== record.runId) return false;
+    const payload = isRecord(event.payload) ? event.payload : {};
+    const eventStepId = isString(event.stepId)
+      ? event.stepId
+      : isString(payload.stepId) ? payload.stepId : undefined;
+    const request = isRecord(payload.request) ? payload.request : undefined;
+    const approvalId = isString(payload.approvalId)
+      ? payload.approvalId
+      : isString(payload.requestId) ? payload.requestId
+        : request && isString(request.id) ? request.id : undefined;
+    return eventStepId === stepId || approvalId === record.approvalId;
+  }).slice(-32).map((event) => ({
+    ...event,
+    payload: sanitizeApprovalExecutionValue(record, event.payload),
+  }));
+}
+
+function hasApprovalResumeEvidence(
+  events: RuntimeEventEnvelope[],
+  checkpoint: WorkflowCheckpoint,
+  approvalId: string,
+  stepId: string | undefined,
+): boolean {
+  if (checkpoint.approvalRequestIds.includes(approvalId)) return true;
+  return events.some((event) => {
+    const payload = isRecord(event.payload) ? event.payload : {};
+    if (payload.kind !== "permission.requested") return false;
+    const request = isRecord(payload.request) ? payload.request : undefined;
+    const id = isString(payload.approvalId)
+      ? payload.approvalId
+      : request && isString(request.id) ? request.id : undefined;
+    if (id !== approvalId) return false;
+    const explicitStep = isString(event.stepId)
+      ? event.stepId
+      : isString(payload.stepId) ? payload.stepId : undefined;
+    return !explicitStep || explicitStep === stepId;
+  });
+}
+
+function sanitizeApprovalExecutionValue(record: DurableApprovalRecord, value: unknown): unknown {
+  const sanitized = sanitizeArtifactForPersistence(createArtifactEnvelope(value, {
+    taskId: record.taskId,
+    runId: record.runId ?? `approval-${record.approvalId}`,
+    type: `approval-execution:${record.toolName}`,
+    producer: { stepId: record.execution?.stepId ?? "restored-approval", toolName: record.toolName },
+    sensitivity: "workspace",
+  })).payload;
+  const serialized = JSON.stringify(sanitized);
+  return serialized === undefined ? null : JSON.parse(serialized) as unknown;
+}
+
+function requireApprovalExecution(
+  record: DurableApprovalRecord,
+  expectedStatus: DurableApprovalExecutionStatus | DurableApprovalExecutionStatus[],
+): DurableApprovalExecution {
+  const expected = Array.isArray(expectedStatus) ? expectedStatus : [expectedStatus];
+  if (!record.execution || !expected.includes(record.execution.status)) {
+    throw new Error(`Approval execution must be in state ${expected.join(" or ")}.`);
+  }
+  return record.execution;
+}
+
+function isApprovalExecutionStatus(value: unknown): value is DurableApprovalExecutionStatus {
+  return value === "started" || value === "succeeded" || value === "continuation_pending" ||
+    value === "completed" || value === "failed" || value === "blocked";
 }
 
 function isCodeProposedEditBoundToRequest(

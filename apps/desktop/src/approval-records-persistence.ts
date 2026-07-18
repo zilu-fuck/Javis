@@ -2,6 +2,7 @@ import type { DatabaseValue, DesktopDatabaseMigration } from "./desktop-database
 import {
   APPROVAL_RECORDS_LIMIT,
   loadApprovalRecords,
+  retainApprovalRecordHistory,
   sanitizeApprovalRecord,
   type DurableApprovalRecord,
 } from "./approval-records";
@@ -72,8 +73,7 @@ export interface ApprovalRecordsRepository {
 const SELECT_APPROVAL_RECORDS_SQL = `
 SELECT record_json
 FROM ${APPROVAL_RECORDS_TABLE_NAME}
-ORDER BY created_at DESC
-LIMIT ?`.trim();
+ORDER BY created_at DESC`.trim();
 
 const UPSERT_APPROVAL_RECORD_SQL = `
 INSERT INTO ${APPROVAL_RECORDS_TABLE_NAME} (
@@ -113,11 +113,14 @@ ON CONFLICT(approval_id) DO UPDATE SET
 
 const DELETE_OVER_LIMIT_SQL = `
 DELETE FROM ${APPROVAL_RECORDS_TABLE_NAME}
-WHERE approval_id NOT IN (
+WHERE approval_id IN (
   SELECT approval_id
   FROM ${APPROVAL_RECORDS_TABLE_NAME}
-  ORDER BY created_at DESC
-  LIMIT ?
+  WHERE status = 'expired'
+    OR (status = 'denied' AND COALESCE(CASE WHEN json_valid(record_json) THEN json_extract(record_json, '$.workflowBound') END, 0) <> 1)
+    OR CASE WHEN json_valid(record_json) THEN json_extract(record_json, '$.execution.status') END IN ('completed', 'failed', 'blocked')
+  ORDER BY created_at DESC, approval_id DESC
+  LIMIT -1 OFFSET ?
 )`.trim();
 
 export async function ensureApprovalRecordsSchema(
@@ -155,12 +158,10 @@ export async function loadApprovalRecordsFromDatabase(
 ): Promise<DurableApprovalRecord[]> {
   const rows = await database.select<{ record_json: unknown }>(
     SELECT_APPROVAL_RECORDS_SQL,
-    [APPROVAL_RECORDS_LIMIT],
   );
-  return rows
+  return retainApprovalRecordHistory(rows
     .map((row) => parsePersistedApprovalRecord(row.record_json))
-    .filter((record): record is DurableApprovalRecord => Boolean(record))
-    .slice(0, APPROVAL_RECORDS_LIMIT);
+    .filter((record): record is DurableApprovalRecord => Boolean(record)));
 }
 
 export async function upsertApprovalRecordInDatabase(
@@ -189,7 +190,7 @@ export async function saveApprovalRecordsToDatabase(
       saved.push(sanitized);
     }
   }
-  return saved.slice(0, APPROVAL_RECORDS_LIMIT);
+  return retainApprovalRecordHistory(saved);
 }
 
 export async function importApprovalRecordsFromLocalStorage(

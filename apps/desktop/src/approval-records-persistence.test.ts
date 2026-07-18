@@ -5,7 +5,12 @@ import {
   APPROVAL_RECORDS_LIMIT,
   APPROVAL_RECORDS_STORAGE_KEY,
   APPROVAL_RECORDS_STORAGE_VERSION,
+  expireApprovalRecord,
+  isTerminalApprovalRecord,
+  markApprovalExecutionStarted,
+  markApprovalExecutionSucceeded,
   resolveApprovalRecord,
+  sanitizeApprovalRecord,
   type DurableApprovalRecord,
 } from "./approval-records";
 import {
@@ -71,13 +76,68 @@ describe("approval records persistence", () => {
     expect(database.rows.get("approval-older")?.updated_at).toBe("2026-05-24T00:04:00.000Z");
   });
 
-  it("skips malformed database rows and enforces the approval record limit", async () => {
+  it("skips malformed rows and limits only terminal approval history", async () => {
     const database = createMemoryApprovalDatabase();
     const records = Array.from({ length: APPROVAL_RECORDS_LIMIT + 2 }, (_, index) =>
-      createApprovalRecord(`approval-${index}`, `2026-05-24T00:${String(index).padStart(2, "0")}:00.000Z`),
+      expireApprovalRecord(
+        createApprovalRecord(
+          `approval-${index}`,
+          `2026-05-24T00:${String(index).padStart(2, "0")}:00.000Z`,
+        ),
+        "2026-05-24T00:59:00.000Z",
+      ),
     );
+    const approved = resolveApprovalRecord(
+      createApprovalRecord("approval-active-approved", "2026-05-24T00:30:00.000Z"),
+      "approved",
+      "2026-05-24T00:31:00.000Z",
+    );
+    const started = markApprovalExecutionStarted(
+      resolveApprovalRecord(
+        createApprovalRecord("approval-active-started", "2026-05-24T00:32:00.000Z"),
+        "approved",
+        "2026-05-24T00:33:00.000Z",
+      ),
+      undefined,
+    );
+    const succeeded = markApprovalExecutionSucceeded(
+      markApprovalExecutionStarted(
+        resolveApprovalRecord(
+          createApprovalRecord("approval-active-succeeded", "2026-05-24T00:34:00.000Z"),
+          "approved",
+          "2026-05-24T00:35:00.000Z",
+        ),
+        undefined,
+      ),
+      { status: "applied" },
+    );
+    const continuationSource = markApprovalExecutionSucceeded(
+      markApprovalExecutionStarted(
+        resolveApprovalRecord(
+          createApprovalRecord("approval-active-continuation", "2026-05-24T00:36:00.000Z"),
+          "approved",
+          "2026-05-24T00:37:00.000Z",
+        ),
+        undefined,
+      ),
+      { status: "applied" },
+    );
+    const continuation: DurableApprovalRecord = {
+      ...continuationSource,
+      execution: {
+        ...continuationSource.execution!,
+        status: "continuation_pending",
+      },
+    };
+    const active = [
+      createApprovalRecord("approval-active-pending", "2026-05-24T00:29:00.000Z"),
+      approved,
+      started,
+      succeeded,
+      continuation,
+    ];
 
-    await saveApprovalRecordsToDatabase(database, records, "2026-05-24T01:00:00.000Z");
+    await saveApprovalRecordsToDatabase(database, [...records, ...active], "2026-05-24T01:00:00.000Z");
     database.rows.set("malformed", {
       approval_id: "malformed",
       created_at: "2026-05-23T23:00:00.000Z",
@@ -87,11 +147,13 @@ describe("approval records persistence", () => {
 
     const loaded = await loadApprovalRecordsFromDatabase(database);
 
-    expect(loaded).toHaveLength(APPROVAL_RECORDS_LIMIT);
-    expect(loaded[0]?.approvalId).toBe("approval-21");
+    expect(loaded.filter(isTerminalApprovalRecord)).toHaveLength(APPROVAL_RECORDS_LIMIT);
+    expect(loaded).toHaveLength(APPROVAL_RECORDS_LIMIT + active.length);
+    expect(loaded).toEqual(expect.arrayContaining(active));
     expect(loaded.some((record) => record.approvalId === "malformed")).toBe(false);
     expect(database.rows.has("approval-0")).toBe(false);
     expect(database.rows.has("approval-1")).toBe(false);
+    expect(database.executedSql[database.executedSql.length - 1]).toContain("LIMIT -1 OFFSET ?");
   });
 
   it("provides an async repository wrapper for approval records", async () => {
@@ -184,16 +246,15 @@ function createMemoryApprovalDatabase() {
       }
       if (sql.startsWith("DELETE FROM approval_records")) {
         const limit = Number(values[0]);
-        const retainedIds = new Set(
-          [...rows.values()]
+        const terminalRows = [...rows.values()]
+          .filter((row) => {
+            const record = sanitizeApprovalRecord(JSON.parse(row.record_json));
+            return record ? isTerminalApprovalRecord(record) : false;
+          })
             .sort((left, right) => right.created_at.localeCompare(left.created_at))
-            .slice(0, limit)
-            .map((row) => row.approval_id),
-        );
-        for (const id of rows.keys()) {
-          if (!retainedIds.has(id)) {
-            rows.delete(id);
-          }
+            .slice(limit);
+        for (const row of terminalRows) {
+          rows.delete(row.approval_id);
         }
       }
     },
@@ -204,7 +265,7 @@ function createMemoryApprovalDatabase() {
       if (!sql.startsWith("SELECT record_json")) {
         return [];
       }
-      const limit = Number(values[0]);
+      const limit = typeof values[0] === "number" ? values[0] : Number.POSITIVE_INFINITY;
       return [...rows.values()]
         .sort((left, right) => right.created_at.localeCompare(left.created_at))
         .slice(0, limit)

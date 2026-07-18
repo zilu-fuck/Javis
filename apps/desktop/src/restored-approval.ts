@@ -110,6 +110,11 @@ export function getDurableApprovalWorkspacePath(
   if (title === CODE_PATCH_APPROVAL_TITLE) {
     return task.codeProposedEdit?.workspacePath ?? task.codeReviewPreview?.workspacePath ?? "";
   }
+  const plan = task.durableApprovalPlan?.payload;
+  if (typeof plan === "object" && plan !== null) {
+    const preview = (plan as { preview?: { workspaceRoot?: unknown } }).preview;
+    if (typeof preview?.workspaceRoot === "string") return preview.workspaceRoot;
+  }
   return "";
 }
 
@@ -134,8 +139,91 @@ export function reconcileRestoredApprovalTaskToCheckpoint(
     return { status: "unlinked", linkedTask: task };
   }
 
+  const orderedApprovalEvents = [...runtimeEvents].sort((left, right) => left.sequence - right.sequence);
+  const requestedEvent = findLatestEvent(orderedApprovalEvents, (event) =>
+    permissionRequestIdFromEvent(event) === approvalId
+  );
+  const expectedToolName = task.permissionRequest
+    ? getDurableApprovalToolName(task.permissionRequest.title)
+    : undefined;
+  const expectedPreviewHash = task.permissionRequest?.bindingHash;
+  const requestedBinding = requestedEvent ? permissionEventBinding(requestedEvent) : undefined;
+  const boundStepId = requestedBinding?.stepId;
+  const boundStep = boundStepId
+    ? checkpoint.workflowSnapshot.steps.find((step) => step.id === boundStepId)
+    : undefined;
+  const boundStepToolName = (boundStep as (typeof boundStep & { toolName?: string }) | undefined)?.toolName;
+  if (!requestedEvent || !requestedBinding || !expectedToolName || !expectedPreviewHash ||
+    requestedBinding.toolName !== expectedToolName ||
+    requestedBinding.previewHash !== expectedPreviewHash ||
+    !boundStep || boundStepToolName !== undefined && boundStepToolName !== expectedToolName
+  ) {
+    const reason = `Approval ${approvalId} does not have matching step, tool, and preview bindings in the durable event log.`;
+    return {
+      status: "blocked",
+      reason,
+      linkedTask: {
+        ...task,
+        logs: [
+          ...task.logs,
+          {
+            id: `${task.id}-workflow-approval-binding-mismatch-${checkpoint.runId}`,
+            kind: "event",
+            title: "workflow.approval.binding_mismatch",
+            detail: reason,
+          },
+        ],
+        verificationSummary: appendVerificationSummaryLine(
+          task.verificationSummary,
+          `blocked: ${reason}`,
+        ),
+      },
+    };
+  }
+  const alreadyResolved = runtimeEvents.some((event) =>
+    permissionResolvedIdFromEvent(event) === approvalId
+  );
+  const boundStepAlreadyTerminal = Boolean(requestedEvent && boundStepId && runtimeEvents.some((event) =>
+    event.sequence > requestedEvent.sequence &&
+    eventStepId(event) === boundStepId &&
+    (eventKind(event) === "step.completed" || eventKind(event) === "step.failed")
+  ));
+  if (alreadyResolved || boundStepAlreadyTerminal) {
+    const reason = alreadyResolved
+      ? `Approval ${approvalId} is already resolved in the durable event log.`
+      : `Approval ${approvalId} already has a terminal event for step ${boundStepId}.`;
+    return {
+      status: "blocked",
+      reason,
+      linkedTask: {
+        ...task,
+        logs: [
+          ...task.logs,
+          {
+            id: `${task.id}-workflow-approval-already-resolved-${checkpoint.runId}`,
+            kind: "event",
+            title: "workflow.approval.already_resolved",
+            detail: reason,
+          },
+        ],
+        verificationSummary: appendVerificationSummaryLine(
+          task.verificationSummary,
+          `blocked: ${reason}`,
+        ),
+      },
+    };
+  }
+
   const reconciliation = reconcileCheckpointWithEventLog(checkpoint, runtimeEvents);
-  if (reconciliation.status === "blocked") {
+  const safelyWaitingForThisApproval = isSafelyWaitingForRestoredApproval(
+    approvalId,
+    checkpoint,
+    runtimeEvents,
+    reconciliation.reason,
+    expectedToolName,
+    expectedPreviewHash,
+  );
+  if (reconciliation.status === "blocked" && !safelyWaitingForThisApproval) {
     return {
       status: "blocked",
       reason: reconciliation.reason,
@@ -158,12 +246,18 @@ export function reconcileRestoredApprovalTaskToCheckpoint(
     };
   }
 
-  if (reconciliation.status !== "resumable" || !hasApprovalEvidence(approvalId, checkpoint, runtimeEvents)) {
+  if (
+    reconciliation.status !== "resumable" && !safelyWaitingForThisApproval
+  ) {
     return { status: "unlinked", linkedTask: task };
   }
 
-  const completedCount = reconciliation.completedStepIds.length;
-  const pendingCount = reconciliation.pendingStepIds.length + reconciliation.retryStepIds.length;
+  const completedCount = safelyWaitingForThisApproval
+    ? checkpoint.completedStepIds.length
+    : reconciliation.completedStepIds.length;
+  const pendingCount = safelyWaitingForThisApproval
+    ? checkpoint.pendingStepIds.length + checkpoint.runningStepIds.length
+    : reconciliation.pendingStepIds.length + reconciliation.retryStepIds.length;
   return {
     status: "linked",
     linkedTask: {
@@ -187,21 +281,82 @@ export function reconcileRestoredApprovalTaskToCheckpoint(
   };
 }
 
+const RUNNING_WRITE_RECONCILIATION_REASON =
+  "Checkpoint has running confirmed-write step(s) that require explicit reconciliation before resume.";
+
+/**
+ * A confirmed-write step is normally unsafe to retry. The one safe exception
+ * is a durable log proving that the step stopped at its approval request and
+ * never received a resolution or terminal step event. In that state the UI
+ * may restore the approval card; the native approval binding still gates the
+ * eventual side effect.
+ */
+function isSafelyWaitingForRestoredApproval(
+  approvalId: string,
+  checkpoint: WorkflowCheckpoint,
+  runtimeEvents: RuntimeEventEnvelope[],
+  reconciliationReason: string,
+  expectedToolName?: string,
+  expectedPreviewHash?: string,
+): boolean {
+  if (
+    reconciliationReason !== RUNNING_WRITE_RECONCILIATION_REASON ||
+    checkpoint.waitingReason !== "human_approval" ||
+    checkpoint.runningStepIds.length !== 1
+  ) {
+    return false;
+  }
+  const runningStepId = checkpoint.runningStepIds[0];
+  const runningStep = checkpoint.workflowSnapshot.steps.find((step) => step.id === runningStepId);
+  if (
+    !runningStep ||
+    runningStep.permissionLevel !== "confirmed_write" && runningStep.permissionLevel !== "dangerous"
+  ) {
+    return false;
+  }
+  const runningStepToolName = (runningStep as typeof runningStep & { toolName?: string }).toolName;
+  if (expectedToolName && runningStepToolName && expectedToolName !== runningStepToolName) {
+    return false;
+  }
+
+  const ordered = [...runtimeEvents].sort((left, right) => left.sequence - right.sequence);
+  const started = findLatestEvent(ordered, (event) =>
+    eventKind(event) === "step.started" && eventStepId(event) === runningStepId
+  );
+  const requested = findLatestEvent(ordered, (event) =>
+    eventKind(event) === "permission.requested" && permissionRequestIdFromEvent(event) === approvalId
+  );
+  if (!started || !requested || requested.sequence < started.sequence) return false;
+  const requestedBinding = permissionEventBinding(requested);
+  if (!requestedBinding ||
+    requestedBinding.stepId !== runningStepId ||
+    requestedBinding.toolName !== expectedToolName ||
+    requestedBinding.previewHash !== expectedPreviewHash
+  ) {
+    return false;
+  }
+  const latestStartedBeforeRequest = findLatestEvent(ordered, (event) =>
+    event.sequence <= requested.sequence && eventKind(event) === "step.started"
+  );
+  if (!latestStartedBeforeRequest || eventStepId(latestStartedBeforeRequest) !== runningStepId) {
+    return false;
+  }
+
+  return !ordered.some((event) =>
+    event.sequence > requested.sequence && (
+      eventKind(event) === "permission.resolved" && permissionResolvedIdFromEvent(event) === approvalId ||
+      eventStepId(event) === runningStepId &&
+        (eventKind(event) === "step.completed" || eventKind(event) === "step.failed")
+    )
+  );
+}
+
 export function linkRestoredApprovalTaskToCheckpoint(
   task: TaskSnapshot,
   checkpoint: WorkflowCheckpoint | undefined,
   runtimeEvents: RuntimeEventEnvelope[] = [],
 ): TaskSnapshot {
   return reconcileRestoredApprovalTaskToCheckpoint(task, checkpoint, runtimeEvents).linkedTask;
-}
-
-function hasApprovalEvidence(
-  approvalId: string,
-  checkpoint: WorkflowCheckpoint,
-  runtimeEvents: RuntimeEventEnvelope[],
-): boolean {
-  const checkpointNamesApproval = checkpoint.approvalRequestIds.includes(approvalId);
-  return checkpointNamesApproval || runtimeEvents.some((event) => permissionRequestIdFromEvent(event) === approvalId);
 }
 
 function permissionRequestIdFromEvent(event: RuntimeEventEnvelope): string | undefined {
@@ -217,6 +372,53 @@ function permissionRequestIdFromEvent(event: RuntimeEventEnvelope): string | und
     return undefined;
   }
   return request.id;
+}
+
+function permissionResolvedIdFromEvent(event: RuntimeEventEnvelope): string | undefined {
+  const payload = event.payload;
+  if (!isRecord(payload) || payload.kind !== "permission.resolved") return undefined;
+  if (typeof payload.requestId === "string") return payload.requestId;
+  return typeof payload.approvalId === "string" ? payload.approvalId : undefined;
+}
+
+function eventKind(event: RuntimeEventEnvelope): string | undefined {
+  return isRecord(event.payload) && typeof event.payload.kind === "string"
+    ? event.payload.kind
+    : undefined;
+}
+
+function eventStepId(event: RuntimeEventEnvelope): string | undefined {
+  if (typeof event.stepId === "string") return event.stepId;
+  return isRecord(event.payload) && typeof event.payload.stepId === "string"
+    ? event.payload.stepId
+    : undefined;
+}
+
+function permissionEventBinding(event: RuntimeEventEnvelope): {
+  stepId: string;
+  toolName: string;
+  previewHash: string;
+} | undefined {
+  const payload = event.payload;
+  const stepId = eventStepId(event);
+  if (!isRecord(payload) || !stepId ||
+    typeof payload.toolName !== "string" ||
+    typeof payload.previewHash !== "string"
+  ) {
+    return undefined;
+  }
+  return { stepId, toolName: payload.toolName, previewHash: payload.previewHash };
+}
+
+function findLatestEvent(
+  events: RuntimeEventEnvelope[],
+  predicate: (event: RuntimeEventEnvelope) => boolean,
+): RuntimeEventEnvelope | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event && predicate(event)) return event;
+  }
+  return undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

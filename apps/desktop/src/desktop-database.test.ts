@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
+import type { RuntimeEventEnvelope } from "@javis/core";
 import {
   invokeDesktopDatabase,
   runDesktopDatabaseMigrations,
@@ -71,6 +72,34 @@ describe("desktop database migrations", () => {
     });
   });
 
+  it("routes runtime event compaction through one dedicated native command", async () => {
+    delete (window as any).__TAURI_INTERNALS__;
+    const invoke = vi.fn(async () => undefined);
+    const database = invokeDesktopDatabase(invoke);
+    const envelope: RuntimeEventEnvelope = {
+      eventId: "evt-run-1-stream-compacted-3",
+      eventVersion: 1,
+      sequence: 3,
+      taskId: "task-1",
+      runId: "run-1",
+      correlationId: "run-1",
+      occurredAt: "2026-06-16T00:00:00.000Z",
+      recordedAt: "2026-06-16T00:00:00.000Z",
+      payload: { kind: "runtime.compacted", taskId: "task-1" },
+    };
+
+    await database.compactRuntimeEvents?.("task-1", ["evt-chunk-1", "evt-chunk-2"], [envelope]);
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith("runtime_events_compact", {
+      request: {
+        taskId: "task-1",
+        eventIds: ["evt-chunk-1", "evt-chunk-2"],
+        compactionEnvelopes: [envelope],
+      },
+    });
+  });
+
   it("routes approval record writes through dedicated native commands", async () => {
     const invoke = vi.fn(async () => undefined);
     (window as any).__TAURI_INTERNALS__ = { invoke };
@@ -103,11 +132,14 @@ describe("desktop database migrations", () => {
     );
     await database.execute(
       `DELETE FROM approval_records
-       WHERE approval_id NOT IN (
+       WHERE approval_id IN (
          SELECT approval_id
          FROM approval_records
-         ORDER BY created_at DESC
-         LIMIT ?
+         WHERE status = 'expired'
+           OR (status = 'denied' AND COALESCE(CASE WHEN json_valid(record_json) THEN json_extract(record_json, '$.workflowBound') END, 0) <> 1)
+           OR CASE WHEN json_valid(record_json) THEN json_extract(record_json, '$.execution.status') END IN ('completed', 'failed', 'blocked')
+         ORDER BY created_at DESC, approval_id DESC
+         LIMIT -1 OFFSET ?
        )`,
       [20],
     );

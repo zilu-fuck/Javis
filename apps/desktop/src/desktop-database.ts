@@ -1,9 +1,20 @@
+import type { RuntimeEventEnvelope } from "@javis/core";
+
 export interface DesktopDatabase {
   execute(sql: string, bindValues?: DatabaseValue[]): Promise<void>;
   select<T extends Record<string, unknown>>(
     sql: string,
     bindValues?: DatabaseValue[],
   ): Promise<T[]>;
+  /**
+   * Atomically replaces selected streaming events with compaction envelopes.
+   * Native implementations perform the whole mutation in one SQLite transaction.
+   */
+  compactRuntimeEvents?(
+    taskId: string,
+    eventIds: string[],
+    compactionEnvelopes: RuntimeEventEnvelope[],
+  ): Promise<void>;
 }
 
 export type DatabaseValue = string | number | boolean | null;
@@ -77,6 +88,11 @@ export function invokeDesktopDatabase(
       const rows = await retryInvoke("db_select", { sql, bindValues }, moduleInvoke);
       return (rows as T[]) ?? [];
     },
+    async compactRuntimeEvents(taskId, eventIds, compactionEnvelopes) {
+      await directInvoke("runtime_events_compact", {
+        request: { taskId, eventIds, compactionEnvelopes },
+      }, moduleInvoke);
+    },
   };
 }
 
@@ -118,9 +134,10 @@ function approvalRecordWriteCommand(
   }
   if (
     normalized.startsWith("delete from approval_records") &&
-    normalized.includes("where approval_id not in") &&
-    normalized.includes("order by created_at desc") &&
-    normalized.includes("limit ?")
+    normalized.includes("where approval_id in") &&
+    normalized.includes("json_extract(record_json, '$.execution.status')") &&
+    normalized.includes("order by created_at desc, approval_id desc") &&
+    normalized.includes("limit -1 offset ?")
   ) {
     if (bindValues.length !== 1 || typeof bindValues[0] !== "number") {
       throw new Error("Approval record prune expected a numeric limit.");

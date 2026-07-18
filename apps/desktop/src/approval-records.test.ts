@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  computePlanHash,
   createCodeApplyDryRun,
   createDryRunBindingHash,
+  type RuntimeEventEnvelope,
+  type WorkflowCheckpoint,
 } from "@javis/core";
 import type { DryRunSummary, PermissionRequest } from "@javis/tools";
 import {
@@ -10,10 +13,15 @@ import {
   APPROVAL_RECORDS_STORAGE_VERSION,
   expireApprovalRecord,
   createApprovalRecordFromPermissionRequest,
+  findRecoverableApprovalExecutionRecord,
   findPendingApprovalRecord,
   isApprovalRecordExpired,
   loadApprovalRecords,
   resolveApprovalRecord,
+  markApprovalContinuationPending,
+  markApprovalExecutionStarted,
+  markApprovalExecutionSucceeded,
+  markApprovalExecutionTerminal,
   saveApprovalRecords,
   sanitizeApprovalRecord,
   upsertApprovalRecord,
@@ -113,20 +121,33 @@ describe("durable approval records", () => {
     expect(loadApprovalRecords(storage)).toEqual([]);
   });
 
-  it("upserts newest records and enforces the storage limit", () => {
+  it("limits terminal history without dropping active approval records", () => {
     const records = Array.from({ length: APPROVAL_RECORDS_LIMIT + 2 }, (_, index) =>
-      createApprovalRecord(`approval-${index}`),
+      expireApprovalRecord(
+        createApprovalRecord(
+          `approval-${index}`,
+          `2026-05-24T00:${String(index).padStart(2, "0")}:00.000Z`,
+        ),
+        "2026-05-24T00:05:00.000Z",
+      ),
     );
     const updated = {
       ...records[5],
       workspacePath: "E:/Updated",
     };
+    const active = [
+      createApprovalRecord("approval-active-1"),
+      createApprovalRecord("approval-active-2"),
+    ];
 
-    const result = upsertApprovalRecord(records, updated);
+    const result = upsertApprovalRecord([...records, ...active], updated);
 
-    expect(result).toHaveLength(APPROVAL_RECORDS_LIMIT);
+    expect(result).toHaveLength(APPROVAL_RECORDS_LIMIT + active.length);
     expect(result[0]?.approvalId).toBe("approval-5");
     expect(result[0]?.workspacePath).toBe("E:/Updated");
+    expect(result).toEqual(expect.arrayContaining(active));
+    expect(result.some((record) => record.approvalId === "approval-0")).toBe(false);
+    expect(result.some((record) => record.approvalId === "approval-1")).toBe(false);
   });
 
   it("creates records from pending permission requests", () => {
@@ -150,6 +171,118 @@ describe("durable approval records", () => {
         status: "approved",
       },
     })).toBeNull();
+  });
+
+  it("persists a workflow-bound execution result for crash-safe continuation", () => {
+    const approved = resolveApprovalRecord(
+      { ...createApprovalRecord(), runId: "run-1", workflowBound: true },
+      "approved",
+      "2026-05-24T00:01:00.000Z",
+    );
+    const seed = createApprovalResumeSeed(approved);
+    const started = markApprovalExecutionStarted(
+      approved,
+      seed,
+      "2026-05-24T00:01:01.000Z",
+    );
+    const succeeded = markApprovalExecutionSucceeded(started, {
+      status: "applied",
+      apiKey: "sk-project-secret-value",
+    }, "2026-05-24T00:01:02.000Z");
+    const advancedSeed = {
+      ...seed,
+      checkpoint: {
+        ...seed.checkpoint,
+        completedStepIds: ["execute"],
+        runningStepIds: [],
+      },
+    };
+    const continuation = markApprovalContinuationPending(
+      succeeded,
+      advancedSeed,
+      "2026-05-24T00:01:03.000Z",
+    );
+    const storage = createMemoryStorage();
+
+    saveApprovalRecords(storage, [continuation]);
+    const loaded = loadApprovalRecords(storage);
+
+    expect(loaded[0]?.execution).toMatchObject({
+      status: "continuation_pending",
+      runId: "run-1",
+      workflowId: "approval-workflow",
+      stepId: "execute",
+      toolName: approved.toolName,
+      previewHash: approved.previewHash,
+    });
+    expect(JSON.stringify(loaded)).not.toContain("sk-project-secret-value");
+    expect(findRecoverableApprovalExecutionRecord(loaded)?.approvalId).toBe(approved.approvalId);
+  });
+
+  it("rejects tampered persisted execution output", () => {
+    const approved = resolveApprovalRecord(
+      { ...createApprovalRecord(), runId: "run-1", workflowBound: true },
+      "approved",
+      "2026-05-24T00:01:00.000Z",
+    );
+    const succeeded = markApprovalExecutionSucceeded(
+      markApprovalExecutionStarted(approved, createApprovalResumeSeed(approved)),
+      { status: "applied" },
+    );
+
+    expect(sanitizeApprovalRecord({
+      ...succeeded,
+      execution: { ...succeeded.execution, output: { status: "forged" } },
+    })).toBeNull();
+  });
+
+  it("round-trips execution output containing undefined as JSON-safe data", () => {
+    const approved = resolveApprovalRecord(
+      createApprovalRecord("approval-json-safe"),
+      "approved",
+      "2026-05-24T00:01:00.000Z",
+    );
+    const succeeded = markApprovalExecutionSucceeded(
+      markApprovalExecutionStarted(approved, undefined),
+      {
+        status: "applied",
+        omitted: undefined,
+        values: [undefined, "kept"],
+      },
+      "2026-05-24T00:01:02.000Z",
+    );
+    const storage = createMemoryStorage();
+
+    saveApprovalRecords(storage, [succeeded]);
+    const loaded = loadApprovalRecords(storage);
+
+    expect(loaded[0]?.execution?.output).toEqual({
+      status: "applied",
+      values: [null, "kept"],
+    });
+    expect(loaded[0]?.execution?.outputHash).toBe(succeeded.execution?.outputHash);
+    expect(sanitizeApprovalRecord(loaded[0])).toEqual(loaded[0]);
+  });
+
+  it("requires a durable seed before a workflow-bound native execution", () => {
+    const approved = resolveApprovalRecord(
+      { ...createApprovalRecord(), runId: "run-1", workflowBound: true },
+      "approved",
+      "2026-05-24T00:01:00.000Z",
+    );
+
+    expect(() => markApprovalExecutionStarted(approved, undefined)).toThrow(
+      "requires a durable resume seed",
+    );
+    const blocked = markApprovalExecutionTerminal(
+      markApprovalExecutionStarted(
+        { ...approved, runId: undefined, workflowBound: false },
+        undefined,
+      ),
+      "blocked",
+      "Native execution state is indeterminate.",
+    );
+    expect(blocked.execution?.status).toBe("blocked");
   });
 
   it("creates durable records for Code Agent patch approvals", () => {
@@ -574,7 +707,10 @@ describe("durable approval records", () => {
   });
 });
 
-function createApprovalRecord(approvalId = "approval-1"): DurableApprovalRecord {
+function createApprovalRecord(
+  approvalId = "approval-1",
+  createdAt = "2026-05-24T00:00:00.000Z",
+): DurableApprovalRecord {
   const dryRun: DryRunSummary = {
     operation: "Organize PDF files by filename topic",
     affectedPaths: [
@@ -595,7 +731,7 @@ function createApprovalRecord(approvalId = "approval-1"): DurableApprovalRecord 
     reason: "Moving files changes the local filesystem, so Javis needs explicit approval.",
     bindingHash,
     status: "pending",
-    createdAt: "2026-05-24T00:00:00.000Z",
+    createdAt,
     dryRun,
   };
   return {
@@ -605,9 +741,9 @@ function createApprovalRecord(approvalId = "approval-1"): DurableApprovalRecord 
     workspacePath: "C:/Users/example/Downloads",
     permissionLevel: "confirmed_write",
     previewHash: bindingHash,
-    expiresAt: "2026-05-24T00:10:00.000Z",
+    expiresAt: new Date(Date.parse(createdAt) + 10 * 60 * 1000).toISOString(),
     status: "pending",
-    createdAt: "2026-05-24T00:00:00.000Z",
+    createdAt,
     permissionRequest,
   };
 }
@@ -898,6 +1034,68 @@ function createCodeProposedEdit() {
     changedFiles: ["packages/core/src/index.ts"],
     patch: "diff --git a/packages/core/src/index.ts b/packages/core/src/index.ts\n",
     patchHash: "fnv1a-test",
+  };
+}
+
+function createApprovalResumeSeed(record: DurableApprovalRecord): {
+  checkpoint: WorkflowCheckpoint;
+  events: RuntimeEventEnvelope[];
+} {
+  const steps = [{
+    id: "execute",
+    title: "Execute",
+    agentKind: "file" as const,
+    input: "plan",
+    output: "result",
+    permissionLevel: "confirmed_write" as const,
+    dependsOn: [],
+    canRunInParallel: false,
+  }];
+  const checkpoint: WorkflowCheckpoint = {
+    taskId: record.taskId,
+    runId: record.runId ?? "run-1",
+    workflowId: "approval-workflow",
+    workflowVersion: 1,
+    planHash: computePlanHash(steps),
+    workflowSnapshot: {
+      id: "approval-workflow" as never,
+      title: "Approval workflow",
+      triggerExamples: [],
+      goal: "resume approval",
+      coordinatorAgentKind: "commander",
+      participatingAgentKinds: ["commander", "file"],
+      currentSupport: "partial",
+      safetyNotes: [],
+      steps,
+    },
+    completedStepIds: [],
+    abandonedStepIds: [],
+    pendingStepIds: [],
+    runningStepIds: ["execute"],
+    contextSnapshot: {},
+    approvalRequestIds: [record.approvalId],
+    waitingReason: "human_approval",
+    eventSequence: 2,
+    createdAt: "2026-05-24T00:00:00.000Z",
+  };
+  const event = (sequence: number, payload: Record<string, unknown>): RuntimeEventEnvelope => ({
+    eventId: `evt-${checkpoint.runId}-${sequence}`,
+    eventVersion: 1,
+    sequence,
+    taskId: checkpoint.taskId,
+    runId: checkpoint.runId,
+    workflowId: checkpoint.workflowId,
+    correlationId: checkpoint.runId,
+    occurredAt: checkpoint.createdAt,
+    recordedAt: checkpoint.createdAt,
+    payload,
+  });
+  return {
+    checkpoint,
+    events: [
+      event(1, { kind: "step.started", stepId: "execute" }),
+      event(2, { kind: "permission.requested", approvalId: record.approvalId }),
+    ],
   };
 }
 

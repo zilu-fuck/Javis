@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { RuntimeEventEnvelope } from "@javis/core";
 import {
   COMPACTED_STREAM_EVENT_KIND,
@@ -61,6 +61,46 @@ describe("runtime-event-store", () => {
     expect((compacted as { hashAlgorithm?: string }).hashAlgorithm).toBe("sha256-canonical-json-v1");
     expect(compacted.originalSequenceRange).toEqual({ first: 2, last: 3 });
     expect(await store.pruneByTaskId(taskId, true)).toBe(0);
+  });
+
+  it("uses the native atomic compaction capability when available", async () => {
+    const taskId = "task-native";
+    const runId = "run-native";
+    const database = createMemoryDatabase([
+      createEnvelope({
+        eventId: "evt-native-chunk",
+        taskId,
+        runId,
+        sequence: 1,
+        payload: { kind: "agent.chunk", taskId, agentKind: "code", text: "hello" },
+      }),
+      createEnvelope({
+        eventId: "evt-native-terminal",
+        taskId,
+        runId,
+        sequence: 2,
+        payload: { kind: "task.completed", taskId },
+      }),
+    ]);
+    const compactRuntimeEvents = vi.fn(async () => undefined);
+    database.compactRuntimeEvents = compactRuntimeEvents;
+
+    expect(await createRuntimeEventStore(database).pruneByTaskId(taskId, true)).toBe(1);
+
+    expect(compactRuntimeEvents).toHaveBeenCalledTimes(1);
+    expect(compactRuntimeEvents).toHaveBeenCalledWith(
+      taskId,
+      ["evt-native-chunk"],
+      [expect.objectContaining({
+        taskId,
+        runId,
+        sequence: 3,
+        payload: expect.objectContaining({
+          kind: COMPACTED_STREAM_EVENT_KIND,
+          compactedEventCount: 1,
+        }),
+      })],
+    );
   });
 
   it("preserves structural lifecycle and approval events during terminal compaction", async () => {
@@ -147,6 +187,88 @@ describe("runtime-event-store", () => {
     ]);
   });
 
+  it("compacts every streaming event when a terminal task has more than 10,000 events", async () => {
+    const taskId = "task-large-stream";
+    const runId = "run-large-stream";
+    const streamingEventCount = 10_005;
+    const events = Array.from({ length: streamingEventCount }, (_, index) => createEnvelope({
+      eventId: `evt-large-${index + 1}`,
+      taskId,
+      runId,
+      sequence: index + 1,
+      payload: { kind: "agent.chunk", taskId, agentKind: "code", text: "x" },
+    }));
+    events.push(createEnvelope({
+      eventId: "evt-large-terminal",
+      taskId,
+      runId,
+      sequence: streamingEventCount + 1,
+      payload: { kind: "task.completed", taskId },
+    }));
+    const database = createMemoryDatabase(events);
+    const store = createRuntimeEventStore(database);
+
+    expect(await store.pruneByTaskId(taskId, true)).toBe(streamingEventCount);
+
+    const remaining = await store.replayByTaskId(taskId, 10);
+    expect(remaining.map((event) => payloadKind(event))).toEqual([
+      "task.completed",
+      COMPACTED_STREAM_EVENT_KIND,
+    ]);
+    expect(remaining[1]?.payload).toMatchObject({
+      compactedEventCount: streamingEventCount,
+      originalSequenceRange: { first: 1, last: streamingEventCount },
+    });
+  });
+
+  it.each([1, 2])("rolls back all compaction changes when summary insert %i fails", async (failureIndex) => {
+    const taskId = "task-atomic-compaction";
+    const database = createMemoryDatabase([
+      createEnvelope({
+        eventId: "evt-run-1-chunk",
+        taskId,
+        runId: "run-atomic-1",
+        sequence: 1,
+        payload: { kind: "agent.chunk", taskId, agentKind: "code", text: "one" },
+      }),
+      createEnvelope({
+        eventId: "evt-run-1-terminal",
+        taskId,
+        runId: "run-atomic-1",
+        sequence: 2,
+        payload: { kind: "task.completed", taskId },
+      }),
+      createEnvelope({
+        eventId: "evt-run-2-chunk",
+        taskId,
+        runId: "run-atomic-2",
+        sequence: 1,
+        payload: { kind: "agent.chunk", taskId, agentKind: "code", text: "two" },
+      }),
+      createEnvelope({
+        eventId: "evt-run-2-terminal",
+        taskId,
+        runId: "run-atomic-2",
+        sequence: 2,
+        payload: { kind: "task.completed", taskId },
+      }),
+    ], { failCompactionInsertAt: failureIndex });
+    const store = createRuntimeEventStore(database);
+
+    await expect(store.pruneByTaskId(taskId, true)).rejects.toThrow(
+      `Injected compaction insert failure ${failureIndex}`,
+    );
+
+    const remaining = await store.replayByTaskId(taskId, 10);
+    expect(remaining.map((event) => event.eventId)).toEqual([
+      "evt-run-1-chunk",
+      "evt-run-2-chunk",
+      "evt-run-1-terminal",
+      "evt-run-2-terminal",
+    ]);
+    expect(remaining.some((event) => payloadKind(event) === COMPACTED_STREAM_EVENT_KIND)).toBe(false);
+  });
+
   it("buildStreamingCompactionEvents keeps the summary bounded", () => {
     const taskId = "task-2";
     const runId = "run-2";
@@ -215,6 +337,91 @@ describe("runtime-event-store", () => {
 
     expect(events.map((event) => event.sequence)).toEqual([1, 2]);
   });
+
+  it("replays the complete run when it exceeds the legacy 10,000-event bound", async () => {
+    const taskId = "task-replay-large";
+    const runId = "run-replay-large";
+    const events = Array.from({ length: 10_005 }, (_, index) => createEnvelope({
+      eventId: `evt-replay-${index + 1}`,
+      taskId,
+      runId,
+      sequence: index + 1,
+      payload: { kind: "agent.chunk", taskId, text: "x" },
+    }));
+    const store = createRuntimeEventStore(createMemoryDatabase(events));
+
+    const replayed = await store.replayByRunId(runId);
+
+    expect(replayed).toHaveLength(10_005);
+    expect(replayed[replayed.length - 1]?.sequence).toBe(10_005);
+  });
+
+  it("compacts only terminal runs when a task has an active resumed run", async () => {
+    const taskId = "task-multi-run";
+    const terminalRun = "run-terminal";
+    const activeRun = "run-active";
+    const events = [
+      createEnvelope({
+        eventId: "terminal-chunk",
+        taskId,
+        runId: terminalRun,
+        sequence: 1,
+        payload: { kind: "agent.chunk", taskId, text: "old" },
+      }),
+      createEnvelope({
+        eventId: "terminal-done",
+        taskId,
+        runId: terminalRun,
+        sequence: 2,
+        payload: { kind: "task.completed", taskId },
+      }),
+      createEnvelope({
+        eventId: "active-chunk",
+        taskId,
+        runId: activeRun,
+        sequence: 1,
+        payload: { kind: "agent.chunk", taskId, text: "live" },
+      }),
+    ];
+    const database = createMemoryDatabase(events);
+    const store = createRuntimeEventStore(database);
+
+    expect(await store.pruneByTaskId(taskId, true)).toBe(1);
+
+    const remaining = await store.replayByTaskId(taskId, 20);
+    expect(remaining.some((event) => event.eventId === "active-chunk")).toBe(true);
+    expect(remaining.some((event) => event.eventId === "terminal-chunk")).toBe(false);
+    expect(remaining.some((event) =>
+      event.runId === activeRun && payloadKind(event) === COMPACTED_STREAM_EVENT_KIND
+    )).toBe(false);
+  });
+
+  it("retries an event batch idempotently after a partial prior write", async () => {
+    const taskId = "task-retry";
+    const runId = "run-retry";
+    const first = createEnvelope({
+      eventId: "evt-retry-1",
+      taskId,
+      runId,
+      sequence: 1,
+      payload: { kind: "permission.resolved", taskId },
+    });
+    const second = createEnvelope({
+      eventId: "evt-retry-2",
+      taskId,
+      runId,
+      sequence: 2,
+      payload: { kind: "step.completed", taskId, stepId: "write" },
+    });
+    const store = createRuntimeEventStore(createMemoryDatabase([first]));
+
+    await store.appendBatch([first, second]);
+
+    expect((await store.replayByTaskId(taskId, 10)).map((event) => event.eventId)).toEqual([
+      first.eventId,
+      second.eventId,
+    ]);
+  });
 });
 
 function createEnvelope(input: {
@@ -242,7 +449,10 @@ function payloadKind(envelope: RuntimeEventEnvelope): unknown {
   return (envelope.payload as { kind?: unknown }).kind;
 }
 
-function createMemoryDatabase(initialRows: RuntimeEventEnvelope[]): DesktopDatabase {
+function createMemoryDatabase(
+  initialRows: RuntimeEventEnvelope[],
+  options: { failCompactionInsertAt?: number } = {},
+): DesktopDatabase {
   const rows = initialRows.map((envelope) => ({
     event_id: envelope.eventId,
     task_id: envelope.taskId,
@@ -252,15 +462,32 @@ function createMemoryDatabase(initialRows: RuntimeEventEnvelope[]): DesktopDatab
     envelope_json: JSON.stringify(envelope),
     recorded_at: envelope.recordedAt,
   }));
+  let transactionSnapshot: typeof rows | undefined;
+  let compactionInsertCount = 0;
 
   return {
     async execute(sql, bindValues = []) {
       const normalized = sql.replace(/\s+/g, " ").trim().toLowerCase();
-      if (normalized.startsWith("delete from runtime_events where task_id = ? and event_kind in")) {
+      if (normalized === "begin transaction") {
+        transactionSnapshot = rows.map((row) => ({ ...row }));
+        return;
+      }
+      if (normalized === "commit") {
+        transactionSnapshot = undefined;
+        return;
+      }
+      if (normalized === "rollback") {
+        if (transactionSnapshot) {
+          rows.splice(0, rows.length, ...transactionSnapshot.map((row) => ({ ...row })));
+        }
+        transactionSnapshot = undefined;
+        return;
+      }
+      if (normalized.startsWith("delete from runtime_events where task_id = ? and event_id in")) {
         const taskId = String(bindValues[0] ?? "");
-        const kinds = new Set(bindValues.slice(1).map((value) => String(value ?? "")));
+        const eventIds = new Set(bindValues.slice(1).map((value) => String(value ?? "")));
         for (let index = rows.length - 1; index >= 0; index -= 1) {
-          if (rows[index]?.task_id === taskId && kinds.has(rows[index]?.event_kind ?? "")) {
+          if (rows[index]?.task_id === taskId && eventIds.has(rows[index]?.event_id ?? "")) {
             rows.splice(index, 1);
           }
         }
@@ -269,6 +496,18 @@ function createMemoryDatabase(initialRows: RuntimeEventEnvelope[]): DesktopDatab
       if (normalized.startsWith("insert into runtime_events")) {
         const envelopeJson = String(bindValues[11] ?? "");
         const envelope = JSON.parse(envelopeJson) as RuntimeEventEnvelope;
+        if (
+          normalized.includes("on conflict(event_id) do nothing") &&
+          rows.some((row) => row.event_id === envelope.eventId)
+        ) {
+          return;
+        }
+        if (payloadKind(envelope) === COMPACTED_STREAM_EVENT_KIND) {
+          compactionInsertCount += 1;
+          if (compactionInsertCount === options.failCompactionInsertAt) {
+            throw new Error(`Injected compaction insert failure ${compactionInsertCount}`);
+          }
+        }
         rows.push({
           event_id: String(bindValues[0] ?? ""),
           task_id: String(bindValues[1] ?? ""),
@@ -291,7 +530,15 @@ function createMemoryDatabase(initialRows: RuntimeEventEnvelope[]): DesktopDatab
           .filter((row) => row.task_id === taskId)
           .sort((left, right) =>
             left.recorded_at.localeCompare(right.recorded_at) || left.sequence - right.sequence)
-          .slice(0, limit)
+          .slice(0, limit < 0 ? undefined : limit)
+          .map((row) => ({ envelope_json: row.envelope_json })) as unknown as T[];
+      }
+      if (normalized === "select envelope_json from runtime_events where run_id = ? order by sequence desc limit 1") {
+        const runId = String(bindValues[0] ?? "");
+        return rows
+          .filter((row) => row.run_id === runId)
+          .sort((left, right) => right.sequence - left.sequence)
+          .slice(0, 1)
           .map((row) => ({ envelope_json: row.envelope_json })) as unknown as T[];
       }
       if (normalized.startsWith("select envelope_json from runtime_events where run_id = ? and sequence <= ?")) {

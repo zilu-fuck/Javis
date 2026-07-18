@@ -1,5 +1,6 @@
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::{
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -91,6 +92,45 @@ pub struct ResourceScanRootUpsertRequest {
     source: String,
     created_at: String,
 }
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeEventCompactionRequest {
+    task_id: String,
+    event_ids: Vec<String>,
+    compaction_envelopes: Vec<serde_json::Value>,
+}
+
+struct RuntimeEventCompactionRow {
+    event_id: String,
+    task_id: String,
+    run_id: String,
+    sequence: i64,
+    event_version: i64,
+    workflow_id: Option<String>,
+    step_id: Option<String>,
+    agent_id: Option<String>,
+    occurred_at: String,
+    recorded_at: String,
+    envelope_json: String,
+    compacted_event_count: usize,
+    compacted_event_kinds: HashSet<String>,
+    first_sequence: i64,
+    last_sequence: i64,
+}
+
+struct RuntimeEventCompactionSource {
+    event_id: String,
+    run_id: String,
+    sequence: i64,
+    event_kind: String,
+}
+
+const RUNTIME_EVENT_COMPACTION_DELETE_BATCH_SIZE: usize = 900;
+const MAX_RUNTIME_EVENT_COMPACTION_IDS: usize = 100_000;
+const MAX_RUNTIME_EVENT_COMPACTION_ENVELOPES: usize = 10_000;
+const MAX_RUNTIME_EVENT_ID_BYTES: usize = 512;
+const MAX_RUNTIME_EVENT_ENVELOPE_BYTES: usize = 1_000_000;
 
 fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
     let data_dir = app
@@ -268,20 +308,24 @@ pub fn approval_records_prune(app: AppHandle, limit: i64) -> Result<(), String> 
     if !(1..=1000).contains(&limit) {
         return Err("Approval record prune limit is out of range.".to_string());
     }
-    with_connection(&app, |conn| {
-        conn.execute(
-            "DELETE FROM approval_records
-             WHERE approval_id NOT IN (
-               SELECT approval_id
-               FROM approval_records
-               ORDER BY created_at DESC
-               LIMIT ?
-             )",
-            [limit],
-        )
-        .map_err(|error| format!("Approval record prune error: {error}"))?;
-        Ok(())
-    })
+    with_connection(&app, |conn| prune_approval_records(conn, limit).map(|_| ()))
+}
+
+fn prune_approval_records(conn: &Connection, limit: i64) -> Result<usize, String> {
+    conn.execute(
+        "DELETE FROM approval_records
+         WHERE approval_id IN (
+           SELECT approval_id
+           FROM approval_records
+           WHERE status = 'expired'
+             OR (status = 'denied' AND COALESCE(CASE WHEN json_valid(record_json) THEN json_extract(record_json, '$.workflowBound') END, 0) <> 1)
+             OR CASE WHEN json_valid(record_json) THEN json_extract(record_json, '$.execution.status') END IN ('completed', 'failed', 'blocked')
+           ORDER BY created_at DESC, approval_id DESC
+           LIMIT -1 OFFSET ?
+         )",
+        [limit],
+    )
+    .map_err(|error| format!("Approval record prune error: {error}"))
 }
 
 #[tauri::command]
@@ -343,6 +387,619 @@ pub fn resource_scan_roots_set_enabled(
         .map_err(|error| format!("Resource scan root update error: {error}"))?;
         Ok(())
     })
+}
+
+#[tauri::command]
+pub fn runtime_events_compact(
+    app: AppHandle,
+    request: RuntimeEventCompactionRequest,
+) -> Result<(), String> {
+    with_connection(&app, |conn| compact_runtime_events(conn, &request))
+}
+
+fn compact_runtime_events(
+    connection: &Connection,
+    request: &RuntimeEventCompactionRequest,
+) -> Result<(), String> {
+    let compaction_rows = validate_runtime_event_compaction_request(request)?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("Runtime event compaction transaction error: {error}"))?;
+
+    require_terminal_compaction_runs(&transaction, &request.task_id, &compaction_rows)?;
+    let source_events =
+        load_compaction_source_events(&transaction, &request.task_id, &request.event_ids)?;
+    if source_events.len() != request.event_ids.len() {
+        if source_events.is_empty()
+            && all_compaction_rows_already_persisted(&transaction, &compaction_rows)?
+        {
+            return Ok(());
+        }
+        return Err("Runtime event compaction source events are missing.".to_string());
+    }
+    validate_compaction_source_bindings(
+        &transaction,
+        &request.task_id,
+        &source_events,
+        &compaction_rows,
+    )?;
+
+    for batch in request
+        .event_ids
+        .chunks(RUNTIME_EVENT_COMPACTION_DELETE_BATCH_SIZE)
+    {
+        delete_runtime_event_batch(&transaction, &request.task_id, batch)?;
+    }
+    for row in &compaction_rows {
+        insert_runtime_event_compaction_row(&transaction, row)?;
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| format!("Runtime event compaction commit error: {error}"))
+}
+
+fn validate_runtime_event_compaction_request(
+    request: &RuntimeEventCompactionRequest,
+) -> Result<Vec<RuntimeEventCompactionRow>, String> {
+    validate_runtime_event_identifier(&request.task_id, "taskId")?;
+    if request.event_ids.is_empty() || request.event_ids.len() > MAX_RUNTIME_EVENT_COMPACTION_IDS {
+        return Err("Runtime event compaction eventIds count is out of range.".to_string());
+    }
+    if request.compaction_envelopes.is_empty()
+        || request.compaction_envelopes.len() > MAX_RUNTIME_EVENT_COMPACTION_ENVELOPES
+    {
+        return Err(
+            "Runtime event compaction compactionEnvelopes count is out of range.".to_string(),
+        );
+    }
+
+    let mut source_ids = HashSet::with_capacity(request.event_ids.len());
+    for event_id in &request.event_ids {
+        validate_runtime_event_identifier(event_id, "eventIds[]")?;
+        if !source_ids.insert(event_id.as_str()) {
+            return Err("Runtime event compaction eventIds must be unique.".to_string());
+        }
+    }
+
+    let mut compaction_ids = HashSet::with_capacity(request.compaction_envelopes.len());
+    let mut rows = Vec::with_capacity(request.compaction_envelopes.len());
+    let mut compacted_event_count = 0usize;
+    for envelope in &request.compaction_envelopes {
+        let row = parse_runtime_event_compaction_envelope(envelope, &request.task_id)?;
+        if source_ids.contains(row.event_id.as_str()) {
+            return Err(
+                "Runtime event compaction summary eventId overlaps a source eventId.".to_string(),
+            );
+        }
+        if !compaction_ids.insert(row.event_id.clone()) {
+            return Err("Runtime event compaction summary eventIds must be unique.".to_string());
+        }
+        compacted_event_count = compacted_event_count
+            .checked_add(row.compacted_event_count)
+            .ok_or_else(|| "Runtime event compaction count overflow.".to_string())?;
+        rows.push(row);
+    }
+    if compacted_event_count != request.event_ids.len() {
+        return Err("Runtime event compaction payload counts do not match eventIds.".to_string());
+    }
+    Ok(rows)
+}
+
+fn parse_runtime_event_compaction_envelope(
+    envelope: &serde_json::Value,
+    expected_task_id: &str,
+) -> Result<RuntimeEventCompactionRow, String> {
+    let object = envelope
+        .as_object()
+        .ok_or_else(|| "Runtime event compaction envelope must be a JSON object.".to_string())?;
+    let event_id = runtime_event_required_string(object, "eventId")?;
+    let task_id = runtime_event_required_string(object, "taskId")?;
+    if task_id != expected_task_id {
+        return Err("Runtime event compaction envelope taskId does not match.".to_string());
+    }
+    let run_id = runtime_event_required_string(object, "runId")?;
+    let correlation_id = runtime_event_required_string(object, "correlationId")?;
+    validate_runtime_event_identifier(&event_id, "envelope.eventId")?;
+    validate_runtime_event_identifier(&run_id, "envelope.runId")?;
+    validate_runtime_event_identifier(&correlation_id, "envelope.correlationId")?;
+
+    let sequence = runtime_event_required_positive_integer(object, "sequence")?;
+    let event_version = runtime_event_required_positive_integer(object, "eventVersion")?;
+    let workflow_id = runtime_event_optional_string(object, "workflowId")?;
+    let step_id = runtime_event_optional_string(object, "stepId")?;
+    let agent_id = runtime_event_optional_string(object, "agentId")?;
+    let occurred_at = runtime_event_required_string(object, "occurredAt")?;
+    let recorded_at = runtime_event_required_string(object, "recordedAt")?;
+    validate_runtime_event_timestamp(&occurred_at, "occurredAt")?;
+    validate_runtime_event_timestamp(&recorded_at, "recordedAt")?;
+
+    let payload = object
+        .get("payload")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| "Runtime event compaction payload must be an object.".to_string())?;
+    if payload.get("kind").and_then(serde_json::Value::as_str) != Some("runtime.compacted") {
+        return Err("Runtime event compaction payload kind is invalid.".to_string());
+    }
+    if payload.get("taskId").and_then(serde_json::Value::as_str) != Some(expected_task_id) {
+        return Err("Runtime event compaction payload taskId does not match.".to_string());
+    }
+    let payload_binding = validate_runtime_event_compaction_payload(payload)?;
+
+    let envelope_json = serde_json::to_string(envelope)
+        .map_err(|error| format!("Runtime event compaction serialization error: {error}"))?;
+    if envelope_json.len() > MAX_RUNTIME_EVENT_ENVELOPE_BYTES {
+        return Err("Runtime event compaction envelope is too large.".to_string());
+    }
+
+    Ok(RuntimeEventCompactionRow {
+        event_id,
+        task_id,
+        run_id,
+        sequence,
+        event_version,
+        workflow_id,
+        step_id,
+        agent_id,
+        occurred_at,
+        recorded_at,
+        envelope_json,
+        compacted_event_count: payload_binding.compacted_event_count,
+        compacted_event_kinds: payload_binding.compacted_event_kinds,
+        first_sequence: payload_binding.first_sequence,
+        last_sequence: payload_binding.last_sequence,
+    })
+}
+
+struct RuntimeEventCompactionPayloadBinding {
+    compacted_event_count: usize,
+    compacted_event_kinds: HashSet<String>,
+    first_sequence: i64,
+    last_sequence: i64,
+}
+
+fn validate_runtime_event_compaction_payload(
+    payload: &serde_json::Map<String, serde_json::Value>,
+) -> Result<RuntimeEventCompactionPayloadBinding, String> {
+    let kinds = payload
+        .get("compactedEventKinds")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            "Runtime event compaction payload compactedEventKinds is invalid.".to_string()
+        })?;
+    if kinds.is_empty()
+        || !kinds.iter().all(|kind| {
+            kind.as_str()
+                .map(is_streaming_runtime_event_kind)
+                .unwrap_or(false)
+        })
+    {
+        return Err(
+            "Runtime event compaction payload contains a non-streaming event kind.".to_string(),
+        );
+    }
+    let compacted_event_kinds = kinds
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
+    if compacted_event_kinds.len() != kinds.len() {
+        return Err(
+            "Runtime event compaction payload compactedEventKinds must be unique.".to_string(),
+        );
+    }
+    let compacted_event_count = payload
+        .get("compactedEventCount")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| {
+            "Runtime event compaction payload compactedEventCount is invalid.".to_string()
+        })?;
+    if compacted_event_count == 0 {
+        return Err(
+            "Runtime event compaction payload compactedEventCount must be positive.".to_string(),
+        );
+    }
+    let range = payload
+        .get("originalSequenceRange")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            "Runtime event compaction payload originalSequenceRange is invalid.".to_string()
+        })?;
+    let first = range
+        .get("first")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            "Runtime event compaction payload originalSequenceRange.first is invalid.".to_string()
+        })?;
+    let last = range
+        .get("last")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|value| *value >= first)
+        .ok_or_else(|| {
+            "Runtime event compaction payload originalSequenceRange.last is invalid.".to_string()
+        })?;
+    if last < first {
+        return Err(
+            "Runtime event compaction payload originalSequenceRange is invalid.".to_string(),
+        );
+    }
+    let summary = payload
+        .get("summary")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "Runtime event compaction payload summary is invalid.".to_string())?;
+    if summary.chars().count() > 25_000 {
+        return Err("Runtime event compaction payload summary is too large.".to_string());
+    }
+    let content_hash = payload
+        .get("contentHash")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "Runtime event compaction payload contentHash is invalid.".to_string())?;
+    if content_hash.len() != 64
+        || !content_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("Runtime event compaction payload contentHash is invalid.".to_string());
+    }
+    if payload
+        .get("hashAlgorithm")
+        .and_then(serde_json::Value::as_str)
+        != Some("sha256-canonical-json-v1")
+    {
+        return Err("Runtime event compaction payload hashAlgorithm is invalid.".to_string());
+    }
+    if !payload
+        .get("truncated")
+        .map(serde_json::Value::is_boolean)
+        .unwrap_or(false)
+    {
+        return Err("Runtime event compaction payload truncated is invalid.".to_string());
+    }
+    Ok(RuntimeEventCompactionPayloadBinding {
+        compacted_event_count,
+        compacted_event_kinds,
+        first_sequence: first,
+        last_sequence: last,
+    })
+}
+
+fn load_compaction_source_events(
+    transaction: &rusqlite::Transaction<'_>,
+    task_id: &str,
+    event_ids: &[String],
+) -> Result<Vec<RuntimeEventCompactionSource>, String> {
+    let mut sources = Vec::with_capacity(event_ids.len());
+    for batch in event_ids.chunks(RUNTIME_EVENT_COMPACTION_DELETE_BATCH_SIZE) {
+        let placeholders = vec!["?"; batch.len()].join(", ");
+        let sql = format!(
+            "SELECT event_id, run_id, sequence, event_kind FROM runtime_events WHERE task_id = ? AND event_id IN ({placeholders})"
+        );
+        let params = runtime_event_batch_params(task_id, batch);
+        let mut statement = transaction
+            .prepare(&sql)
+            .map_err(|error| format!("Runtime event compaction source prepare error: {error}"))?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(params.iter()), |row| {
+                Ok(RuntimeEventCompactionSource {
+                    event_id: row.get(0)?,
+                    run_id: row.get(1)?,
+                    sequence: row.get(2)?,
+                    event_kind: row.get(3)?,
+                })
+            })
+            .map_err(|error| format!("Runtime event compaction source query error: {error}"))?;
+        for row in rows {
+            let source = row
+                .map_err(|error| format!("Runtime event compaction source read error: {error}"))?;
+            if !is_streaming_runtime_event_kind(&source.event_kind) {
+                return Err(
+                    "Runtime event compaction can only delete streaming events.".to_string()
+                );
+            }
+            sources.push(source);
+        }
+    }
+    Ok(sources)
+}
+
+fn require_terminal_compaction_runs(
+    transaction: &rusqlite::Transaction<'_>,
+    task_id: &str,
+    compaction_rows: &[RuntimeEventCompactionRow],
+) -> Result<(), String> {
+    let mut seen_run_ids = HashSet::with_capacity(compaction_rows.len());
+    for row in compaction_rows {
+        if !seen_run_ids.insert(row.run_id.as_str()) {
+            return Err(
+                "Runtime event compaction requires exactly one summary per run.".to_string(),
+            );
+        }
+        let has_terminal_event = transaction
+            .query_row(
+                "SELECT 1 FROM runtime_events WHERE task_id = ? AND run_id = ? AND event_kind IN ('task.completed', 'task.failed') LIMIT 1",
+                rusqlite::params![task_id, row.run_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| {
+                format!("Runtime event compaction terminal run check error: {error}")
+            })?
+            .is_some();
+        if !has_terminal_event {
+            return Err(format!(
+                "Runtime event compaction requires terminal run {}.",
+                row.run_id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_compaction_source_bindings(
+    transaction: &rusqlite::Transaction<'_>,
+    task_id: &str,
+    source_events: &[RuntimeEventCompactionSource],
+    compaction_rows: &[RuntimeEventCompactionRow],
+) -> Result<(), String> {
+    let summaries_by_run = compaction_rows
+        .iter()
+        .map(|row| (row.run_id.as_str(), row))
+        .collect::<HashMap<_, _>>();
+    let mut sources_by_run: HashMap<&str, Vec<&RuntimeEventCompactionSource>> = HashMap::new();
+    for source in source_events {
+        sources_by_run
+            .entry(source.run_id.as_str())
+            .or_default()
+            .push(source);
+    }
+    if sources_by_run.len() != summaries_by_run.len() {
+        return Err(
+            "Runtime event compaction summaries do not match source event runs.".to_string(),
+        );
+    }
+
+    for (run_id, run_sources) in sources_by_run {
+        let summary = summaries_by_run.get(run_id).ok_or_else(|| {
+            format!("Runtime event compaction is missing a summary for run {run_id}.")
+        })?;
+        if summary.compacted_event_count != run_sources.len() {
+            return Err(format!(
+                "Runtime event compaction summary count does not match source IDs for run {run_id}."
+            ));
+        }
+        let first_sequence = run_sources
+            .iter()
+            .map(|source| source.sequence)
+            .min()
+            .ok_or_else(|| "Runtime event compaction source run is empty.".to_string())?;
+        let last_sequence = run_sources
+            .iter()
+            .map(|source| source.sequence)
+            .max()
+            .ok_or_else(|| "Runtime event compaction source run is empty.".to_string())?;
+        if summary.first_sequence != first_sequence || summary.last_sequence != last_sequence {
+            return Err(format!(
+                "Runtime event compaction summary range does not match source IDs for run {run_id}."
+            ));
+        }
+        let source_kinds = run_sources
+            .iter()
+            .map(|source| source.event_kind.clone())
+            .collect::<HashSet<_>>();
+        if summary.compacted_event_kinds != source_kinds {
+            return Err(format!(
+                "Runtime event compaction summary kinds do not match source IDs for run {run_id}."
+            ));
+        }
+        let max_run_sequence = transaction
+            .query_row(
+                "SELECT MAX(sequence) FROM runtime_events WHERE task_id = ? AND run_id = ?",
+                rusqlite::params![task_id, run_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .map_err(|error| format!("Runtime event compaction run sequence check error: {error}"))?
+            .ok_or_else(|| format!("Runtime event compaction run {run_id} is missing."))?;
+        if summary.sequence <= max_run_sequence {
+            return Err(format!(
+                "Runtime event compaction summary sequence must follow run {run_id}."
+            ));
+        }
+
+        let source_ids = run_sources
+            .iter()
+            .map(|source| source.event_id.as_str())
+            .collect::<HashSet<_>>();
+        if source_ids.len() != run_sources.len() {
+            return Err(format!(
+                "Runtime event compaction source IDs are not unique for run {run_id}."
+            ));
+        }
+        let mut statement = transaction
+            .prepare(
+                "SELECT event_id FROM runtime_events WHERE task_id = ? AND run_id = ? AND sequence BETWEEN ? AND ? AND event_kind IN ('agent.chunk_start', 'agent.chunk', 'agent.chunk_end', 'tool.partial')",
+            )
+            .map_err(|error| {
+                format!("Runtime event compaction source range prepare error: {error}")
+            })?;
+        let rows = statement
+            .query_map(
+                rusqlite::params![
+                    task_id,
+                    run_id,
+                    summary.first_sequence,
+                    summary.last_sequence
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| {
+                format!("Runtime event compaction source range query error: {error}")
+            })?;
+        let mut range_source_ids = HashSet::new();
+        for row in rows {
+            range_source_ids.insert(row.map_err(|error| {
+                format!("Runtime event compaction source range read error: {error}")
+            })?);
+        }
+        if range_source_ids.len() != source_ids.len()
+            || !range_source_ids
+                .iter()
+                .all(|event_id| source_ids.contains(event_id.as_str()))
+        {
+            return Err(format!(
+                "Runtime event compaction source IDs do not exactly cover the summary range for run {run_id}."
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn all_compaction_rows_already_persisted(
+    transaction: &rusqlite::Transaction<'_>,
+    rows: &[RuntimeEventCompactionRow],
+) -> Result<bool, String> {
+    for row in rows {
+        let existing = transaction
+            .query_row(
+                "SELECT envelope_json FROM runtime_events WHERE event_id = ? LIMIT 1",
+                [&row.event_id],
+                |db_row| db_row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| {
+                format!("Runtime event compaction idempotency check error: {error}")
+            })?;
+        if existing.as_deref() != Some(row.envelope_json.as_str()) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn delete_runtime_event_batch(
+    transaction: &rusqlite::Transaction<'_>,
+    task_id: &str,
+    event_ids: &[String],
+) -> Result<(), String> {
+    let placeholders = vec!["?"; event_ids.len()].join(", ");
+    let sql =
+        format!("DELETE FROM runtime_events WHERE task_id = ? AND event_id IN ({placeholders})");
+    let params = runtime_event_batch_params(task_id, event_ids);
+    transaction
+        .execute(&sql, rusqlite::params_from_iter(params.iter()))
+        .map_err(|error| format!("Runtime event compaction delete error: {error}"))?;
+    Ok(())
+}
+
+fn runtime_event_batch_params(task_id: &str, event_ids: &[String]) -> Vec<rusqlite::types::Value> {
+    std::iter::once(rusqlite::types::Value::Text(task_id.to_string()))
+        .chain(event_ids.iter().cloned().map(rusqlite::types::Value::Text))
+        .collect()
+}
+
+fn insert_runtime_event_compaction_row(
+    transaction: &rusqlite::Transaction<'_>,
+    row: &RuntimeEventCompactionRow,
+) -> Result<(), String> {
+    let existing = transaction
+        .query_row(
+            "SELECT envelope_json FROM runtime_events WHERE event_id = ? LIMIT 1",
+            [&row.event_id],
+            |db_row| db_row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("Runtime event compaction existing-row check error: {error}"))?;
+    if let Some(existing) = existing {
+        if existing == row.envelope_json {
+            return Ok(());
+        }
+        return Err("Runtime event compaction eventId conflicts with existing data.".to_string());
+    }
+    transaction
+        .execute(
+            "INSERT INTO runtime_events (event_id, task_id, run_id, sequence, event_version, event_kind, workflow_id, step_id, agent_id, occurred_at, recorded_at, envelope_json) VALUES (?, ?, ?, ?, ?, 'runtime.compacted', ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                row.event_id,
+                row.task_id,
+                row.run_id,
+                row.sequence,
+                row.event_version,
+                row.workflow_id,
+                row.step_id,
+                row.agent_id,
+                row.occurred_at,
+                row.recorded_at,
+                row.envelope_json,
+            ],
+        )
+        .map_err(|error| format!("Runtime event compaction insert error: {error}"))?;
+    Ok(())
+}
+
+fn runtime_event_required_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<String, String> {
+    object
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("Runtime event compaction envelope {field} is invalid."))
+}
+
+fn runtime_event_optional_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Option<String>, String> {
+    match object.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) if !value.trim().is_empty() => {
+            validate_runtime_event_identifier(value, field)?;
+            Ok(Some(value.clone()))
+        }
+        _ => Err(format!(
+            "Runtime event compaction envelope {field} is invalid."
+        )),
+    }
+}
+
+fn runtime_event_required_positive_integer(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<i64, String> {
+    object
+        .get(field)
+        .and_then(serde_json::Value::as_i64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| format!("Runtime event compaction envelope {field} is invalid."))
+}
+
+fn validate_runtime_event_identifier(value: &str, field: &str) -> Result<(), String> {
+    if value.trim().is_empty()
+        || value.len() > MAX_RUNTIME_EVENT_ID_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(format!("Runtime event compaction {field} is invalid."));
+    }
+    Ok(())
+}
+
+fn validate_runtime_event_timestamp(value: &str, field: &str) -> Result<(), String> {
+    if value.len() > 64 || !value.contains('T') || !value.ends_with('Z') {
+        return Err(format!(
+            "Runtime event compaction envelope {field} must be an ISO timestamp."
+        ));
+    }
+    Ok(())
+}
+
+fn is_streaming_runtime_event_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "agent.chunk_start" | "agent.chunk" | "agent.chunk_end" | "tool.partial"
+    )
 }
 
 #[tauri::command]
@@ -639,9 +1296,6 @@ fn validate_sql(sql: &str, operation: SqlOperation) -> Result<(), String> {
             require_known_select_shape(&tokens, &collapse_sql_whitespace(&lowered))
         }
         SqlOperation::Execute => {
-            if is_transaction_statement(&tokens) {
-                return Ok(());
-            }
             let tables = match first {
                 "alter" => alter_statement_tables(&tokens)?,
                 "create" => create_statement_tables(&tokens)?,
@@ -704,12 +1358,6 @@ fn sql_tokens(sql: &str) -> Vec<String> {
 
 fn collapse_sql_whitespace(sql: &str) -> String {
     sql.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn is_transaction_statement(tokens: &[String]) -> bool {
-    matches!(tokens, [single] if single == "commit" || single == "rollback")
-        || matches!(tokens, [first] if first == "begin")
-        || matches!(tokens, [first, second] if first == "begin" && second == "transaction")
 }
 
 fn create_statement_tables(tokens: &[String]) -> Result<Vec<String>, String> {
@@ -797,7 +1445,7 @@ fn require_known_select_shape(tokens: &[String], sql_text: &str) -> Result<(), S
     if matches!(
         signature.as_str(),
         "select id from schema_migrations"
-            | "select record_json from approval_records order by created_at desc limit"
+            | "select record_json from approval_records order by created_at desc"
             | "select c fc category fc tags_json fc confidence from file_scan_cache c left join file_classifications fc on c path fc file_path where c is_dir 0 order by c modified_at desc"
             | "select c from file_scan_cache c left join file_classifications fc on c path fc file_path where fc file_path is null and c is_dir 0 order by c modified_at desc"
             | "select category count as count from file_classifications group by category order by count desc"
@@ -850,9 +1498,9 @@ fn require_known_select_shape(tokens: &[String], sql_text: &str) -> Result<(), S
             | "select envelope_json from runtime_events where run_id order by sequence desc limit 1"
             | "select count as count from runtime_events where run_id"
             | "select checkpoint_json from workflow_checkpoints where run_id order by event_sequence desc limit 1"
-            | "select checkpoint_json from workflow_checkpoints where task_id order by created_at desc limit 1"
-            | "select checkpoint_json from workflow_checkpoints where task_id order by event_sequence desc limit"
-            | "select checkpoint_id from workflow_checkpoints where task_id order by event_sequence desc"
+            | "select checkpoint_json from workflow_checkpoints where task_id order by created_at desc rowid desc limit 1"
+            | "select checkpoint_json from workflow_checkpoints where task_id order by created_at desc rowid desc limit"
+            | "select checkpoint_id from workflow_checkpoints where task_id order by created_at desc rowid desc"
     ) && has_required_select_operator_shape(&signature, sql_text)
     {
         Ok(())
@@ -863,8 +1511,8 @@ fn require_known_select_shape(tokens: &[String], sql_text: &str) -> Result<(), S
 
 fn has_required_select_operator_shape(signature: &str, sql_text: &str) -> bool {
     match signature {
-        "select record_json from approval_records order by created_at desc limit" => {
-            sql_text.contains("order by created_at desc limit ?")
+        "select record_json from approval_records order by created_at desc" => {
+            sql_text.ends_with("order by created_at desc")
         }
         "select c fc category fc tags_json fc confidence from file_scan_cache c left join file_classifications fc on c path fc file_path where c is_dir 0 order by c modified_at desc" => {
             sql_text.contains("left join file_classifications fc on c.path = fc.file_path")
@@ -1010,19 +1658,19 @@ fn has_required_select_operator_shape(signature: &str, sql_text: &str) -> bool {
                 && sql_text.contains("order by event_sequence desc")
                 && sql_text.contains("limit 1")
         }
-        "select checkpoint_json from workflow_checkpoints where task_id order by created_at desc limit 1" => {
+        "select checkpoint_json from workflow_checkpoints where task_id order by created_at desc rowid desc limit 1" => {
             sql_text.contains("where task_id = ?")
-                && sql_text.contains("order by created_at desc")
+                && sql_text.contains("order by created_at desc, rowid desc")
                 && sql_text.contains("limit 1")
         }
-        "select checkpoint_json from workflow_checkpoints where task_id order by event_sequence desc limit" => {
+        "select checkpoint_json from workflow_checkpoints where task_id order by created_at desc rowid desc limit" => {
             sql_text.contains("where task_id = ?")
-                && sql_text.contains("order by event_sequence desc")
+                && sql_text.contains("order by created_at desc, rowid desc")
                 && sql_text.contains("limit ?")
         }
-        "select checkpoint_id from workflow_checkpoints where task_id order by event_sequence desc" => {
+        "select checkpoint_id from workflow_checkpoints where task_id order by created_at desc rowid desc" => {
             sql_text.contains("where task_id = ?")
-                && sql_text.contains("order by event_sequence desc")
+                && sql_text.contains("order by created_at desc, rowid desc")
         }
         _ => true,
     }
@@ -1063,6 +1711,7 @@ fn require_known_execute_shape(tokens: &[String], sql_text: &str) -> Result<(), 
                 | "insert into vector_index_items id namespace owner_type owner_id scope_type scope_id content_hash dimensions metric vector_json vector_norm metadata_json created_at updated_at values on conflict id do update set namespace excluded namespace owner_type excluded owner_type owner_id excluded owner_id scope_type excluded scope_type scope_id excluded scope_id content_hash excluded content_hash dimensions excluded dimensions metric excluded metric vector_json excluded vector_json vector_norm excluded vector_norm metadata_json excluded metadata_json updated_at excluded updated_at"
                 | "insert or ignore into vector_index_buckets namespace bucket_key item_id values"
                 | "insert into runtime_events event_id task_id run_id sequence event_version event_kind workflow_id step_id agent_id occurred_at recorded_at envelope_json values"
+                | "insert into runtime_events event_id task_id run_id sequence event_version event_kind workflow_id step_id agent_id occurred_at recorded_at envelope_json values on conflict event_id do nothing"
                 | "insert into workflow_checkpoints checkpoint_id task_id run_id workflow_id workflow_version plan_hash event_sequence created_at workflow_json checkpoint_json values on conflict checkpoint_id do update set task_id excluded task_id run_id excluded run_id workflow_id excluded workflow_id workflow_version excluded workflow_version plan_hash excluded plan_hash event_sequence excluded event_sequence created_at excluded created_at workflow_json excluded workflow_json checkpoint_json excluded checkpoint_json"
                 | "update agent_memory_facts set last_accessed_at case when last_accessed_at is null or last_accessed_at then else last_accessed_at end access_count coalesce access_count 0 1 where id and status"
                 | "delete from file_scan_cache where scanned_at"
@@ -1094,6 +1743,7 @@ fn require_known_execute_shape(tokens: &[String], sql_text: &str) -> Result<(), 
                 | "delete from vector_index_items where id"
                 | "delete from runtime_events where task_id"
                 | "delete from runtime_events where task_id and event_kind in"
+                | "delete from runtime_events where task_id and event_id in"
                 | "delete from workflow_checkpoints where checkpoint_id"
         ) && has_required_execute_operator_shape(&signature, sql_text)
     {
@@ -1149,6 +1799,9 @@ fn has_required_execute_operator_shape(signature: &str, sql_text: &str) -> bool 
         "insert into vector_index_items id namespace owner_type owner_id scope_type scope_id content_hash dimensions metric vector_json vector_norm metadata_json created_at updated_at values on conflict id do update set namespace excluded namespace owner_type excluded owner_type owner_id excluded owner_id scope_type excluded scope_type scope_id excluded scope_id content_hash excluded content_hash dimensions excluded dimensions metric excluded metric vector_json excluded vector_json vector_norm excluded vector_norm metadata_json excluded metadata_json updated_at excluded updated_at" => {
             sql_text.contains("on conflict(id) do update set")
         }
+        "insert into runtime_events event_id task_id run_id sequence event_version event_kind workflow_id step_id agent_id occurred_at recorded_at envelope_json values on conflict event_id do nothing" => {
+            sql_text.contains("on conflict(event_id) do nothing")
+        }
         "insert or ignore into vector_index_buckets namespace bucket_key item_id values" => {
             sql_text.contains("values (?, ?, ?)")
         }
@@ -1157,6 +1810,9 @@ fn has_required_execute_operator_shape(signature: &str, sql_text: &str) -> bool 
         "delete from runtime_events where task_id" => sql_text.contains("where task_id = ?"),
         "delete from runtime_events where task_id and event_kind in" => {
             sql_text.contains("where task_id = ?") && sql_text.contains("event_kind in")
+        }
+        "delete from runtime_events where task_id and event_id in" => {
+            sql_text.contains("where task_id = ?") && sql_text.contains("event_id in")
         }
         "delete from workflow_checkpoints where checkpoint_id" => {
             sql_text.contains("where checkpoint_id = ?")
@@ -1480,8 +2136,14 @@ fn is_known_index(index_name: &str, table_name: &str) -> bool {
             | ("idx_runtime_events_run_sequence", "runtime_events")
             | ("idx_runtime_events_workflow_recorded", "runtime_events")
             | ("idx_runtime_events_kind_recorded", "runtime_events")
-            | ("idx_workflow_checkpoints_task_created", "workflow_checkpoints")
-            | ("idx_workflow_checkpoints_run_sequence", "workflow_checkpoints")
+            | (
+                "idx_workflow_checkpoints_task_created",
+                "workflow_checkpoints"
+            )
+            | (
+                "idx_workflow_checkpoints_run_sequence",
+                "workflow_checkpoints"
+            )
     )
 }
 
@@ -1764,6 +2426,77 @@ mod tests {
             .expect("create runtime_events table");
     }
 
+    fn insert_runtime_event(
+        connection: &Connection,
+        event_id: &str,
+        task_id: &str,
+        run_id: &str,
+        sequence: i64,
+        event_kind: &str,
+    ) {
+        let envelope = serde_json::json!({
+            "eventId": event_id,
+            "eventVersion": 1,
+            "sequence": sequence,
+            "taskId": task_id,
+            "runId": run_id,
+            "correlationId": run_id,
+            "occurredAt": "2026-06-16T00:00:00.000Z",
+            "recordedAt": "2026-06-16T00:00:00.001Z",
+            "payload": { "kind": event_kind, "taskId": task_id }
+        });
+        connection
+            .execute(
+                "INSERT INTO runtime_events (event_id, task_id, run_id, sequence, event_version, event_kind, workflow_id, step_id, agent_id, occurred_at, recorded_at, envelope_json) VALUES (?, ?, ?, ?, 1, ?, NULL, NULL, NULL, ?, ?, ?)",
+                rusqlite::params![
+                    event_id,
+                    task_id,
+                    run_id,
+                    sequence,
+                    event_kind,
+                    "2026-06-16T00:00:00.000Z",
+                    "2026-06-16T00:00:00.001Z",
+                    envelope.to_string(),
+                ],
+            )
+            .expect("insert runtime event");
+    }
+
+    fn runtime_compaction_envelope(
+        event_id: &str,
+        task_id: &str,
+        run_id: &str,
+        sequence: i64,
+        compacted_event_count: usize,
+        first_sequence: i64,
+        last_sequence: i64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "eventId": event_id,
+            "eventVersion": 1,
+            "sequence": sequence,
+            "taskId": task_id,
+            "runId": run_id,
+            "correlationId": run_id,
+            "occurredAt": "2026-06-16T00:00:01.000Z",
+            "recordedAt": "2026-06-16T00:00:01.001Z",
+            "payload": {
+                "kind": "runtime.compacted",
+                "taskId": task_id,
+                "compactedEventKinds": ["agent.chunk"],
+                "compactedEventCount": compacted_event_count,
+                "originalSequenceRange": {
+                    "first": first_sequence,
+                    "last": last_sequence
+                },
+                "summary": "summary",
+                "contentHash": "a".repeat(64),
+                "hashAlgorithm": "sha256-canonical-json-v1",
+                "truncated": false
+            }
+        })
+    }
+
     fn create_workflow_checkpoints_table(connection: &Connection) {
         connection
             .execute_batch(
@@ -1784,6 +2517,48 @@ mod tests {
                 "#,
             )
             .expect("create workflow_checkpoints table");
+    }
+
+    fn create_approval_records_prune_table(connection: &Connection) {
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE approval_records (
+                  approval_id TEXT PRIMARY KEY,
+                  status TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  record_json TEXT NOT NULL
+                );
+                "#,
+            )
+            .expect("create approval_records table");
+    }
+
+    fn insert_approval_prune_row(
+        connection: &Connection,
+        approval_id: &str,
+        status: &str,
+        created_at: &str,
+        workflow_bound: Option<bool>,
+        execution_status: Option<&str>,
+    ) {
+        let mut record = serde_json::json!({
+            "approvalId": approval_id,
+            "taskId": "task-1",
+            "status": status,
+        });
+        if let Some(workflow_bound) = workflow_bound {
+            record["workflowBound"] = serde_json::Value::Bool(workflow_bound);
+        }
+        if let Some(execution_status) = execution_status {
+            record["execution"] = serde_json::json!({ "status": execution_status });
+        }
+        connection
+            .execute(
+                "INSERT INTO approval_records (approval_id, status, created_at, record_json) VALUES (?, ?, ?, ?)",
+                rusqlite::params![approval_id, status, created_at, record.to_string()],
+            )
+            .expect("insert approval prune row");
     }
 
     #[test]
@@ -1863,6 +2638,358 @@ mod tests {
     }
 
     #[test]
+    fn runtime_event_compaction_is_atomic_and_idempotent() {
+        let connection = in_memory_connection();
+        create_runtime_events_table(&connection);
+        insert_runtime_event(
+            &connection,
+            "evt-chunk-1",
+            "task-compact",
+            "run-compact",
+            1,
+            "agent.chunk",
+        );
+        insert_runtime_event(
+            &connection,
+            "evt-chunk-2",
+            "task-compact",
+            "run-compact",
+            2,
+            "agent.chunk",
+        );
+        insert_runtime_event(
+            &connection,
+            "evt-terminal",
+            "task-compact",
+            "run-compact",
+            3,
+            "task.completed",
+        );
+        let request = RuntimeEventCompactionRequest {
+            task_id: "task-compact".to_string(),
+            event_ids: vec!["evt-chunk-1".to_string(), "evt-chunk-2".to_string()],
+            compaction_envelopes: vec![runtime_compaction_envelope(
+                "evt-summary",
+                "task-compact",
+                "run-compact",
+                4,
+                2,
+                1,
+                2,
+            )],
+        };
+
+        compact_runtime_events(&connection, &request).expect("compact runtime events");
+        compact_runtime_events(&connection, &request).expect("replay compaction request");
+
+        let remaining_streams: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM runtime_events WHERE event_kind = 'agent.chunk'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let summaries: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM runtime_events WHERE event_kind = 'runtime.compacted'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_streams, 0);
+        assert_eq!(summaries, 1);
+    }
+
+    #[test]
+    fn runtime_event_compaction_rejects_active_source_run_even_when_task_has_terminal_run() {
+        let connection = in_memory_connection();
+        create_runtime_events_table(&connection);
+        insert_runtime_event(
+            &connection,
+            "evt-terminal-run-done",
+            "task-multi-run-guard",
+            "run-done",
+            1,
+            "task.completed",
+        );
+        insert_runtime_event(
+            &connection,
+            "evt-active-chunk",
+            "task-multi-run-guard",
+            "run-active",
+            1,
+            "agent.chunk",
+        );
+        let request = RuntimeEventCompactionRequest {
+            task_id: "task-multi-run-guard".to_string(),
+            event_ids: vec!["evt-active-chunk".to_string()],
+            compaction_envelopes: vec![runtime_compaction_envelope(
+                "evt-active-summary",
+                "task-multi-run-guard",
+                "run-active",
+                2,
+                1,
+                1,
+                1,
+            )],
+        };
+
+        let error = compact_runtime_events(&connection, &request).unwrap_err();
+
+        assert!(error.contains("run-active"));
+        let active_streams: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM runtime_events WHERE event_id = 'evt-active-chunk'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_streams, 1);
+    }
+
+    #[test]
+    fn runtime_event_compaction_rejects_summary_for_different_run() {
+        let connection = in_memory_connection();
+        create_runtime_events_table(&connection);
+        insert_runtime_event(
+            &connection,
+            "evt-source-chunk",
+            "task-run-binding",
+            "run-source",
+            1,
+            "agent.chunk",
+        );
+        insert_runtime_event(
+            &connection,
+            "evt-source-terminal",
+            "task-run-binding",
+            "run-source",
+            2,
+            "task.completed",
+        );
+        insert_runtime_event(
+            &connection,
+            "evt-other-terminal",
+            "task-run-binding",
+            "run-other",
+            1,
+            "task.completed",
+        );
+        let request = RuntimeEventCompactionRequest {
+            task_id: "task-run-binding".to_string(),
+            event_ids: vec!["evt-source-chunk".to_string()],
+            compaction_envelopes: vec![runtime_compaction_envelope(
+                "evt-other-summary",
+                "task-run-binding",
+                "run-other",
+                2,
+                1,
+                1,
+                1,
+            )],
+        };
+
+        let error = compact_runtime_events(&connection, &request).unwrap_err();
+
+        assert!(error.contains("missing a summary for run run-source"));
+    }
+
+    #[test]
+    fn runtime_event_compaction_rejects_per_run_count_mismatch() {
+        let connection = in_memory_connection();
+        create_runtime_events_table(&connection);
+        for (event_id, sequence, kind) in [
+            ("evt-run-a-chunk-1", 1, "agent.chunk"),
+            ("evt-run-a-chunk-2", 2, "agent.chunk"),
+            ("evt-run-a-terminal", 3, "task.completed"),
+        ] {
+            insert_runtime_event(
+                &connection,
+                event_id,
+                "task-count-binding",
+                "run-a",
+                sequence,
+                kind,
+            );
+        }
+        for (event_id, sequence, kind) in [
+            ("evt-run-b-chunk", 1, "agent.chunk"),
+            ("evt-run-b-terminal", 2, "task.completed"),
+        ] {
+            insert_runtime_event(
+                &connection,
+                event_id,
+                "task-count-binding",
+                "run-b",
+                sequence,
+                kind,
+            );
+        }
+        let request = RuntimeEventCompactionRequest {
+            task_id: "task-count-binding".to_string(),
+            event_ids: vec![
+                "evt-run-a-chunk-1".to_string(),
+                "evt-run-a-chunk-2".to_string(),
+                "evt-run-b-chunk".to_string(),
+            ],
+            compaction_envelopes: vec![
+                runtime_compaction_envelope(
+                    "evt-run-a-summary",
+                    "task-count-binding",
+                    "run-a",
+                    4,
+                    1,
+                    1,
+                    1,
+                ),
+                runtime_compaction_envelope(
+                    "evt-run-b-summary",
+                    "task-count-binding",
+                    "run-b",
+                    3,
+                    2,
+                    1,
+                    1,
+                ),
+            ],
+        };
+
+        let error = compact_runtime_events(&connection, &request).unwrap_err();
+
+        assert!(error.contains("count does not match"));
+    }
+
+    #[test]
+    fn runtime_event_compaction_rejects_unlisted_streaming_source_in_summary_range() {
+        let connection = in_memory_connection();
+        create_runtime_events_table(&connection);
+        for (event_id, sequence, kind) in [
+            ("evt-range-chunk-1", 1, "agent.chunk"),
+            ("evt-range-chunk-2", 2, "agent.chunk"),
+            ("evt-range-chunk-3", 3, "agent.chunk"),
+            ("evt-range-terminal", 4, "task.completed"),
+        ] {
+            insert_runtime_event(
+                &connection,
+                event_id,
+                "task-range-binding",
+                "run-range",
+                sequence,
+                kind,
+            );
+        }
+        let request = RuntimeEventCompactionRequest {
+            task_id: "task-range-binding".to_string(),
+            event_ids: vec![
+                "evt-range-chunk-1".to_string(),
+                "evt-range-chunk-3".to_string(),
+            ],
+            compaction_envelopes: vec![runtime_compaction_envelope(
+                "evt-range-summary",
+                "task-range-binding",
+                "run-range",
+                5,
+                2,
+                1,
+                3,
+            )],
+        };
+
+        let error = compact_runtime_events(&connection, &request).unwrap_err();
+
+        assert!(error.contains("source IDs do not exactly cover"));
+    }
+
+    #[test]
+    fn runtime_event_compaction_rolls_back_delete_and_prior_insert_on_failure() {
+        let connection = in_memory_connection();
+        create_runtime_events_table(&connection);
+        insert_runtime_event(
+            &connection,
+            "evt-run-1-chunk",
+            "task-rollback",
+            "run-rollback-1",
+            1,
+            "agent.chunk",
+        );
+        insert_runtime_event(
+            &connection,
+            "evt-run-2-chunk",
+            "task-rollback",
+            "run-rollback-2",
+            1,
+            "agent.chunk",
+        );
+        insert_runtime_event(
+            &connection,
+            "evt-run-2-terminal",
+            "task-rollback",
+            "run-rollback-2",
+            2,
+            "task.completed",
+        );
+        insert_runtime_event(
+            &connection,
+            "evt-run-1-terminal",
+            "task-rollback",
+            "run-rollback-1",
+            2,
+            "task.completed",
+        );
+        insert_runtime_event(
+            &connection,
+            "evt-run-2-summary",
+            "other-task",
+            "other-run",
+            1,
+            "task.created",
+        );
+        let request = RuntimeEventCompactionRequest {
+            task_id: "task-rollback".to_string(),
+            event_ids: vec!["evt-run-1-chunk".to_string(), "evt-run-2-chunk".to_string()],
+            compaction_envelopes: vec![
+                runtime_compaction_envelope(
+                    "evt-run-1-summary",
+                    "task-rollback",
+                    "run-rollback-1",
+                    3,
+                    1,
+                    1,
+                    1,
+                ),
+                runtime_compaction_envelope(
+                    "evt-run-2-summary",
+                    "task-rollback",
+                    "run-rollback-2",
+                    3,
+                    1,
+                    1,
+                    1,
+                ),
+            ],
+        };
+
+        assert!(compact_runtime_events(&connection, &request).is_err());
+
+        let remaining_streams: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM runtime_events WHERE event_kind = 'agent.chunk'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let summaries: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM runtime_events WHERE event_kind = 'runtime.compacted'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_streams, 2);
+        assert_eq!(summaries, 0);
+    }
+
+    #[test]
     fn workflow_checkpoints_reject_duplicate_run_and_event_sequence() {
         let connection = in_memory_connection();
         create_workflow_checkpoints_table(&connection);
@@ -1909,11 +3036,117 @@ mod tests {
     }
 
     #[test]
+    fn approval_record_prune_keeps_active_execution_states() {
+        let connection = in_memory_connection();
+        create_approval_records_prune_table(&connection);
+        insert_approval_prune_row(
+            &connection,
+            "terminal-old",
+            "expired",
+            "2026-06-16T00:00:00.000Z",
+            None,
+            None,
+        );
+        insert_approval_prune_row(
+            &connection,
+            "terminal-new",
+            "denied",
+            "2026-06-16T00:01:00.000Z",
+            Some(false),
+            None,
+        );
+        for (id, status, minute) in [
+            ("active-pending", "pending", "02"),
+            ("active-started", "approved", "03"),
+            ("active-succeeded", "approved", "04"),
+            ("active-continuation", "approved", "05"),
+        ] {
+            insert_approval_prune_row(
+                &connection,
+                id,
+                status,
+                &format!("2026-06-16T00:{minute}:00.000Z"),
+                Some(false),
+                match id {
+                    "active-started" => Some("started"),
+                    "active-succeeded" => Some("succeeded"),
+                    "active-continuation" => Some("continuation_pending"),
+                    _ => None,
+                },
+            );
+        }
+
+        prune_approval_records(&connection, 1).expect("prune approval records");
+
+        let ids = connection
+            .prepare("SELECT approval_id FROM approval_records ORDER BY approval_id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(ids.contains(&"terminal-new".to_string()));
+        assert!(!ids.contains(&"terminal-old".to_string()));
+        for id in [
+            "active-pending",
+            "active-started",
+            "active-succeeded",
+            "active-continuation",
+        ] {
+            assert!(
+                ids.contains(&id.to_string()),
+                "missing active approval {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn task_checkpoint_queries_use_global_creation_order() {
+        let connection = in_memory_connection();
+        create_workflow_checkpoints_table(&connection);
+        for (id, run_id, sequence, created_at) in [
+            (
+                "checkpoint-old",
+                "run-old",
+                99_i64,
+                "2026-06-16T00:00:00.000Z",
+            ),
+            (
+                "checkpoint-new",
+                "run-new",
+                1_i64,
+                "2026-06-16T00:01:00.000Z",
+            ),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO workflow_checkpoints (checkpoint_id, task_id, run_id, workflow_id, workflow_version, plan_hash, event_sequence, created_at, workflow_json, checkpoint_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    rusqlite::params![id, "task-1", run_id, "workflow-1", 1_i64, "plan-1", sequence, created_at, "{}", id],
+                )
+                .unwrap();
+        }
+
+        let latest: String = connection
+            .query_row(
+                "SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                ["task-1"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let listed = connection
+            .prepare("SELECT checkpoint_id FROM workflow_checkpoints WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?")
+            .unwrap()
+            .query_map(rusqlite::params!["task-1", 2_i64], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(latest, "checkpoint-new");
+        assert_eq!(listed, vec!["checkpoint-new", "checkpoint-old"]);
+    }
+
+    #[test]
     fn allows_known_app_execute_statements() {
         let statements = [
-            "BEGIN TRANSACTION",
-            "COMMIT",
-            "ROLLBACK",
             "CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)",
             "ALTER TABLE approval_records ADD COLUMN run_id TEXT",
             "CREATE TABLE IF NOT EXISTS task_history (id TEXT PRIMARY KEY, title TEXT NOT NULL, user_goal TEXT NOT NULL, status TEXT NOT NULL, updated_at TEXT NOT NULL, snapshot_json TEXT NOT NULL)",
@@ -2079,6 +3312,8 @@ mod tests {
             "DELETE FROM vector_index_buckets WHERE item_id = ?",
             "DELETE FROM vector_index_items WHERE id = ?",
             "INSERT INTO runtime_events (event_id, task_id, run_id, sequence, event_version, event_kind, workflow_id, step_id, agent_id, occurred_at, recorded_at, envelope_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO runtime_events (event_id, task_id, run_id, sequence, event_version, event_kind, workflow_id, step_id, agent_id, occurred_at, recorded_at, envelope_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(event_id) DO NOTHING",
+            "DELETE FROM runtime_events WHERE task_id = ? AND event_id IN (?, ?)",
             r#"INSERT INTO workflow_checkpoints
                (checkpoint_id, task_id, run_id, workflow_id, workflow_version, plan_hash, event_sequence, created_at, workflow_json, checkpoint_json)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -2104,7 +3339,7 @@ mod tests {
     fn allows_known_app_select_statements() {
         let statements = [
             "SELECT id FROM schema_migrations",
-            "SELECT record_json FROM approval_records ORDER BY created_at DESC LIMIT ?",
+            "SELECT record_json FROM approval_records ORDER BY created_at DESC",
             "SELECT * FROM resource_file_cache WHERE kind = ? ORDER BY modified_at DESC",
             r#"SELECT c.*, fc.category, fc.tags_json, fc.confidence
                FROM file_scan_cache c
@@ -2199,9 +3434,9 @@ mod tests {
             "SELECT envelope_json FROM runtime_events WHERE run_id = ? ORDER BY sequence DESC LIMIT 1",
             "SELECT COUNT(*) as count FROM runtime_events WHERE run_id = ?",
             "SELECT checkpoint_json FROM workflow_checkpoints WHERE run_id = ? ORDER BY event_sequence DESC LIMIT 1",
-            "SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id = ? ORDER BY created_at DESC LIMIT 1",
-            "SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id = ? ORDER BY event_sequence DESC LIMIT ?",
-            "SELECT checkpoint_id FROM workflow_checkpoints WHERE task_id = ? ORDER BY event_sequence DESC",
+            "SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            "SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+            "SELECT checkpoint_id FROM workflow_checkpoints WHERE task_id = ? ORDER BY created_at DESC, rowid DESC",
             r#"SELECT id, session_id, workspace_id, summary, important_points, open_threads, created_at, updated_at
                FROM agent_session_summaries
                WHERE workspace_id = ?
@@ -2233,6 +3468,9 @@ mod tests {
     #[test]
     fn rejects_unknown_or_dangerous_execute_statements() {
         let statements = [
+            "BEGIN TRANSACTION",
+            "COMMIT",
+            "ROLLBACK",
             "DROP TABLE task_history",
             "ALTER TABLE task_history ADD COLUMN leaked TEXT",
             "ALTER TABLE approval_records ADD COLUMN leaked TEXT",
@@ -2278,11 +3516,14 @@ mod tests {
                  record_json = excluded.record_json,
                  updated_at = excluded.updated_at"#,
             r#"DELETE FROM approval_records
-               WHERE approval_id NOT IN (
+               WHERE approval_id IN (
                  SELECT approval_id
                  FROM approval_records
-                 ORDER BY created_at DESC
-                 LIMIT ?
+                 WHERE status = 'expired'
+                   OR (status = 'denied' AND COALESCE(CASE WHEN json_valid(record_json) THEN json_extract(record_json, '$.workflowBound') END, 0) <> 1)
+                   OR CASE WHEN json_valid(record_json) THEN json_extract(record_json, '$.execution.status') END IN ('completed', 'failed', 'blocked')
+                 ORDER BY created_at DESC, approval_id DESC
+                 LIMIT -1 OFFSET ?
                )"#,
             "DELETE FROM file_scan_cache WHERE scanned_at = ?",
             "DELETE FROM resource_file_cache WHERE kind <> ?",
@@ -2308,9 +3549,9 @@ mod tests {
             "SELECT * FROM task_history",
             "SELECT * FROM runtime_events",
             "SELECT * FROM workflow_checkpoints",
-            "SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id <> ? ORDER BY event_sequence DESC LIMIT ?",
+            "SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id <> ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
             "SELECT checkpoint_json FROM workflow_checkpoints WHERE run_id = ? ORDER BY created_at DESC LIMIT 1",
-            "SELECT checkpoint_id FROM workflow_checkpoints WHERE task_id = ? ORDER BY created_at DESC",
+            "SELECT checkpoint_id FROM workflow_checkpoints WHERE task_id <> ? ORDER BY created_at DESC, rowid DESC",
             "SELECT user_goal FROM task_history",
             "SELECT record_json FROM approval_records",
             "SELECT * FROM resource_scan_roots ORDER BY source DESC, created_at ASC",

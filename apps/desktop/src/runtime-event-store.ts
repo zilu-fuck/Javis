@@ -79,6 +79,8 @@ export interface RuntimeEventStore {
 
 const MAX_ENVELOPES_PER_QUERY = 10_000;
 const DEFAULT_TASK_REPLAY_LIMIT = 5_000;
+const SQLITE_UNBOUNDED_LIMIT = -1;
+const EVENT_ID_DELETE_BATCH_SIZE = 900;
 export const COMPACTED_STREAM_TEXT_LIMIT = 20_000;
 export const COMPACTED_STREAM_EVENT_KIND = "runtime.compacted";
 
@@ -107,11 +109,9 @@ export function createRuntimeEventStore(database: DesktopDatabase): RuntimeEvent
     },
 
     async replayByRunId(runId) {
-      const rows = await database.select<{ envelope_json: string }>(
-        `SELECT envelope_json FROM runtime_events WHERE run_id = ? ORDER BY sequence ASC LIMIT ?`,
-        [runId, MAX_ENVELOPES_PER_QUERY],
-      );
-      return rows.map((row) => JSON.parse(row.envelope_json) as RuntimeEventEnvelope);
+      const latest = await this.latestByRunId(runId);
+      if (!latest) return [];
+      return this.replayByRunIdThroughSequence(runId, latest.sequence);
     },
 
     async replayByRunIdThroughSequence(runId, eventSequence) {
@@ -142,23 +142,28 @@ export function createRuntimeEventStore(database: DesktopDatabase): RuntimeEvent
 
     async pruneByTaskId(taskId, keepStructuralOnly) {
       if (keepStructuralOnly) {
-        const events = await this.replayByTaskId(taskId, MAX_ENVELOPES_PER_QUERY);
-        if (!hasTerminalTaskEvent(taskId, events)) {
+        const events = await this.replayByTaskId(taskId, SQLITE_UNBOUNDED_LIMIT);
+        const terminalRunIds = terminalRunIdsForTask(taskId, events);
+        if (terminalRunIds.size === 0) {
           return 0;
         }
-        const compactionEvents = buildStreamingCompactionEvents(taskId, events);
-        const compactedEventCount = compactionEvents.reduce(
-          (sum, envelope) => sum + (envelope.payload as CompactedRuntimeStreamPayload).compactedEventCount,
-          0,
-        );
+        const compactionEvents = buildStreamingCompactionEvents(taskId, events, terminalRunIds);
+        const compactedEventIds = events
+          .filter((event) => {
+            if (event.taskId !== taskId || !terminalRunIds.has(event.runId)) return false;
+            const kind = safeExtractEventKind(event);
+            return Boolean(kind && isStreamingEvent(kind));
+          })
+          .map((event) => event.eventId);
+        const compactedEventCount = compactedEventIds.length;
         if (compactedEventCount === 0) {
           return 0;
         }
-        await database.execute(
-          `DELETE FROM runtime_events WHERE task_id = ? AND event_kind IN (?, ?, ?, ?)`,
-          [taskId, "agent.chunk_start", "agent.chunk", "agent.chunk_end", "tool.partial"],
-        );
-        await this.appendBatch(compactionEvents);
+        if (database.compactRuntimeEvents) {
+          await database.compactRuntimeEvents(taskId, compactedEventIds, compactionEvents);
+        } else {
+          await compactRuntimeEventsFallback(database, taskId, compactedEventIds, compactionEvents);
+        }
         return compactedEventCount;
       } else {
         await database.execute(
@@ -179,21 +184,66 @@ export function createRuntimeEventStore(database: DesktopDatabase): RuntimeEvent
   };
 }
 
-function hasTerminalTaskEvent(taskId: string, events: RuntimeEventEnvelope[]): boolean {
-  return events.some((event) => {
+async function compactRuntimeEventsFallback(
+  database: DesktopDatabase,
+  taskId: string,
+  eventIds: string[],
+  compactionEvents: RuntimeEventEnvelope[],
+): Promise<void> {
+  await database.execute("BEGIN TRANSACTION");
+  try {
+    await deleteRuntimeEventsByEventId(database, taskId, eventIds);
+    for (const envelope of compactionEvents) {
+      await insertEnvelope(database, envelope);
+    }
+    await database.execute("COMMIT");
+  } catch (error) {
+    try {
+      await database.execute("ROLLBACK");
+    } catch (rollbackError) {
+      console.error("[RuntimeEvents] Failed to roll back stream compaction.", rollbackError);
+    }
+    throw error;
+  }
+}
+
+async function deleteRuntimeEventsByEventId(
+  database: DesktopDatabase,
+  taskId: string,
+  eventIds: string[],
+): Promise<void> {
+  for (let offset = 0; offset < eventIds.length; offset += EVENT_ID_DELETE_BATCH_SIZE) {
+    const batch = eventIds.slice(offset, offset + EVENT_ID_DELETE_BATCH_SIZE);
+    const placeholders = batch.map(() => "?").join(", ");
+    await database.execute(
+      `DELETE FROM runtime_events WHERE task_id = ? AND event_id IN (${placeholders})`,
+      [taskId, ...batch],
+    );
+  }
+}
+
+function terminalRunIdsForTask(taskId: string, events: RuntimeEventEnvelope[]): Set<string> {
+  const runIds = new Set<string>();
+  for (const event of events) {
     const payload = event.payload as { kind?: string; taskId?: string };
-    return payload.taskId === taskId && (payload.kind === "task.completed" || payload.kind === "task.failed");
-  });
+    if (event.taskId === taskId && payload.taskId === taskId &&
+      (payload.kind === "task.completed" || payload.kind === "task.failed")) {
+      runIds.add(event.runId);
+    }
+  }
+  return runIds;
 }
 
 export function buildStreamingCompactionEvents(
   taskId: string,
   events: RuntimeEventEnvelope[],
+  eligibleRunIds?: ReadonlySet<string>,
 ): RuntimeEventEnvelope<CompactedRuntimeStreamPayload>[] {
   const eventsByRun = new Map<string, RuntimeEventEnvelope[]>();
   const maxSequenceByRun = new Map<string, number>();
   for (const envelope of events) {
-    if (envelope.taskId !== taskId) continue;
+    if (envelope.taskId !== taskId ||
+      eligibleRunIds !== undefined && !eligibleRunIds.has(envelope.runId)) continue;
     maxSequenceByRun.set(
       envelope.runId,
       Math.max(maxSequenceByRun.get(envelope.runId) ?? 0, envelope.sequence),
@@ -297,7 +347,7 @@ async function insertEnvelope(
 ): Promise<void> {
   const kind = (envelope.payload as { kind?: string })?.kind ?? "unknown";
   await database.execute(
-    `INSERT INTO runtime_events (event_id, task_id, run_id, sequence, event_version, event_kind, workflow_id, step_id, agent_id, occurred_at, recorded_at, envelope_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO runtime_events (event_id, task_id, run_id, sequence, event_version, event_kind, workflow_id, step_id, agent_id, occurred_at, recorded_at, envelope_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(event_id) DO NOTHING`,
     [
       envelope.eventId,
       envelope.taskId,

@@ -1,4 +1,10 @@
-import { sanitizeArtifactForPersistence, type WorkflowCheckpoint } from "@javis/core";
+import {
+  computePlanHash,
+  sanitizeArtifactForPersistence,
+  validateArtifactEnvelope,
+  type WorkflowCheckpoint,
+  type WorkbenchWorkflow,
+} from "@javis/core";
 import type { DesktopDatabase, DesktopDatabaseMigration } from "./desktop-database";
 
 export const WORKFLOW_CHECKPOINTS_TABLE_NAME = "workflow_checkpoints";
@@ -58,6 +64,9 @@ export function createWorkflowCheckpointStore(database: DesktopDatabase): Workfl
     async save(checkpoint) {
       const checkpointId = `ckpt-${checkpoint.runId}-${checkpoint.eventSequence}`;
       const persistedCheckpoint = sanitizeCheckpointForPersistence(checkpoint);
+      if (!sanitizeWorkflowCheckpoint(persistedCheckpoint)) {
+        throw new Error("Refusing to persist an invalid workflow checkpoint.");
+      }
       await database.execute(
         `INSERT INTO workflow_checkpoints (checkpoint_id, task_id, run_id, workflow_id, workflow_version, plan_hash, event_sequence, created_at, workflow_json, checkpoint_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(checkpoint_id) DO UPDATE SET task_id = excluded.task_id, run_id = excluded.run_id, workflow_id = excluded.workflow_id, workflow_version = excluded.workflow_version, plan_hash = excluded.plan_hash, event_sequence = excluded.event_sequence, created_at = excluded.created_at, workflow_json = excluded.workflow_json, checkpoint_json = excluded.checkpoint_json`,
         [
@@ -81,29 +90,31 @@ export function createWorkflowCheckpointStore(database: DesktopDatabase): Workfl
         [runId],
       );
       if (rows.length === 0) return undefined;
-      return JSON.parse(rows[0].checkpoint_json) as WorkflowCheckpoint;
+      return parsePersistedCheckpoint(rows[0].checkpoint_json, { runId });
     },
 
     async latestByTaskId(taskId) {
       const rows = await database.select<{ checkpoint_json: string }>(
-        `SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id = ? ORDER BY created_at DESC LIMIT 1`,
+        `SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`,
         [taskId],
       );
       if (rows.length === 0) return undefined;
-      return JSON.parse(rows[0].checkpoint_json) as WorkflowCheckpoint;
+      return parsePersistedCheckpoint(rows[0].checkpoint_json, { taskId });
     },
 
     async listByTaskId(taskId, limit) {
       const rows = await database.select<{ checkpoint_json: string }>(
-        `SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id = ? ORDER BY event_sequence DESC LIMIT ?`,
+        `SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?`,
         [taskId, limit ?? 50],
       );
-      return rows.map((row) => JSON.parse(row.checkpoint_json) as WorkflowCheckpoint);
+      return rows
+        .map((row) => parsePersistedCheckpoint(row.checkpoint_json, { taskId }))
+        .filter((checkpoint): checkpoint is WorkflowCheckpoint => checkpoint !== undefined);
     },
 
     async pruneByTaskId(taskId, keepLatest) {
       const rows = await database.select<{ checkpoint_id: string }>(
-        `SELECT checkpoint_id FROM workflow_checkpoints WHERE task_id = ? ORDER BY event_sequence DESC`,
+        `SELECT checkpoint_id FROM workflow_checkpoints WHERE task_id = ? ORDER BY created_at DESC, rowid DESC`,
         [taskId],
       );
       if (rows.length <= keepLatest) return 0;
@@ -119,7 +130,7 @@ export function createWorkflowCheckpointStore(database: DesktopDatabase): Workfl
   };
 }
 
-function sanitizeCheckpointForPersistence(checkpoint: WorkflowCheckpoint): WorkflowCheckpoint {
+export function sanitizeCheckpointForPersistence(checkpoint: WorkflowCheckpoint): WorkflowCheckpoint {
   const contextSnapshot: WorkflowCheckpoint["contextSnapshot"] = {};
   for (const [key, envelope] of Object.entries(checkpoint.contextSnapshot)) {
     contextSnapshot[key] = sanitizeArtifactForPersistence(envelope);
@@ -130,16 +141,78 @@ function sanitizeCheckpointForPersistence(checkpoint: WorkflowCheckpoint): Workf
   };
 }
 
+function parsePersistedCheckpoint(
+  serialized: string,
+  expected: { taskId?: string; runId?: string },
+): WorkflowCheckpoint | undefined {
+  try {
+    const parsed = JSON.parse(serialized);
+    const checkpoint = sanitizeWorkflowCheckpoint(parsed);
+    if (!checkpoint) return undefined;
+    if (expected.taskId !== undefined && checkpoint.taskId !== expected.taskId) return undefined;
+    if (expected.runId !== undefined && checkpoint.runId !== expected.runId) return undefined;
+    return checkpoint;
+  } catch {
+    return undefined;
+  }
+}
+
 export function sanitizeWorkflowCheckpoint(value: unknown): WorkflowCheckpoint | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const obj = value as Record<string, unknown>;
-  if (typeof obj.taskId !== "string") return undefined;
-  if (typeof obj.runId !== "string") return undefined;
-  if (typeof obj.workflowId !== "string") return undefined;
-  if (typeof obj.eventSequence !== "number") return undefined;
-  if (!Array.isArray(obj.completedStepIds)) return undefined;
-  if (!Array.isArray(obj.abandonedStepIds)) return undefined;
-  if (!Array.isArray(obj.pendingStepIds)) return undefined;
-  if (!Array.isArray(obj.runningStepIds)) return undefined;
+  if (!isNonEmptyString(obj.taskId) || !isNonEmptyString(obj.runId) || !isNonEmptyString(obj.workflowId)) return undefined;
+  if (!Number.isInteger(obj.workflowVersion) || (obj.workflowVersion as number) < 1) return undefined;
+  if (!isNonEmptyString(obj.planHash) || !Number.isInteger(obj.eventSequence) || (obj.eventSequence as number) < 0) return undefined;
+  if (!isNonEmptyString(obj.createdAt)) return undefined;
+  if (!isStringArray(obj.completedStepIds) || !isStringArray(obj.abandonedStepIds) ||
+    !isStringArray(obj.pendingStepIds) || !isStringArray(obj.runningStepIds) ||
+    !isStringArray(obj.approvalRequestIds)) return undefined;
+  if (!isWorkflowSnapshot(obj.workflowSnapshot) || obj.workflowSnapshot.id !== obj.workflowId) return undefined;
+  if (!hasValidCheckpointStepPartition(obj.workflowSnapshot, [
+    obj.completedStepIds,
+    obj.abandonedStepIds,
+    obj.pendingStepIds,
+    obj.runningStepIds,
+  ])) return undefined;
+  if (computePlanHash(obj.workflowSnapshot.steps) !== obj.planHash) return undefined;
+  if (typeof obj.contextSnapshot !== "object" || obj.contextSnapshot === null) return undefined;
+  for (const envelope of Object.values(obj.contextSnapshot as Record<string, unknown>)) {
+    if (!validateArtifactEnvelope(envelope, { taskId: obj.taskId, runId: obj.runId })) return undefined;
+  }
   return obj as unknown as WorkflowCheckpoint;
+}
+
+function isWorkflowSnapshot(value: unknown): value is WorkbenchWorkflow {
+  if (typeof value !== "object" || value === null) return false;
+  const snapshot = value as Record<string, unknown>;
+  return isNonEmptyString(snapshot.id) && Array.isArray(snapshot.steps) && snapshot.steps.every(
+    (step) => typeof step === "object" && step !== null &&
+      isNonEmptyString((step as Record<string, unknown>).id),
+  );
+}
+
+function hasValidCheckpointStepPartition(
+  workflow: WorkbenchWorkflow,
+  stateGroups: string[][],
+): boolean {
+  const workflowStepIds = workflow.steps.map((step) => step.id);
+  const knownStepIds = new Set(workflowStepIds);
+  if (knownStepIds.size !== workflowStepIds.length) return false;
+
+  const seen = new Set<string>();
+  for (const group of stateGroups) {
+    for (const stepId of group) {
+      if (!knownStepIds.has(stepId) || seen.has(stepId)) return false;
+      seen.add(stepId);
+    }
+  }
+  return seen.size === knownStepIds.size;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => isNonEmptyString(item));
 }
