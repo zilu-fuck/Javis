@@ -46,7 +46,7 @@ export function buildAgentDetailViewModel(task: WorkbenchTask, agent: WorkbenchA
 function isStepRelatedToAgent(step: WorkbenchStep, agent: WorkbenchAgent, kind: string): boolean {
   const linkedStep = step as StepWithLinks;
   if (linkedStep.agentId) return linkedStep.agentId === agent.id;
-  if (step.agentKind) return normalize(step.agentKind) === normalize(kind);
+  if (step.agentKind) return normalizeLinkedAgentKind(step.agentKind) === normalizeLinkedAgentKind(kind);
 
   const haystack = normalize([
     step.title,
@@ -74,6 +74,11 @@ function isLogRelatedToAgent(
     log.devDetail,
   ].filter(Boolean).join(" "));
   return matchesAgentText(haystack, agent, kind);
+}
+
+function normalizeLinkedAgentKind(value: string): string {
+  const normalized = normalize(value);
+  return normalized === "page agent" ? "browser" : normalized;
 }
 
 function buildArtifactsForAgent(task: WorkbenchTask, agent: WorkbenchAgent, kind: string): AgentArtifactSummary[] {

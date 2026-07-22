@@ -38,8 +38,8 @@ pnpm check
 Verify the bundled opencode native binaries are present:
 
 ```sh
-node_modules/.pnpm/opencode-windows-x64@1.15.10/node_modules/opencode-windows-x64/bin/opencode.exe --version
-node_modules/.pnpm/opencode-windows-x64-baseline@1.15.10/node_modules/opencode-windows-x64-baseline/bin/opencode.exe --version
+node_modules/.pnpm/opencode-windows-x64@1.18.3/node_modules/opencode-windows-x64/bin/opencode.exe --version
+node_modules/.pnpm/opencode-windows-x64-baseline@1.18.3/node_modules/opencode-windows-x64-baseline/bin/opencode.exe --version
 ```
 
 Build the desktop frontend:

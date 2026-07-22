@@ -30,6 +30,7 @@ MVP documents remain as baseline acceptance records.
 - [UI Layout](UI_LAYOUT.md)
 - [MVP Specification](MVP.md)
 - [Core Contracts](CORE_CONTRACTS.md)
+- [Agent Runtime Dual-Kernel Plan](AGENT_RUNTIME_DUAL_KERNEL_PLAN.md)
 - [Permissions and Safety](PERMISSIONS.md)
 - [Agent Learning Boundaries](AGENT_LEARNING_BOUNDARIES.md)
 - [Project Structure](PROJECT_STRUCTURE.md)

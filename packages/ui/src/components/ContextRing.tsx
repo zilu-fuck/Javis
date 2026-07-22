@@ -34,12 +34,22 @@ export function ContextRing({
 }: ContextRingProps) {
   const panelId = useId();
   const [panelMode, setPanelMode] = useState<ContextPanelMode>("closed");
-  const maxTokens = resolveMaxTokens(modelConfiguration);
+  const measuredContextWindow = task.tokenUsage?.contextWindowTokens;
+  const measuredContextUsed = task.tokenUsage?.contextUsedTokens;
+  const hasMeasuredContext = Number.isFinite(measuredContextWindow) &&
+    measuredContextWindow! > 0 &&
+    Number.isFinite(measuredContextUsed) &&
+    measuredContextUsed! >= 0;
+  const maxTokens = hasMeasuredContext
+    ? measuredContextWindow!
+    : resolveMaxTokens(modelConfiguration);
   const cumulativeTokens = task.tokenUsage?.totalTokens ?? 0;
   const inputTokens = task.tokenUsage?.inputTokens ?? 0;
   const outputTokens = task.tokenUsage?.outputTokens ?? 0;
   const modelCalls = task.tokenUsage?.modelCalls ?? 0;
-  const usedTokens = task.tokenUsage?.peakContextTokens
+  const usedTokens = hasMeasuredContext
+    ? measuredContextUsed!
+    : task.tokenUsage?.peakContextTokens
     ?? (modelCalls > 0 ? Math.ceil(cumulativeTokens / modelCalls) : 0);
   const remainingTokens = Math.max(maxTokens - usedTokens, 0);
   const ratio = maxTokens > 0 ? Math.min(usedTokens / maxTokens, 1) : 0;
@@ -225,7 +235,8 @@ function formatAgentKindLabel(agentKind: string, locale: WorkbenchLocale): strin
     case "shell":
       return translateWorkbenchText("Shell Agent", locale);
     case "browser":
-      return translateWorkbenchText("Browser Agent", locale);
+    case "page-agent":
+      return translateWorkbenchText("Page Agent", locale);
     case "computer":
       return translateWorkbenchText("Computer Agent", locale);
     case "scheduler":

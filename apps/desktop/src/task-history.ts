@@ -1,4 +1,8 @@
-import { isTerminalTaskStatus, type TaskSnapshot } from "@javis/core";
+import {
+  isTerminalTaskStatus,
+  normalizeTaskProgress,
+  type TaskSnapshot,
+} from "@javis/core";
 import type { DatabaseValue, DesktopDatabase, DesktopDatabaseMigration } from "./desktop-database";
 
 export const TASK_HISTORY_STORAGE_KEY = "javis.taskHistory.v1";
@@ -192,23 +196,47 @@ export interface TaskHistoryRepository {
 export function createTaskHistoryRepository(
   database: Pick<DesktopDatabase, "execute" | "select">,
 ): TaskHistoryRepository {
+  let writeQueue: Promise<void> = Promise.resolve();
+
+  function enqueueWrite<T>(operation: () => Promise<T>): Promise<T> {
+    const result = writeQueue.then(operation, operation);
+    writeQueue = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
   return {
     async list() {
+      await writeQueue;
       return loadTaskHistoryFromDatabase(database);
     },
 
     async save(history) {
-      return saveTaskHistoryToDatabase(database, history);
+      return enqueueWrite(() => saveTaskHistoryToDatabase(database, history));
     },
 
     async upsert(task) {
-      return upsertTaskHistoryInDatabase(database, task);
+      return enqueueWrite(() => upsertTaskHistoryInDatabase(database, task));
     },
 
     async importFromLocalStorage(storage) {
-      return importTaskHistoryFromLocalStorage(database, storage);
+      return enqueueWrite(() => importTaskHistoryFromLocalStorage(database, storage));
     },
   };
+}
+
+/** Fire-and-observe a history write without allowing persistence to break the runtime loop. */
+export function persistTaskHistorySnapshot(
+  repository: Pick<TaskHistoryRepository, "upsert"> | null | undefined,
+  task: TaskSnapshot,
+): void {
+  if (!repository) return;
+  void repository.upsert(task).catch((error: unknown) => {
+    console.warn("[TaskHistory] Failed to persist task snapshot.", {
+      taskId: task.id,
+      status: task.status,
+      error,
+    });
+  });
 }
 
 export async function loadTaskHistoryWithStorageFallback(
@@ -436,6 +464,20 @@ export function sanitizeTaskSnapshot(value: unknown): TaskSnapshot | null {
   }
   if (isTokenUsageSummary(value.tokenUsage)) {
     snapshot.tokenUsage = value.tokenUsage;
+  }
+  const taskProgress = normalizeTaskProgress(value.taskProgress);
+  if (taskProgress) {
+    snapshot.taskProgress = taskProgress;
+  }
+  if (isAgentRuntimeMetricsSnapshotArray(value.agentRuntimeMetrics)) {
+    snapshot.agentRuntimeMetrics = value.agentRuntimeMetrics;
+  }
+  if (isAgentRuntimeRoutingMetricsSnapshotArray(value.agentRuntimeRoutingMetrics)) {
+    snapshot.agentRuntimeRoutingMetrics = value.agentRuntimeRoutingMetrics.map((metrics) => ({
+      ...metrics,
+      fallbackReasons: metrics.fallbackReasons.map((entry) => ({ ...entry })),
+      observationIds: [...metrics.observationIds],
+    }));
   }
   if (isHandoffReport(value.handoffReport)) {
     snapshot.handoffReport = normalizeHandoffReport(value.handoffReport);
@@ -682,27 +724,9 @@ function isAgentRunStatus(value: unknown): value is TaskSnapshot["agents"][numbe
 }
 
 function isAgentKind(value: unknown): boolean {
-  return (
-    value === "commander" ||
-    value === "file" ||
-    value === "shell" ||
-    value === "browser" ||
-    value === "computer" ||
-    value === "scheduler" ||
-    value === "research" ||
-    value === "code" ||
-    value === "language-reviewer" ||
-    value === "security-reviewer" ||
-    value === "build-fix" ||
-    value === "test-runner" ||
-    value === "doc-updater" ||
-    value === "explorer" ||
-    value === "perf-analyzer" ||
-    value === "refactor" ||
-    value === "verifier" ||
-    value === "workspace" ||
-    value === "vision"
-  );
+  // Agent kinds are registry-defined and may include plugins or newly added
+  // built-ins. Persist them as data instead of duplicating the registry here.
+  return isString(value) && value.trim().length > 0 && value.length <= 160;
 }
 
 function isTaskLogKind(value: unknown): value is TaskSnapshot["logs"][number]["kind"] {
@@ -765,10 +789,10 @@ function isTaskStepArray(value: unknown): value is TaskSnapshot["plan"] {
         isString(step.title) &&
         isAgentKind(step.assignedAgentKind) &&
         isTaskStepStatus(step.status) &&
-        (!("agentId" in step) || isString(step.agentId)) &&
-        (!("inputContextKeys" in step) || isStringArray(step.inputContextKeys)) &&
-        (!("outputContextKey" in step) || isString(step.outputContextKey)) &&
-        (!("successCriteria" in step) || isString(step.successCriteria)),
+        (step.agentId === undefined || isString(step.agentId)) &&
+        (step.inputContextKeys === undefined || isStringArray(step.inputContextKeys)) &&
+        (step.outputContextKey === undefined || isString(step.outputContextKey)) &&
+        (step.successCriteria === undefined || isString(step.successCriteria)),
     )
   );
 }
@@ -798,10 +822,10 @@ function isTaskLogArray(value: unknown): value is TaskSnapshot["logs"] {
         isTaskLogKind(log.kind) &&
         isString(log.title) &&
         isString(log.detail) &&
-        (!("userMessage" in log) || isString(log.userMessage)) &&
-        (!("devDetail" in log) || isString(log.devDetail)) &&
-        (!("agentId" in log) || isString(log.agentId)) &&
-        (!("stepId" in log) || isString(log.stepId)),
+        (log.userMessage === undefined || isString(log.userMessage)) &&
+        (log.devDetail === undefined || isString(log.devDetail)) &&
+        (log.agentId === undefined || isString(log.agentId)) &&
+        (log.stepId === undefined || isString(log.stepId)),
     )
   );
 }
@@ -812,16 +836,16 @@ function isChatMessageArray(value: unknown): value is NonNullable<TaskSnapshot["
     value.every(
       (message) =>
         isRecord(message) &&
-        (!("id" in message) || isString(message.id)) &&
-        (!("kind" in message) || isConversationMessageKind(message.kind)) &&
+        (message.id === undefined || isString(message.id)) &&
+        (message.kind === undefined || isConversationMessageKind(message.kind)) &&
         (message.role === "user" || message.role === "assistant") &&
         isString(message.content) &&
-        (!("parentMessageId" in message) || isString(message.parentMessageId)) &&
-        (!("createdAt" in message) || isString(message.createdAt)) &&
+        (message.parentMessageId === undefined || isString(message.parentMessageId)) &&
+        (message.createdAt === undefined || isString(message.createdAt)) &&
         (message.attachments === undefined ||
          (Array.isArray(message.attachments) && message.attachments.every(isString))) &&
-        (!("askUserQuestion" in message) || isAskUserQuestionLike(message.askUserQuestion)) &&
-        (!("permissionRequest" in message) || isRecord(message.permissionRequest)),
+        (message.askUserQuestion === undefined || isAskUserQuestionLike(message.askUserQuestion)) &&
+        (message.permissionRequest === undefined || isRecord(message.permissionRequest)),
     )
   );
 }
@@ -841,8 +865,8 @@ function isAskUserQuestionLike(value: unknown): boolean {
     isString(value.id) &&
     isString(value.question) &&
     isString(value.status) &&
-    (!("choices" in value) || Array.isArray(value.choices)) &&
-    (!("answer" in value) || isString(value.answer))
+    (value.choices === undefined || Array.isArray(value.choices)) &&
+    (value.answer === undefined || isString(value.answer))
   );
 }
 
@@ -1149,6 +1173,9 @@ function isTokenUsageSummary(value: unknown): value is NonNullable<TaskSnapshot[
     isNumber(value.outputTokens) &&
     isNumber(value.totalTokens) &&
     isNumber(value.modelCalls) &&
+    (!('contextUsedTokens' in value) || isNumber(value.contextUsedTokens)) &&
+    (!('contextWindowTokens' in value) || isNumber(value.contextWindowTokens)) &&
+    (!('peakContextTokens' in value) || isNumber(value.peakContextTokens)) &&
     Array.isArray(value.byAgentKind) &&
     value.byAgentKind.every(
       (entry) =>
@@ -1160,6 +1187,103 @@ function isTokenUsageSummary(value: unknown): value is NonNullable<TaskSnapshot[
         isNumber(entry.modelCalls),
     )
   );
+}
+
+function isAgentRuntimeMetricsSnapshotArray(
+  value: unknown,
+): value is NonNullable<TaskSnapshot["agentRuntimeMetrics"]> {
+  return Array.isArray(value) && value.every((metrics) =>
+    isRecord(metrics) &&
+    (metrics.backend === "legacy" || metrics.backend === "langchain" ||
+      metrics.backend === "opencode") &&
+    isNumber(metrics.runCount) &&
+    isNumber(metrics.completedRunCount) &&
+    isNumber(metrics.successRate) &&
+    isNumber(metrics.totalDurationMs) &&
+    isNumber(metrics.averageDurationMs) &&
+    isNumber(metrics.modelCalls) &&
+    isNumber(metrics.toolCalls) &&
+    (!("usage" in metrics) || (
+      isRecord(metrics.usage) &&
+      isNumber(metrics.usage.inputTokens) &&
+      isNumber(metrics.usage.outputTokens) &&
+      (!("totalTokens" in metrics.usage) || isNumber(metrics.usage.totalTokens))
+    ))
+  );
+}
+
+function isAgentRuntimeRoutingMetricsSnapshotArray(
+  value: unknown,
+): value is NonNullable<TaskSnapshot["agentRuntimeRoutingMetrics"]> {
+  if (!Array.isArray(value) || value.length > 200) return false;
+  const dimensions = new Set<string>();
+  for (const metrics of value) {
+    if (!isRecord(metrics)) return false;
+    const opencodeRouteCount = metrics.opencodeRouteCount === undefined
+      ? 0
+      : metrics.opencodeRouteCount;
+    if (!isCanonicalBoundedString(metrics.providerId, 160) ||
+      metrics.providerId !== metrics.providerId.toLowerCase() ||
+      !isCanonicalBoundedString(metrics.agentKind, 160) ||
+      !isCanonicalBoundedString(metrics.taskType, 80) ||
+      !isNonNegativeInteger(metrics.routeCount) ||
+      !isNonNegativeInteger(metrics.rolloutTargetCount) ||
+      !isNonNegativeInteger(metrics.langchainRouteCount) ||
+      !isNonNegativeInteger(opencodeRouteCount) ||
+      !isNonNegativeInteger(metrics.legacyRouteCount) ||
+      !isNonNegativeInteger(metrics.unavailableRouteCount) ||
+      !isNonNegativeInteger(metrics.fallbackCount) ||
+      metrics.rolloutTargetCount > metrics.routeCount ||
+      metrics.langchainRouteCount + opencodeRouteCount + metrics.legacyRouteCount +
+        metrics.unavailableRouteCount !== metrics.routeCount ||
+      metrics.langchainRouteCount + opencodeRouteCount + metrics.fallbackCount !==
+        metrics.rolloutTargetCount ||
+      !isNumber(metrics.fallbackRate) ||
+      metrics.fallbackRate < 0 || metrics.fallbackRate > 1) return false;
+    const expectedRate = metrics.rolloutTargetCount === 0
+      ? 0
+      : metrics.fallbackCount / metrics.rolloutTargetCount;
+    if (Math.abs(metrics.fallbackRate - expectedRate) > 1e-12 ||
+      !Array.isArray(metrics.fallbackReasons) ||
+      metrics.fallbackReasons.length > 5 ||
+      !metrics.fallbackReasons.every((entry) =>
+        isRecord(entry) &&
+        isAgentRuntimeFallbackReason(entry.reason) &&
+        isNonNegativeInteger(entry.count) && entry.count > 0
+      ) ||
+      new Set(metrics.fallbackReasons.map((entry) => entry.reason)).size !==
+        metrics.fallbackReasons.length ||
+      metrics.fallbackReasons.reduce((total, entry) => total + entry.count, 0) !==
+        metrics.fallbackCount ||
+      !Array.isArray(metrics.observationIds) ||
+      metrics.observationIds.length !== metrics.routeCount ||
+      !metrics.observationIds.every((id) => isCanonicalBoundedString(id, 320)) ||
+      new Set(metrics.observationIds).size !== metrics.observationIds.length) return false;
+    const key = `${metrics.providerId}\u0000${metrics.agentKind}\u0000${metrics.taskType}`;
+    if (dimensions.has(key)) return false;
+    dimensions.add(key);
+  }
+  return true;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isNonEmptyBoundedString(value: unknown, maxLength: number): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= maxLength;
+}
+
+function isCanonicalBoundedString(value: unknown, maxLength: number): value is string {
+  return isNonEmptyBoundedString(value, maxLength) && value === value.trim();
+}
+
+function isAgentRuntimeFallbackReason(value: unknown): boolean {
+  return value === "native_tool_call_unavailable" ||
+    value === "runtime_factory_unavailable" ||
+    value === "runtime_initialization_failed" ||
+    value === "eligible_tools_unavailable" ||
+    value === "legacy_backend_selected";
 }
 
 function isHandoffReport(value: unknown): value is NonNullable<TaskSnapshot["handoffReport"]> {
@@ -1184,6 +1308,11 @@ function normalizeHandoffReport(
     steps: report.steps.map((step) => ({
       ...step,
       invalidInputContextKeys: step.invalidInputContextKeys ?? [],
+      hardConstraints: step.hardConstraints ?? [],
+      preferences: step.preferences ?? [],
+      acceptanceCriteria: step.acceptanceCriteria ?? (
+        step.successCriteria ? [step.successCriteria] : []
+      ),
     })),
   };
 }
@@ -1202,10 +1331,31 @@ function isHandoffReportStepArray(
       isStringArray(step.missingInputContextKeys) &&
       (!("invalidInputContextKeys" in step) || isStringArray(step.invalidInputContextKeys)) &&
       (!("title" in step) || isString(step.title)) &&
+      (!("instruction" in step) || isString(step.instruction)) &&
+      (!("hardConstraints" in step) || isStringArray(step.hardConstraints)) &&
+      (!("preferences" in step) || isStringArray(step.preferences)) &&
+      (!("acceptanceCriteria" in step) || isStringArray(step.acceptanceCriteria)) &&
+      (!("outputSchemaRef" in step) || isString(step.outputSchemaRef)) &&
       (!("outputContextKey" in step) || isString(step.outputContextKey)) &&
-      (!("successCriteria" in step) || isString(step.successCriteria)),
+      (!("successCriteria" in step) || isString(step.successCriteria)) &&
+      (!("result" in step) || isPersistedStepResult(step.result)),
     )
   );
+}
+
+function isPersistedStepResult(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  return (
+    value.status === "completed" ||
+    value.status === "partial" ||
+    value.status === "blocked" ||
+    value.status === "needs_clarification" ||
+    value.status === "failed"
+  ) &&
+    Array.isArray(value.evidence) &&
+    isStringArray(value.assumptions) &&
+    isStringArray(value.unresolvedQuestions) &&
+    (!("error" in value) || isString(value.error));
 }
 
 function isHandoffRecordArray(

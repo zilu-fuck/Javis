@@ -8218,6 +8218,55 @@ textarea:focus-visible {
   overflow-wrap: anywhere;
 }
 
+button.javis-message-detail-body {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 12px;
+  color: var(--color-ink);
+  cursor: pointer;
+  font: inherit;
+  line-height: 23px;
+  text-align: left;
+  transition:
+    border-color var(--duration-fast) var(--ease-smooth),
+    box-shadow var(--duration-fast) var(--ease-smooth),
+    background var(--duration-fast) var(--ease-smooth);
+}
+
+button.javis-message-detail-body:hover {
+  border-color: rgba(45, 111, 103, 0.34);
+  background: rgba(255, 255, 255, 1);
+  box-shadow: 0 14px 30px rgba(28, 41, 35, 0.08);
+}
+
+button.javis-message-detail-body:focus-visible {
+  outline: 2px solid rgba(45, 111, 103, 0.42);
+  outline-offset: 2px;
+}
+
+.javis-message-detail-body > span:first-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.javis-message-detail-body-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+  color: var(--color-accent);
+  background: currentColor;
+  mask-image: url("./assets/570icons/info.svg");
+  mask-position: center;
+  mask-repeat: no-repeat;
+  mask-size: contain;
+  -webkit-mask-image: url("./assets/570icons/info.svg");
+  -webkit-mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-size: contain;
+}
+
 .javis-message-actions {
   display: flex;
   flex-wrap: wrap;
@@ -13563,6 +13612,85 @@ ul.javis-mention-dropdown {
 .javis-execution-summary + .javis-message:not(.user),
 .javis-execution-summary + .javis-message-inline-card {
   width: min(780px, calc(100% - 108px));
+}
+
+.javis-terminal-execution-details {
+  margin-top: 12px;
+  border-top: 1px solid var(--color-line-soft);
+}
+
+.javis-terminal-execution-details-toggle {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  grid-template-columns: auto minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  padding: 8px 0 0;
+  color: var(--color-ink);
+  background: transparent;
+  text-align: left;
+}
+
+.javis-terminal-execution-details-toggle:hover {
+  color: var(--color-accent-strong);
+}
+
+.javis-terminal-execution-details-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 720;
+}
+
+.javis-terminal-execution-details-title::before {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-status-success);
+  content: "";
+}
+
+.javis-terminal-execution-details.status-failed .javis-terminal-execution-details-title::before,
+.javis-terminal-execution-details.status-cancelled .javis-terminal-execution-details-title::before {
+  background: var(--color-danger);
+}
+
+.javis-terminal-execution-details-summary {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.javis-terminal-execution-details-arrow {
+  color: var(--color-muted);
+  font-size: 12px;
+  text-align: right;
+}
+
+.javis-terminal-execution-details-body {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  padding: 10px 0 2px;
+}
+
+.javis-terminal-execution-details-body .javis-terminal-execution-summary {
+  width: 100%;
+  margin: 0;
+  box-shadow: none;
+}
+
+.javis-terminal-execution-details-body .javis-tool-call-list,
+.javis-terminal-execution-details-body .javis-artifact-list,
+.javis-terminal-execution-details-body .javis-context-stats {
+  margin-top: 0;
 }
 
 .javis-inspector {

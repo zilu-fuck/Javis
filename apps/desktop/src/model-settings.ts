@@ -134,7 +134,7 @@ export const DEFAULT_AGENT_SLOT: Record<string, ModelSlot> = {
   file: "secondary",
   shell: "secondary",
   workspace: "secondary",
-  browser: "multimodal",
+  "page-agent": "secondary",
   vision: "multimodal",
   computer: "multimodal",
 };

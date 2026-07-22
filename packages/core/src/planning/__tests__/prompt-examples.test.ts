@@ -123,6 +123,6 @@ describe("Prompt examples compile", () => {
   });
 
   it("the schema version is declared and matches the snapshot", () => {
-    expect(COMMANDER_PLAN_SCHEMA_VERSION).toBe("1.2.0");
+    expect(COMMANDER_PLAN_SCHEMA_VERSION).toBe("1.4.0");
   });
 });

@@ -38,6 +38,7 @@ describe("PROVIDER_DEFINITIONS", () => {
       vision: false,
       code: true,
       longContext: false,
+      parallelToolCalls: false,
     });
   });
 

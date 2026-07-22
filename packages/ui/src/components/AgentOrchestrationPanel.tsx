@@ -4,6 +4,7 @@ import { formatDurationMs, getTaskStatusLabel, getTaskStatusProgress, translateW
 import { getParticipatingAgents } from "./agent-visibility";
 
 interface AgentOrchestrationPanelProps {
+  initiallyExpanded?: boolean;
   locale: WorkbenchLocale;
   onSelectAgent?: (agentId: string) => void;
   selectedAgentId?: string;
@@ -11,6 +12,7 @@ interface AgentOrchestrationPanelProps {
 }
 
 export function AgentOrchestrationPanel({
+  initiallyExpanded,
   locale,
   onSelectAgent,
   selectedAgentId,
@@ -19,7 +21,11 @@ export function AgentOrchestrationPanel({
   const steps = task.plan ?? [];
   const shouldShow = steps.length > 0 && task.status !== "created";
   const visibleAgents = getParticipatingAgents(task);
-  const [isCollapsed, setIsCollapsed] = useState(task.status === "completed");
+  const [isCollapsed, setIsCollapsed] = useState(() =>
+    initiallyExpanded === undefined
+      ? isTerminalStatus(task.status)
+      : !initiallyExpanded,
+  );
   const completedCount = steps.filter((step) => step.status === "completed").length;
   const stepProgress = steps.length > 0 ? Math.round((completedCount / steps.length) * 100) : 0;
   const progress = steps.length > 0
@@ -32,10 +38,11 @@ export function AgentOrchestrationPanel({
     : `${progress}%`;
 
   useEffect(() => {
-    if (task.status !== "completed") {
-      setIsCollapsed(false);
+    if (initiallyExpanded !== undefined) {
+      return;
     }
-  }, [task.status]);
+    setIsCollapsed(isTerminalStatus(task.status));
+  }, [initiallyExpanded, task.status]);
 
   if (!shouldShow) {
     return null;
@@ -124,6 +131,10 @@ export function AgentOrchestrationPanel({
       ) : null}
     </section>
   );
+}
+
+function isTerminalStatus(status: WorkbenchTask["status"]): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
 }
 
 function getAgentProgress(status: string, fallback: number): number {

@@ -15,17 +15,32 @@ import { createDefaultAgentRegistry } from "./agents";
 import type { AgentKind, TaskStep } from "./index";
 import type { WorkspaceRuntime } from "./workspace-runtime";
 import { getWorkbenchWorkflow } from "./workflows";
+import { normalizeStepContract } from "./step-protocol";
 
 export function workflowStepToTaskStep(
   step: NonNullable<ReturnType<typeof getWorkbenchWorkflow>>["steps"][number],
 ): TaskStep {
+  const contract = normalizeStepContract({
+    title: step.title,
+    instruction: step.instruction ?? step.input,
+    hardConstraints: step.hardConstraints,
+    preferences: step.preferences,
+    acceptanceCriteria: step.acceptanceCriteria,
+    outputSchemaRef: step.outputSchemaRef ?? step.outputContextKey,
+    primaryCapability: step.primaryCapability,
+    artifactObligation: step.artifactObligation,
+    completionPolicy: step.completionPolicy,
+    outputContextKey: step.outputContextKey,
+    successCriteria: step.successCriteria ?? step.output,
+  });
   return {
     id: step.id,
     title: step.title,
     assignedAgentKind: step.agentKind,
+    ...contract,
     agentId: createDefaultAgentRegistry().findByKind(step.agentKind)?.agent.id ?? `agent-${step.agentKind}`,
     status: "pending",
-    successCriteria: step.output,
+    successCriteria: step.successCriteria ?? step.output,
   };
 }
 

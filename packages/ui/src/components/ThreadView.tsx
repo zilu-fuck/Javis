@@ -28,6 +28,7 @@ import { ContextStats } from "./ContextStats";
 import { Markdown } from "./Markdown";
 import { StreamingMessage } from "./StreamingMessage";
 import { TaskSections } from "./TaskSections";
+import { TaskProgressCard } from "./TaskProgressCard";
 
 interface ThreadViewProps {
   composeMode?: "chat" | "project";
@@ -95,7 +96,9 @@ export function ThreadView({
   const streaming = useRenderedStreamingText(task);
   const showStreaming = streaming.isVisible;
   const scrollAnchorRef = useRef<HTMLDivElement | null>(null);
+  const autoScrollTaskRef = useRef<string | undefined>(undefined);
   const [commanderExpanded, setCommanderExpanded] = useState(false);
+  const [terminalDetailsExpanded, setTerminalDetailsExpanded] = useState(false);
   const [localConversationMessages, setLocalConversationMessages] =
     useState<WorkbenchChatMessage[] | null>(null);
   const [editingMessageKey, setEditingMessageKey] = useState<string | null>(null);
@@ -110,14 +113,31 @@ export function ThreadView({
   );
   const hasActivePrompt = hasPendingPermissionRequest || hasPendingAskUserQuestion;
   const showExecutionPanels = !hasActivePrompt;
+  const isTerminalTask = isTerminalTaskStatus(task.status);
   const hasExecutionProgress = Boolean(task.plan?.length) && task.status !== "created";
   const hasExecutionResults = getParticipatingAgents(task).some(
     (agent) => agent.status === "completed" || agent.status === "failed",
   );
-  const sourceConversationMessages = task.conversationMessages?.length
+  const unfilteredConversationMessages = task.conversationMessages?.length
     ? task.conversationMessages
     : createFallbackConversationMessages(task);
-  const conversationMessages = localConversationMessages ?? sourceConversationMessages;
+  const progressFilteredMessages = unfilteredConversationMessages.filter((message) =>
+    !isSupersededTaskProgressMilestone(message, task.id ?? "")
+  );
+  const sourceConversationMessages = isTerminalTask
+    ? ensureTerminalConclusionMessage(
+        collapseTerminalExecutionMessages(progressFilteredMessages),
+        task,
+      )
+    : progressFilteredMessages;
+  const conversationMessages = localConversationMessages
+    ? isTerminalTask
+      ? ensureTerminalConclusionMessage(
+          collapseTerminalExecutionMessages(localConversationMessages),
+          task,
+        )
+      : localConversationMessages
+    : sourceConversationMessages;
   const hasConversationMessages = conversationMessages.length > 0;
   const lastConversationMessage = conversationMessages[conversationMessages.length - 1];
   const actionLabels = getMessageActionLabels(locale);
@@ -127,6 +147,27 @@ export function ThreadView({
       ? translateWorkbenchText("Review the permission card above to continue.", locale)
       : undefined;
   const isActiveTask = !["completed", "failed", "cancelled"].includes(task.status);
+  const showStreamingResponse = showStreaming && isActiveTask && !hasActivePrompt;
+  const showLiveCommanderMessage = Boolean(
+    !task.taskProgress &&
+    (
+      task.status === "planning" ||
+      task.status === "running" ||
+      task.status === "generating" ||
+      task.status === "verifying" ||
+      task.status === "retrying"
+    ) &&
+    lastConversationMessage?.role === "user" &&
+    task.commanderMessage.trim() &&
+    (
+      !showStreamingResponse ||
+      (streaming.agentKind === "commander" && !streaming.text.trim())
+    ),
+  );
+  const showStreamingMessage = showStreamingResponse && !showLiveCommanderMessage;
+  const taskProgressMessageIndex = task.taskProgress && lastConversationMessage?.role === "assistant"
+    ? conversationMessages.length - 1
+    : -1;
 
   useEffect(() => {
     setLocalConversationMessages(null);
@@ -135,14 +176,28 @@ export function ThreadView({
   }, [task.id, task.conversationMessages]);
 
   useEffect(() => {
-    if (typeof scrollAnchorRef.current?.scrollIntoView !== "function") {
+    setTerminalDetailsExpanded(false);
+  }, [task.id, task.status]);
+
+  useEffect(() => {
+    const anchor = scrollAnchorRef.current;
+    if (typeof anchor?.scrollIntoView !== "function") {
       return;
     }
-    scrollAnchorRef.current.scrollIntoView({
+    const isNewTask = autoScrollTaskRef.current !== task.id;
+    autoScrollTaskRef.current = task.id;
+    const scrollContainer = anchor.parentElement;
+    const distanceFromBottom = scrollContainer
+      ? scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight
+      : 0;
+    if (!isNewTask && distanceFromBottom > 160) {
+      return;
+    }
+    anchor.scrollIntoView({
       behavior: "smooth",
       block: "end",
     });
-  }, [showStreaming, task.id]);
+  }, [showStreamingMessage, task.commanderMessage, task.id]);
 
   function commitConversationMessages(messages: WorkbenchChatMessage[]) {
     setLocalConversationMessages(messages);
@@ -195,7 +250,7 @@ export function ThreadView({
   }
 
   function renderExecutionPanels() {
-    if (!showExecutionPanels || (!hasExecutionProgress && !hasExecutionResults)) return null;
+    if (isTerminalTask || !showExecutionPanels || (!hasExecutionProgress && !hasExecutionResults)) return null;
     return (
       <div
         aria-label={translateWorkbenchText("Execution progress", locale)}
@@ -217,6 +272,84 @@ export function ThreadView({
           onSelectAgent={(id) => onSelectAgent?.(id)}
         />
       </div>
+    );
+  }
+
+  function renderResultDetails() {
+    if (!isTerminalTask) {
+      return (
+        <>
+          <ToolActivityCards task={task} locale={locale} />
+          <ArtifactCards
+            task={task}
+            locale={locale}
+            onOpenDetail={onOpenDetail}
+            onOpenFile={onOpenFile}
+            onOpenWorkspaceTool={onOpenWorkspaceTool}
+          />
+          <ContextStats task={task} labels={labels} />
+        </>
+      );
+    }
+
+    const activities = buildToolActivities(task, locale);
+    const artifacts = buildArtifacts(task);
+
+    const detailsId = `javis-terminal-details-${task.id ?? "current"}`;
+    return (
+      <section
+        aria-label={translateWorkbenchText("Execution details", locale)}
+        className={`javis-terminal-execution-details status-${task.status}`}
+      >
+        <button
+          aria-controls={detailsId}
+          aria-expanded={terminalDetailsExpanded}
+          className="javis-terminal-execution-details-toggle"
+          onClick={() => setTerminalDetailsExpanded((value) => !value)}
+          type="button"
+        >
+          <span className="javis-terminal-execution-details-title">
+            {translateWorkbenchText("Execution details", locale)}
+          </span>
+          <span className="javis-terminal-execution-details-summary">
+            {formatTerminalDetailsSummary(task, activities.length, artifacts.length, locale)}
+          </span>
+          <span aria-hidden="true" className="javis-terminal-execution-details-arrow">
+            {terminalDetailsExpanded ? "▾" : "▸"}
+          </span>
+        </button>
+        {terminalDetailsExpanded ? (
+          <div className="javis-terminal-execution-details-body" id={detailsId}>
+            {hasExecutionProgress || hasExecutionResults ? (
+              <div className="javis-execution-summary javis-terminal-execution-summary">
+                <AgentOrchestrationPanel
+                  initiallyExpanded={terminalDetailsExpanded}
+                  task={task}
+                  locale={locale}
+                  selectedAgentId={selectedAgentId}
+                  onSelectAgent={onSelectAgent}
+                />
+                <AgentSummaryList
+                  agents={task.agents}
+                  task={task}
+                  selectedAgentId={selectedAgentId}
+                  locale={locale}
+                  onSelectAgent={(id) => onSelectAgent?.(id)}
+                />
+              </div>
+            ) : null}
+            <ToolActivityCards task={task} locale={locale} />
+            <ArtifactCards
+              task={task}
+              locale={locale}
+              onOpenDetail={onOpenDetail}
+              onOpenFile={onOpenFile}
+              onOpenWorkspaceTool={onOpenWorkspaceTool}
+            />
+            <ContextStats task={task} labels={labels} />
+          </div>
+        ) : null}
+      </section>
     );
   }
 
@@ -284,12 +417,18 @@ export function ThreadView({
               : getSafeAssistantContent(message.content, task, locale);
             const translatedDisplayContent = translateWorkbenchText(displayContent, locale);
             const messageKey = getConversationMessageKey(message, index);
+            const timeoutDetail = message.role === "assistant"
+              ? createTimeoutMessageDetail(message, task, locale, modelConfiguration)
+              : undefined;
             const canMutateMessage = message.role === "user" && !isActiveTask;
-            const shouldInsertExecutionPanels = !showStreaming &&
+            const shouldInsertExecutionPanels = !showStreamingMessage &&
               message.role === "assistant" &&
               index === conversationMessages.length - 1;
             return (
               <Fragment key={messageKey}>
+                {task.taskProgress && taskProgressMessageIndex === index ? (
+                  <TaskProgressCard locale={locale} progress={task.taskProgress} />
+                ) : null}
                 {shouldInsertExecutionPanels ? renderExecutionPanels() : null}
                 <article
                   className={`javis-message ${message.role === "user" ? "user" : ""}`}
@@ -323,6 +462,17 @@ export function ThreadView({
                         </button>
                       </div>
                     </div>
+                  ) : timeoutDetail && onOpenDetail ? (
+                    <button
+                      aria-label={actionLabels.timeoutDetails}
+                      className="javis-message-body javis-message-detail-body"
+                      onClick={() => onOpenDetail(timeoutDetail)}
+                      title={actionLabels.timeoutDetails}
+                      type="button"
+                    >
+                      <span>{translatedDisplayContent}</span>
+                      <span aria-hidden="true" className="javis-message-detail-body-icon" />
+                    </button>
                   ) : (
                     <Markdown
                       className="javis-message-body"
@@ -378,19 +528,7 @@ export function ThreadView({
                     ) : null}
                   </div>
                   {message.role === "assistant" && index === conversationMessages.length - 1 ? (
-                    <ToolActivityCards task={task} locale={locale} />
-                  ) : null}
-                  {message.role === "assistant" && index === conversationMessages.length - 1 ? (
-                    <ArtifactCards
-                      task={task}
-                      locale={locale}
-                      onOpenDetail={onOpenDetail}
-                      onOpenFile={onOpenFile}
-                      onOpenWorkspaceTool={onOpenWorkspaceTool}
-                    />
-                  ) : null}
-                  {message.role === "assistant" && index === conversationMessages.length - 1 ? (
-                    <ContextStats task={task} labels={labels} />
+                    renderResultDetails()
                   ) : null}
                 </article>
               </Fragment>
@@ -402,11 +540,31 @@ export function ThreadView({
           </article>
         )}
 
-        {!showStreaming && lastConversationMessage?.role === "user"
+        {task.taskProgress && taskProgressMessageIndex < 0 ? (
+          <TaskProgressCard locale={locale} progress={task.taskProgress} />
+        ) : null}
+
+        {showLiveCommanderMessage ? (
+          <article aria-live="polite" className="javis-message live-progress">
+            <p className="javis-message-title">
+              <span>{formatCommanderTitle(labels.commander)}</span>
+            </p>
+            <Markdown
+              className="javis-message-body"
+              text={translateWorkbenchText(
+                getSafeAssistantContent(task.commanderMessage, task, locale),
+                locale,
+              )}
+            />
+            <ToolActivityCards task={task} locale={locale} />
+          </article>
+        ) : null}
+
+        {!showStreamingMessage && lastConversationMessage?.role === "user"
           ? renderExecutionPanels()
           : null}
 
-        {showStreaming ? (
+        {showStreamingMessage ? (
           <>
             {renderExecutionPanels()}
             <StreamingMessage
@@ -431,15 +589,7 @@ export function ThreadView({
               <span className="javis-expand-arrow">{commanderExpanded ? "▾" : "▸"}</span>
             </button>
             <Markdown className="javis-message-body" text={getSafeAssistantContent(task.commanderMessage, task, locale)} />
-            <ToolActivityCards task={task} locale={locale} />
-            <ArtifactCards
-              task={task}
-              locale={locale}
-              onOpenDetail={onOpenDetail}
-              onOpenFile={onOpenFile}
-              onOpenWorkspaceTool={onOpenWorkspaceTool}
-            />
-            <ContextStats task={task} labels={labels} />
+            {renderResultDetails()}
             {commanderExpanded ? (
               <AgentDetailSections labels={labels} locale={locale} task={task} />
             ) : null}
@@ -473,7 +623,7 @@ export function ThreadView({
           />
         }
         currentWorkspacePath={currentWorkspacePath}
-        isStreaming={showStreaming}
+        isStreaming={showStreamingResponse}
         disabled={hasActivePrompt}
         draftGoal={draftGoal}
         labels={labels}
@@ -671,6 +821,7 @@ function getMessageActionLabels(locale: WorkbenchLocale): {
   cancel: string;
   editTextarea: string;
   quotePrefix: string;
+  timeoutDetails: string;
 } {
   const isChinese = locale.labels.newChat !== "New chat";
   return isChinese
@@ -685,6 +836,7 @@ function getMessageActionLabels(locale: WorkbenchLocale): {
         cancel: "取消",
         editTextarea: "编辑消息内容",
         quotePrefix: "引用",
+        timeoutDetails: "查看超时详情",
       }
     : {
         actions: "Message actions",
@@ -697,7 +849,154 @@ function getMessageActionLabels(locale: WorkbenchLocale): {
         cancel: "Cancel",
         editTextarea: "Edit message content",
         quotePrefix: "Quote",
+        timeoutDetails: "View timeout details",
       };
+}
+
+function isSupersededTaskProgressMilestone(
+  message: WorkbenchChatMessage,
+  taskId: string,
+): boolean {
+  if (message.role !== "assistant" || !message.id) return false;
+  const prefix = `progress-${taskId}-`;
+  return message.id.startsWith(prefix) && message.id !== `${prefix}final`;
+}
+
+function collapseTerminalExecutionMessages(
+  messages: WorkbenchChatMessage[],
+): WorkbenchChatMessage[] {
+  let lastUserIndex = -1;
+  let lastAssistantIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (lastAssistantIndex < 0 && messages[index]?.role === "assistant") {
+      lastAssistantIndex = index;
+    }
+    if (messages[index]?.role === "user") {
+      lastUserIndex = index;
+      break;
+    }
+  }
+  if (lastAssistantIndex <= lastUserIndex + 1) {
+    return messages;
+  }
+  return messages.filter((message, index) =>
+    index <= lastUserIndex ||
+    index === lastAssistantIndex ||
+    message.kind === "ask_user_question" ||
+    message.kind === "permission_request"
+  );
+}
+
+function ensureTerminalConclusionMessage(
+  messages: WorkbenchChatMessage[],
+  task: WorkbenchTask,
+): WorkbenchChatMessage[] {
+  if (
+    !task.commanderMessage.trim() ||
+    messages[messages.length - 1]?.role === "assistant"
+  ) {
+    return messages;
+  }
+  return [
+    ...messages,
+    {
+      id: `${task.id ?? "terminal"}-terminal-conclusion`,
+      kind: "assistant_text",
+      role: "assistant",
+      content: task.commanderMessage,
+    },
+  ];
+}
+
+function createTimeoutMessageDetail(
+  message: WorkbenchChatMessage,
+  task: WorkbenchTask,
+  locale: WorkbenchLocale,
+  modelConfiguration?: WorkbenchModelConfiguration,
+): WorkbenchDetailItem | undefined {
+  const match = message.content.trim().match(/^(.+?)\s+timed out after\s+(\d+)\s*ms\.?$/iu);
+  if (!match) return undefined;
+  const timeoutMs = Number(match[2]);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) return undefined;
+  const isChinese = locale.labels.newChat !== "New chat";
+  const rawStage = match[1].trim();
+  const stage = rawStage === "commander.plan"
+    ? isChinese ? "Commander 任务规划" : "Commander planning"
+    : rawStage.replace(/[._-]+/gu, " ");
+  const duration = timeoutMs % 1_000 === 0 ? `${timeoutMs / 1_000} s` : `${timeoutMs} ms`;
+  const commanderProfileId = modelConfiguration?.agentOverrides.commander;
+  const commanderProfile = modelConfiguration?.profiles.find((profile) =>
+    profile.id === commanderProfileId,
+  ) ?? modelConfiguration?.profiles.find((profile) => profile.slot === "primary");
+  const modelLabel = commanderProfile?.provider && commanderProfile.model
+    ? `${commanderProfile.provider} / ${commanderProfile.model}`
+    : undefined;
+  const matchingLog = [...task.logs].reverse().find((log) =>
+    log.title === "task.timeout" &&
+    (log.detail.includes(rawStage) || log.userMessage === message.content),
+  );
+  const content = isChinese
+    ? [
+        "## 发生了什么",
+        `运行时等待 **${stage}** 超过 ${duration}，随后由本地超时保护终止。`,
+        "",
+        "## 影响",
+        rawStage === "commander.plan"
+          ? "DAG 计划尚未生成，因此没有进入工具调用或子代理执行阶段。"
+          : "当前阶段没有在期限内完成，后续步骤未继续执行。",
+        "",
+        "## 建议",
+        "- 先重试当前任务；临时的服务商延迟通常可恢复。",
+        "- 连续超时时检查模型服务状态，或切换备用模型。",
+        "- 长任务可在运行时设置中提高任务超时上限。",
+        "",
+        "## 原始错误",
+        `\`${message.content.trim()}\``,
+        ...(matchingLog?.devDetail
+          ? ["", "## 运行时记录", matchingLog.devDetail]
+          : []),
+      ].join("\n")
+    : [
+        "## What happened",
+        `The runtime waited more than ${duration} for **${stage}** and then stopped it with the local timeout guard.`,
+        "",
+        "## Impact",
+        rawStage === "commander.plan"
+          ? "No DAG plan was produced, so tools and sub-agents were not started."
+          : "The current stage did not finish before the deadline, so later steps were not started.",
+        "",
+        "## Suggested actions",
+        "- Retry the task; transient provider latency often clears.",
+        "- If it repeats, check provider health or switch to a fallback model.",
+        "- Increase the task timeout for consistently long requests.",
+        "",
+        "## Original error",
+        `\`${message.content.trim()}\``,
+        ...(matchingLog?.devDetail
+          ? ["", "## Runtime record", matchingLog.devDetail]
+          : []),
+      ].join("\n");
+  return {
+    title: isChinese ? "任务超时详情" : "Task timeout details",
+    description: isChinese
+      ? `${stage} 未在 ${duration} 内完成。`
+      : `${stage} did not complete within ${duration}.`,
+    content,
+    contentFormat: "markdown",
+    kind: "Timeout",
+    source: "runtime",
+    metadata: [
+      { label: isChinese ? "阶段" : "Stage", value: rawStage },
+      { label: isChinese ? "超时上限" : "Timeout", value: duration },
+      ...(modelLabel
+        ? [{ label: isChinese ? "当前 Commander 模型" : "Current Commander model", value: modelLabel }]
+        : []),
+      ...(task.id ? [{ label: isChinese ? "任务 ID" : "Task ID", value: task.id }] : []),
+      ...(message.createdAt
+        ? [{ label: isChinese ? "发生时间" : "Occurred at", value: message.createdAt }]
+        : []),
+    ],
+  };
 }
 
 async function writeClipboardText(text: string): Promise<void> {
@@ -1129,4 +1428,25 @@ function getStreamingAgentLabel(
     default:
       return labels.commander;
   }
+}
+
+function isTerminalTaskStatus(status: WorkbenchTask["status"]): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
+function formatTerminalDetailsSummary(
+  task: WorkbenchTask,
+  activityCount: number,
+  artifactCount: number,
+  locale: WorkbenchLocale,
+): string {
+  const isChinese = isChineseLocale(locale);
+  const parts: string[] = [];
+  if (task.plan.length > 0) {
+    const completed = task.plan.filter((step) => step.status === "completed").length;
+    parts.push(isChinese ? `${completed}/${task.plan.length} 步骤` : `${completed}/${task.plan.length} steps`);
+  }
+  if (activityCount > 0) parts.push(isChinese ? `${activityCount} 项调用` : `${activityCount} calls`);
+  if (artifactCount > 0) parts.push(isChinese ? `${artifactCount} 个产物` : `${artifactCount} artifacts`);
+  return parts.join(" · ") || (isChinese ? "查看运行记录" : "View run records");
 }

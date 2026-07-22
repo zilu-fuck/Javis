@@ -19,11 +19,10 @@ use crate::sandbox::{
 };
 use crate::{
     capture_current_git_head, create_approval_id, create_file_content_hashes, create_fnv1a_hash,
-    create_native_approval_binding, create_provider_response_diagnostic,
-    default_openai_compatible_base_url, env_flag_enabled, hydrate_model_api_key_secret,
-    normalize_path, require_current_git_head_matches, require_native_approval_binding,
-    resolve_command_program, resolve_workspace_path, summarize_provider_output_for_error,
-    NativeApprovalBinding, JAVIS_TERMINOLOGY_PROMPT_PREFIX, OPENCODE_PROPOSAL_TIMEOUT,
+    create_native_approval_binding, env_flag_enabled, hydrate_model_api_key_secret, normalize_path,
+    require_current_git_head_matches, require_native_approval_binding, resolve_command_program,
+    resolve_workspace_path, summarize_provider_output_for_error, NativeApprovalBinding,
+    JAVIS_TERMINOLOGY_PROMPT_PREFIX, OPENCODE_PROPOSAL_TIMEOUT,
 };
 
 pub(crate) const CODE_PATCH_APPROVAL_TOOL_NAME: &str = "code.applyProposedEdit";
@@ -96,6 +95,21 @@ pub(crate) struct CodeProposeEditRequest {
     pub(crate) diff: String,
     #[serde(default)]
     pub(crate) task_id: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub(crate) run_id: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub(crate) workflow_run_id: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub(crate) agent_run_id: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub(crate) step_id: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub(crate) attempt: Option<u32>,
     pub(crate) provider_id: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) api_key: Option<String>,
@@ -211,7 +225,7 @@ pub(crate) fn propose_code_edit(
     }
     let task_id = request.task_id.clone();
     let proposal =
-        propose_code_edit_with_opencode(&workspace, request).map_err(|e| e.to_string())?;
+        propose_code_edit_with_opencode(&workspace, request).map_err(format_code_proposal_error)?;
     register_pending_code_patch(&approval_state, &proposal, task_id.as_deref())
         .map_err(|e| e.to_string())?;
     Ok(proposal)
@@ -264,12 +278,37 @@ pub(crate) fn propose_code_edit_with_opencode(
     }
 
     let prompt = create_opencode_proposal_prompt(&request);
-    if should_fallback_to_openai_compatible(&request) {
-        let output = run_openai_compatible_proposal_request(&request, &prompt)?;
-        return parse_code_proposal_from_text_for_request(&canonical_workspace, &output, &request);
-    }
     let output = run_opencode_proposal_command(&canonical_workspace, &prompt, &request)?;
     parse_code_proposal_from_text_for_request(&canonical_workspace, &output, &request)
+}
+
+pub(crate) fn format_code_proposal_error(error: JavisError) -> String {
+    match error {
+        JavisError::Internal(message) if is_runtime_unavailable_error(&message) => message,
+        other => other.to_string(),
+    }
+}
+
+fn is_runtime_unavailable_error(message: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(message)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .is_some_and(|code| code == "runtime_unavailable")
+}
+
+pub(crate) fn opencode_runtime_unavailable_error(detail: impl std::fmt::Display) -> JavisError {
+    let payload = serde_json::json!({
+        "code": "runtime_unavailable",
+        "phase": "runtime",
+        "retryable": true,
+        "message": format!("OpenCode runtime is unavailable: {detail}"),
+    });
+    JavisError::Internal(payload.to_string())
 }
 
 pub(crate) fn run_opencode_proposal_command(
@@ -297,8 +336,8 @@ pub(crate) fn run_opencode_proposal_command(
         timeout_ms: Some(OPENCODE_PROPOSAL_TIMEOUT.as_millis() as u64),
     })
     .map_err(|error| {
-        JavisError::Io(format!(
-            "opencode is unavailable at {}: {error}",
+        opencode_runtime_unavailable_error(format!(
+            "could not start {}: {error}",
             opencode.display()
         ))
     })?;
@@ -497,11 +536,11 @@ pub(crate) fn bundled_opencode_candidates() -> Vec<PathBuf> {
         for ancestor in current_dir.ancestors() {
             candidates.push(
                 ancestor
-                    .join("node_modules/.pnpm/opencode-windows-x64@1.15.10/node_modules/opencode-windows-x64/bin/opencode.exe"),
+                    .join("node_modules/.pnpm/opencode-windows-x64@1.18.3/node_modules/opencode-windows-x64/bin/opencode.exe"),
             );
             candidates.push(
                 ancestor
-                    .join("node_modules/.pnpm/opencode-windows-x64-baseline@1.15.10/node_modules/opencode-windows-x64-baseline/bin/opencode.exe"),
+                    .join("node_modules/.pnpm/opencode-windows-x64-baseline@1.18.3/node_modules/opencode-windows-x64-baseline/bin/opencode.exe"),
             );
         }
     }
@@ -585,116 +624,6 @@ pub(crate) fn validate_opencode_config_id(value: &str) -> Result<(), JavisError>
     Err(JavisError::Validation(format!(
         "Invalid opencode provider or model id: {value}"
     )))
-}
-
-pub(crate) fn should_fallback_to_openai_compatible(request: &CodeProposeEditRequest) -> bool {
-    let provider_id = normalize_optional_config_value(request.provider_id.as_deref())
-        .unwrap_or_else(|| infer_provider_id_from_model(request));
-    let has_credentials = normalize_optional_config_value(request.api_key.as_deref()).is_some();
-    let has_custom_base_url =
-        normalize_optional_config_value(request.base_url.as_deref()).is_some();
-    has_credentials && (provider_id == "deepseek" || provider_id == "custom" && has_custom_base_url)
-}
-
-pub(crate) fn run_openai_compatible_proposal_request(
-    request: &CodeProposeEditRequest,
-    prompt: &str,
-) -> Result<String, JavisError> {
-    let api_key = normalize_optional_config_value(request.api_key.as_deref()).ok_or_else(|| {
-        JavisError::Validation("OpenAI-compatible fallback requires an API key.".into())
-    })?;
-    let model = normalize_openai_compatible_model_name(request).ok_or_else(|| {
-        JavisError::Validation("OpenAI-compatible fallback requires a model.".into())
-    })?;
-    let base_url = normalize_optional_config_value(request.base_url.as_deref())
-        .unwrap_or_else(|| default_openai_compatible_base_url(request));
-    let endpoint = create_chat_completions_endpoint(&base_url);
-    let body = create_openai_compatible_proposal_body(&model, prompt);
-    let body_text = serde_json::to_string(&body).map_err(JavisError::from)?;
-    let client = reqwest::blocking::Client::builder()
-        .timeout(OPENCODE_PROPOSAL_TIMEOUT)
-        .build()
-        .map_err(|error| {
-            JavisError::Internal(format!(
-                "Could not create HTTP client for proposal: {error}"
-            ))
-        })?;
-    let response_text = client
-        .post(&endpoint)
-        .header("Authorization", &format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .body(body_text)
-        .send()
-        .map_err(|error| {
-            JavisError::Internal(format!(
-                "OpenAI-compatible proposal fallback failed: {error}"
-            ))
-        })?
-        .text()
-        .map_err(|error| {
-            JavisError::Internal(format!(
-                "OpenAI-compatible proposal fallback could not read response: {error}"
-            ))
-        })?;
-    let value = serde_json::from_str::<serde_json::Value>(&response_text).map_err(|error| {
-        JavisError::Internal(format!(
-            "OpenAI-compatible proposal fallback returned invalid JSON: {error}; {}",
-            create_provider_response_diagnostic(request, &endpoint, &response_text)
-        ))
-    })?;
-    let content_value = value
-        .get("choices")
-        .and_then(|choices| choices.as_array())
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"));
-    let Some(content_value) = content_value else {
-        return Err(JavisError::Internal(format!(
-            "OpenAI-compatible proposal fallback returned no message content. {}",
-            create_provider_response_diagnostic(request, &endpoint, &response_text)
-        )));
-    };
-    let content = content_value
-        .as_str()
-        .map(str::to_string)
-        .or_else(|| serde_json::to_string(content_value).ok())
-        .map(|content| content.trim().to_string())
-        .filter(|content| !content.is_empty())
-        .ok_or_else(|| {
-            JavisError::Internal(format!(
-                "OpenAI-compatible proposal fallback returned empty message content. {}",
-                create_provider_response_diagnostic(request, &endpoint, &response_text)
-            ))
-        })?;
-    Ok(content)
-}
-
-pub(crate) fn create_openai_compatible_proposal_body(
-    model: &str,
-    prompt: &str,
-) -> serde_json::Value {
-    serde_json::json!({
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "Return only the requested JSON object. Do not include markdown fences or explanation."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ],
-        "stream": false,
-        "thinking": {
-            "type": "disabled"
-        },
-        "response_format": {
-            "type": "json_object"
-        },
-        "temperature": 0,
-        "max_tokens": 4096
-    })
 }
 
 #[cfg(test)]

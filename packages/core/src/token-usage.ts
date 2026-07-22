@@ -12,6 +12,16 @@ export function createEmptyTokenUsageSummary(): TokenUsageSummary {
   };
 }
 
+export function cloneTokenUsageSummary(
+  summary: TokenUsageSummary | undefined,
+): TokenUsageSummary {
+  if (!summary) return createEmptyTokenUsageSummary();
+  return {
+    ...summary,
+    byAgentKind: summary.byAgentKind.map((usage) => ({ ...usage })),
+  };
+}
+
 export function addModelUsage(
   summary: TokenUsageSummary | undefined,
   agentKind: AgentKind,
@@ -20,6 +30,7 @@ export function addModelUsage(
   const inputTokens = normalizeTokenCount(usage.inputTokens);
   const outputTokens = normalizeTokenCount(usage.outputTokens);
   const totalTokens = normalizeTokenCount(usage.totalTokens ?? inputTokens + outputTokens);
+  const contextWindowTokens = normalizeOptionalPositiveTokenCount(usage.contextWindowTokens);
   const current = summary ?? createEmptyTokenUsageSummary();
   const existingAgent = current.byAgentKind.find((entry) => entry.agentKind === agentKind);
   const nextAgent = {
@@ -30,11 +41,13 @@ export function addModelUsage(
     modelCalls: (existingAgent?.modelCalls ?? 0) + 1,
   };
 
+  const nextContextPair = selectMostUtilizedContextPair(current, totalTokens, contextWindowTokens);
   return {
     inputTokens: current.inputTokens + inputTokens,
     outputTokens: current.outputTokens + outputTokens,
     totalTokens: current.totalTokens + totalTokens,
     peakContextTokens: Math.max(current.peakContextTokens ?? 0, totalTokens),
+    ...nextContextPair,
     modelCalls: current.modelCalls + 1,
     byAgentKind: [
       ...current.byAgentKind.filter((entry) => entry.agentKind !== agentKind),
@@ -43,9 +56,41 @@ export function addModelUsage(
   };
 }
 
+function selectMostUtilizedContextPair(
+  current: TokenUsageSummary,
+  usedTokens: number,
+  contextWindowTokens: number | undefined,
+): Pick<TokenUsageSummary, "contextUsedTokens" | "contextWindowTokens"> {
+  const currentUsed = normalizeOptionalTokenCount(current.contextUsedTokens);
+  const currentWindow = normalizeOptionalPositiveTokenCount(current.contextWindowTokens);
+  if (contextWindowTokens === undefined) {
+    return currentUsed !== undefined && currentWindow !== undefined
+      ? { contextUsedTokens: currentUsed, contextWindowTokens: currentWindow }
+      : {};
+  }
+  const nextRatio = usedTokens / contextWindowTokens;
+  const currentRatio = currentUsed !== undefined && currentWindow !== undefined
+    ? currentUsed / currentWindow
+    : -1;
+  if (nextRatio > currentRatio || (nextRatio === currentRatio && usedTokens > (currentUsed ?? -1))) {
+    return { contextUsedTokens: usedTokens, contextWindowTokens };
+  }
+  return { contextUsedTokens: currentUsed!, contextWindowTokens: currentWindow! };
+}
+
 function normalizeTokenCount(value: number): number {
   if (!Number.isFinite(value) || value < 0) {
     return 0;
   }
   return Math.floor(value);
+}
+
+function normalizeOptionalTokenCount(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value) || value < 0) return undefined;
+  return Math.floor(value);
+}
+
+function normalizeOptionalPositiveTokenCount(value: number | undefined): number | undefined {
+  const normalized = normalizeOptionalTokenCount(value);
+  return normalized !== undefined && normalized > 0 ? normalized : undefined;
 }

@@ -179,7 +179,162 @@ export function sanitizeWorkflowCheckpoint(value: unknown): WorkflowCheckpoint |
   for (const envelope of Object.values(obj.contextSnapshot as Record<string, unknown>)) {
     if (!validateArtifactEnvelope(envelope, { taskId: obj.taskId, runId: obj.runId })) return undefined;
   }
+  if (obj.agentRuntimeMetrics !== undefined &&
+    !isAgentRuntimeMetricsSnapshotArray(obj.agentRuntimeMetrics)) return undefined;
+  if (obj.agentRuntimeRoutingMetrics !== undefined &&
+    !isAgentRuntimeRoutingMetricsSnapshotArray(obj.agentRuntimeRoutingMetrics)) return undefined;
+  if (obj.tokenUsage !== undefined && !isTokenUsageSummary(obj.tokenUsage)) return undefined;
   return obj as unknown as WorkflowCheckpoint;
+}
+
+function isAgentRuntimeRoutingMetricsSnapshotArray(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > 200) return false;
+  const dimensions = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) return false;
+    const metrics = item as Record<string, unknown>;
+    const opencodeRouteCount = metrics.opencodeRouteCount === undefined
+      ? 0
+      : metrics.opencodeRouteCount;
+    if (!isCanonicalBoundedString(metrics.providerId, 160) ||
+      metrics.providerId !== (metrics.providerId as string).toLowerCase() ||
+      !isCanonicalBoundedString(metrics.agentKind, 160) ||
+      !isCanonicalBoundedString(metrics.taskType, 80) ||
+      !isNonNegativeInteger(metrics.routeCount) ||
+      !isNonNegativeInteger(metrics.rolloutTargetCount) ||
+      !isNonNegativeInteger(metrics.langchainRouteCount) ||
+      !isNonNegativeInteger(opencodeRouteCount) ||
+      !isNonNegativeInteger(metrics.legacyRouteCount) ||
+      !isNonNegativeInteger(metrics.unavailableRouteCount) ||
+      !isNonNegativeInteger(metrics.fallbackCount) ||
+      (metrics.rolloutTargetCount as number) > (metrics.routeCount as number) ||
+      (metrics.langchainRouteCount as number) +
+        (opencodeRouteCount as number) +
+        (metrics.legacyRouteCount as number) +
+        (metrics.unavailableRouteCount as number) !== metrics.routeCount ||
+      (metrics.langchainRouteCount as number) +
+        (opencodeRouteCount as number) +
+        (metrics.fallbackCount as number) !== metrics.rolloutTargetCount ||
+      !isRatio(metrics.fallbackRate)) return false;
+    const expectedRate = (metrics.rolloutTargetCount as number) === 0
+      ? 0
+      : (metrics.fallbackCount as number) / (metrics.rolloutTargetCount as number);
+    if (Math.abs((metrics.fallbackRate as number) - expectedRate) > 1e-12) return false;
+    if (!isAgentRuntimeFallbackReasonCounts(metrics.fallbackReasons, metrics.fallbackCount as number)) {
+      return false;
+    }
+    if (!isUniqueBoundedStringArray(
+      metrics.observationIds,
+      metrics.routeCount as number,
+      320,
+    )) return false;
+    const key = `${metrics.providerId}\u0000${metrics.agentKind}\u0000${metrics.taskType}`;
+    if (dimensions.has(key)) return false;
+    dimensions.add(key);
+  }
+  return true;
+}
+
+function isUniqueBoundedStringArray(
+  value: unknown,
+  expectedLength: number,
+  maxItemLength: number,
+): boolean {
+  return Array.isArray(value) && value.length === expectedLength &&
+    value.every((item) => isCanonicalBoundedString(item, maxItemLength)) &&
+    new Set(value).size === value.length;
+}
+
+function isAgentRuntimeFallbackReasonCounts(value: unknown, fallbackCount: number): boolean {
+  if (!Array.isArray(value) || value.length > 5) return false;
+  const reasons = new Set<string>();
+  let total = 0;
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) return false;
+    const entry = item as Record<string, unknown>;
+    if ((entry.reason !== "native_tool_call_unavailable" &&
+      entry.reason !== "runtime_factory_unavailable" &&
+      entry.reason !== "runtime_initialization_failed" &&
+      entry.reason !== "eligible_tools_unavailable" &&
+      entry.reason !== "legacy_backend_selected") ||
+      reasons.has(entry.reason) || !isNonNegativeInteger(entry.count) || entry.count === 0) {
+      return false;
+    }
+    reasons.add(entry.reason);
+    total += entry.count as number;
+  }
+  return total === fallbackCount;
+}
+
+function isTokenUsageSummary(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const summary = value as Record<string, unknown>;
+  if (!isNonNegativeInteger(summary.inputTokens) ||
+    !isNonNegativeInteger(summary.outputTokens) ||
+    !isNonNegativeInteger(summary.totalTokens) ||
+    !isNonNegativeInteger(summary.modelCalls) ||
+    (summary.peakContextTokens !== undefined &&
+      !isNonNegativeInteger(summary.peakContextTokens)) ||
+    (summary.contextUsedTokens !== undefined &&
+      !isNonNegativeInteger(summary.contextUsedTokens)) ||
+    (summary.contextWindowTokens !== undefined &&
+      !isNonNegativeInteger(summary.contextWindowTokens)) ||
+    !Array.isArray(summary.byAgentKind) || summary.byAgentKind.length > 100) return false;
+  const agentKinds = new Set<string>();
+  for (const item of summary.byAgentKind) {
+    if (typeof item !== "object" || item === null) return false;
+    const usage = item as Record<string, unknown>;
+    if (!isNonEmptyString(usage.agentKind) || agentKinds.has(usage.agentKind) ||
+      !isNonNegativeInteger(usage.inputTokens) ||
+      !isNonNegativeInteger(usage.outputTokens) ||
+      !isNonNegativeInteger(usage.totalTokens) ||
+      !isNonNegativeInteger(usage.modelCalls)) return false;
+    agentKinds.add(usage.agentKind);
+  }
+  return true;
+}
+
+function isAgentRuntimeMetricsSnapshotArray(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > 3) return false;
+  const backends = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) return false;
+    const metrics = item as Record<string, unknown>;
+    if ((metrics.backend !== "legacy" && metrics.backend !== "langchain" &&
+      metrics.backend !== "opencode") ||
+      backends.has(metrics.backend)) return false;
+    backends.add(metrics.backend);
+    if (!isNonNegativeInteger(metrics.runCount) ||
+      !isNonNegativeInteger(metrics.completedRunCount) ||
+      (metrics.completedRunCount as number) > (metrics.runCount as number) ||
+      !isRatio(metrics.successRate) ||
+      !isNonNegativeNumber(metrics.totalDurationMs) ||
+      !isNonNegativeNumber(metrics.averageDurationMs) ||
+      !isNonNegativeInteger(metrics.modelCalls) ||
+      !isNonNegativeInteger(metrics.toolCalls)) return false;
+    if (metrics.usage !== undefined && !isAgentTokenUsage(metrics.usage)) return false;
+  }
+  return true;
+}
+
+function isAgentTokenUsage(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const usage = value as Record<string, unknown>;
+  return isNonNegativeInteger(usage.inputTokens) &&
+    isNonNegativeInteger(usage.outputTokens) &&
+    (usage.totalTokens === undefined || isNonNegativeInteger(usage.totalTokens));
+}
+
+function isRatio(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+function isNonNegativeNumber(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isNonNegativeInteger(value: unknown): boolean {
+  return Number.isInteger(value) && (value as number) >= 0;
 }
 
 function isWorkflowSnapshot(value: unknown): value is WorkbenchWorkflow {
@@ -211,6 +366,14 @@ function hasValidCheckpointStepPartition(
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function isBoundedString(value: unknown, maxLength: number): value is string {
+  return isNonEmptyString(value) && value.length <= maxLength;
+}
+
+function isCanonicalBoundedString(value: unknown, maxLength: number): value is string {
+  return isBoundedString(value, maxLength) && value === value.trim();
 }
 
 function isStringArray(value: unknown): value is string[] {

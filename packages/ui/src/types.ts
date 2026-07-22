@@ -27,6 +27,11 @@ export interface WorkbenchStep {
   id: string;
   title: string;
   status: string;
+  instruction?: string;
+  hardConstraints?: string[];
+  preferences?: string[];
+  acceptanceCriteria?: string[];
+  outputSchemaRef?: string;
   successCriteria?: string;
   agentKind?: string;
   agentId?: string;
@@ -182,6 +187,8 @@ export interface WorkbenchTokenUsageSummary {
   outputTokens: number;
   totalTokens: number;
   peakContextTokens?: number;
+  contextUsedTokens?: number;
+  contextWindowTokens?: number;
   modelCalls: number;
   byAgentKind: Array<{
     agentKind: string;
@@ -197,6 +204,7 @@ export type WorkbenchStreamingAgentKind =
   | "file"
   | "shell"
   | "browser"
+  | "page-agent"
   | "computer"
   | "scheduler"
   | "research"
@@ -485,6 +493,41 @@ export interface WorkbenchTask {
   recoveryReport?: WorkbenchRecoveryReport;
   /** User-readable error message shown in recovery section when task fails. */
   userFacingError?: string;
+  /** User-facing task progress shown in the main conversation. */
+  taskProgress?: WorkbenchTaskProgress;
+}
+
+export type WorkbenchTaskProgressStatus =
+  | "running"
+  | "completed"
+  | "completed_with_warnings"
+  | "failed";
+
+export type WorkbenchTaskProgressItemStatus =
+  | "queued"
+  | "running"
+  | "verifying"
+  | "completed"
+  | "blocked"
+  | "failed";
+
+export interface WorkbenchTaskProgressItem {
+  id: string;
+  label: string;
+  status: WorkbenchTaskProgressItemStatus;
+  detail?: string;
+  completedCount?: number;
+  expectedCount?: number;
+  sourceUrl?: string;
+}
+
+export interface WorkbenchTaskProgress {
+  title: string;
+  status: WorkbenchTaskProgressStatus;
+  currentAction?: string;
+  completedItems: number;
+  totalItems: number;
+  items: WorkbenchTaskProgressItem[];
 }
 
 export interface WorkbenchHandoffReport {
@@ -501,12 +544,33 @@ export interface WorkbenchHandoffReportStep {
   stepId: string;
   title?: string;
   assignedAgentKind: string;
+  instruction?: string;
+  hardConstraints?: string[];
+  preferences?: string[];
+  acceptanceCriteria?: string[];
+  outputSchemaRef?: string;
   dependsOn: string[];
   inputContextKeys: string[];
   outputContextKey?: string;
   missingInputContextKeys: string[];
   invalidInputContextKeys: string[];
   successCriteria?: string;
+  result?: WorkbenchStepResult;
+}
+
+export interface WorkbenchStepResult {
+  status: "completed" | "partial" | "blocked" | "needs_clarification" | "failed";
+  evidence: WorkbenchStepEvidence[];
+  assumptions: string[];
+  unresolvedQuestions: string[];
+  error?: string;
+}
+
+export interface WorkbenchStepEvidence {
+  kind: string;
+  label: string;
+  data?: unknown;
+  reference?: string;
 }
 
 export interface WorkbenchHandoffRecord {
@@ -516,6 +580,15 @@ export interface WorkbenchHandoffRecord {
   status: "available" | "missing" | "unconsumed" | "input_missing" | "invalid_schema";
   valueSummary: WorkbenchHandoffValueSummary;
   schemaError?: string;
+  artifact?: {
+    artifactId: string;
+    type: string;
+    schemaVersion: number;
+    outputSchemaRef?: string;
+    contentHash: string;
+    sensitivity: string;
+    producer: { stepId: string; agentKind?: string; toolName?: string };
+  };
 }
 
 export interface WorkbenchHandoffValueSummary {

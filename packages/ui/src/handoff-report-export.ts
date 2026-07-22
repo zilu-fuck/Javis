@@ -49,16 +49,18 @@ export function formatWorkbenchHandoffReportMarkdown(report: WorkbenchHandoffRep
     "",
     "## Steps",
     "",
-    "| Step | Agent | Inputs | Output | Missing inputs | Invalid inputs | Success criteria |",
+    "| Step | Agent | Instruction | Acceptance | Inputs | Output | Result |",
     "| --- | --- | --- | --- | --- | --- | --- |",
     ...report.steps.map((step) => [
       escapeMarkdownTableCell(step.title ? `${step.stepId} (${step.title})` : step.stepId),
       escapeMarkdownTableCell(step.assignedAgentKind),
+      escapeMarkdownTableCell(step.instruction ?? step.title ?? "none"),
+      escapeMarkdownTableCell((step.acceptanceCriteria ?? []).join("; ") || step.successCriteria || "none"),
       escapeMarkdownTableCell(formatList(step.inputContextKeys)),
       escapeMarkdownTableCell(step.outputContextKey ?? "none"),
-      escapeMarkdownTableCell(formatList(step.missingInputContextKeys)),
-      escapeMarkdownTableCell(formatList(step.invalidInputContextKeys)),
-      escapeMarkdownTableCell(step.successCriteria ?? ""),
+      escapeMarkdownTableCell(step.result?.status ?? (
+        step.missingInputContextKeys.length > 0 ? "blocked: missing input" : "not recorded"
+      )),
     ].join(" | ")).map((row) => `| ${row} |`),
     "",
   ];

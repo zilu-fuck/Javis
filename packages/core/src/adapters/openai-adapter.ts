@@ -21,6 +21,10 @@ export class OpenAIAdapter implements ProviderAdapter {
     vision: true,
     code: true,
     longContext: true,
+    nativeToolCalling: true,
+    streamingToolCalls: true,
+    structuredOutput: true,
+    parallelToolCalls: true,
   };
 
   buildCompletionRequest(input: AdapterCompletionInput): AdapterRequestPayload {

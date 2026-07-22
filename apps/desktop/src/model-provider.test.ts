@@ -37,7 +37,14 @@ describe("model provider", () => {
       text: "done",
       model: "gpt-test",
       provider: "openai",
-      tokenUsage: { inputTokens: 12, outputTokens: 4, totalTokens: 16 },
+      tokenUsage: {
+        inputTokens: 12,
+        outputTokens: 4,
+        totalTokens: 16,
+        model: "gpt-test",
+        provider: "openai",
+        contextWindowTokens: 32_000,
+      },
     });
     expect(invokeMock).toHaveBeenCalledWith("complete_model_prompt", {
       request: {
@@ -61,6 +68,28 @@ describe("model provider", () => {
         protocol: "openai-compatible",
         timeoutMs: undefined,
       },
+    });
+  });
+
+  it("preserves the provider-reported context window for the actual model", async () => {
+    invokeMock.mockResolvedValueOnce({
+      text: "done",
+      model: "routed-large-model",
+      provider: "openai",
+      tokenUsage: {
+        inputTokens: 12,
+        outputTokens: 4,
+        totalTokens: 16,
+        contextWindowTokens: 128_000,
+      },
+    });
+    const provider = createConfiguredModelProvider(createSettings());
+
+    await expect(provider.complete("Plan it")).resolves.toMatchObject({
+      tokenUsage: expect.objectContaining({
+        model: "routed-large-model",
+        contextWindowTokens: 128_000,
+      }),
     });
   });
 
@@ -137,7 +166,14 @@ describe("model provider", () => {
 
     expect(chunks).toEqual(["Hel", "lo"]);
     expect(seen).toEqual(["Hel", "lo"]);
-    expect(usages).toEqual([{ inputTokens: 8, outputTokens: 2, totalTokens: 10 }]);
+    expect(usages).toEqual([{
+      inputTokens: 8,
+      outputTokens: 2,
+      totalTokens: 10,
+      model: "gpt-test",
+      provider: "openai",
+      contextWindowTokens: 32_000,
+    }]);
     expect(invokeMock).toHaveBeenCalledWith("stream_model_prompt_start", {
       request: expect.objectContaining({
         prompt: "Say hello",

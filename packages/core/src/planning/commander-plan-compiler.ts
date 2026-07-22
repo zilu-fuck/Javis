@@ -19,6 +19,8 @@ import type {
 } from "./commander-plan-diagnostics";
 import { isRepairable } from "./commander-plan-diagnostics";
 import { validateCommanderPlan, type PlanValidationInput } from "./commander-plan-validator";
+import { normalizeStepContract } from "../step-protocol";
+import { normalizeAgentKind } from "../agents";
 
 // --- Public API --------------------------------------------------------------
 
@@ -49,8 +51,30 @@ export interface CompileCommanderPlanInput {
 export function compileCommanderPlan(
   input: CompileCommanderPlanInput,
 ): CompileCommanderPlanResult {
+  const normalizedPlan: CommanderDagPlan = {
+    ...input.plan,
+    steps: input.plan.steps.map((step) => {
+      const toolCapabilities = step.toolName
+        ? input.availableTools.find((tool) => tool.name === step.toolName)?.capabilityTags ?? []
+        : [];
+      const inferredPrimaryCapability = step.primaryCapability ??
+        (step.capability || (step.requiredCapabilities?.length === 1
+          ? step.requiredCapabilities[0]
+          : undefined)) ??
+        (toolCapabilities.length === 1 ? toolCapabilities[0] : undefined);
+      return {
+        ...step,
+        assignedAgentKind: normalizeAgentKind(step.assignedAgentKind),
+        ...(inferredPrimaryCapability ? { primaryCapability: inferredPrimaryCapability } : {}),
+        ...normalizeStepContract({
+          ...step,
+          ...(inferredPrimaryCapability ? { primaryCapability: inferredPrimaryCapability } : {}),
+        }),
+      };
+    }),
+  };
   const validationInput: PlanValidationInput = {
-    plan: input.plan,
+    plan: normalizedPlan,
     availableAgents: input.availableAgents,
     availableTools: input.availableTools,
     existingSteps: input.existingSteps,
@@ -73,7 +97,7 @@ export function compileCommanderPlan(
 
   return {
     ok: true,
-    plan: input.plan as CompiledCommanderPlan,
+    plan: normalizedPlan as CompiledCommanderPlan,
     warnings,
   };
 }

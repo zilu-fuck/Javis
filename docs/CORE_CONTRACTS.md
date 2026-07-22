@@ -116,26 +116,26 @@ show which path produced the evidence.
 Supports:
 
 - `inspectRepository()`
-- optional `proposeEdit(request)`
-- optional `applyProposedEdit(proposal)`
+- optional legacy `proposeEdit(request)` transport (not a Commander step)
+- optional `applyProposedEdit(proposal)` apply transport
 
 It returns the workspace path, changed files, diff stat, and a bounded diff
 preview for the current local repository state. Core treats the preview as a
 `preview` permission step before running read-only verification.
 
-The proposed-edit and apply functions form the Code Agent edit boundary. When
-`proposeEdit` is not configured, Code Agent routes stop after read-only diff
-verification. When it is configured, Core expects proposal metadata, affected
-files, patch text, and a patch hash. Patch application requires a
-`confirmed_write` permission request bound to that exact proposal, and Core
-validates the hash before approval and again before apply.
+`code_propose` is a `react` step owned by the OpenCode AgentRuntime. The
+runtime receives the diff preview as input and returns the final `StepResult`;
+Core publishes that output as an `ArtifactEnvelope` whose producer is
+`agent.opencode`. The OpenCode bridge exposes no `code.proposeEdit` or
+`code.applyProposedEdit` tool, and its edit, shell, and web permissions remain
+denied.
 
-The desktop app configures an opencode-backed `proposeEdit` adapter that asks
-opencode for a strict JSON patch proposal while denying edit, shell, and web
-tool permissions through opencode configuration. The adapter returns proposal
-metadata only; it must not write files. The desktop app also configures a local
-`applyProposedEdit` backend that applies approved unified diffs through the
-native boundary after Javis confirmed-write approval.
+`proposeEdit` remains only as a desktop transport adapter used by the
+OpenCode runtime factory and by historical integrations. The degraded
+code-review flow is read-only even when that callback is present. A patch can
+be applied only by a Javis direct apply path after a `confirmed_write`
+permission request bound to the exact proposal; the native boundary validates
+the preview hash, path scope, file hashes, and one-shot approval consumption.
 
 The desktop workbench owns the opencode model settings for this adapter. The
 current settings are provider id, model id, API key, and optional base URL. On

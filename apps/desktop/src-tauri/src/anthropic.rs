@@ -20,7 +20,7 @@ const ANTHROPIC_TIMEOUT: Duration = Duration::from_secs(90);
 const ANTHROPIC_STREAMING_TIMEOUT: Duration = Duration::from_secs(120);
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 
-fn anthropic_endpoint(base_url: &str) -> String {
+pub(crate) fn anthropic_endpoint(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
     if trimmed.ends_with("/messages") {
         return trimmed.to_string();
@@ -31,7 +31,7 @@ fn anthropic_endpoint(base_url: &str) -> String {
     format!("{trimmed}/messages")
 }
 
-fn default_anthropic_base_url(provider_id: &str) -> String {
+pub(crate) fn default_anthropic_base_url(provider_id: &str) -> String {
     match provider_id {
         "anthropic" => "https://api.anthropic.com/v1".to_string(),
         "deepseek" | "deepseek-anthropic" => "https://api.deepseek.com/anthropic".to_string(),
@@ -39,7 +39,7 @@ fn default_anthropic_base_url(provider_id: &str) -> String {
     }
 }
 
-fn build_anthropic_headers(api_key: &str, provider_id: &str) -> Vec<(String, String)> {
+pub(crate) fn build_anthropic_headers(api_key: &str, provider_id: &str) -> Vec<(String, String)> {
     let mut headers = vec![
         ("x-api-key".to_string(), api_key.to_string()),
         (
@@ -129,7 +129,7 @@ fn build_anthropic_message_content(
     Ok(serde_json::json!(content))
 }
 
-fn parse_data_url(value: &str) -> Result<(String, String), String> {
+pub(crate) fn parse_data_url(value: &str) -> Result<(String, String), String> {
     let rest = value
         .strip_prefix("data:")
         .ok_or_else(|| "Image data URL must start with data:.".to_string())?;

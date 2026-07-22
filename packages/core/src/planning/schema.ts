@@ -36,7 +36,7 @@ import {
 export const PLAN_GENERATION_TRACE_SCHEMA_VERSION = "1.0.0";
 
 /** Bumped whenever the commander plan shape changes. */
-export const COMMANDER_PLAN_SCHEMA_VERSION = "1.2.0";
+export const COMMANDER_PLAN_SCHEMA_VERSION = "1.4.0";
 
 /**
  * Bumped whenever the planner prompt template text changes
@@ -45,7 +45,7 @@ export const COMMANDER_PLAN_SCHEMA_VERSION = "1.2.0";
  * post-mortem analytics can correlate plan success with prompt
  * version.
  */
-export const COMMANDER_PLAN_PROMPT_VERSION = "1.3.0";
+export const COMMANDER_PLAN_PROMPT_VERSION = "1.5.0";
 
 // --- Tool descriptor input shapes --------------------------------------------
 
@@ -128,6 +128,18 @@ export const CommanderDagStepShape = z.object({
     .regex(/^[a-z][a-z0-9-]*[a-z0-9]$/, "id must be kebab-case"),
   title: z.string().min(1),
   assignedAgentKind: z.string().min(1),
+  instruction: z.string().min(1).optional(),
+  hardConstraints: z.array(z.string()).optional(),
+  preferences: z.array(z.string()).optional(),
+  acceptanceCriteria: z.array(z.string()).optional(),
+  outputSchemaRef: z.string().min(1).optional(),
+  primaryCapability: z.string().min(1).optional(),
+  artifactObligation: z.enum(["required", "optional", "none"]).optional(),
+  completionPolicy: z.object({
+    partial: z.enum(["publish_and_continue", "retain_and_replan", "stop"]).optional(),
+    blocked: z.enum(["wait", "replan"]).optional(),
+    needsClarification: z.enum(["ask_user", "replan"]).optional(),
+  }).optional(),
   toolName: z.string().optional(),
   capability: z.string().optional(),
   requiredCapabilities: z.array(z.string()),
@@ -268,16 +280,14 @@ export function planShapeToPromptText(): string {
       + "id:kebab-case, "
       + "title:string, "
       + "assignedAgentKind:string, "
+      + "instruction?, hardConstraints?, preferences?, acceptanceCriteria?, outputSchemaRef?, "
+      + "primaryCapability?, artifactObligation?, completionPolicy?, "
       + "successCriteria:string, "
       + "requiredCapabilities?:string[], "
       + "capability?:string, "
       + "toolName?:string, "
-      + "dependsOn?:string[], "
-      + "inputContextKeys?:string[], "
-      + "toolInput?:object, "
-      + "outputContextKey?:string, "
-      + "choices?:(string|{label,value,isRecommended?})[], "
-      + "executionMode?:direct_response|direct_tool_call|react"
+      + "dependsOn?, inputContextKeys?, toolInput?, outputContextKey?, choices?, "
+      + "executionMode?:direct_response|direct_tool_call|react|desktop_input"
       + "}",
   );
   return lines.join("\n");
@@ -352,6 +362,11 @@ export const COMMANDER_PLAN_PROMPT_EXAMPLE_FULL: CommanderDagPlanT = {
       id: "search-code",
       title: "Search the repo for the requested change",
       assignedAgentKind: "code",
+      instruction: "Search the selected repository for launch-code evidence.",
+      hardConstraints: ["Read only", "Do not infer unobserved files"],
+      preferences: ["Prefer entry points and manifests"],
+      acceptanceCriteria: ["Matching files are returned with source evidence."],
+      outputSchemaRef: "repoEvidence",
       toolName: "code.searchRepository",
       requiredCapabilities: ["code_search"],
       dependsOn: [],
@@ -363,6 +378,11 @@ export const COMMANDER_PLAN_PROMPT_EXAMPLE_FULL: CommanderDagPlanT = {
       id: "verify-evidence",
       title: "Verify the repository evidence",
       assignedAgentKind: "verifier",
+      instruction: "Check the repository evidence against the acceptance criteria.",
+      hardConstraints: ["Do not invent missing evidence"],
+      preferences: [],
+      acceptanceCriteria: ["The verdict identifies satisfied criteria and gaps."],
+      outputSchemaRef: "verificationResult",
       toolName: "verifier.check",
       requiredCapabilities: ["evidence_check"],
       dependsOn: ["search-code"],
@@ -374,6 +394,11 @@ export const COMMANDER_PLAN_PROMPT_EXAMPLE_FULL: CommanderDagPlanT = {
       id: "summarize",
       title: "Summarize the evidence for the user",
       assignedAgentKind: "commander",
+      instruction: "Write the final answer from verified repository evidence.",
+      hardConstraints: ["Use verified evidence only"],
+      preferences: ["Keep the answer concise"],
+      acceptanceCriteria: ["The summary names the files and explains their roles."],
+      outputSchemaRef: "summary",
       toolName: "commander.synthesize",
       requiredCapabilities: ["synthesis"],
       dependsOn: ["verify-evidence"],

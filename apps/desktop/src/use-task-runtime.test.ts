@@ -30,8 +30,9 @@ describe("useTaskRuntime", () => {
     vi.useRealTimers();
   });
 
-  function setupHook() {
+  function setupHook(taskHistoryRepository: { upsert(task: TaskSnapshot): Promise<TaskSnapshot[]> } | null = null) {
     let subscriber: ((snapshot: TaskSnapshot) => void) | null = null;
+    let historyState: TaskSnapshot[] = [];
     const runtime = {
       subscribe: vi.fn((fn: (snapshot: TaskSnapshot) => void) => {
         subscriber = fn;
@@ -44,9 +45,7 @@ describe("useTaskRuntime", () => {
     };
 
     const setHistory = vi.fn((updater) => {
-      if (typeof updater === "function") {
-        updater([]);
-      }
+      historyState = typeof updater === "function" ? updater(historyState) : updater;
     });
     const setActiveHistoryEntryId = vi.fn();
     const setScheduledTasks = vi.fn();
@@ -63,13 +62,20 @@ describe("useTaskRuntime", () => {
         persistWorkspaceForTask,
         persistDurableApprovalRecord,
         onTaskSnapshot,
-        taskHistoryRepoRef: { current: null },
+        taskHistoryRepoRef: { current: taskHistoryRepository },
         scheduledTasksRepoRef: { current: null },
         workspacePathRef: { current: "/test" },
       } as any),
     );
 
-    return { result, runtime, setActiveHistoryEntryId, onTaskSnapshot, persistDurableApprovalRecord };
+    return {
+      result,
+      runtime,
+      setActiveHistoryEntryId,
+      onTaskSnapshot,
+      persistDurableApprovalRecord,
+      getHistory: () => historyState,
+    };
   }
 
   it("initializes with isTaskActive false and idle task snapshot", () => {
@@ -166,5 +172,62 @@ describe("useTaskRuntime", () => {
     });
 
     expect(setActiveHistoryEntryId).toHaveBeenCalledWith("task-done");
+  });
+
+  it("archives and persists failed DAG snapshots with undefined optional fields", () => {
+    const repository = { upsert: vi.fn().mockResolvedValue([]) };
+    const { runtime, getHistory } = setupHook(repository);
+    const failed = createTaskSnapshot({
+      id: "task-failed",
+      status: "failed",
+      plan: [{
+        id: "fallback",
+        title: "Try Page Agent fallback",
+        assignedAgentKind: "page-agent",
+        status: "failed",
+        inputContextKeys: undefined,
+        outputContextKey: undefined,
+      }],
+      logs: [{
+        id: "task-failed-waiting",
+        kind: "event",
+        title: "waiting_model",
+        detail: "Waiting for Page Agent.",
+        agentId: undefined,
+        stepId: undefined,
+      }],
+    });
+
+    act(() => {
+      runtime.emit(failed);
+    });
+
+    expect(getHistory()).toHaveLength(1);
+    expect(getHistory()[0]).toMatchObject({ id: "task-failed", status: "failed" });
+    expect(repository.upsert).toHaveBeenCalledWith(failed);
+  });
+
+  it("reports terminal history persistence failures", async () => {
+    const error = new Error("database unavailable");
+    const repository = { upsert: vi.fn().mockRejectedValue(error) };
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { runtime } = setupHook(repository);
+
+    act(() => {
+      runtime.emit(createTaskSnapshot({ id: "task-failed-write", status: "failed" }));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(warn).toHaveBeenCalledWith(
+      "[TaskHistory] Failed to persist task snapshot.",
+      expect.objectContaining({
+        taskId: "task-failed-write",
+        status: "failed",
+        error,
+      }),
+    );
+    warn.mockRestore();
   });
 });

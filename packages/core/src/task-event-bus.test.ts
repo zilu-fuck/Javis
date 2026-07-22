@@ -44,6 +44,38 @@ describe("taskEventToLogEntry", () => {
     expect(log.agentId).toBe("agent-shell");
   });
 
+  it("omits absent optional ownership fields from lifecycle logs", () => {
+    const events = [
+      {
+        kind: "task.waiting",
+        taskId: "task-1",
+        phase: "waiting_model",
+        label: "Commander plan",
+        detail: "Waiting for Commander to generate a DAG plan.",
+      },
+      {
+        kind: "task.timeout",
+        taskId: "task-1",
+        phase: "waiting_model",
+        label: "Commander plan",
+        timeoutMs: 90_000,
+        detail: "Commander planning timed out.",
+      },
+      {
+        kind: "task.cancelled",
+        taskId: "task-1",
+        label: "Commander plan",
+        detail: "Commander planning was cancelled.",
+      },
+    ] satisfies TaskRuntimeEvent[];
+
+    for (const event of events) {
+      const log = taskEventToLogEntry(event);
+      expect(Object.prototype.hasOwnProperty.call(log, "agentId")).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(log, "stepId")).toBe(false);
+    }
+  });
+
   it("links permission logs to explicit step and tool owners without changing detail", () => {
     const requested = taskEventToLogEntry({
       kind: "permission.requested",
@@ -88,7 +120,7 @@ describe("taskEventToLogEntry", () => {
     expect(resolved.devDetail).toBe("Permission permission-1 was approved.");
   });
 
-  it("keeps raw errors in developer detail while shortening user text", () => {
+  it("keeps raw errors in developer detail without exposing multiline internals", () => {
     const log = taskEventToLogEntry({
       kind: "task.failed",
       taskId: "task-1",
@@ -97,6 +129,74 @@ describe("taskEventToLogEntry", () => {
 
     expect(log.userMessage).toBe("出错: first line");
     expect(log.devDetail).toBe("first line\nstack trace line");
+  });
+
+  it("surfaces a safe rate-limit reason for multiline Commander compilation failures", () => {
+    const error = [
+      "Commander plan compilation failed:",
+      "ERROR INVALID_EXECUTION_MODE: Repair model call failed with API rate limit 429. Bearer sk-secret-value",
+      "at C:/internal/provider.ts:42:7",
+    ].join("\n");
+    const log = taskEventToLogEntry({
+      kind: "task.failed",
+      taskId: "task-1",
+      error,
+    });
+
+    expect(log.userMessage).toBe("出错: Commander 计划编译失败：请求频率过高，请稍后重试。");
+    expect(log.userMessage).not.toContain("C:/internal");
+    expect(log.userMessage).not.toContain("sk-secret-value");
+    expect(log.detail).not.toContain("sk-secret-value");
+    expect(log.devDetail).not.toContain("sk-secret-value");
+    expect(log.devDetail).toContain("[redacted:secret]");
+  });
+
+  it("surfaces an actionable reason for an unrepairable incomplete Commander plan", () => {
+    const error = [
+      "Commander plan compilation failed:",
+      "ERROR MISSING_APPROVAL_TOOL_SELECTION [step=write-file]: no explicit toolName was provided.",
+      "ERROR MISSING_TOOL_INPUT [step=write-file]: toolInput is incomplete.",
+      "ERROR MISSING_VERIFIER [step=summary]: verifier is missing.",
+    ].join("\n");
+    const log = taskEventToLogEntry({
+      kind: "task.failed",
+      taskId: "task-1",
+      error,
+    });
+
+    expect(log.userMessage).toBe(
+      "出错: Commander 计划中的工具或必要输入不完整，自动修复未成功，请重试。",
+    );
+  });
+
+  it("redacts credentials from replan and step failure logs", () => {
+    const events: TaskRuntimeEvent[] = [
+      {
+        kind: "task.replan_started",
+        taskId: "task-1",
+        failedStepId: "step-1",
+        error: "Authorization: Bearer sk-replan-secret",
+      },
+      {
+        kind: "task.replan_failed",
+        taskId: "task-1",
+        failedStepId: "step-1",
+        error: "api_key=sk-replan-secret",
+      },
+      {
+        kind: "step.failed",
+        taskId: "task-1",
+        stepId: "step-1",
+        error: "password=hunter2-secret",
+      },
+    ];
+
+    for (const event of events) {
+      const serialized = JSON.stringify(taskEventToLogEntry(event));
+      expect(serialized).not.toContain("sk-replan-secret");
+      expect(serialized).not.toContain("hunter2-secret");
+      expect(serialized).toContain("[redacted:secret]");
+    }
   });
 
   it("identifies the full agent run event family for UI consumers", () => {

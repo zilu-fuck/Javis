@@ -29,6 +29,7 @@ export type RuntimeEventKind =
   | "task.completed"
   | "task.failed"
   | "runtime.compacted"
+  | "agent.runtime_routed"
   | "agent.status"
   | "agent.chunk_start"
   | "agent.chunk"
@@ -55,6 +56,7 @@ export const STRUCTURAL_EVENT_KINDS: ReadonlySet<RuntimeEventKind> = new Set([
   "task.completed",
   "task.failed",
   "runtime.compacted",
+  "agent.runtime_routed",
   "step.started",
   "step.completed",
   "step.failed",

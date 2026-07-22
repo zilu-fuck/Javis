@@ -28,6 +28,7 @@ import {
 import { isRepairable } from "./commander-plan-diagnostics";
 import { CommanderDagPlanShape } from "./schema";
 import { CommanderPlanResultShape } from "@javis/tools";
+import { normalizeStepContract } from "../step-protocol";
 
 // --- Public types ------------------------------------------------------------
 
@@ -42,6 +43,8 @@ export interface RepairAttemptRecord {
 export interface AttemptPlanRepairInput {
   commanderPlan: (request: CommanderPlanRequest) => Promise<CommanderPlanResult>;
   originalUserGoal: string;
+  /** Preserve the runtime-selected workspace across repair model calls. */
+  workspacePath?: string;
   /** Transport-only image data for vision-capable repair calls. */
   modelImages?: string[];
   invalidPlan: CommanderDagPlan;
@@ -124,6 +127,7 @@ function normalizeResultToDagPlan(result: CommanderPlanResult): CommanderDagPlan
       !Array.isArray(step.toolInput);
     return {
       ...step,
+      ...normalizeStepContract(step),
       capability: step.capability,
       requiredCapabilities: step.requiredCapabilities ?? [],
       dependsOn: step.dependsOn ?? [],
@@ -230,6 +234,7 @@ export async function attemptPlanRepair(
 
     const request: CommanderPlanRequest = {
       userGoal: input.originalUserGoal,
+      ...(input.workspacePath ? { workspacePath: input.workspacePath } : {}),
       ...(input.modelImages?.length ? { images: input.modelImages } : {}),
       availableAgents: input.availableAgents.map((a) => ({
         kind: a.kind,

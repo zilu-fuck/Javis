@@ -26,6 +26,9 @@ export class AnthropicAdapter implements ProviderAdapter {
     vision: true,
     code: true,
     longContext: true,
+    nativeToolCalling: true,
+    streamingToolCalls: true,
+    parallelToolCalls: true,
   };
 
   constructor(adapterId = "anthropic") {

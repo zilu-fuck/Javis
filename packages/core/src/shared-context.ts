@@ -5,6 +5,7 @@ import {
   type ArtifactEnvelope,
   type ArtifactSensitivity,
 } from "./artifact-envelope";
+import type { StepResult } from "./step-protocol";
 
 export interface SharedTaskContext {
   set<T>(key: string, value: T): void;
@@ -31,6 +32,7 @@ export interface StepArtifactOutputContext {
   toolName?: string;
   type?: string;
   schemaVersion?: number;
+  outputSchemaRef?: string;
   sensitivity?: ArtifactSensitivity;
 }
 
@@ -65,6 +67,11 @@ export interface HandoffReportStep {
   id: string;
   title?: string;
   assignedAgentKind: string;
+  instruction?: string;
+  hardConstraints?: string[];
+  preferences?: string[];
+  acceptanceCriteria?: string[];
+  outputSchemaRef?: string;
   dependsOn?: string[];
   inputContextKeys?: string[];
   outputContextKey?: string;
@@ -90,6 +97,7 @@ export interface HandoffReportRecord {
     artifactId: string;
     type: string;
     schemaVersion: number;
+    outputSchemaRef?: string;
     contentHash: string;
     sensitivity: string;
     producer: { stepId: string; agentKind?: string; toolName?: string };
@@ -105,12 +113,18 @@ export interface HandoffReportStepRecord {
   stepId: string;
   title?: string;
   assignedAgentKind: string;
+  instruction?: string;
+  hardConstraints?: string[];
+  preferences?: string[];
+  acceptanceCriteria?: string[];
+  outputSchemaRef?: string;
   dependsOn: string[];
   inputContextKeys: string[];
   outputContextKey?: string;
   missingInputContextKeys: string[];
   invalidInputContextKeys: string[];
   successCriteria?: string;
+  result?: StepResult;
 }
 
 export interface HandoffReport {
@@ -283,6 +297,7 @@ function toArtifactEnvelope(
     runId: context.runId,
     type: context.type ?? outputContextKey,
     schemaVersion: context.schemaVersion,
+    outputSchemaRef: context.outputSchemaRef,
     producer: {
       workflowId: context.workflowId,
       stepId: context.stepId,
@@ -432,16 +447,25 @@ export function buildHandoffReport(
       .map((key) => validateContextValue(key, snapshot[key]))
       .filter((validation) => !validation.valid)
       .map((validation) => validation.key);
+    const result = snapshot[`stepResult:${step.id}`];
     return {
       stepId: step.id,
       title: step.title,
       assignedAgentKind: step.assignedAgentKind,
+      instruction: step.instruction,
+      hardConstraints: step.hardConstraints ?? [],
+      preferences: step.preferences ?? [],
+      acceptanceCriteria: step.acceptanceCriteria ?? (
+        step.successCriteria ? [step.successCriteria] : []
+      ),
+      outputSchemaRef: step.outputSchemaRef,
       dependsOn: step.dependsOn ?? [],
       inputContextKeys,
       outputContextKey: step.outputContextKey,
       missingInputContextKeys,
       invalidInputContextKeys,
       successCriteria: step.successCriteria,
+      ...(isStepResult(result) ? { result } : {}),
     };
   });
 
@@ -474,6 +498,7 @@ export function buildHandoffReport(
       artifactId: envelope.artifactId,
       type: envelope.type,
       schemaVersion: envelope.schemaVersion,
+      ...(envelope.outputSchemaRef ? { outputSchemaRef: envelope.outputSchemaRef } : {}),
       contentHash: envelope.contentHash,
       sensitivity: envelope.sensitivity ?? "public",
       producer: {
@@ -518,6 +543,12 @@ export function buildHandoffReport(
   const invalidInputContextKeys = [...new Set(
     stepRecords.flatMap((step) => step.invalidInputContextKeys),
   )].sort();
+  const hasIncompleteStepResult = stepRecords.some((step) =>
+    step.result && (
+      step.result.status !== "completed" ||
+      step.result.unresolvedQuestions.length > 0
+    )
+  );
 
   return {
     generatedAt: options.generatedAt ?? new Date().toISOString(),
@@ -526,7 +557,10 @@ export function buildHandoffReport(
     missingInputContextKeys,
     invalidInputContextKeys,
     unconsumedOutputContextKeys,
-    status: missingInputContextKeys.length || invalidInputContextKeys.length || unconsumedOutputContextKeys.length
+    status: missingInputContextKeys.length ||
+      invalidInputContextKeys.length ||
+      unconsumedOutputContextKeys.length ||
+      hasIncompleteStepResult
       ? "needs_attention"
       : "complete",
   };
@@ -582,14 +616,18 @@ export function formatHandoffReportMarkdown(report: HandoffReport): string {
     "",
     "## Steps",
     "",
-    "| Step | Agent | Inputs | Output | Missing inputs |",
-    "| --- | --- | --- | --- | --- |",
+    "| Step | Agent | Instruction | Acceptance | Inputs | Output | Result |",
+    "| --- | --- | --- | --- | --- | --- | --- |",
     ...report.steps.map((step) => [
       escapeMarkdownTableCell(step.stepId),
       escapeMarkdownTableCell(step.assignedAgentKind),
+      escapeMarkdownTableCell(step.instruction ?? step.title ?? "none"),
+      escapeMarkdownTableCell((step.acceptanceCriteria ?? []).join("; ") || step.successCriteria || "none"),
       escapeMarkdownTableCell(step.inputContextKeys.join(", ") || "none"),
       escapeMarkdownTableCell(step.outputContextKey ?? "none"),
-      escapeMarkdownTableCell(step.missingInputContextKeys.join(", ") || "none"),
+      escapeMarkdownTableCell(step.result?.status ?? (
+        step.missingInputContextKeys.length > 0 ? "blocked: missing input" : "not recorded"
+      )),
     ].join(" | ")).map((row) => `| ${row} |`),
     "",
   ];
@@ -600,6 +638,15 @@ function isSharedTaskContext(value: unknown): value is SharedTaskContext {
   return typeof value === "object" &&
     value !== null &&
     typeof (value as SharedTaskContext).snapshot === "function";
+}
+
+function isStepResult(value: unknown): value is StepResult {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.status === "string" &&
+    Array.isArray(candidate.evidence) &&
+    Array.isArray(candidate.assumptions) &&
+    Array.isArray(candidate.unresolvedQuestions);
 }
 
 function resolveHandoffStatus(input: {

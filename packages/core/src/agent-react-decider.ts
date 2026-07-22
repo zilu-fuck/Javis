@@ -7,6 +7,11 @@ export interface ReActDecisionRequest {
   stepId: string;
   stepTitle: string;
   userGoal: string;
+  instruction?: string;
+  hardConstraints?: string[];
+  preferences?: string[];
+  acceptanceCriteria?: string[];
+  outputSchemaRef?: string;
   /** Commander's success criteria for this step — guides the ReAct LLM on when to declare completion. */
   successCriteria?: string;
   /** Primary capability tag for this step — tells the ReAct LLM which tool category is expected. */
@@ -105,6 +110,11 @@ export function buildReActDecisionUserPrompt(request: ReActDecisionRequest): str
     `${localizedLabel(locale, "User goal", "用户目标")}: ${request.userGoal}`,
     `${localizedLabel(locale, "Current step", "当前步骤")}: ${request.stepId} - ${request.stepTitle}`,
     `${localizedLabel(locale, "Agent", "代理")}: ${request.agentKind}`,
+    `${localizedLabel(locale, "Instruction", "任务指令")}: ${request.instruction ?? request.stepTitle}`,
+    `${localizedLabel(locale, "Hard constraints", "硬约束")}: ${JSON.stringify(request.hardConstraints ?? [])}`,
+    `${localizedLabel(locale, "Preferences", "偏好")}: ${JSON.stringify(request.preferences ?? [])}`,
+    `${localizedLabel(locale, "Acceptance criteria", "验收标准")}: ${JSON.stringify(request.acceptanceCriteria ?? [])}`,
+    `${localizedLabel(locale, "Output schema", "输出结构")}: ${request.outputSchemaRef ?? "unspecified"}`,
     `${localizedLabel(locale, "Success criteria", "成功标准")}: ${request.successCriteria ?? getDefaultSuccessCriteria(locale)}`,
     `${localizedLabel(locale, "Primary capability", "主要能力")}: ${request.capability ?? "general"}`,
     "",

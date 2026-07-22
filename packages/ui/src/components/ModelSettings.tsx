@@ -109,7 +109,7 @@ const FALLBACK_AGENT_CATALOG: WorkbenchAgentCatalogEntry[] = [
   { kind: "file", displayName: "File Agent" },
   { kind: "shell", displayName: "Shell Agent" },
   { kind: "computer", displayName: "Computer Agent" },
-  { kind: "browser", displayName: "Browser Agent" },
+  { kind: "page-agent", displayName: "Page Agent" },
   { kind: "workspace", displayName: "Workspace Agent" },
   { kind: "vision", displayName: "Vision Agent" },
 ];

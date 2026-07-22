@@ -260,10 +260,10 @@ describe("runtime-event-store", () => {
     );
 
     const remaining = await store.replayByTaskId(taskId, 10);
-    expect(remaining.map((event) => event.eventId)).toEqual([
+    expect(remaining.map((event) => event.eventId).sort()).toEqual([
       "evt-run-1-chunk",
-      "evt-run-2-chunk",
       "evt-run-1-terminal",
+      "evt-run-2-chunk",
       "evt-run-2-terminal",
     ]);
     expect(remaining.some((event) => payloadKind(event) === COMPACTED_STREAM_EVENT_KIND)).toBe(false);

@@ -56,6 +56,24 @@ describe("delegation policy", () => {
 
     expect(delegatedCodeAgent?.allowedToolNames).toContain("code.proposeEdit");
     expect(delegatedCodeAgent?.allowedToolNames).not.toContain("code.applyProposedEdit");
+    expect(delegatedCodeAgent?.capabilities).toContain("code_propose");
+    expect(delegatedCodeAgent?.capabilities).not.toContain("code_apply");
+    const delegatedDocUpdater = delegatedAgents.find((agent) => agent.kind === "doc-updater");
+    expect(delegatedDocUpdater?.allowedToolNames).not.toContain("file.writeText");
+    expect(delegatedDocUpdater?.capabilities).toContain("doc_update");
+    expect(delegatedDocUpdater?.capabilities).not.toContain("file_execute");
     expect(delegatedAgents.find((agent) => agent.kind === "commander")).toBeUndefined();
+  });
+
+  it("preserves role-level capabilities in the Core planning contract", () => {
+    const agents = getAvailableAgentsForPlanning(
+      initialToolDescriptors,
+      "统计微博热搜并写入文件",
+    );
+
+    expect(agents.find((agent) => agent.kind === "doc-updater")?.capabilities)
+      .toContain("doc_update");
+    expect(agents.find((agent) => agent.kind === "research")?.capabilities)
+      .toContain("synthesis");
   });
 });

@@ -266,6 +266,7 @@ describe("runtime-event-envelope", () => {
       expect(isStructuralEvent("task.completed")).toBe(true);
       expect(isStructuralEvent("task.failed")).toBe(true);
       expect(isStructuralEvent("runtime.compacted")).toBe(true);
+      expect(isStructuralEvent("agent.runtime_routed")).toBe(true);
       expect(isStructuralEvent("step.started")).toBe(true);
       expect(isStructuralEvent("step.completed")).toBe(true);
       expect(isStructuralEvent("step.failed")).toBe(true);

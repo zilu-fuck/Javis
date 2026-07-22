@@ -12,6 +12,97 @@ import { createSharedTaskContext } from "./shared-context";
 import type { WorkbenchWorkflowStep } from "./workflows";
 
 describe("runAgentReActLoop", () => {
+  it("records backend-neutral legacy run metrics without changing the result", async () => {
+    const metrics = vi.fn(() => {
+      throw new Error("metrics sink unavailable");
+    });
+    const result = await runAgentReActLoop({
+      agent: mustAgent("file"),
+      step: step("file"),
+      context: createSharedTaskContext(),
+      tools: [{
+        name: "file.scanMarkdownDocuments",
+        execute: async () => ({ sources: [{ url: "https://example.test" }] }),
+      }],
+      decideNext: vi.fn()
+        .mockResolvedValueOnce({
+          status: "continue",
+          toolName: "file.scanMarkdownDocuments",
+          reason: "search",
+          usage: { inputTokens: 4, outputTokens: 2 },
+        })
+        .mockResolvedValueOnce({
+          status: "completed",
+          reason: "done",
+          usage: { inputTokens: 3, outputTokens: 1, totalTokens: 4 },
+        }),
+      onRunMetrics: metrics,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.metrics).toMatchObject({
+      backend: "legacy",
+      status: "completed",
+      modelCalls: 2,
+      toolCalls: 1,
+      usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 },
+    });
+    expect(metrics).toHaveBeenCalledWith(result.metrics);
+  });
+
+  it("counts dispatched tools on a later model failure and isolates metrics observers", async () => {
+    const metrics = vi.fn(() => {
+      throw new Error("metrics sink unavailable");
+    });
+    const decideNext = vi.fn()
+      .mockResolvedValueOnce({
+        status: "continue",
+        toolName: "file.scanMarkdownDocuments",
+        reason: "scan",
+      })
+      .mockRejectedValueOnce(new Error("model unavailable"));
+
+    await expect(runAgentReActLoop({
+      agent: mustAgent("file"),
+      step: step("file"),
+      context: createSharedTaskContext(),
+      tools: [{
+        name: "file.scanMarkdownDocuments",
+        execute: async () => ({ sources: [{ url: "https://example.test" }] }),
+      }],
+      decideNext,
+      onRunMetrics: metrics,
+    })).rejects.toThrow("model unavailable");
+
+    expect(metrics).toHaveBeenCalledWith(expect.objectContaining({
+      backend: "legacy",
+      status: "failed",
+      modelCalls: 2,
+      toolCalls: 1,
+    }));
+  });
+
+  it("does not report zero token usage when the provider omits usage", async () => {
+    const result = await runAgentReActLoop({
+      agent: mustAgent("file"),
+      step: step("file"),
+      context: createSharedTaskContext(),
+      tools: [{
+        name: "file.scanMarkdownDocuments",
+        execute: async () => ({ sources: [{ url: "https://example.test" }] }),
+      }],
+      decideNext: vi.fn()
+        .mockResolvedValueOnce({
+          status: "continue",
+          toolName: "file.scanMarkdownDocuments",
+          reason: "scan",
+        })
+        .mockResolvedValueOnce({ status: "completed", reason: "done" }),
+    });
+
+    expect(result.metrics.usage).toBeUndefined();
+  });
+
   it("observes tool output and lets the agent choose a follow-up tool", async () => {
     const agent = mustAgent("code");
     const context = createSharedTaskContext();
@@ -45,6 +136,47 @@ describe("runAgentReActLoop", () => {
     expect(context.get("react:react-step:1")).toMatchObject({ toolName: "code.inspectRepository" });
     expect(inspectRepository).toHaveBeenCalledOnce();
     expect(runReadOnlyCommand).toHaveBeenCalledOnce();
+  });
+
+  it("publishes a structured completion derived from the latest successful observation", async () => {
+    const result = await runAgentReActLoop({
+      agent: mustAgent("page-agent"),
+      step: step("page-agent"),
+      context: createSharedTaskContext(),
+      tools: [{
+        name: "browser.getContent",
+        execute: async () => ({
+          url: "https://example.test/trending",
+          content: "1. First topic\n2. Second topic",
+        }),
+      }],
+      decideNext: vi.fn()
+        .mockResolvedValueOnce({
+          status: "continue",
+          toolName: "browser.getContent",
+          reason: "Read the ranked page.",
+        })
+        .mockResolvedValueOnce({
+          status: "completed",
+          reason: "Return structured ranked evidence.",
+          output: {
+            sourceUrl: "https://example.test/trending",
+            items: [
+              { rank: 1, title: "First topic" },
+              { rank: 2, title: "Second topic" },
+            ],
+          },
+        }),
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.output).toEqual({
+      sourceUrl: "https://example.test/trending",
+      items: [
+        { rank: 1, title: "First topic" },
+        { rank: 2, title: "Second topic" },
+      ],
+    });
   });
 
   it("rejects tools outside the agent whitelist", async () => {
@@ -104,6 +236,46 @@ describe("runAgentReActLoop", () => {
     expect(result.status).toBe("request_input");
     expect(result.requestedContextKeys).toEqual(["uiEvidence"]);
     expect(result.requestedAgentKind).toBe("computer");
+  });
+
+  it("hands a failed tool to its configured fallback agent without another model turn", async () => {
+    const decideNext = vi.fn(async () => ({
+      status: "continue" as const,
+      toolName: "trend.fetchHotList",
+      reason: "Try the structured browser-first collector.",
+    }));
+    const fetchHotList = vi.fn(async () => {
+      throw new Error("Structured trend provider is unsupported.");
+    });
+
+    const result = await runAgentReActLoop({
+      agent: mustAgent("research"),
+      step: step("research"),
+      context: createSharedTaskContext(),
+      tools: [{
+        name: "trend.fetchHotList",
+        failureFallbackAgentKind: "page-agent",
+        failureFallbackCapability: "browser_navigate",
+        failureFallbackContextKey: "hotListEvidence",
+        execute: fetchHotList,
+      }],
+      liveAgentKinds: ["research", "page-agent"],
+      decideNext,
+    });
+
+    expect(result.status).toBe("request_input");
+    expect(result.requestedContextKeys).toEqual(["hotListEvidence"]);
+    expect(result.requestedAgentKind).toBe("page-agent");
+    expect(result.reason).toContain("browser_navigate");
+    expect(result.observations).toEqual([
+      expect.objectContaining({
+        toolName: "trend.fetchHotList",
+        status: "failed",
+        error: "Structured trend provider is unsupported.",
+      }),
+    ]);
+    expect(decideNext).toHaveBeenCalledOnce();
+    expect(fetchHotList).toHaveBeenCalledOnce();
   });
 
   it.each([
@@ -851,13 +1023,13 @@ describe("runAgentReActLoop", () => {
   });
 });
 
-function mustAgent(kind: "code" | "file") {
+function mustAgent(kind: "code" | "file" | "research" | "page-agent") {
   const agent = demoAgents.find((item) => item.kind === kind);
   if (!agent) throw new Error(`Missing test agent ${kind}`);
   return agent;
 }
 
-function step(agentKind: "code" | "file"): WorkbenchWorkflowStep {
+function step(agentKind: "code" | "file" | "research" | "page-agent"): WorkbenchWorkflowStep {
   return {
     id: "react-step",
     title: "React step",

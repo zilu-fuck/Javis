@@ -30,6 +30,7 @@ export interface ArtifactEnvelope<T = unknown> {
   artifactId: string;
   type: string;
   schemaVersion: number;
+  outputSchemaRef?: string;
 
   taskId: string;
   runId: string;
@@ -60,6 +61,7 @@ export function createArtifactEnvelope<T>(
     runId: string;
     type: string;
     schemaVersion?: number;
+    outputSchemaRef?: string;
     producer: ArtifactProducerRef;
     sourceRefs?: EvidenceReference[];
     sensitivity?: ArtifactSensitivity;
@@ -71,6 +73,7 @@ export function createArtifactEnvelope<T>(
     artifactId: `art-${context.runId}-${artifactIdCounter}-${Date.now()}`,
     type: context.type,
     schemaVersion: context.schemaVersion ?? 1,
+    ...(context.outputSchemaRef ? { outputSchemaRef: context.outputSchemaRef } : {}),
     taskId: context.taskId,
     runId: context.runId,
     producer: { ...context.producer },
@@ -377,6 +380,7 @@ export function resetArtifactIdCounter(): void {
 export function summarizeArtifactForHandoff(envelope: ArtifactEnvelope): {
   type: string;
   schemaVersion: number;
+  outputSchemaRef?: string;
   producer: ArtifactProducerRef;
   contentHash: string;
   sensitivity: ArtifactSensitivity | "public";
@@ -386,6 +390,7 @@ export function summarizeArtifactForHandoff(envelope: ArtifactEnvelope): {
   return {
     type: envelope.type,
     schemaVersion: envelope.schemaVersion,
+    ...(envelope.outputSchemaRef ? { outputSchemaRef: envelope.outputSchemaRef } : {}),
     producer: envelope.producer,
     contentHash: envelope.contentHash,
     sensitivity: envelope.sensitivity ?? "public",

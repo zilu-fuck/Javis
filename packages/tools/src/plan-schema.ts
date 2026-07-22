@@ -24,12 +24,13 @@
 import { z } from "zod";
 
 /** Bumped whenever this shape changes. */
-export const COMMANDER_PLAN_RESULT_SCHEMA_VERSION = "1.1.0";
+export const COMMANDER_PLAN_RESULT_SCHEMA_VERSION = "1.4.0";
 
 export const StepExecutionModeShape = z.enum([
   "direct_response",
   "direct_tool_call",
   "react",
+  "desktop_input",
 ]);
 export type StepExecutionModeT = z.infer<typeof StepExecutionModeShape>;
 
@@ -56,6 +57,18 @@ export const CommanderPlanStepShape = z.object({
   id: z.string(),
   title: z.string(),
   assignedAgentKind: z.string(),
+  instruction: z.string().optional(),
+  hardConstraints: z.array(z.string()).optional(),
+  preferences: z.array(z.string()).optional(),
+  acceptanceCriteria: z.array(z.string()).optional(),
+  outputSchemaRef: z.string().optional(),
+  primaryCapability: z.string().optional(),
+  artifactObligation: z.enum(["required", "optional", "none"]).optional(),
+  completionPolicy: z.object({
+    partial: z.enum(["publish_and_continue", "retain_and_replan", "stop"]).optional(),
+    blocked: z.enum(["wait", "replan"]).optional(),
+    needsClarification: z.enum(["ask_user", "replan"]).optional(),
+  }).optional(),
   toolName: z.string().optional(),
   capability: z.string().optional(),
   requiredCapabilities: z.array(z.string()).optional(),

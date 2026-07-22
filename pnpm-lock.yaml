@@ -29,6 +29,12 @@ importers:
       '@javis/ui':
         specifier: workspace:*
         version: link:../../packages/ui
+      '@langchain/core':
+        specifier: 1.2.3
+        version: 1.2.3(ws@8.21.0)
+      '@langchain/langgraph':
+        specifier: 1.4.8
+        version: 1.4.8(@langchain/core@1.2.3(ws@8.21.0))(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(zod@4.4.3)
       '@tauri-apps/api':
         specifier: ^2
         version: 2.11.0
@@ -38,9 +44,12 @@ importers:
       '@tauri-apps/plugin-opener':
         specifier: ^2
         version: 2.5.4
+      langchain:
+        specifier: 1.5.3
+        version: 1.5.3(@langchain/core@1.2.3(ws@8.21.0))(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(ws@8.21.0)
       opencode-ai:
-        specifier: 1.15.10
-        version: 1.15.10
+        specifier: 1.18.3
+        version: 1.18.3
       react:
         specifier: ^19.1.0
         version: 19.2.6
@@ -268,6 +277,9 @@ packages:
     resolution: {integrity: sha512-ctxtJ/eA+t+6q2++vj5j7FYX3nRu311q1wfYH3xjlLOsczhlhxAg2FWNUXhpGvAw3BWo1xBcvOV6/YLc2r5FJw==}
     hasBin: true
 
+  '@cfworker/json-schema@4.1.1':
+    resolution: {integrity: sha512-gAmrUZSGtKc3AiBL71iNWxDsyUC5uMaKKGdvzYsBoTW/xi42JQHl7eKV2OYzCUqvc+D2RCcf7EXY2iCyFIk6og==}
+
   '@csstools/color-helpers@6.0.2':
     resolution: {integrity: sha512-LMGQLS9EuADloEFkcTBR3BwV/CGHV7zyDxVRtVDTwdI2Ca4it0CCVTT9wCkxSgokjE5Ho41hEPgb8OEUwoXr6Q==}
     engines: {node: '>=20.19.0'}
@@ -484,6 +496,44 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
+
+  '@langchain/core@1.2.3':
+    resolution: {integrity: sha512-F+L5SsciykwDl7eDxacnhDTcWe1IF6jetzfkvI5PPfq6ogWHO7xcjU90SGh/3lqbbS0tgun+qF01KIqxawrCsA==}
+    engines: {node: '>=20'}
+
+  '@langchain/langgraph-checkpoint@1.1.3':
+    resolution: {integrity: sha512-wgzdQNeEsdw1e+4lvlj0tdq/RYR/k1vPin10g0ymGoehZDDgd9nvIllGXSXN4TFgF9sf5qQP/KTkOcLfeseIhA==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      '@langchain/core': ^1.1.48
+
+  '@langchain/langgraph-sdk@1.9.27':
+    resolution: {integrity: sha512-EHGFsxawniLw2pGVUDLSSdMriASIP4oz0Mihytb50iRsIqhmODzGBWW7iLWA/0hqavggNpqjat4WD7LjmxiXSQ==}
+    peerDependencies:
+      '@langchain/core': ^1.1.48
+      react: ^18 || ^19
+      react-dom: ^18 || ^19
+      svelte: ^4.0.0 || ^5.0.0
+      vue: ^3.0.0
+    peerDependenciesMeta:
+      react:
+        optional: true
+      react-dom:
+        optional: true
+      svelte:
+        optional: true
+      vue:
+        optional: true
+
+  '@langchain/langgraph@1.4.8':
+    resolution: {integrity: sha512-DN1Np1XefdBEbp1qBKlt39cwoL743AAGpR5Ipja0gY2YbWvsoQnOTIrjnj/orSAhaUYsdTKS8VSWdFzsHZo6Ig==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      '@langchain/core': ^1.1.48
+      zod: ^3.25.32 || ^4.2.0
+
+  '@langchain/protocol@0.0.18':
+    resolution: {integrity: sha512-XW1egQtPfsGI41w2AMZNFZrUIwFSQHTjVMZs0OaTpCAvht/QLoaPN8FQcsysMVypOhupG28J29yOorrc70otBQ==}
 
   '@rolldown/pluginutils@1.0.0-beta.27':
     resolution: {integrity: sha512-+d0F4MKMCbeVUJwG96uQ4SgAznZNSq93I3V+9NHA4OpvqG8mRCpGdKmK8l/dl02h2CCDHwW2FqilnTyDcAnqjA==}
@@ -761,6 +811,9 @@ packages:
   '@types/estree@1.0.8':
     resolution: {integrity: sha512-dWHzHa2WqEXI/O1E9OjrocMTKJl2mSrEolh1Iomrv6U+JuNwaHXsXx9bLu5gG7BUWFIN0skIQJQ/L1rIex4X6w==}
 
+  '@types/json-schema@7.0.15':
+    resolution: {integrity: sha512-5+fP8P8MFNC+AyZCDxrB2pkZFPGzqQWUzpSeuuVLvm8VMcorNYavBqoFcxK8bQz4Qsbn4oUEEem4wDLfcysGHA==}
+
   '@types/marked@6.0.0':
     resolution: {integrity: sha512-jmjpa4BwUsmhxcfsgUit/7A9KbrC48Q0q8KvnY107ogcjGgTFDlIL3RpihNpx2Mu1hM4mdFQjoVc4O6JoGKHsA==}
     deprecated: This is a stub types definition. marked provides its own type definitions, so you do not need this installed.
@@ -855,6 +908,9 @@ packages:
   assertion-error@2.0.1:
     resolution: {integrity: sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA==}
     engines: {node: '>=12'}
+
+  base64-js@1.5.1:
+    resolution: {integrity: sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA==}
 
   baseline-browser-mapping@2.10.32:
     resolution: {integrity: sha512-wbPvpyjJPC0zdfdKXxqEL3Ea+bOMD/87X4lftiJkkaBiuG6ALQy1SLmEd7BSmVCuwCQsBrCamgBoLyfFDD1EPg==}
@@ -961,6 +1017,12 @@ packages:
   estree-walker@3.0.3:
     resolution: {integrity: sha512-7RUKfXgSMMkzt6ZuXmqapOurLGPPfgj6l9uRZ7lRGolvk0y2yocc35LdcxKC5PQZdn2DMqioAQ2NoWcrTKmm6g==}
 
+  eventemitter3@4.0.4:
+    resolution: {integrity: sha512-rlaVLnVxtxvoyLsQQFBx53YmXHDxRIzzTLbdfxqi4yocpSjAxXwkU0cScM5JgSKMqEhrZpnvQ2D9gjylR0AimQ==}
+
+  eventemitter3@5.0.4:
+    resolution: {integrity: sha512-mlsTRyGaPBjPedk6Bvw+aqbsXDtoAyAzm5MO7JgU+yVRyMQ5O8bD4Kcci7BS85f93veegeCPkL8R4GLClnjLFw==}
+
   expect-type@1.3.0:
     resolution: {integrity: sha512-knvyeauYhqjOYvQ66MznSMs83wmHrCycNEN6Ao+2AeYEfxUIkuiVxdEa1qlGEPK+We3n0THiDciYSsCcgW/DoA==}
     engines: {node: '>=12.0.0'}
@@ -1015,8 +1077,15 @@ packages:
     resolution: {integrity: sha512-EdDDZu4A2OyIK7Lr/2zG+w5jmbuk1DVBnEwREQvBzspBJkCEbRa8GxU1lghYcaGJCnRWibjDXlq779X1/y5xwg==}
     engines: {node: '>=8'}
 
+  is-network-error@1.3.2:
+    resolution: {integrity: sha512-PhBY86zaxNZUuWP6h13Vu5oFe0XY6/UlKzQnYFELzGVHygP3MxmvTfYSG7GN3aIab/iWudSMgjSnG9Dq+nHrgA==}
+    engines: {node: '>=16'}
+
   is-potential-custom-element-name@1.0.1:
     resolution: {integrity: sha512-bCYeRA2rVibKZd+s2625gGnGF/t7DSqDs4dP7CrLA1m7jKWz6pps0LpYLJN8Q64HtmPKJ1hrN3nzPNKFEKOUiQ==}
+
+  js-tiktoken@1.0.21:
+    resolution: {integrity: sha512-biOj/6M5qdgx5TKjDnFT1ymSpM5tbd3ylwDtrQvFQSu0Z7bBYko2dF+W/aUkXUPuk6IVpRxk/3Q2sHOzGlS36g==}
 
   js-tokens@4.0.0:
     resolution: {integrity: sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ==}
@@ -1039,6 +1108,32 @@ packages:
     resolution: {integrity: sha512-XmOWe7eyHYH14cLdVPoyg+GOH3rYX++KpzrylJwSW98t3Nk+U8XOl8FWKOgwtzdb8lXGf6zYwDUzeHMWfxasyg==}
     engines: {node: '>=6'}
     hasBin: true
+
+  langchain@1.5.3:
+    resolution: {integrity: sha512-YRYPy1xPq4CgKe0NdPoscYHnKBW5cViEyWiZsUKQfN3xL1X5DpGlIpaBQg1A/t6o9ePKE7J5b7nqrfLz8t7/Rw==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      '@langchain/core': ^1.2.1
+
+  langsmith@0.8.3:
+    resolution: {integrity: sha512-3y1PRTmY24wiN8NiMb0CcNI2LwgovsKAz+ymVmBSmUx4nXL+GlmPY6Ju7FGeaPV1DMfQs9SjceNZHIfY2XYMKQ==}
+    peerDependencies:
+      '@opentelemetry/api': '*'
+      '@opentelemetry/exporter-trace-otlp-proto': '*'
+      '@opentelemetry/sdk-trace-base': '*'
+      openai: '*'
+      ws: '>=7'
+    peerDependenciesMeta:
+      '@opentelemetry/api':
+        optional: true
+      '@opentelemetry/exporter-trace-otlp-proto':
+        optional: true
+      '@opentelemetry/sdk-trace-base':
+        optional: true
+      openai:
+        optional: true
+      ws:
+        optional: true
 
   lru-cache@11.5.1:
     resolution: {integrity: sha512-RPimw/7aMdv2oqRrxKwvZXcPfwBrn/JZ2xYcY9Hus/6LaS3VOAKVWKWgNLCFSiOm1ESXinjsDlidVU7JlnCN2A==}
@@ -1076,6 +1171,10 @@ packages:
   ms@2.1.3:
     resolution: {integrity: sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==}
 
+  mustache@4.2.0:
+    resolution: {integrity: sha512-71ippSywq5Yb7/tVYyGbkBggbU8H3u5Rz56fH60jGFgr8uHwxs+aSKeqmluIVzM0m0kB7xQjKS6qPfd0b2ZoqQ==}
+    hasBin: true
+
   nanoid@3.3.12:
     resolution: {integrity: sha512-ZB9RH/39qpq5Vu6Y+NmUaFhQR6pp+M2Xt76XBnEwDaGcVAqhlvxrl3B2bKS5D3NH3QR76v3aSrKaF/Kiy7lEtQ==}
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
@@ -1099,71 +1198,98 @@ packages:
     resolution: {integrity: sha512-OHl6PiOEOqxaLHL0N9eFrbzS7IGmu3BtJNH3RTEnRAheCIkfc3gjcjl4sGcjp9C22ZC9YTquDOxSdT/stBQ6BQ==}
     os: [win32, darwin, linux]
 
-  opencode-ai@1.15.10:
-    resolution: {integrity: sha512-/JOvvD50/fVW3se3dS6ZAZ3E4P/A8uD6+XmcuRzr2WGzoDvEjAvrYagT7plv5SB+yL+lcN5JIKPdPbyw74ih9g==}
+  opencode-ai@1.18.3:
+    resolution: {integrity: sha512-HnItl/+uhSpj7JV9x6ITiE0XFq4b/PKF5OM03TIyiFoFiLw3MQoJOAXZFTEzC7IOgAIYcysRQBBmCmlXILkxww==}
     cpu: [arm64, x64]
     os: [darwin, linux, win32]
     hasBin: true
 
-  opencode-darwin-arm64@1.15.10:
-    resolution: {integrity: sha512-P24xNtL++mK3Saox8R/VeqyUs+fzArw4tl6vlp+U6b9DlKnlchFWcBh5Jnm0XV0sbKXuNPATmHzfAnFWc00IEw==}
+  opencode-darwin-arm64@1.18.3:
+    resolution: {integrity: sha512-BkfJf4E502OVwpDXgaVz8eqTDOy2B9xXPefYebT+xv8TXYvEo1wtby4eu4MoN51o4o1qpzcvCCXDqUDXu1pBGQ==}
     cpu: [arm64]
     os: [darwin]
 
-  opencode-darwin-x64-baseline@1.15.10:
-    resolution: {integrity: sha512-1UCnmgqO+fO1HWQSiCxcxDX+4LnA5AvkUYMeyM77jJNweEAwFfF5mwqtELN+oU9KiCrCs6YaX/IglvBqnoRu+Q==}
+  opencode-darwin-x64-baseline@1.18.3:
+    resolution: {integrity: sha512-8qQ9Ig7Zp7LEKaKGRL+OIlDb/uTLYkeAq6SGsN0fLHR2rHZRHyb61KrpkS5TgUlGwSWPtb5uCeVtTA9rGbEAKw==}
     cpu: [x64]
     os: [darwin]
 
-  opencode-darwin-x64@1.15.10:
-    resolution: {integrity: sha512-GMzziADb7UwVHo28wZqraa2+QFf2gOjCH4cyS1KjE518AwUXAgDIRoTrDhh+k7NYjVvu0tcpJRd9OZaUbKQdgQ==}
+  opencode-darwin-x64@1.18.3:
+    resolution: {integrity: sha512-ujy61O3WUEHjPqk+qXMBl97zR9q3crOzHbm2VLmXLHUWbqB5ZtN1HToODbuI1SBMKVR8GyZwPygRQVMfON4DHg==}
     cpu: [x64]
     os: [darwin]
 
-  opencode-linux-arm64-musl@1.15.10:
-    resolution: {integrity: sha512-L1bAgonUxNFdsGbKSLZ1uNlJ2nED+hTgIeGj7gAoYHz4ofuozRgXFJ4Udjz6G1HzoLEUF+NpXY7CJrDotV026Q==}
+  opencode-linux-arm64-musl@1.18.3:
+    resolution: {integrity: sha512-s1vNP8dpIH3vFs8aoMzgHViBNVz6xtR7n24gGg0WOw4uSZVM+sRUmZKc3Hj56XjHQSsVBg5AkwR2Xm0nFSfIUQ==}
+    cpu: [arm64]
+    os: [linux]
+    libc: [musl]
+
+  opencode-linux-arm64@1.18.3:
+    resolution: {integrity: sha512-K+1SPkfrYFUufPUYpbSurlB2ogpjv5in2usA1FwOM7HCOpNxR3ap7K+X4uQXnOV8AtsON+Vr9W5uYXQJA1yKlA==}
     cpu: [arm64]
     os: [linux]
 
-  opencode-linux-arm64@1.15.10:
-    resolution: {integrity: sha512-lprzGrIywjnO1M9vOuiM6MyK5stYcB5ebJYZcOcvept7dSjARtOz/xnWxFVL0Gf4scbaOuYRSZs67DVcWsjWpA==}
-    cpu: [arm64]
+  opencode-linux-x64-baseline-musl@1.18.3:
+    resolution: {integrity: sha512-F2nNPqYPdTCydLvNH1rvSXdlX3pfmOmOOfsFl+pqi3W0iE3Alyxmv28AjrIGUw4/6EfWhMKYcyxKjNIKLFyaZQ==}
+    cpu: [x64]
     os: [linux]
+    libc: [musl]
 
-  opencode-linux-x64-baseline-musl@1.15.10:
-    resolution: {integrity: sha512-jBU2dSB9ktNX3C99Fm0hX+QaTbXEhrs0lOQfV2mvJLMn2QfnwKYJ8EPASSSOpuwdLL3FZIXJ67ur0fAwTqASEQ==}
+  opencode-linux-x64-baseline@1.18.3:
+    resolution: {integrity: sha512-DDfspGSQ123yhsFhAlbpF+tsvje5kHOS2/PYUpWJroTlvgtqRLGmET51Anrxd5BrAFrqB6PXYA2kGh5QStPU/g==}
     cpu: [x64]
     os: [linux]
 
-  opencode-linux-x64-baseline@1.15.10:
-    resolution: {integrity: sha512-VxFC+8SKX/HyZO9+iAvj0JzFjIWaamyiOTxYvDLIK6S9Ae7BIrilI62tSvq39D0XXvaFjuiRsF5TCOPpO7l5dw==}
+  opencode-linux-x64-musl@1.18.3:
+    resolution: {integrity: sha512-SSp2zSpAM4dntcPZw8ISl3CmXYrWPftLc8u0HuAIeNWJOo6G4xAHPoXhNnXI3tQYqqGcppArf/3EMPnF9WnyFw==}
+    cpu: [x64]
+    os: [linux]
+    libc: [musl]
+
+  opencode-linux-x64@1.18.3:
+    resolution: {integrity: sha512-p+19dSTf3pWL3+Rh/Ym94DvS9mNxNG94HJnR5oMCDhQvgimdT5tSdoK4ETtk4XOoCKz3OcTQDPHTdYKcJg32KQ==}
     cpu: [x64]
     os: [linux]
 
-  opencode-linux-x64-musl@1.15.10:
-    resolution: {integrity: sha512-SxpXejiKWWH9QImqaZ/bbYiK0jwZcAcGcFOvP0qAOWmv4Bs9JjMIP2UcbGBc9nXduSxwzjo+Pyy0coozWnMQ9g==}
-    cpu: [x64]
-    os: [linux]
-
-  opencode-linux-x64@1.15.10:
-    resolution: {integrity: sha512-QIQwP/3lwHFzital4PEP/4Sq8C5CBKE/gCbseuAQKxK0/vaaRIMsBh3rYwSVFKiCGP9BD2E82fMjXxOfLUkYHQ==}
-    cpu: [x64]
-    os: [linux]
-
-  opencode-windows-arm64@1.15.10:
-    resolution: {integrity: sha512-w6k7rrlr/qkULVl7gMlwXzV69NJ9Lel/Y38erFBY6fajyGrSjC+2MN1yu+1XMeUxftrVJgo2Q0D0gjhUdJx4Ew==}
+  opencode-windows-arm64@1.18.3:
+    resolution: {integrity: sha512-qkz9/r6kUhhgLycQv71MoSQ2m5UI2QnZZx8SeZgyYD7oB8pDH6DIGbDWcs6BJ02ND1Y5hmgYWlP+rOrMkGlMJw==}
     cpu: [arm64]
     os: [win32]
 
-  opencode-windows-x64-baseline@1.15.10:
-    resolution: {integrity: sha512-y8eETB9YmB41LmshNpOb2iPblg6X0GF46giOU+kTT5ewZpcETfP0l6U53H8iccbO3uGcozPZ+ChYDRjjPDfwQg==}
+  opencode-windows-x64-baseline@1.18.3:
+    resolution: {integrity: sha512-+tyoxwSfY7msfZNY1IoA0ZWRL9XfdqY+ash6U3ldfE+GfF2WNAdhewmmYiUsC4lHjkdSmLt2brdWgoebQK9HAg==}
     cpu: [x64]
     os: [win32]
 
-  opencode-windows-x64@1.15.10:
-    resolution: {integrity: sha512-Un8vYVqm+nor1DA78GY7Zhq+LDs2/Zq3oSoG6a5yjBtj267BkSv1hYde3L+YNFy4MbCPmhQxEBSXrUs+oMGASA==}
+  opencode-windows-x64@1.18.3:
+    resolution: {integrity: sha512-V/Q4VkyZ7TkotLbpTCX/s5wP8MoFj5UnRqBHFJ8WGptb/+oYw36kamUUt1P1wN8iRjmw+8vwYhuYdAe+3xbgpQ==}
     cpu: [x64]
     os: [win32]
+
+  p-finally@1.0.0:
+    resolution: {integrity: sha512-LICb2p9CB7FS+0eR1oqWnHhp0FljGLZCWBE9aix0Uye9W8LTQPwMTYVGWQWIw9RdQiDg4+epXQODwIYJtSJaow==}
+    engines: {node: '>=4'}
+
+  p-queue@6.6.2:
+    resolution: {integrity: sha512-RwFpb72c/BhQLEXIZ5K2e+AhgNVmIejGlTgiB9MzZ0e93GRvqZ7uSi0dvRF7/XIXDeNkra2fNHBxTyPDGySpjQ==}
+    engines: {node: '>=8'}
+
+  p-queue@9.3.1:
+    resolution: {integrity: sha512-POWdiIPmsUPGwb4FeQ4OBg46aqmcInSWe45CKDsGHiOBiVQM9chqfQTuqhuTzcg2Vz9faTI65at0KkVyVEiCHw==}
+    engines: {node: '>=20'}
+
+  p-retry@7.1.1:
+    resolution: {integrity: sha512-J5ApzjyRkkf601HpEeykoiCvzHQjWxPAHhyjFcEUP2SWq0+35NKh8TLhpLw+Dkq5TZBFvUM6UigdE9hIVYTl5w==}
+    engines: {node: '>=20'}
+
+  p-timeout@3.2.0:
+    resolution: {integrity: sha512-rhIwUycgwwKcP9yTOOFK/AKsAopjjCakVqLHePO3CC6Mir1Z99xT+R63jZxAT5lFZLa2inS5h+ZS2GvR99/FBg==}
+    engines: {node: '>=8'}
+
+  p-timeout@7.0.1:
+    resolution: {integrity: sha512-AxTM2wDGORHGEkPCt8yqxOTMgpfbEHqF51f/5fJCmwFC3C/zNcGT63SymH2ttOAaiIws2zVg4+izQCjrakcwHg==}
+    engines: {node: '>=20'}
 
   parse5@8.0.1:
     resolution: {integrity: sha512-z1e/HMG90obSGeidlli3hj7cbocou0/wa5HacvI3ASx34PecNjNQeaHNo5WIZpWofN9kgkqV1q5YvXe3F0FoPw==}
@@ -1601,6 +1727,8 @@ snapshots:
     dependencies:
       css-tree: 3.2.1
 
+  '@cfworker/json-schema@4.1.1': {}
+
   '@csstools/color-helpers@6.0.2': {}
 
   '@csstools/css-calc@3.2.1(@csstools/css-parser-algorithms@4.0.0(@csstools/css-tokenizer@4.0.0))(@csstools/css-tokenizer@4.0.0)':
@@ -1723,6 +1851,53 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
+
+  '@langchain/core@1.2.3(ws@8.21.0)':
+    dependencies:
+      '@cfworker/json-schema': 4.1.1
+      '@standard-schema/spec': 1.1.0
+      js-tiktoken: 1.0.21
+      langsmith: 0.8.3(ws@8.21.0)
+      mustache: 4.2.0
+      p-queue: 6.6.2
+      zod: 4.4.3
+    transitivePeerDependencies:
+      - '@opentelemetry/api'
+      - '@opentelemetry/exporter-trace-otlp-proto'
+      - '@opentelemetry/sdk-trace-base'
+      - openai
+      - ws
+
+  '@langchain/langgraph-checkpoint@1.1.3(@langchain/core@1.2.3(ws@8.21.0))':
+    dependencies:
+      '@langchain/core': 1.2.3(ws@8.21.0)
+
+  '@langchain/langgraph-sdk@1.9.27(@langchain/core@1.2.3(ws@8.21.0))(react-dom@19.2.6(react@19.2.6))(react@19.2.6)':
+    dependencies:
+      '@langchain/core': 1.2.3(ws@8.21.0)
+      '@langchain/protocol': 0.0.18
+      '@types/json-schema': 7.0.15
+      p-queue: 9.3.1
+      p-retry: 7.1.1
+    optionalDependencies:
+      react: 19.2.6
+      react-dom: 19.2.6(react@19.2.6)
+
+  '@langchain/langgraph@1.4.8(@langchain/core@1.2.3(ws@8.21.0))(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(zod@4.4.3)':
+    dependencies:
+      '@langchain/core': 1.2.3(ws@8.21.0)
+      '@langchain/langgraph-checkpoint': 1.1.3(@langchain/core@1.2.3(ws@8.21.0))
+      '@langchain/langgraph-sdk': 1.9.27(@langchain/core@1.2.3(ws@8.21.0))(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
+      '@langchain/protocol': 0.0.18
+      '@standard-schema/spec': 1.1.0
+      zod: 4.4.3
+    transitivePeerDependencies:
+      - react
+      - react-dom
+      - svelte
+      - vue
+
+  '@langchain/protocol@0.0.18': {}
 
   '@rolldown/pluginutils@1.0.0-beta.27': {}
 
@@ -1922,6 +2097,8 @@ snapshots:
 
   '@types/estree@1.0.8': {}
 
+  '@types/json-schema@7.0.15': {}
+
   '@types/marked@6.0.0':
     dependencies:
       marked: 18.0.4
@@ -2026,6 +2203,8 @@ snapshots:
   aria-query@5.3.2: {}
 
   assertion-error@2.0.1: {}
+
+  base64-js@1.5.1: {}
 
   baseline-browser-mapping@2.10.32: {}
 
@@ -2137,6 +2316,10 @@ snapshots:
     dependencies:
       '@types/estree': 1.0.8
 
+  eventemitter3@4.0.4: {}
+
+  eventemitter3@5.0.4: {}
+
   expect-type@1.3.0: {}
 
   fdir@6.5.0(picomatch@4.0.4):
@@ -2190,7 +2373,13 @@ snapshots:
 
   indent-string@4.0.0: {}
 
+  is-network-error@1.3.2: {}
+
   is-potential-custom-element-name@1.0.1: {}
+
+  js-tiktoken@1.0.21:
+    dependencies:
+      base64-js: 1.5.1
 
   js-tokens@4.0.0: {}
 
@@ -2224,6 +2413,30 @@ snapshots:
 
   json5@2.2.3: {}
 
+  langchain@1.5.3(@langchain/core@1.2.3(ws@8.21.0))(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(ws@8.21.0):
+    dependencies:
+      '@langchain/core': 1.2.3(ws@8.21.0)
+      '@langchain/langgraph': 1.4.8(@langchain/core@1.2.3(ws@8.21.0))(react-dom@19.2.6(react@19.2.6))(react@19.2.6)(zod@4.4.3)
+      '@langchain/langgraph-checkpoint': 1.1.3(@langchain/core@1.2.3(ws@8.21.0))
+      langsmith: 0.8.3(ws@8.21.0)
+      zod: 4.4.3
+    transitivePeerDependencies:
+      - '@opentelemetry/api'
+      - '@opentelemetry/exporter-trace-otlp-proto'
+      - '@opentelemetry/sdk-trace-base'
+      - openai
+      - react
+      - react-dom
+      - svelte
+      - vue
+      - ws
+
+  langsmith@0.8.3(ws@8.21.0):
+    dependencies:
+      p-queue: 6.6.2
+    optionalDependencies:
+      ws: 8.21.0
+
   lru-cache@11.5.1: {}
 
   lru-cache@5.1.1:
@@ -2250,6 +2463,8 @@ snapshots:
 
   ms@2.1.3: {}
 
+  mustache@4.2.0: {}
+
   nanoid@3.3.12: {}
 
   node-releases@2.0.46: {}
@@ -2266,56 +2481,78 @@ snapshots:
       global-agent: 4.1.3
       onnxruntime-common: 1.26.0
 
-  opencode-ai@1.15.10:
+  opencode-ai@1.18.3:
     optionalDependencies:
-      opencode-darwin-arm64: 1.15.10
-      opencode-darwin-x64: 1.15.10
-      opencode-darwin-x64-baseline: 1.15.10
-      opencode-linux-arm64: 1.15.10
-      opencode-linux-arm64-musl: 1.15.10
-      opencode-linux-x64: 1.15.10
-      opencode-linux-x64-baseline: 1.15.10
-      opencode-linux-x64-baseline-musl: 1.15.10
-      opencode-linux-x64-musl: 1.15.10
-      opencode-windows-arm64: 1.15.10
-      opencode-windows-x64: 1.15.10
-      opencode-windows-x64-baseline: 1.15.10
+      opencode-darwin-arm64: 1.18.3
+      opencode-darwin-x64: 1.18.3
+      opencode-darwin-x64-baseline: 1.18.3
+      opencode-linux-arm64: 1.18.3
+      opencode-linux-arm64-musl: 1.18.3
+      opencode-linux-x64: 1.18.3
+      opencode-linux-x64-baseline: 1.18.3
+      opencode-linux-x64-baseline-musl: 1.18.3
+      opencode-linux-x64-musl: 1.18.3
+      opencode-windows-arm64: 1.18.3
+      opencode-windows-x64: 1.18.3
+      opencode-windows-x64-baseline: 1.18.3
 
-  opencode-darwin-arm64@1.15.10:
+  opencode-darwin-arm64@1.18.3:
     optional: true
 
-  opencode-darwin-x64-baseline@1.15.10:
+  opencode-darwin-x64-baseline@1.18.3:
     optional: true
 
-  opencode-darwin-x64@1.15.10:
+  opencode-darwin-x64@1.18.3:
     optional: true
 
-  opencode-linux-arm64-musl@1.15.10:
+  opencode-linux-arm64-musl@1.18.3:
     optional: true
 
-  opencode-linux-arm64@1.15.10:
+  opencode-linux-arm64@1.18.3:
     optional: true
 
-  opencode-linux-x64-baseline-musl@1.15.10:
+  opencode-linux-x64-baseline-musl@1.18.3:
     optional: true
 
-  opencode-linux-x64-baseline@1.15.10:
+  opencode-linux-x64-baseline@1.18.3:
     optional: true
 
-  opencode-linux-x64-musl@1.15.10:
+  opencode-linux-x64-musl@1.18.3:
     optional: true
 
-  opencode-linux-x64@1.15.10:
+  opencode-linux-x64@1.18.3:
     optional: true
 
-  opencode-windows-arm64@1.15.10:
+  opencode-windows-arm64@1.18.3:
     optional: true
 
-  opencode-windows-x64-baseline@1.15.10:
+  opencode-windows-x64-baseline@1.18.3:
     optional: true
 
-  opencode-windows-x64@1.15.10:
+  opencode-windows-x64@1.18.3:
     optional: true
+
+  p-finally@1.0.0: {}
+
+  p-queue@6.6.2:
+    dependencies:
+      eventemitter3: 4.0.4
+      p-timeout: 3.2.0
+
+  p-queue@9.3.1:
+    dependencies:
+      eventemitter3: 5.0.4
+      p-timeout: 7.0.1
+
+  p-retry@7.1.1:
+    dependencies:
+      is-network-error: 1.3.2
+
+  p-timeout@3.2.0:
+    dependencies:
+      p-finally: 1.0.0
+
+  p-timeout@7.0.1: {}
 
   parse5@8.0.1:
     dependencies:

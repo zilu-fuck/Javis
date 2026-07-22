@@ -116,7 +116,7 @@ describe("buildPlanGenerationTrace", () => {
       recoveryCompiles: [],
     });
     expect(trace.schemaVersion).toBe("1.0.0");
-    expect(trace.planSchemaVersion).toBe("1.2.0");
+    expect(trace.planSchemaVersion).toBe("1.4.0");
   });
 
   it("preserves extractedJson, normalizedPlan, promptVersion when provided", () => {

@@ -41,6 +41,14 @@ import type { AskUserAnswerHandler } from "./ask-user";
 import type { PendingPermissionHandler } from "./confirmed-write";
 import type { AgentReActDecision } from "./agent-react-loop";
 import type { ReActDecisionRequest } from "./agent-react-decider";
+import type {
+  AgentRuntimeBackend,
+  AgentRuntimeFactory,
+  AgentRuntimeFactoryRegistry,
+  AgentRuntimeMetricsSnapshot,
+  AgentRuntimeRoutingDecision,
+  AgentRuntimeRoutingMetricsSnapshot,
+} from "./agent-runtime/contracts";
 import type { CommanderDagPlan } from "./commander-plan-schema";
 import type { ComputerUseStepTrace } from "./computer-use-types";
 import type { HandoffReport } from "./shared-context";
@@ -80,7 +88,11 @@ import {
 } from "./routing";
 import { createRuntimeState } from "./runtime-state";
 import { appendLog } from "./snapshot-utils";
-import { addModelUsage, createEmptyTokenUsageSummary } from "./token-usage";
+import {
+  addModelUsage,
+  cloneTokenUsageSummary,
+  createEmptyTokenUsageSummary,
+} from "./token-usage";
 import {
   createRecoveredContextMessages,
   isContextOverflowError,
@@ -102,6 +114,7 @@ import { isTerminalTaskStatus } from "./state/task-state";
 import { inferVisionMode } from "./vision-utils";
 
 export {
+  createCodeProposalHash,
   createCodeApplyDryRun,
   parsePatchHunks,
   validateCodeApplyResult,
@@ -119,7 +132,7 @@ export {
   isTerminalTaskStatus,
   transitionTask,
 } from "./state/task-state";
-export { demoAgents, getAgentSystemPrompt, createDefaultAgentRegistry, browserSnapshot } from "./agents";
+export { demoAgents, getAgentSystemPrompt, createDefaultAgentRegistry, normalizeAgentKind } from "./agents";
 export {
   MAX_STYLE_LENGTH,
   buildAgentPromptBundle,
@@ -272,6 +285,22 @@ export type {
   StepInputValidationResult,
 } from "./shared-context";
 export {
+  STEP_RESULT_STATUSES,
+  createFailedStepResult,
+  isTerminalStepResultStatus,
+  normalizeStepContract,
+  normalizeStepResult,
+} from "./step-protocol";
+export type {
+  StepContract,
+  StepContractInput,
+  StepEvidence,
+  StepEvidenceKind,
+  StepResult,
+  StepResultInput,
+  StepResultStatus,
+} from "./step-protocol";
+export {
   buildRecoveryReport,
   classifyRecoveryFailure,
   createRecoveryAttempt,
@@ -325,6 +354,39 @@ export type {
   WorkflowStepExecutionResult,
 } from "./workflow-dag-executor";
 export { runAgentReActLoop } from "./agent-react-loop";
+export {
+  MAX_REACT_REQUESTED_CONTEXT_KEYS,
+  MAX_REACT_REQUESTED_CONTEXT_KEY_CHARS,
+  validateAgentRequestInput,
+} from "./agent-react-loop";
+export { runCommanderDagTask } from "./workflow-executor";
+export type * from "./agent-runtime/contracts";
+export type * from "./agent-runtime/event";
+export { routeAgentRuntime } from "./agent-runtime/router";
+export type {
+  AgentRouteResolution,
+  AgentRuntimeAvailability,
+} from "./agent-runtime/router";
+export {
+  canonicalToolNameToModelAlias,
+  createToolNameAliasMap,
+} from "./agent-runtime/tool-name-alias";
+export {
+  toolDescriptorToJsonSchema,
+  toolDescriptorsToAgentToolSpecs,
+} from "./agent-runtime/tool-schema";
+export {
+  addAgentTokenUsage,
+  createAgentRuntimeMetricsCollector,
+  createAgentRuntimeRoutingMetricsCollector,
+} from "./agent-runtime/metrics";
+export {
+  createReadOnlyToolExecutionGateway,
+  createScopedToolExecutionGateway,
+  type MigratedAgentRuntimePermissionLevel,
+  type ReadOnlyToolGatewayOptions,
+  type ScopedToolGatewayOptions,
+} from "./agent-runtime/read-only-tool-gateway";
 export type {
   AgentReActDecision,
   AgentReActLoopOptions,
@@ -612,6 +674,7 @@ export type AgentKind =
   | "file"
   | "shell"
   | "browser"
+  | "page-agent"
   | "computer"
   | "scheduler"
   | "research"
@@ -662,6 +725,14 @@ export interface TaskStep {
   id: ID;
   title: string;
   assignedAgentKind: AgentKind;
+  instruction?: string;
+  hardConstraints?: string[];
+  preferences?: string[];
+  acceptanceCriteria?: string[];
+  outputSchemaRef?: string;
+  primaryCapability?: string;
+  artifactObligation?: import("./step-protocol").ArtifactObligation;
+  completionPolicy?: import("./step-protocol").StepCompletionPolicy;
   agentId?: ID;
   requiredCapabilities?: string[];
   inputContextKeys?: string[];
@@ -877,6 +948,124 @@ export interface ConversationMessage extends ChatMessage {
   permissionRequest?: ToolPermissionRequest;
 }
 
+export const TASK_PROGRESS_STATUSES = [
+  "running",
+  "completed",
+  "completed_with_warnings",
+  "failed",
+] as const;
+
+export type TaskProgressStatus = (typeof TASK_PROGRESS_STATUSES)[number];
+
+export const TASK_PROGRESS_ITEM_STATUSES = [
+  "queued",
+  "running",
+  "verifying",
+  "completed",
+  "blocked",
+  "failed",
+] as const;
+
+export type TaskProgressItemStatus = (typeof TASK_PROGRESS_ITEM_STATUSES)[number];
+
+export interface TaskProgressItem {
+  id: ID;
+  label: string;
+  status: TaskProgressItemStatus;
+  detail?: string;
+  completedCount?: number;
+  expectedCount?: number;
+  sourceUrl?: string;
+}
+
+export interface TaskProgress {
+  title: string;
+  status: TaskProgressStatus;
+  currentAction?: string;
+  completedItems: number;
+  totalItems: number;
+  items: TaskProgressItem[];
+}
+
+function isTaskProgressRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isTaskProgressCount(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= 0;
+}
+
+function normalizeTaskProgressItem(value: unknown): TaskProgressItem | undefined {
+  if (!isTaskProgressRecord(value)) return undefined;
+  if (
+    typeof value.id !== "string" || value.id.trim().length === 0 ||
+    typeof value.label !== "string" || value.label.trim().length === 0 ||
+    typeof value.status !== "string" ||
+    !TASK_PROGRESS_ITEM_STATUSES.includes(value.status as TaskProgressItemStatus)
+  ) {
+    return undefined;
+  }
+  if (value.detail !== undefined && typeof value.detail !== "string") return undefined;
+  if (value.sourceUrl !== undefined && typeof value.sourceUrl !== "string") return undefined;
+  if (value.completedCount !== undefined && !isTaskProgressCount(value.completedCount)) {
+    return undefined;
+  }
+  if (value.expectedCount !== undefined && !isTaskProgressCount(value.expectedCount)) {
+    return undefined;
+  }
+  if (
+    typeof value.completedCount === "number" &&
+    typeof value.expectedCount === "number" &&
+    value.completedCount > value.expectedCount
+  ) {
+    return undefined;
+  }
+
+  const item: TaskProgressItem = {
+    id: value.id.trim(),
+    label: value.label.trim(),
+    status: value.status as TaskProgressItemStatus,
+  };
+  if (value.detail !== undefined) item.detail = value.detail.trim();
+  if (value.completedCount !== undefined) item.completedCount = value.completedCount;
+  if (value.expectedCount !== undefined) item.expectedCount = value.expectedCount;
+  if (value.sourceUrl !== undefined) item.sourceUrl = value.sourceUrl.trim();
+  return item;
+}
+
+export function normalizeTaskProgress(value: unknown): TaskProgress | undefined {
+  if (!isTaskProgressRecord(value)) return undefined;
+  if (
+    typeof value.title !== "string" || value.title.trim().length === 0 ||
+    typeof value.status !== "string" ||
+    !TASK_PROGRESS_STATUSES.includes(value.status as TaskProgressStatus) ||
+    (value.currentAction !== undefined && typeof value.currentAction !== "string") ||
+    !isTaskProgressCount(value.completedItems) ||
+    !isTaskProgressCount(value.totalItems) ||
+    value.completedItems > value.totalItems ||
+    !Array.isArray(value.items)
+  ) {
+    return undefined;
+  }
+
+  const items = value.items.map(normalizeTaskProgressItem);
+  if (items.some((item) => item === undefined)) return undefined;
+  const normalizedItems = items as TaskProgressItem[];
+  if (new Set(normalizedItems.map((item) => item.id)).size !== normalizedItems.length) {
+    return undefined;
+  }
+
+  const progress: TaskProgress = {
+    title: value.title.trim(),
+    status: value.status as TaskProgressStatus,
+    completedItems: value.completedItems,
+    totalItems: value.totalItems,
+    items: normalizedItems,
+  };
+  if (value.currentAction !== undefined) progress.currentAction = value.currentAction.trim();
+  return progress;
+}
+
 export interface TaskSnapshot {
   id: ID;
   runId?: ID;
@@ -912,6 +1101,12 @@ export interface TaskSnapshot {
   researchReport?: ResearchReport;
   sources?: WebSource[];
   tokenUsage?: TokenUsageSummary;
+  /** User-facing, structured task progress. Optional for persisted legacy snapshots. */
+  taskProgress?: TaskProgress;
+  /** Backend-neutral Agent loop baseline metrics, persisted for rollout comparison. */
+  agentRuntimeMetrics?: AgentRuntimeMetricsSnapshot[];
+  /** Per-provider/Agent/task-type routing and legacy fallback rates. */
+  agentRuntimeRoutingMetrics?: AgentRuntimeRoutingMetricsSnapshot[];
   verificationSummary?: string;
   verificationResult?: VerifierCheckResult;
   conversationMessages?: ConversationMessage[];
@@ -984,7 +1179,7 @@ export interface StepTrace {
 }
 
 export type { ModelUsage, TokenUsageSummary };
-export { addModelUsage, createEmptyTokenUsageSummary };
+export { addModelUsage, cloneTokenUsageSummary, createEmptyTokenUsageSummary };
 
 export interface TaskRuntime {
   getSnapshot(): TaskSnapshot;
@@ -1006,6 +1201,8 @@ export interface TaskRuntime {
       displayAttachments?: string[];
       /** Image data URLs to send to a vision-capable model. */
       modelImages?: string[];
+      /** Cumulative usage already recorded for this task before a follow-up turn. */
+      initialTokenUsage?: TokenUsageSummary;
       /** Fail before routing when a required local context artifact cannot be loaded. */
       preflightError?: string;
       /** Optional durable checkpoint seed used by Commander DAG resume. */
@@ -1076,6 +1273,31 @@ export interface FileScanRuntimeOptions {
   };
   /** P0-2: LLM-based ReAct decision maker for step execution loops. */
   reactDecideNext?: (request: ReActDecisionRequest) => Promise<AgentReActDecision>;
+  /** Select the per-step Agent loop backend. Legacy remains the rollout default and rollback path. */
+  getAgentRuntimeBackend?: (
+    agentKind: AgentKind,
+    taskId: string,
+    taskType: PermissionLevel,
+    toolName?: string,
+    primaryCapability?: string,
+  ) => AgentRuntimeBackend;
+  getAgentRuntimeRoutingDecision?: (
+    agentKind: AgentKind,
+    taskId: string,
+    taskType: PermissionLevel,
+    toolName?: string,
+    primaryCapability?: string,
+  ) => AgentRuntimeRoutingDecision;
+  /** Provider dimension used only for backend rollout telemetry. */
+  getAgentRuntimeProviderId?: (agentKind: AgentKind) => string;
+  getAgentRuntimeModelProfile?: (agentKind: AgentKind) => {
+    provider: string;
+    model: string;
+    contextWindowTokens?: number;
+  };
+  agentRuntimeFactories?: AgentRuntimeFactoryRegistry;
+  /** Desktop adapter factory; Core continues to own DAG scheduling and tool dispatch. */
+  createAgentRuntime?: AgentRuntimeFactory;
   /** P0-3: Commander replan after step failure or P0-4: after askUser clarification. */
   replanDag?: (
     userGoal: string,
@@ -1083,6 +1305,7 @@ export interface FileScanRuntimeOptions {
     failedStepId?: string,
     failureReason?: string,
     modelImages?: string[],
+    onUsage?: (usage: ModelUsage) => void,
   ) => Promise<CommanderDagPlan>;
   /**
    * Vision-model-driven action loop for computer-use steps.
@@ -1636,6 +1859,12 @@ export function createFileScanTaskRuntime({
   runtimeEventSink,
   checkpointSink,
   reactDecideNext,
+  getAgentRuntimeBackend,
+  getAgentRuntimeRoutingDecision,
+  getAgentRuntimeProviderId,
+  getAgentRuntimeModelProfile,
+  agentRuntimeFactories,
+  createAgentRuntime,
   replanDag,
   computerUseLoopRunner,
 }: FileScanRuntimeOptions): TaskRuntime {
@@ -1927,7 +2156,18 @@ export function createFileScanTaskRuntime({
       },
     };
   }
-  function emitImmediateFeedback(taskId: ID, userGoal: string) {
+  function tokenUsageForTask(taskId: ID): TokenUsageSummary {
+    const current = runtimeState.getSnapshot();
+    return cloneTokenUsageSummary(
+      current.id === taskId ? current.tokenUsage : undefined,
+    );
+  }
+
+  function emitImmediateFeedback(
+    taskId: ID,
+    userGoal: string,
+    initialTokenUsage?: TokenUsageSummary,
+  ) {
     const isChinese = /[\u3400-\u9fff]/u.test(userGoal);
     emit({
       id: taskId,
@@ -1954,7 +2194,7 @@ export function createFileScanTaskRuntime({
           userMessage: isChinese ? "姝ｅ湪鐞嗚В浣犵殑闂..." : "Understanding your request...",
         },
       ],
-      tokenUsage: createEmptyTokenUsageSummary(),
+      tokenUsage: cloneTokenUsageSummary(initialTokenUsage),
       streamingText: "",
       streamingAgentKind: "commander",
       isStreaming: true,
@@ -2037,6 +2277,10 @@ export function createFileScanTaskRuntime({
       const signal = taskAbortController.signal;
       const startMode = options.mode ?? "auto";
       const taskId = options.taskId ?? `task-${Date.now()}`;
+      const previousSnapshot = runtimeState.getSnapshot();
+      const initialTokenUsage = options.initialTokenUsage ?? (
+        previousSnapshot.id === taskId ? previousSnapshot.tokenUsage : undefined
+      );
       const controller = createTaskScopedController(taskId);
       const effectiveRuntimeConfig = getRuntimeConfig?.() ?? runtimeConfig;
       const appendUserMessage = options.appendUserMessage !== false;
@@ -2067,7 +2311,7 @@ export function createFileScanTaskRuntime({
           : [...priorMessages],
       };
       onTaskStarted?.(taskId);
-      emitImmediateFeedback(taskId, routingGoal);
+      emitImmediateFeedback(taskId, routingGoal, initialTokenUsage);
       if (options.preflightError) {
         runPreflightFailureTask(taskId, userGoal, options.preflightError);
         return;
@@ -2443,12 +2687,19 @@ export function createFileScanTaskRuntime({
           fullPriorMessages: modelPriorMessages,
           contextSummaryTool: chatTool,
           initialLogs: [routeLogToTaskLog(routeLog)],
+          initialTokenUsage,
           runtimeConfig: effectiveRuntimeConfig,
           availableToolDescriptors: effectiveToolDescriptors,
           runtimeEventSink,
           checkpointSink,
           resumeFromCheckpoint: options.resumeFromCheckpoint,
           reactDecideNext,
+          getAgentRuntimeBackend,
+          getAgentRuntimeRoutingDecision,
+          getAgentRuntimeProviderId,
+          getAgentRuntimeModelProfile,
+          agentRuntimeFactories,
+          createAgentRuntime,
           replanDag,
           computerUseLoopRunner,
           signal,
@@ -2798,7 +3049,7 @@ export function createFileScanTaskRuntime({
               ? "\u672a\u5206\u914d\u5de5\u4f5c\u4efb\u52a1"
               : "No workflow task assigned",
       })),
-      tokenUsage: createEmptyTokenUsageSummary(),
+      tokenUsage: tokenUsageForTask(taskId),
       conversationMessages: startedMessages,
       logs: [
         routeLogToTaskLog(routeLog),
@@ -2812,6 +3063,17 @@ export function createFileScanTaskRuntime({
         },
       ],
     });
+
+    let recordedUsageCount = 0;
+    const recordChatUsage = (usage: ModelUsage) => {
+      const currentSnapshot = runtimeState.getSnapshot();
+      if (currentSnapshot.id !== taskId) return;
+      recordedUsageCount += 1;
+      emitForActiveTask(taskId, {
+        ...currentSnapshot,
+        tokenUsage: addModelUsage(currentSnapshot.tokenUsage, "commander", usage),
+      });
+    };
 
     try {
       const chatOptions = {
@@ -2833,6 +3095,7 @@ export function createFileScanTaskRuntime({
           options: chatOptions,
           timeoutMs: chatTimeoutMs,
           signal,
+          onUsage: recordChatUsage,
         }),
         {
           label: "chat.complete",
@@ -2845,6 +3108,9 @@ export function createFileScanTaskRuntime({
         outputTokens: 0,
         totalTokens: 0,
       };
+      if (recordedUsageCount === 0) {
+        recordChatUsage(usage);
+      }
       const currentSnapshot = runtimeState.getSnapshot();
       if (currentSnapshot.id !== taskId) {
         return;
@@ -2871,7 +3137,7 @@ export function createFileScanTaskRuntime({
                 ? "\u672a\u5206\u914d\u5de5\u4f5c\u4efb\u52a1"
                 : "No workflow task assigned",
         })),
-        tokenUsage: addModelUsage(currentSnapshot.tokenUsage, "commander", usage),
+        tokenUsage: currentSnapshot.tokenUsage,
         logs: appendLog(currentSnapshot, {
           id: `${taskId}-done`,
           kind: "event",
@@ -2959,11 +3225,13 @@ export function createFileScanTaskRuntime({
     },
     timeoutMs = 90_000,
     signal?: AbortSignal,
+    onUsage?: (usage: ModelUsage) => void,
   ): Promise<{ text: string; tokenUsage?: ModelUsage; finishReason?: string }> {
     throwIfTaskAborted(signal, "chat.complete");
     if (!activeChatTool.stream) {
       return withTaskTimeout(async () => {
         const result = await activeChatTool.complete(prompt, { ...options, timeoutMs });
+        if (result.tokenUsage) onUsage?.(result.tokenUsage);
         if (isOutputTruncationFinishReason(result.finishReason)) {
           throw new Error(`Model response was truncated (${result.finishReason}); no complete answer was returned.`);
         }
@@ -2977,6 +3245,7 @@ export function createFileScanTaskRuntime({
     if (!eventBus) {
       return withTaskTimeout(async () => {
         const result = await activeChatTool.complete(prompt, { ...options, timeoutMs });
+        if (result.tokenUsage) onUsage?.(result.tokenUsage);
         if (isOutputTruncationFinishReason(result.finishReason)) {
           throw new Error(`Model response was truncated (${result.finishReason}); no complete answer was returned.`);
         }
@@ -2999,6 +3268,7 @@ export function createFileScanTaskRuntime({
         streamMode: "l1",
         onUsage: (usage) => {
           tokenUsage = usage;
+          onUsage?.(usage);
         },
         onFinish: (reason) => {
           finishReason = reason;
@@ -3059,6 +3329,7 @@ export function createFileScanTaskRuntime({
       });
       return withTaskTimeout(async () => {
         const result = await activeChatTool.complete(prompt, { ...options, timeoutMs });
+        if (result.tokenUsage) onUsage?.(result.tokenUsage);
         if (isOutputTruncationFinishReason(result.finishReason)) {
           throw new Error(`Model response was truncated (${result.finishReason}); no complete answer was returned.`);
         }
@@ -3091,6 +3362,7 @@ export function createFileScanTaskRuntime({
     };
     timeoutMs: number;
     signal?: AbortSignal;
+    onUsage?: (usage: ModelUsage) => void;
   }): Promise<{ text: string; tokenUsage?: ModelUsage; finishReason?: string }> {
     try {
       return await completeGeneralChat(
@@ -3108,6 +3380,7 @@ export function createFileScanTaskRuntime({
         },
         input.timeoutMs,
         input.signal,
+        input.onUsage,
       );
     } catch (error) {
       throwIfTaskAborted(input.signal, "chat.context_recovery");
@@ -3133,6 +3406,7 @@ export function createFileScanTaskRuntime({
         },
         input.timeoutMs,
         input.signal,
+        input.onUsage,
       );
     }
   }
@@ -3181,7 +3455,7 @@ export function createFileScanTaskRuntime({
         status: "completed",
         task: isChinese ? "无任务分配" : "No task assigned",
       })),
-      tokenUsage: createEmptyTokenUsageSummary(),
+      tokenUsage: tokenUsageForTask(taskId),
       logs: [
         {
           id: `${taskId}-created`,
@@ -3224,7 +3498,7 @@ export function createFileScanTaskRuntime({
               ? "没有工作流任务"
               : "No workflow task",
       })),
-      tokenUsage: createEmptyTokenUsageSummary(),
+      tokenUsage: tokenUsageForTask(taskId),
       logs: [
         {
           id: `${taskId}-created`,

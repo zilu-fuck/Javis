@@ -8,7 +8,7 @@
  * This module is pure data — no I/O, no Tauri, no ModelProvider.
  */
 
-import type { Agent } from "./index";
+import type { Agent, AgentKind } from "./index";
 import type { PermissionLevel } from "@javis/tools";
 import { initialToolDescriptors } from "@javis/tools";
 
@@ -84,6 +84,34 @@ export const ALL_CAPABILITY_TAGS: ReadonlyArray<AgentCapabilityTag> = [
 /** Check whether a string is a valid capability tag. */
 export function isValidCapabilityTag(value: string): value is AgentCapabilityTag {
   return (ALL_CAPABILITY_TAGS as ReadonlyArray<string>).includes(value);
+}
+
+const ROLE_CAPABILITIES_BY_AGENT_KIND: Partial<
+  Record<AgentKind, ReadonlyArray<AgentCapabilityTag>>
+> = {
+  research: ["synthesis"],
+  "language-reviewer": ["language_review"],
+  "security-reviewer": ["security_review"],
+  "build-fix": ["build_fix"],
+  "test-runner": ["test_run"],
+  "doc-updater": ["doc_update"],
+  explorer: ["code_explore"],
+  "perf-analyzer": ["performance_analysis"],
+  refactor: ["refactor"],
+};
+
+/** Role-level capabilities are fulfilled through an agent's safe ReAct toolset. */
+export function getRoleCapabilityTagsForAgentKind(
+  agentKind: string,
+): ReadonlyArray<AgentCapabilityTag> {
+  return ROLE_CAPABILITIES_BY_AGENT_KIND[agentKind as AgentKind] ?? [];
+}
+
+export function isRoleCapabilityForAgentKind(
+  agentKind: string,
+  capability: string,
+): boolean {
+  return getRoleCapabilityTagsForAgentKind(agentKind).some((tag) => tag === capability);
 }
 
 // ── Model Requirements ──────────────────────────────────────────────────────
@@ -644,33 +672,8 @@ function inferCapabilityTags(agent: Agent): AgentCapabilityTag[] {
     }
   }
 
-  // Research additionally gets synthesis capability
-  if (agent.kind === "research") {
-    tags.add("synthesis");
-  }
-  if (agent.kind === "language-reviewer") {
-    tags.add("language_review");
-  }
-  if (agent.kind === "security-reviewer") {
-    tags.add("security_review");
-  }
-  if (agent.kind === "build-fix") {
-    tags.add("build_fix");
-  }
-  if (agent.kind === "test-runner") {
-    tags.add("test_run");
-  }
-  if (agent.kind === "doc-updater") {
-    tags.add("doc_update");
-  }
-  if (agent.kind === "explorer") {
-    tags.add("code_explore");
-  }
-  if (agent.kind === "perf-analyzer") {
-    tags.add("performance_analysis");
-  }
-  if (agent.kind === "refactor") {
-    tags.add("refactor");
+  for (const tag of getRoleCapabilityTagsForAgentKind(agent.kind)) {
+    tags.add(tag);
   }
 
   return [...tags];

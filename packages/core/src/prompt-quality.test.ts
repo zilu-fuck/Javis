@@ -35,7 +35,8 @@ describe("prompt quality gates", () => {
       availableTools: [...availableTools],
     });
 
-    expect(prompt.length).toBeLessThan(4_500);
+    // The step contract adds five explicit fields to the compact schema.
+    expect(prompt.length).toBeLessThan(4_600);
     expect(prompt).toContain("{title:string, reasoning:string, executionPolicy?:ExecutionPolicy, steps:Step[1..12]}");
     expect(prompt).not.toContain('"properties"');
     expect(prompt).not.toContain("Available agents / 可用 Agent");
@@ -124,14 +125,14 @@ describe("prompt quality gates", () => {
 
   it("keeps agent-only policy text out of unrelated agent prompts", () => {
     const commanderPrompt = buildAgentSystemPrompt({ kind: "commander", locale: "en" });
-    const browserPrompt = buildAgentSystemPrompt({ kind: "browser", locale: "en" });
+    const pageAgentPrompt = buildAgentSystemPrompt({ kind: "page-agent", locale: "en" });
     const researchPrompt = buildAgentSystemPrompt({ kind: "research", locale: "en" });
     const codePrompt = buildAgentSystemPrompt({ kind: "code", locale: "en" });
 
     expect(commanderPrompt).not.toContain("claim, status, sourceUrl, excerpt");
     expect(commanderPrompt).not.toContain("currentOrigin, targetOrigin");
     expect(commanderPrompt).not.toContain("changed, verified, failed, skipped, risk");
-    expect(browserPrompt).toContain("currentOrigin, targetOrigin");
+    expect(pageAgentPrompt).toContain("currentOrigin, targetOrigin");
     expect(researchPrompt).toContain("claim, status, sourceUrl, excerpt");
     expect(codePrompt).toContain("changed, verified, failed, skipped, risk");
   });
@@ -180,7 +181,7 @@ describe("prompt quality gates", () => {
     });
     expect(getPromptSectionDefinition("browser_origin_policy")).toMatchObject({
       scope: "agent_only",
-      agentKinds: ["browser"],
+      agentKinds: ["page-agent"],
     });
     expect(getPromptSectionDefinition("code_verification_report")).toMatchObject({
       scope: "agent_only",

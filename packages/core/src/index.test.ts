@@ -9,6 +9,9 @@ import {
   getAgentSystemPrompt,
   getWorkbenchWorkflow,
   listWorkbenchWorkflows,
+  normalizeTaskProgress,
+  TASK_PROGRESS_ITEM_STATUSES,
+  TASK_PROGRESS_STATUSES,
   type WorkbenchWorkflow,
 } from "./index";
 import { initialToolDescriptors } from "@javis/tools";
@@ -57,6 +60,118 @@ async function waitForStatus(
   return snapshots[snapshots.length - 1] as TaskSnapshot;
 }
 
+describe("task progress contract", () => {
+  it("normalizes a complete user-facing progress value", () => {
+    expect(TASK_PROGRESS_STATUSES).toEqual([
+      "running",
+      "completed",
+      "completed_with_warnings",
+      "failed",
+    ]);
+    expect(TASK_PROGRESS_ITEM_STATUSES).toEqual([
+      "queued",
+      "running",
+      "verifying",
+      "completed",
+      "blocked",
+      "failed",
+    ]);
+
+    expect(normalizeTaskProgress({
+      title: "  Trend collection  ",
+      status: "completed_with_warnings",
+      currentAction: "  Preparing the partial report  ",
+      completedItems: 2,
+      totalItems: 3,
+      items: [
+        {
+          id: "  weibo  ",
+          label: "  Weibo  ",
+          status: "completed",
+          detail: "  20 verified items  ",
+          completedCount: 20,
+          expectedCount: 20,
+          sourceUrl: "  https://example.test/weibo  ",
+        },
+        {
+          id: "xiaohongshu",
+          label: "Xiaohongshu",
+          status: "blocked",
+          detail: "Access control 300012",
+        },
+      ],
+    })).toEqual({
+      title: "Trend collection",
+      status: "completed_with_warnings",
+      currentAction: "Preparing the partial report",
+      completedItems: 2,
+      totalItems: 3,
+      items: [
+        {
+          id: "weibo",
+          label: "Weibo",
+          status: "completed",
+          detail: "20 verified items",
+          completedCount: 20,
+          expectedCount: 20,
+          sourceUrl: "https://example.test/weibo",
+        },
+        {
+          id: "xiaohongshu",
+          label: "Xiaohongshu",
+          status: "blocked",
+          detail: "Access control 300012",
+        },
+      ],
+    });
+  });
+
+  it("rejects malformed progress instead of leaking loose values into the UI", () => {
+    const base = {
+      title: "Trend collection",
+      status: "running",
+      currentAction: "Collecting sources",
+      completedItems: 0,
+      totalItems: 1,
+      items: [{ id: "source", label: "Source", status: "queued" }],
+    };
+
+    expect(normalizeTaskProgress({ ...base, status: "waiting" })).toBeUndefined();
+    expect(normalizeTaskProgress({ ...base, completedItems: 2 })).toBeUndefined();
+    expect(normalizeTaskProgress({
+      ...base,
+      items: [{ ...base.items[0], completedCount: 21, expectedCount: 20 }],
+    })).toBeUndefined();
+    expect(normalizeTaskProgress({
+      ...base,
+      items: [base.items[0], base.items[0]],
+    })).toBeUndefined();
+  });
+
+  it("allows a terminal progress value without a current action", () => {
+    expect(normalizeTaskProgress({
+      title: "Trend collection",
+      status: "completed",
+      completedItems: 1,
+      totalItems: 1,
+      items: [{ id: "source", label: "Source", status: "completed" }],
+    })).toEqual({
+      title: "Trend collection",
+      status: "completed",
+      completedItems: 1,
+      totalItems: 1,
+      items: [{ id: "source", label: "Source", status: "completed" }],
+    });
+  });
+
+  it("keeps task progress optional for initial and legacy snapshots", () => {
+    const legacyCompatibleSnapshot: TaskSnapshot = createInitialTaskSnapshot();
+
+    expect(legacyCompatibleSnapshot.taskProgress).toBeUndefined();
+    expect(normalizeTaskProgress(legacyCompatibleSnapshot.taskProgress)).toBeUndefined();
+  });
+});
+
 describe("createFileScanTaskRuntime", () => {
   it("creates a consistent idle snapshot for all built-in agents", () => {
     const snapshot = createInitialTaskSnapshot();
@@ -89,7 +204,7 @@ describe("createFileScanTaskRuntime", () => {
       "agent-verifier",
       "agent-vision",
       "agent-workspace",
-      "agent-browser",
+      "agent-page-agent",
     ]);
     expect(snapshot.agents.every((agent) => agent.status === "queued")).toBe(true);
     const researchScore = snapshot.agents.find((agent) => agent.id === "agent-research")?.capabilityScore;
@@ -188,7 +303,7 @@ describe("createFileScanTaskRuntime", () => {
 
     expect(commanderPlan).toHaveBeenCalledWith(expect.objectContaining({
       workspacePath: "E:/MAIMAI_BOT",
-    }));
+    }), expect.objectContaining({ onUsage: expect.any(Function) }));
     expect(finalSnapshot.workspacePath).toBe("E:/MAIMAI_BOT");
     expect(finalSnapshot.askUserQuestion).toBeUndefined();
 
@@ -407,7 +522,7 @@ describe("createFileScanTaskRuntime", () => {
     expect(verifierCheck).toHaveBeenCalledWith(expect.objectContaining({
       stepId: "review-repository-evidence",
       successCriteria: "代码证据足够支撑项目功能结论。",
-    }));
+    }), expect.objectContaining({ onUsage: expect.any(Function) }));
     expect(finalSnapshot.commanderMessage).toContain("这个项目的主入口在 src/main.ts");
     expect(finalSnapshot.commanderMessage).not.toContain("assignedAgentKind");
     expect(finalSnapshot.plan.map((step) => step.id)).toEqual([
@@ -711,10 +826,10 @@ describe("createFileScanTaskRuntime", () => {
     expect(finalSnapshot.status).toBe("completed");
     expect(commanderPlan).toHaveBeenCalledWith(expect.objectContaining({
       images: ["data:image/png;base64,AA=="],
-    }));
+    }), expect.objectContaining({ onUsage: expect.any(Function) }));
     expect(synthesize).toHaveBeenCalledWith(expect.objectContaining({
       images: ["data:image/png;base64,AA=="],
-    }));
+    }), expect.objectContaining({ onUsage: expect.any(Function) }));
     expect(reactDecideNext).not.toHaveBeenCalled();
     expect(scanMarkdownDocuments).not.toHaveBeenCalled();
 
@@ -789,7 +904,7 @@ describe("createFileScanTaskRuntime", () => {
       permissionLevel: "confirmed_write",
     }));
     expect(getWorkbenchWorkflow("browser-research")?.safetyNotes).toContain(
-      "Click/type/evaluate/runTest operations require confirmed-write approval; upload remains disabled until upload approvals are implemented.",
+      "Click/type/evaluate/runTest operations require confirmed-write approval.",
     );
     expect(getWorkbenchWorkflow("browser-test")?.safetyNotes).toContain(
       "Browser test execution requires confirmed-write approval.",
@@ -839,6 +954,26 @@ describe("createFileScanTaskRuntime", () => {
         },
       ],
     });
+  });
+
+  it("keeps the measured usage paired with its actual model window", () => {
+    const mostUtilized = addModelUsage(undefined, "commander", {
+      inputTokens: 50,
+      outputTokens: 10,
+      totalTokens: 60,
+      model: "small-model",
+      contextWindowTokens: 100,
+    });
+    const lowerUtilization = addModelUsage(mostUtilized, "verifier", {
+      inputTokens: 100,
+      outputTokens: 0,
+      totalTokens: 100,
+      model: "large-model",
+      contextWindowTokens: 1_000,
+    });
+
+    expect(lowerUtilization.contextUsedTokens).toBe(60);
+    expect(lowerUtilization.contextWindowTokens).toBe(100);
   });
 
   it("routes project inspection goals through the project and shell tools", async () => {
@@ -934,7 +1069,7 @@ describe("createFileScanTaskRuntime", () => {
     expect(commanderPlan).toHaveBeenCalledWith(expect.objectContaining({
       workflowId: "commander-dag",
       userGoal: "inspect this project",
-    }));
+    }), expect.objectContaining({ onUsage: expect.any(Function) }));
 
     unsubscribe();
     runtime.dispose();
@@ -976,7 +1111,7 @@ describe("createFileScanTaskRuntime", () => {
     expect(commanderPlan).toHaveBeenCalledWith(expect.objectContaining({
       workflowId: "commander-dag",
       userGoal: "write the AI news summary to reports/search.md",
-    }));
+    }), expect.objectContaining({ onUsage: expect.any(Function) }));
     expect(planWriteText).not.toHaveBeenCalled();
     expect(synthesize).toHaveBeenCalled();
     expect(finalSnapshot.title).toBe("Commander planned text write");
@@ -1371,7 +1506,7 @@ describe("createFileScanTaskRuntime", () => {
     expect(commanderPlan).toHaveBeenCalledWith(expect.objectContaining({
       workflowId: "commander-dag",
       userGoal: "remind me every day at 8",
-    }));
+    }), expect.objectContaining({ onUsage: expect.any(Function) }));
 
     unsubscribe();
     runtime.dispose();
@@ -1762,7 +1897,7 @@ describe("createFileScanTaskRuntime", () => {
     expect(finalSnapshot.commands).toHaveLength(1);
     expect(finalSnapshot.commands?.[0]?.command).toBe("git diff --check");
     expect(finalSnapshot.verificationSummary).toContain("git diff --check passed");
-    expect(finalSnapshot.verificationSummary).toContain("no Code Agent edit backend is configured");
+    expect(finalSnapshot.verificationSummary).toContain("no patch was generated in the degraded code-review path");
 
     unsubscribe();
     runtime.dispose();
@@ -1828,7 +1963,7 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
-  it("requires confirmed-write approval before applying a proposed Code Agent patch", async () => {
+  it("keeps degraded code review read-only when a legacy proposal callback is present", async () => {
     const preview = {
       workspacePath: "E:/Javis",
       changedFiles: ["packages/core/src/index.ts"],
@@ -1853,6 +1988,7 @@ describe("createFileScanTaskRuntime", () => {
       changedFiles: proposedEdit.changedFiles,
       message: "Applied patch in test.",
     }));
+    const proposeEdit = vi.fn(async () => proposedEdit);
     const runtime = createFileScanTaskRuntime({
       delayMs: 0,
       fileTool: {
@@ -1860,7 +1996,7 @@ describe("createFileScanTaskRuntime", () => {
       },
       codeTool: {
         inspectRepository: vi.fn(async () => preview),
-        proposeEdit: vi.fn(async () => proposedEdit),
+        proposeEdit,
         applyProposedEdit,
       },
       shellTool: {
@@ -1878,46 +2014,25 @@ describe("createFileScanTaskRuntime", () => {
     runtime.start("Review code changes");
     await waitForStatus(snapshots, "waiting_permission");
     runtime.resolvePermission("approved");
-    await vi.waitFor(() => {
-      expect(snapshots[snapshots.length - 1]?.permissionRequest?.title).toBe(
-        "Approve Code Agent patch application",
-      );
-    });
-    expect(applyProposedEdit).not.toHaveBeenCalled();
-    runtime.resolvePermission("approved");
 
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
-    expect(applyProposedEdit).toHaveBeenCalledWith(proposedEdit, {
-      approvalId: expect.stringMatching(/^task-\d+-apply-permission$/),
-      taskId: expect.stringMatching(/^task-\d+$/),
-    });
-    expect(finalSnapshot.codeProposedEdit).toEqual(proposedEdit);
-    expect(finalSnapshot.codeApplyResult?.applied).toBe(true);
-    expect(finalSnapshot.tokenUsage).toEqual({
-      inputTokens: 1200,
-      outputTokens: 340,
-      totalTokens: 1540,
-      peakContextTokens: 1540,
-      modelCalls: 1,
-      byAgentKind: [
-        {
-          agentKind: "code",
-          inputTokens: 1200,
-          outputTokens: 340,
-          totalTokens: 1540,
-          modelCalls: 1,
-        },
-      ],
-    });
-    expect(finalSnapshot.commands).toHaveLength(2);
-    expect(finalSnapshot.verificationSummary).toContain("approved Code Agent patch applied");
+    expect(proposeEdit).not.toHaveBeenCalled();
+    expect(applyProposedEdit).not.toHaveBeenCalled();
+    expect(finalSnapshot.codeProposedEdit).toBeUndefined();
+    expect(finalSnapshot.codeApplyResult).toBeUndefined();
+    expect(finalSnapshot.commands).toHaveLength(1);
+    expect(finalSnapshot.verificationSummary).toContain("no patch was generated");
+    expect(finalSnapshot.plan.find((step) => step.id === "step-propose-code-edit")?.status)
+      .toBe("skipped");
+    expect(finalSnapshot.plan.find((step) => step.id === "step-apply-code-edit")?.status)
+      .toBe("skipped");
 
     unsubscribe();
     runtime.dispose();
   });
 
-  it("audits approved Code Agent patch effects through WorkspaceRuntime when provided", async () => {
+  it("does not enter the workspace apply path from degraded code review", async () => {
     const preview = {
       workspacePath: "E:/Javis",
       changedFiles: ["packages/core/src/index.ts"],
@@ -1990,28 +2105,19 @@ describe("createFileScanTaskRuntime", () => {
     runtime.start("Review code changes");
     await waitForStatus(snapshots, "waiting_permission");
     runtime.resolvePermission("approved");
-    await vi.waitFor(() => {
-      expect(snapshots[snapshots.length - 1]?.permissionRequest?.title).toBe(
-        "Approve Code Agent patch application",
-      );
-    });
-    runtime.resolvePermission("approved");
 
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
-    expect(finalSnapshot.codeApplyResult?.applied).toBe(true);
-    expect(createSnapshot).toHaveBeenCalledOnce();
-    expect(diff).toHaveBeenCalledWith(expect.objectContaining({ snapshotId: "snapshot-1" }));
-    expect(applyProposedEdit).toHaveBeenCalledWith(proposedEdit, {
-      approvalId: expect.stringMatching(/^task-\d+-apply-permission$/),
-      taskId: expect.stringMatching(/^task-\d+$/),
-    });
+    expect(finalSnapshot.codeApplyResult).toBeUndefined();
+    expect(createSnapshot).not.toHaveBeenCalled();
+    expect(diff).not.toHaveBeenCalled();
+    expect(applyProposedEdit).not.toHaveBeenCalled();
 
     unsubscribe();
     runtime.dispose();
   });
 
-  it("keeps denied Code Agent patch proposals as a no-op", async () => {
+  it("does not request a patch approval in degraded code review", async () => {
     const proposedEdit = {
       proposalId: "proposal-1",
       workspacePath: "E:/Javis",
@@ -2056,24 +2162,18 @@ describe("createFileScanTaskRuntime", () => {
     runtime.start("Review code changes");
     await waitForStatus(snapshots, "waiting_permission");
     runtime.resolvePermission("approved");
-    await vi.waitFor(() => {
-      expect(snapshots[snapshots.length - 1]?.permissionRequest?.title).toBe(
-        "Approve Code Agent patch application",
-      );
-    });
-    runtime.resolvePermission("denied");
 
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(applyProposedEdit).not.toHaveBeenCalled();
-    expect(finalSnapshot.permissionRequest?.status).toBe("denied");
-    expect(finalSnapshot.verificationSummary).toContain("no write operation was executed");
+    expect(finalSnapshot.permissionRequest?.status).toBe("approved");
+    expect(finalSnapshot.verificationSummary).toContain("no patch was generated");
 
     unsubscribe();
     runtime.dispose();
   });
 
-  it("refuses Code Agent patch proposals when the patch hash does not match", async () => {
+  it("ignores legacy proposal safety callbacks in degraded code review", async () => {
     const applyProposedEdit = vi.fn(async () => ({
       applied: true,
       workspacePath: "E:/Javis",
@@ -2118,16 +2218,17 @@ describe("createFileScanTaskRuntime", () => {
     await waitForStatus(snapshots, "waiting_permission");
     runtime.resolvePermission("approved");
 
-    const finalSnapshot = await waitForStatus(snapshots, "failed");
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
 
-    expect(finalSnapshot.title).toBe("Code Agent patch proposal failed safety check");
+    expect(finalSnapshot.title).toBe("Code review completed");
     expect(applyProposedEdit).not.toHaveBeenCalled();
+    expect(finalSnapshot.verificationSummary).toContain("no patch was generated");
 
     unsubscribe();
     runtime.dispose();
   });
 
-  it("reports Code Agent proposal backend failures separately from verification failures", async () => {
+  it("does not invoke a legacy proposal backend after verification", async () => {
     const proposeEdit = vi.fn(async () => {
       throw new Error("provider returned invalid proposal");
     });
@@ -2167,20 +2268,18 @@ describe("createFileScanTaskRuntime", () => {
     await waitForStatus(snapshots, "waiting_permission");
     runtime.resolvePermission("approved");
 
-    const finalSnapshot = await waitForStatus(snapshots, "failed");
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
 
-    expect(proposeEdit).toHaveBeenCalled();
-    expect(finalSnapshot.title).toBe("Code Agent patch proposal failed");
+    expect(proposeEdit).not.toHaveBeenCalled();
+    expect(finalSnapshot.title).toBe("Code review completed");
     expect(finalSnapshot.commanderMessage).toBeTruthy();
-    expect(finalSnapshot.logs[finalSnapshot.logs.length - 1]?.detail).toContain(
-      "provider returned invalid proposal",
-    );
+    expect(finalSnapshot.verificationSummary).toContain("no patch was generated");
 
     unsubscribe();
     runtime.dispose();
   });
 
-  it("refuses Code Agent apply results that include unapproved files", async () => {
+  it("does not consume legacy apply results in degraded code review", async () => {
     const proposedEdit = {
       proposalId: "proposal-1",
       workspacePath: "E:/Javis",
@@ -2224,17 +2323,11 @@ describe("createFileScanTaskRuntime", () => {
     runtime.start("Review code changes");
     await waitForStatus(snapshots, "waiting_permission");
     runtime.resolvePermission("approved");
-    await vi.waitFor(() => {
-      expect(snapshots[snapshots.length - 1]?.permissionRequest?.title).toBe(
-        "Approve Code Agent patch application",
-      );
-    });
-    runtime.resolvePermission("approved");
 
-    const finalSnapshot = await waitForStatus(snapshots, "failed");
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
 
-    expect(finalSnapshot.title).toBe("Code Agent patch result failed safety check");
-    expect(finalSnapshot.verificationSummary).toContain("unapproved file");
+    expect(finalSnapshot.title).toBe("Code review completed");
+    expect(finalSnapshot.verificationSummary).toContain("no patch was generated");
 
     unsubscribe();
     runtime.dispose();
@@ -3519,7 +3612,7 @@ describe("createFileScanTaskRuntime", () => {
     expect(plan).toHaveBeenCalledWith(expect.objectContaining({
       workflowId: "commander-dag",
       userGoal: "describe this image data:image/png;base64,abcd",
-    }));
+    }), expect.objectContaining({ onUsage: expect.any(Function) }));
     expect(describe).toHaveBeenCalledWith(
       expect.objectContaining({ imagePath: "data:image/png;base64,abcd" }),
     );
@@ -3945,6 +4038,83 @@ describe("createFileScanTaskRuntime", () => {
       { role: "user", content: "second question" },
       { role: "assistant", content: "Second answer" },
     ]);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("keeps cumulative usage when a follow-up reuses the same task id", async () => {
+    const complete = vi.fn(async () => complete.mock.calls.length === 1
+      ? {
+          text: "First answer",
+          tokenUsage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 },
+        }
+      : {
+          text: "Second answer",
+          tokenUsage: { inputTokens: 20, outputTokens: 3, totalTokens: 23 },
+        });
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      chatTool: { complete },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("first question", { mode: "chat", taskId: "task-continued" });
+    const first = await waitForStatus(snapshots, "completed");
+    expect(first.tokenUsage).toMatchObject({ totalTokens: 12, modelCalls: 1 });
+
+    const followUpStart = snapshots.length;
+    runtime.start("second question", {
+      mode: "chat",
+      taskId: "task-continued",
+      priorMessages: first.conversationMessages,
+    });
+    const second = await waitForStatus(snapshots, "completed");
+
+    const followUpSnapshots = snapshots.slice(followUpStart)
+      .filter((snapshot) => snapshot.id === "task-continued");
+    expect(followUpSnapshots.length).toBeGreaterThan(0);
+    expect(followUpSnapshots.every((snapshot) =>
+      (snapshot.tokenUsage?.totalTokens ?? 0) >= 12 &&
+      (snapshot.tokenUsage?.modelCalls ?? 0) >= 1
+    )).toBe(true);
+    expect(second.tokenUsage).toMatchObject({
+      inputTokens: 30,
+      outputTokens: 5,
+      totalTokens: 35,
+      modelCalls: 2,
+    });
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("records usage from a model call that fails after returning usage", async () => {
+    const commanderPlan = vi.fn<CommanderTool["plan"]>(async (_request, observer) => {
+      observer?.onUsage?.({
+        inputTokens: 40,
+        outputTokens: 6,
+        totalTokens: 46,
+      });
+      throw new Error("planner response was invalid");
+    });
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      commanderTool: { plan: commanderPlan },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("inspect the project", { mode: "project", taskId: "task-failed-usage" });
+    const finalSnapshot = await waitForStatus(snapshots, "failed");
+
+    expect(finalSnapshot.tokenUsage).toMatchObject({
+      inputTokens: 40,
+      outputTokens: 6,
+      totalTokens: 46,
+      modelCalls: 1,
+    });
 
     unsubscribe();
     runtime.dispose();
@@ -5210,11 +5380,17 @@ describe("createFileScanTaskRuntime", () => {
     const scanDocs = vi.fn(async () => {
       throw new Error("Scan failed: permission denied");
     });
+    const scanUserDocs = vi.fn(async () => {
+      throw new Error("Fallback scan failed: permission denied");
+    });
 
     const runtime = createFileScanTaskRuntime({
       delayMs: 0,
       commanderTool: { plan: commanderPlan },
-      fileTool: { scanMarkdownDocuments: scanDocs },
+      fileTool: {
+        scanMarkdownDocuments: scanDocs,
+        scanUserDocuments: scanUserDocs,
+      },
       replanDag: vi.fn(async () => ({
         title: "Recovery plan",
         reasoning: "Try alternative.",
@@ -5222,6 +5398,8 @@ describe("createFileScanTaskRuntime", () => {
           id: "recovery-step",
           title: "Scan with different approach",
           assignedAgentKind: "file",
+          toolName: "file.scanUserDocuments",
+          toolInput: { query: "markdown" },
           capability: "file_scan" as const,
           requiredCapabilities: ["file_scan"] as string[],
           dependsOn: [] as string[],
@@ -5233,7 +5411,7 @@ describe("createFileScanTaskRuntime", () => {
 
     runtime.start("test failure replan");
 
-    // Task will fail (recovery also fails since scanDocs always throws),
+    // Task will fail because the alternative recovery scan also throws,
     // but the replan itself should be visible in logs before final failure.
     await vi.waitFor(() => {
       const hasReplanLog = snapshots.some((s) =>
@@ -5805,6 +5983,48 @@ describe("completeGeneralChat streaming pipeline", () => {
     }));
     const final = snapshots[snapshots.length - 1];
     expect(final?.commanderMessage).toBe("recovered after stream failure");
+
+    runtime.dispose();
+  });
+
+  it("keeps streamed usage when stream and fallback both fail", async () => {
+    const mockChatTool = {
+      complete: vi.fn(async () => {
+        throw new Error("fallback failed");
+      }),
+      stream: vi.fn(async function* (
+        _prompt: string,
+        options?: {
+          onUsage?: (usage: { inputTokens: number; outputTokens: number; totalTokens: number }) => void;
+        },
+      ) {
+        options?.onUsage?.({ inputTokens: 9, outputTokens: 1, totalTokens: 10 });
+        throw new Error("stream failed");
+      }),
+    };
+    const runtime = createFileScanTaskRuntime({
+      fileTool: undefined as any,
+      chatTool: mockChatTool,
+      eventBus: createTaskEventBus(),
+    });
+    const { snapshots } = subscribeToRuntime(runtime);
+
+    runtime.start("test failed usage accounting", {
+      mode: "chat",
+      taskId: "task-failed-usage-accounting",
+    });
+
+    await vi.waitFor(() => {
+      expect(snapshots[snapshots.length - 1]?.status).toBe("failed");
+    }, { timeout: 3000 });
+
+    expect(mockChatTool.complete).toHaveBeenCalledOnce();
+    expect(snapshots[snapshots.length - 1]?.tokenUsage).toMatchObject({
+      inputTokens: 9,
+      outputTokens: 1,
+      totalTokens: 10,
+      modelCalls: 1,
+    });
 
     runtime.dispose();
   });

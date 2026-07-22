@@ -63,6 +63,39 @@ describe("createSharedTaskContext", () => {
 });
 
 describe("buildHandoffReport", () => {
+  it("includes the step contract and unified result metadata", () => {
+    const context = createSharedTaskContext();
+    context.set("stepResult:collect", {
+      status: "partial",
+      evidence: [{ kind: "file", label: "README", reference: "README.md" }],
+      assumptions: ["The workspace is selected."],
+      unresolvedQuestions: ["Which target should be built?"],
+    });
+    const report = buildHandoffReport([{
+      id: "collect",
+      title: "Collect evidence",
+      assignedAgentKind: "file",
+      instruction: "Collect repository evidence.",
+      hardConstraints: ["Read only"],
+      preferences: ["Prefer manifests"],
+      acceptanceCriteria: ["Evidence is source-backed."],
+      outputSchemaRef: "repoEvidence",
+      inputContextKeys: [],
+      outputContextKey: "repoEvidence",
+    }], context);
+
+    expect(report.steps[0]).toMatchObject({
+      instruction: "Collect repository evidence.",
+      hardConstraints: ["Read only"],
+      preferences: ["Prefer manifests"],
+      acceptanceCriteria: ["Evidence is source-backed."],
+      outputSchemaRef: "repoEvidence",
+      result: { status: "partial" },
+    });
+    expect(report.status).toBe("needs_attention");
+    expect(formatHandoffReportMarkdown(report)).toContain("| partial |");
+  });
+
   it("serializes producer and consumer handoffs with compact value summaries", () => {
     const context = createSharedTaskContext({
       repoEvidence: { keyFiles: ["src/app.ts"], edges: 2 },

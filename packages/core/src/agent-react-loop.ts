@@ -4,6 +4,8 @@ import { formatStepInputValidationError, validateStepInputContext } from "./shar
 import { DEFAULT_TASK_TIMEOUT_MS, throwIfTaskAborted, withTaskTimeout } from "./task-wait";
 import type { WorkbenchWorkflowStep } from "./workflows";
 import { isSensitiveFieldName, redactSensitiveText } from "./sensitive-data";
+import type { AgentRuntimeRunMetrics, AgentTokenUsage } from "./agent-runtime/contracts";
+import { addAgentTokenUsage } from "./agent-runtime/metrics";
 
 export interface AgentReActObservation {
   iteration: number;
@@ -20,6 +22,10 @@ export interface AgentReActObservation {
 export interface AgentReActTool {
   name: string;
   baseInput?: Record<string, unknown>;
+  /** Optional live Agent that should collect replacement evidence after this tool fails. */
+  failureFallbackAgentKind?: AgentKind;
+  failureFallbackCapability?: string;
+  failureFallbackContextKey?: string;
   requiredInputs?: Array<{
     name: string;
     type: "string" | "string[]" | "number" | "number[]" | "boolean" | "boolean[]" | "object" | "object[]";
@@ -42,6 +48,7 @@ export interface AgentReActDecision {
   output?: unknown;
   requestedContextKeys?: string[];
   requestedAgentKind?: AgentKind;
+  usage?: AgentTokenUsage;
 }
 
 export interface AgentReActLoopOptions {
@@ -66,6 +73,7 @@ export interface AgentReActLoopOptions {
   onIteration?: (iteration: number, observation: AgentReActObservation) => void;
   onWaiting?: (phase: "waiting_model" | "waiting_tool", iteration: number, detail: string) => void;
   onTimeout?: (phase: "waiting_model" | "waiting_tool", iteration: number, detail: string) => void;
+  onRunMetrics?: (metrics: AgentRuntimeRunMetrics) => void;
 }
 
 export interface AgentReActLoopResult {
@@ -75,11 +83,70 @@ export interface AgentReActLoopResult {
   reason: string;
   requestedContextKeys?: string[];
   requestedAgentKind?: AgentKind;
+  metrics: AgentRuntimeRunMetrics;
 }
 
 export async function runAgentReActLoop(
   options: AgentReActLoopOptions,
 ): Promise<AgentReActLoopResult> {
+  const startedAt = Date.now();
+  let modelCalls = 0;
+  let toolCalls = 0;
+  let usage: AgentTokenUsage | undefined;
+  try {
+    const result = await runAgentReActLoopInternal({
+      ...options,
+      tools: options.tools.map((tool) => ({
+        ...tool,
+        execute: async (request) => {
+          toolCalls += 1;
+          return tool.execute(request);
+        },
+      })),
+      decideNext: async (request) => {
+        modelCalls += 1;
+        const decision = await options.decideNext(request);
+        usage = addAgentTokenUsage(usage, decision.usage);
+        return decision;
+      },
+    });
+    const metrics: AgentRuntimeRunMetrics = {
+      backend: "legacy",
+      status: result.status,
+      durationMs: Date.now() - startedAt,
+      modelCalls,
+      toolCalls,
+      ...(usage ? { usage } : {}),
+    };
+    notifyRunMetrics(options.onRunMetrics, metrics);
+    return { ...result, metrics };
+  } catch (error) {
+    notifyRunMetrics(options.onRunMetrics, {
+      backend: "legacy",
+      status: options.signal?.aborted ? "cancelled" : "failed",
+      durationMs: Date.now() - startedAt,
+      modelCalls,
+      toolCalls,
+      ...(usage ? { usage } : {}),
+    });
+    throw error;
+  }
+}
+
+function notifyRunMetrics(
+  observer: AgentReActLoopOptions["onRunMetrics"],
+  metrics: AgentRuntimeRunMetrics,
+): void {
+  try {
+    observer?.(metrics);
+  } catch {
+    // Observability must never change the Agent result or mask its failure.
+  }
+}
+
+async function runAgentReActLoopInternal(
+  options: AgentReActLoopOptions,
+): Promise<Omit<AgentReActLoopResult, "metrics">> {
   const {
     agent,
     step,
@@ -144,7 +211,9 @@ export async function runAgentReActLoop(
       }
       return {
         status: "completed",
-        output: lastObservation.output,
+        output: agent.kind === "page-agent" && hasUsableObservationOutput(decision.output)
+          ? sanitizeAgentReActOutput(decision.output)
+          : lastObservation.output,
         observations: boundObservationHistory(observations),
         reason: decision.reason,
       };
@@ -256,6 +325,21 @@ export async function runAgentReActLoop(
     observations.push(observation);
     writeBoundedObservationContext(context, step.id, observations);
     options.onIteration?.(iteration, observation);
+    if (
+      observation.status === "failed" &&
+      tool.failureFallbackAgentKind &&
+      options.liveAgentKinds?.includes(tool.failureFallbackAgentKind)
+    ) {
+      const requestedContextKey = tool.failureFallbackContextKey?.trim() || `fallbackEvidence:${step.id}`;
+      return {
+        status: "request_input",
+        observations: boundObservationHistory(observations),
+        reason: `Tool ${tool.name} failed; request replacement evidence from ${tool.failureFallbackAgentKind}` +
+          (tool.failureFallbackCapability ? ` using capability ${tool.failureFallbackCapability}.` : "."),
+        requestedContextKeys: [requestedContextKey],
+        requestedAgentKind: tool.failureFallbackAgentKind,
+      };
+    }
   }
 
   return {
@@ -277,11 +361,11 @@ type RequestInputValidation =
     }
   | { valid: false; reason: string };
 
-function validateRequestInputDecision(
-  decision: AgentReActDecision,
+export function validateAgentRequestInput(
+  requestedContextKeys: unknown,
+  requestedAgentKind: unknown,
   liveAgentKinds: ReadonlyArray<AgentKind> | undefined,
 ): RequestInputValidation {
-  const requestedContextKeys: unknown = decision.requestedContextKeys;
   if (!Array.isArray(requestedContextKeys) || requestedContextKeys.length === 0) {
     return invalidRequestInput("requestedContextKeys must be a non-empty array.");
   }
@@ -315,7 +399,6 @@ function validateRequestInputDecision(
     validatedKeys.push(key);
   }
 
-  const requestedAgentKind: unknown = decision.requestedAgentKind;
   if (requestedAgentKind === undefined) {
     return { valid: true, requestedContextKeys: validatedKeys };
   }
@@ -331,6 +414,17 @@ function validateRequestInputDecision(
     requestedContextKeys: validatedKeys,
     requestedAgentKind: requestedAgentKind as AgentKind,
   };
+}
+
+function validateRequestInputDecision(
+  decision: AgentReActDecision,
+  liveAgentKinds: ReadonlyArray<AgentKind> | undefined,
+): RequestInputValidation {
+  return validateAgentRequestInput(
+    decision.requestedContextKeys,
+    decision.requestedAgentKind,
+    liveAgentKinds,
+  );
 }
 
 function invalidRequestInput(reason: string): RequestInputValidation {

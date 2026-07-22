@@ -4,10 +4,74 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Javis</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        background: #f4f7f6;
+      }
+
+      #root {
+        min-height: 100vh;
+      }
+
+      .javis-startup-shell {
+        box-sizing: border-box;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        gap: 12px;
+        color: #24302f;
+        font: 600 14px/1.4 system-ui, sans-serif;
+      }
+
+      .javis-startup-mark {
+        width: 8px;
+        height: 28px;
+        border-radius: 4px;
+        background: #267b77;
+      }
+
+      .javis-startup-copy {
+        display: grid;
+        gap: 2px;
+      }
+
+      .javis-startup-copy span {
+        color: #687674;
+        font-size: 12px;
+        font-weight: 500;
+      }
+
+      .javis-startup-retry {
+        visibility: hidden;
+        color: #267b77;
+        font-size: 12px;
+        text-decoration: none;
+        animation: javis-show-startup-retry 0s linear 8s forwards;
+      }
+
+      @keyframes javis-show-startup-retry {
+        to {
+          visibility: visible;
+        }
+      }
+    </style>
   </head>
 
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="javis-startup-shell" role="status" aria-live="polite">
+        <span class="javis-startup-mark" aria-hidden="true"></span>
+        <div class="javis-startup-copy">
+          <strong>Javis</strong>
+          <span>正在启动...</span>
+          <a class="javis-startup-retry" href="/">重新加载</a>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

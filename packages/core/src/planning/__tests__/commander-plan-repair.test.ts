@@ -136,6 +136,7 @@ describe("attemptPlanRepair", () => {
     const result = await attemptPlanRepair({
       commanderPlan: planCall,
       originalUserGoal: "List the directory",
+      workspacePath: "E:/selected-workspace",
       invalidPlan: invalidMissingDepPlan(),
       diagnostics: [missingDepDiag],
       availableAgents: availableAgents as unknown as Array<{
@@ -153,6 +154,12 @@ describe("attemptPlanRepair", () => {
       expect(result.attempts).toHaveLength(1);
       expect(result.attempts[0].status).toBe("compiled");
       expect(result.attempts[0].attempt).toBe(1);
+      expect(result.plan.steps[0]).toMatchObject({
+        instruction: "Analyze",
+        hardConstraints: [],
+        preferences: [],
+        acceptanceCriteria: ["Done."],
+      });
     }
     expect(planCall).toHaveBeenCalledTimes(1);
     const sentRequest = planCall.mock.calls[0][0];
@@ -161,6 +168,7 @@ describe("attemptPlanRepair", () => {
     expect(sentRequest.repairContext?.maxAttempts).toBe(2);
     expect(sentRequest.repairContext?.originalUserGoal).toBe("List the directory");
     expect(sentRequest.repairContext?.diagnostics[0].code).toBe("MISSING_DEPENDENCY");
+    expect(sentRequest.workspacePath).toBe("E:/selected-workspace");
   });
 
   it("succeeds on the second attempt when first attempt still fails with repairable error", async () => {

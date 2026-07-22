@@ -342,7 +342,7 @@ describe("compileCommanderPlan", () => {
     }
   });
 
-  it("rejects capability-only approval-gated steps that omit the exact toolName", () => {
+  it("marks capability-only approval-gated steps with a repairable tool-selection diagnostic", () => {
     const plan: CommanderDagPlan = {
       title: "Ambiguous write",
       reasoning: "test",
@@ -362,9 +362,49 @@ describe("compileCommanderPlan", () => {
     const result = compileCommanderPlan(makeInput({ plan }));
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      const diag = result.diagnostics.find((d) => d.code === "UNSUPPORTED_APPROVAL_GATED_TOOL");
+      const diag = result.diagnostics.find((d) => d.code === "MISSING_APPROVAL_TOOL_SELECTION");
       expect(diag?.message).toContain("no explicit toolName");
       expect(diag?.suggestedFix).toContain("toolName");
+      expect(result.repairable).toBe(true);
+    }
+  });
+
+  it("normalizes legacy Browser Agent steps to Page Agent", () => {
+    const plan: CommanderDagPlan = {
+      title: "Legacy browser plan",
+      reasoning: "Loaded from persisted history.",
+      steps: [{
+        id: "open-page",
+        title: "Open page",
+        assignedAgentKind: "browser",
+        toolName: "browser.navigate",
+        capability: "browser_navigate",
+        requiredCapabilities: ["browser_navigate"],
+        dependsOn: [],
+        toolInput: { url: "https://example.com" },
+        successCriteria: "Page loaded.",
+      }],
+    };
+    const input = makeInput({ plan });
+    const result = compileCommanderPlan({
+      ...input,
+      availableAgents: [
+        ...input.availableAgents,
+        { kind: "page-agent", allowedToolNames: ["browser.navigate"], capabilities: ["browser_navigate"] },
+      ],
+      availableTools: [
+        ...input.availableTools,
+        makeToolDescriptor("browser.navigate", {
+          capabilityTags: ["browser_navigate"],
+          ownerAgentKinds: ["page-agent"],
+          requiredInputs: [{ name: "url", type: "string", nonEmpty: true }],
+        }),
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.plan.steps[0]?.assignedAgentKind).toBe("page-agent");
     }
   });
 
@@ -869,6 +909,44 @@ describe("compileCommanderPlan", () => {
       );
       expect(diagnostic?.message).toContain("evidence guard");
       expect(diagnostic?.suggestedFix).toContain("direct_response");
+    }
+  });
+
+  it("rejects direct_tool_call for an agent role capability", () => {
+    const plan: CommanderDagPlan = {
+      title: "Review documentation",
+      reasoning: "Use the documentation agent role.",
+      steps: [{
+        id: "review-docs",
+        title: "Review documentation",
+        assignedAgentKind: "doc-updater",
+        capability: "doc_update",
+        requiredCapabilities: ["doc_update"],
+        dependsOn: [],
+        executionMode: "direct_tool_call",
+        successCriteria: "Documentation findings are reported.",
+      }],
+    };
+    const result = compileCommanderPlan(makeInput({
+      plan,
+      availableAgents: [
+        ...makeInput({ plan }).availableAgents,
+        {
+          kind: "doc-updater",
+          allowedToolNames: ["file.scanMarkdownDocuments"],
+          capabilities: ["doc_update"],
+        },
+      ],
+    }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      const diagnostic = result.diagnostics.find((item) =>
+        item.code === "INVALID_EXECUTION_MODE" && item.stepId === "review-docs"
+      );
+      expect(diagnostic?.message).toContain("role capability");
+      expect(diagnostic?.suggestedFix).toContain("react");
+      expect(result.repairable).toBe(true);
     }
   });
 

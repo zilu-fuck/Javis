@@ -279,6 +279,8 @@ export interface ModelUsage {
   totalTokens?: number;
   model?: string;
   provider?: string;
+  /** Context window of the model that produced this usage, when known. */
+  contextWindowTokens?: number;
 }
 
 export interface TokenUsageByAgent {
@@ -295,8 +297,16 @@ export interface TokenUsageSummary {
   totalTokens: number;
   /** Largest input plus output token count observed in one model call. */
   peakContextTokens?: number;
+  /** Tokens used by the model call with the highest known context utilization. */
+  contextUsedTokens?: number;
+  /** Context window paired with contextUsedTokens. */
+  contextWindowTokens?: number;
   modelCalls: number;
   byAgentKind: TokenUsageByAgent[];
+}
+
+export interface ModelUsageObserver {
+  onUsage?: (usage: ModelUsage) => void;
 }
 
 export interface CommanderPlanRequest {
@@ -387,8 +397,11 @@ export interface CommanderSynthesizeResult {
 }
 
 export interface CommanderTool {
-  plan(request: CommanderPlanRequest): Promise<CommanderPlanResult>;
-  synthesize?(request: CommanderSynthesizeRequest): Promise<CommanderSynthesizeResult>;
+  plan(request: CommanderPlanRequest, observer?: ModelUsageObserver): Promise<CommanderPlanResult>;
+  synthesize?(
+    request: CommanderSynthesizeRequest,
+    observer?: ModelUsageObserver,
+  ): Promise<CommanderSynthesizeResult>;
   askUser?(question: string, choices?: Array<string | AskUserChoice>): Promise<string>;
 }
 
@@ -409,7 +422,7 @@ export interface VerifierCheckResult {
 }
 
 export interface VerifierTool {
-  check(request: VerifierCheckRequest): Promise<VerifierCheckResult>;
+  check(request: VerifierCheckRequest, observer?: ModelUsageObserver): Promise<VerifierCheckResult>;
 }
 
 export interface CodeProposedEdit {

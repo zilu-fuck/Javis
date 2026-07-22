@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from "react";
 import { createInitialTaskSnapshot, type TaskSnapshot } from "@javis/core";
 import { getCompletedTaskWorkspacePath } from "./workspace-session";
-import { isArchivableTask, upsertTaskHistory, type createTaskHistoryRepository } from "./task-history";
+import {
+  isArchivableTask,
+  persistTaskHistorySnapshot,
+  upsertTaskHistory,
+  type createTaskHistoryRepository,
+} from "./task-history";
 import type { ScheduledTask } from "./scheduled-tasks";
 import type { createScheduledTasksRepository } from "./scheduled-tasks-persistence";
 import type { createJavisRuntime } from "./app-runtime";
@@ -141,9 +146,7 @@ export function useTaskRuntime({
         setHistory((current) => {
           const updated = upsertTaskHistory(current, nextTask);
           const repository = taskHistoryRepoRef.current;
-          if (repository) {
-            void repository.upsert(nextTask);
-          }
+          persistTaskHistorySnapshot(repository, nextTask);
           setActiveHistoryEntryId?.(nextTask.id);
           return updated;
         });

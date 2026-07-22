@@ -54,6 +54,19 @@ describe("artifact-envelope", () => {
       expect(envelope.sensitivity).toBe("workspace");
     });
 
+    it("carries the declared output schema reference into handoff metadata", () => {
+      const envelope = createArtifactEnvelope({ data: "test" }, {
+        taskId: "task-1",
+        runId: "run-1",
+        type: "repoEvidence",
+        outputSchemaRef: "repoEvidence",
+        producer: { stepId: "step-2", agentKind: "code" },
+      });
+
+      expect(envelope.outputSchemaRef).toBe("repoEvidence");
+      expect(summarizeArtifactForHandoff(envelope).outputSchemaRef).toBe("repoEvidence");
+    });
+
     it("defaults schemaVersion to 1", () => {
       const envelope = createArtifactEnvelope({}, {
         taskId: "t",

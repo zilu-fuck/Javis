@@ -90,6 +90,34 @@ describe("OpenAIAdapter", () => {
 });
 
 describe("OpenAICompatibleAdapter", () => {
+  it("enables Tool Call capabilities unless explicitly disabled", () => {
+    const enabled = new OpenAICompatibleAdapter(
+      "ollama",
+      "http://localhost:11434/v1",
+      { vision: false, code: true, longContext: false },
+    );
+    expect(enabled.capabilities).toMatchObject({
+      nativeToolCalling: true,
+      streamingToolCalls: true,
+    });
+
+    const disabled = new OpenAICompatibleAdapter(
+      "legacy-endpoint",
+      "https://example.test/v1",
+      {
+        vision: false,
+        code: true,
+        longContext: false,
+        nativeToolCalling: false,
+        streamingToolCalls: false,
+      },
+    );
+    expect(disabled.capabilities).toMatchObject({
+      nativeToolCalling: false,
+      streamingToolCalls: false,
+    });
+  });
+
   it("uses provider-specific default baseUrl when empty", () => {
     const adapter = new OpenAICompatibleAdapter("openrouter", "https://openrouter.ai/api/v1");
     const payload = adapter.buildCompletionRequest({

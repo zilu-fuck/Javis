@@ -83,6 +83,9 @@ export interface ModelUsage {
   inputTokens: number;
   outputTokens: number;
   totalTokens?: number;
+  model?: string;
+  provider?: string;
+  contextWindowTokens?: number;
 }
 
 export class ModelProviderError extends Error {
@@ -128,13 +131,13 @@ export function createConfiguredModelProvider(settings: ModelSettings): ModelPro
         const result = await invoke<CompletionResult>("complete_model_prompt", {
           request: await createModelRequest(prompt, providerSettings, options, adapter),
         });
-        return sanitizeCompletionResult(
+        return enrichCompletionUsage(sanitizeCompletionResult(
           result,
           providerSettings.provider,
           normalizeOptionalText(options?.assistantPrefill),
           options?.preserveLeadingReasoningMarkup === true,
           stopSequences,
-        );
+        ), providerSettings);
       } catch (error) {
         throw normalizeModelProviderError(error, providerSettings.provider);
       }
@@ -176,13 +179,13 @@ export function createModelProviderFromProfile(
         const result = await invoke<CompletionResult>("complete_model_prompt", {
           request: await createModelRequest(prompt, providerSettings, options, adapter),
         });
-        return sanitizeCompletionResult(
+        return enrichCompletionUsage(sanitizeCompletionResult(
           result,
           providerSettings.provider,
           normalizeOptionalText(options?.assistantPrefill),
           options?.preserveLeadingReasoningMarkup === true,
           stopSequences,
-        );
+        ), providerSettings);
       } catch (error) {
         throw normalizeModelProviderError(error, providerSettings.provider);
       }
@@ -329,7 +332,14 @@ async function* streamModelPrompt(
       (event) => {
         if (getPayloadStreamId(event.payload) !== streamId) return;
         const usage = event.payload.tokenUsage ?? event.payload.token_usage;
-        if (usage) options?.onUsage?.(usage);
+        if (usage) {
+          options?.onUsage?.(enrichModelUsage(
+            usage,
+            providerSettings,
+            lastModel,
+            lastProvider,
+          ));
+        }
         finishReason = event.payload.finishReason ?? event.payload.finish_reason;
         pushGeneratedText(prefillCoordinator.finish(), lastModel, lastProvider);
         // `finish()` returns the matcher tail that was held only to detect a
@@ -781,6 +791,45 @@ function sanitizeCompletionResult(
     return { ...result, text: fullText };
   }
   return { ...result, text: fullText, finishReason };
+}
+
+function enrichCompletionUsage(
+  result: CompletionResult,
+  providerSettings: ModelProviderSettings,
+): CompletionResult {
+  if (!result.tokenUsage) return result;
+  return {
+    ...result,
+    tokenUsage: enrichModelUsage(
+      result.tokenUsage,
+      providerSettings,
+      result.model,
+      result.provider,
+    ),
+  };
+}
+
+function enrichModelUsage(
+  usage: ModelUsage,
+  providerSettings: ModelProviderSettings,
+  model?: string,
+  provider?: string,
+): ModelUsage {
+  const contextWindowTokens = isUsableContextWindow(usage.contextWindowTokens)
+    ? usage.contextWindowTokens
+    : providerSettings.contextWindowTokens;
+  return {
+    ...usage,
+    model: usage.model ?? model ?? providerSettings.model,
+    provider: usage.provider ?? provider ?? providerSettings.provider,
+    ...(contextWindowTokens
+      ? { contextWindowTokens }
+      : {}),
+  };
+}
+
+function isUsableContextWindow(value: number | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
 async function createModelRequest(

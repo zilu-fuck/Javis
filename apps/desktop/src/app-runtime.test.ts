@@ -36,6 +36,7 @@ import {
   parseAgentReActDecision,
   resolveModelProfileForAgent,
   allowedToolNamesForAgent,
+  proposeCodeEditWithModelProvider,
   saveComputerUseLocalVisionSettingsToStorage,
   saveComputerUseSettingsToStorage,
 } from "./app-runtime";
@@ -49,6 +50,48 @@ import {
 } from "@javis/core";
 
 const COMMANDER_PLAN_SCHEMA_MARKER = '"requestKind":"commander-plan"';
+
+describe("proposeCodeEditWithModelProvider", () => {
+  it("forwards the complete OpenCode runtime identity to the native transport", async () => {
+    vi.mocked(invoke).mockResolvedValue({} as never);
+    const provider = {
+      settings: {
+        provider: "openai",
+        model: "gpt-test",
+        apiKeyReference: "default",
+        baseUrl: "",
+      },
+    } as unknown as ModelProvider;
+    const preview = {
+      workspacePath: "E:/Javis",
+      changedFiles: ["src/value.ts"],
+      diffStat: " src/value.ts | 2 +-",
+      diff: "diff --git a/src/value.ts b/src/value.ts\n",
+    };
+
+    await proposeCodeEditWithModelProvider({
+      taskId: "task-1",
+      runId: "run-1",
+      workflowRunId: "workflow-1",
+      agentRunId: "agent-run-1",
+      stepId: "propose-edit",
+      attempt: 2,
+      userGoal: "Update the value",
+      preview,
+    }, provider);
+
+    expect(invoke).toHaveBeenCalledWith("propose_code_edit", {
+      request: expect.objectContaining({
+        taskId: "task-1",
+        runId: "run-1",
+        workflowRunId: "workflow-1",
+        agentRunId: "agent-run-1",
+        stepId: "propose-edit",
+        attempt: 2,
+      }),
+    });
+  });
+});
 
 describe("parseAgentReActDecision", () => {
   it("accepts a bounded, structurally valid decision", () => {
@@ -168,6 +211,126 @@ describe("createJavisRuntime", () => {
     expect(normalizedAppRuntimeSource).not.toContain(
       "workspacePath: request.workspacePath ?? (workspacePath.trim() || null),",
     );
+  });
+
+  it("sends workspace-relative text targets to native preview and execution commands", async () => {
+    const invokeMock = vi.mocked(invoke);
+    const absoluteTargetPath = "E:/测试/微博热搜.md";
+    const content = "# 微博热搜\n\n测试内容。\n";
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "plan_write_text_file") {
+        return {
+          approvalId: "approval-runtime-text-write",
+          targetPath: absoluteTargetPath,
+          action: "create",
+          byteCount: content.length,
+          contentHash: "hash-text-write",
+          dryRun: {
+            operation: "Write text file",
+            affectedPaths: [{ source: "", target: absoluteTargetPath, action: "create" }],
+            riskSummary: "Creates the requested Markdown file.",
+            reversible: true,
+          },
+        };
+      }
+      if (command === "approve_write_text_file") {
+        return undefined;
+      }
+      if (command === "execute_write_text_file") {
+        return {
+          targetPath: absoluteTargetPath,
+          action: "create",
+          byteCount: content.length,
+          status: "written",
+          message: "Written in test.",
+        };
+      }
+      if (command === "cancel_all_model_streams" || command === "computer_cancel_approvals") {
+        return undefined;
+      }
+      throw new Error(`Unexpected invoke command: ${command}`);
+    });
+    const complete = vi.fn((prompt: string, options?: unknown) => {
+      if (prompt.includes("Chinese input preprocessor")) {
+        return Promise.resolve({ text: "{}" });
+      }
+      if (combinedPlannerPrompt(prompt, options).includes(COMMANDER_PLAN_SCHEMA_MARKER)) {
+        return Promise.resolve({
+          text: JSON.stringify({
+            title: "Write generated text",
+            reasoning: "Write the requested content after approval.",
+            steps: [{
+              id: "write-text",
+              title: "Write generated text",
+              assignedAgentKind: "file",
+              toolName: "file.writeText",
+              toolInput: { targetPath: absoluteTargetPath, content },
+              executionMode: "direct_tool_call",
+              requiredCapabilities: ["file_execute"],
+              dependsOn: [],
+              outputContextKey: "writtenFile",
+              successCriteria: "The requested file is written.",
+            }],
+          }),
+        });
+      }
+      return Promise.resolve({ text: "The requested file was written." });
+    });
+    modelMocks.provider = {
+      id: "test-provider",
+      settings: {
+        provider: "deepseek",
+        model: "deepseek-chat",
+        apiKeyReference: "default",
+        baseUrl: "",
+      },
+      complete,
+      stream: vi.fn(async function* () {
+        throw new Error("stream unavailable in test");
+      }),
+      defaultSettingsForLocale: vi.fn(),
+    } as unknown as ModelProvider;
+
+    const runtime = createJavisRuntime({
+      getWorkspacePath: () => "E:/测试",
+      modelSettings: DEFAULT_MODEL_SETTINGS,
+    });
+    const snapshots = subscribeToRuntime(runtime);
+
+    runtime.start(`write a short story and save it as "${absoluteTargetPath}"`, {
+      mode: "project",
+      taskId: "task-runtime-text-write",
+    });
+
+    await vi.waitFor(() => {
+      const latest = snapshots[snapshots.length - 1];
+      expect(latest?.status, JSON.stringify(latest?.logs)).toBe("waiting_permission");
+    });
+    expect(invokeMock).toHaveBeenCalledWith("plan_write_text_file", {
+      request: {
+        targetPath: "微博热搜.md",
+        content,
+        workspacePath: "E:/测试",
+        taskId: "task-runtime-text-write",
+      },
+    });
+
+    runtime.resolvePermission("approved", "approval-runtime-text-write");
+
+    await vi.waitFor(() => {
+      expect(snapshots[snapshots.length - 1]?.status).toBe("completed");
+    });
+    expect(invokeMock).toHaveBeenCalledWith("execute_write_text_file", {
+      request: {
+        approvalId: "approval-runtime-text-write",
+        targetPath: "微博热搜.md",
+        content,
+        workspacePath: "E:/测试",
+        taskId: "task-runtime-text-write",
+      },
+    });
+
+    runtime.dispose();
   });
 
   it("parses structured Goal verifier results and prevents low-confidence completion", async () => {
@@ -2767,6 +2930,191 @@ describe("createJavisRuntime", () => {
     expect(logsText).toContain("ReAct decision LLM returned plain text instead of JSON.");
     expect(logsText).not.toContain("ReAct completed after");
 
+    runtime.dispose();
+  });
+
+  it("repairs malformed ReAct JSON before failing the step", async () => {
+    let reactCallCount = 0;
+    const complete = vi.fn((prompt: string, options?: CompletionOptions) => {
+      if (prompt.includes("Chinese input preprocessor")) {
+        return Promise.resolve({ text: "{}" });
+      }
+      if (options?.systemPrompt?.includes("ReAct decision agent")) {
+        reactCallCount += 1;
+        if (prompt.includes("之前的无效输出")) {
+          return Promise.resolve({
+            text: JSON.stringify({
+              status: "completed",
+              reason: "The repaired decision is complete.",
+              output: "Done.",
+            }),
+          });
+        }
+        if (reactCallCount === 1) {
+          return Promise.resolve({
+            text: JSON.stringify({
+              status: "continue",
+              toolName: "memory.search",
+              input: { query: "repairable ReAct" },
+              reason: "Collect one grounded observation.",
+            }),
+          });
+        }
+        return Promise.resolve({
+          text: '{"status":"completed","reason":"Missing comma" "output":"Done."}',
+        });
+      }
+      if (prompt.includes("Write a concise natural-language answer")) {
+        return Promise.resolve({ text: "Done." });
+      }
+      return Promise.resolve({
+        text: JSON.stringify({
+          title: "Repair ReAct",
+          reasoning: "Exercise malformed ReAct JSON.",
+          steps: [{
+            id: "react-repair-step",
+            title: "Run repairable ReAct step",
+            assignedAgentKind: "commander",
+            toolName: "memory.search",
+            requiredCapabilities: ["memory_search"],
+            capability: "memory_search",
+            executionMode: "react",
+            dependsOn: [],
+            successCriteria: "ReAct completes.",
+          }],
+        }),
+      });
+    });
+    modelMocks.provider = {
+      id: "test-provider",
+      settings: {
+        provider: "deepseek",
+        model: "deepseek-chat",
+        apiKeyReference: "default",
+        baseUrl: "",
+      },
+      complete,
+      stream: vi.fn(async function* () {
+        throw new Error("stream unavailable in test");
+      }),
+      defaultSettingsForLocale: vi.fn(),
+    } as unknown as ModelProvider;
+    const runtime = createJavisRuntime({
+      getWorkspacePath: () => "E:/Javis",
+      modelSettings: DEFAULT_MODEL_SETTINGS,
+      isAgentMemoryEnabled: () => true,
+      searchAgentMemory: async () => [{
+        id: "memory-react-repair",
+        fact: "Grounded evidence for the repair test.",
+        kind: "lesson",
+        tags: ["react"],
+        confidence: 1,
+        importance: 1,
+        updatedAt: Date.now(),
+      }],
+    });
+    const snapshots = subscribeToRuntime(runtime);
+
+    runtime.start("Exercise repairable ReAct", { mode: "project", taskId: "task-react-json-repair" });
+
+    await vi.waitFor(() => {
+      const latest = snapshots[snapshots.length - 1];
+      expect(latest?.status, JSON.stringify({
+        commanderMessage: latest?.commanderMessage,
+        logs: latest?.logs.map((log) => ({ title: log.title, detail: log.detail })),
+      }, null, 2)).toBe("completed");
+    });
+    expect(reactCallCount).toBe(3);
+    runtime.dispose();
+  });
+
+  it("ignores an invalid optional requested agent kind from a ReAct response", async () => {
+    let reactCallCount = 0;
+    const complete = vi.fn((prompt: string, options?: CompletionOptions) => {
+      if (prompt.includes("Chinese input preprocessor")) {
+        return Promise.resolve({ text: "{}" });
+      }
+      if (options?.systemPrompt?.includes("ReAct decision agent")) {
+        reactCallCount += 1;
+        if (reactCallCount === 1) {
+          return Promise.resolve({
+            text: JSON.stringify({
+              status: "continue",
+              toolName: "memory.search",
+              input: { query: "optional ReAct field" },
+              reason: "Collect one grounded observation.",
+            }),
+          });
+        }
+        return Promise.resolve({
+          text: JSON.stringify({
+            status: "completed",
+            reason: "The source evidence is complete.",
+            requestedAgentKind: 42,
+            output: "Done.",
+          }),
+        });
+      }
+      if (prompt.includes("Write a concise natural-language answer")) {
+        return Promise.resolve({ text: "Done." });
+      }
+      return Promise.resolve({
+        text: JSON.stringify({
+          title: "Normalize ReAct",
+          reasoning: "Exercise optional field normalization.",
+          steps: [{
+            id: "react-normalize-step",
+            title: "Run normalized ReAct step",
+            assignedAgentKind: "commander",
+            toolName: "memory.search",
+            requiredCapabilities: ["memory_search"],
+            capability: "memory_search",
+            executionMode: "react",
+            dependsOn: [],
+            successCriteria: "ReAct completes.",
+          }],
+        }),
+      });
+    });
+    modelMocks.provider = {
+      id: "test-provider",
+      settings: {
+        provider: "deepseek",
+        model: "deepseek-chat",
+        apiKeyReference: "default",
+        baseUrl: "",
+      },
+      complete,
+      stream: vi.fn(async function* () {
+        throw new Error("stream unavailable in test");
+      }),
+      defaultSettingsForLocale: vi.fn(),
+    } as unknown as ModelProvider;
+    const runtime = createJavisRuntime({
+      getWorkspacePath: () => "E:/Javis",
+      modelSettings: DEFAULT_MODEL_SETTINGS,
+      isAgentMemoryEnabled: () => true,
+      searchAgentMemory: async () => [{
+        id: "memory-react-optional",
+        fact: "Grounded evidence for the optional field test.",
+        kind: "lesson",
+        tags: ["react"],
+        confidence: 1,
+        importance: 1,
+        updatedAt: Date.now(),
+      }],
+    });
+    const snapshots = subscribeToRuntime(runtime);
+
+    runtime.start("Exercise optional ReAct field", { mode: "project", taskId: "task-react-optional-field" });
+
+    await vi.waitFor(() => {
+      const latest = snapshots[snapshots.length - 1];
+      expect(latest?.status, JSON.stringify({
+        commanderMessage: latest?.commanderMessage,
+        logs: latest?.logs.map((log) => ({ title: log.title, detail: log.detail })),
+      }, null, 2)).toBe("completed");
+    });
     runtime.dispose();
   });
 

@@ -33,7 +33,7 @@ export const PROMPT_SECTION_REGISTRY: readonly PromptSectionDefinition[] = [
   { key: "custom_style", scope: "opt_in" },
   { key: "runtime_context", scope: "opt_in" },
   { key: "research_evidence_schema", scope: "agent_only", agentKinds: ["research"] },
-  { key: "browser_origin_policy", scope: "agent_only", agentKinds: ["browser"] },
+  { key: "browser_origin_policy", scope: "agent_only", agentKinds: ["page-agent"] },
   { key: "code_verification_report", scope: "agent_only", agentKinds: ["code"] },
 ] as const;
 

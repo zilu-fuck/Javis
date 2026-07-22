@@ -23,6 +23,9 @@ export class DeepSeekAdapter implements ProviderAdapter {
     vision: false,
     code: true,
     longContext: true,
+    nativeToolCalling: true,
+    streamingToolCalls: true,
+    parallelToolCalls: true,
   };
 
   buildCompletionRequest(input: AdapterCompletionInput): AdapterRequestPayload {

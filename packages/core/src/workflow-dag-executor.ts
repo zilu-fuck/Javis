@@ -18,9 +18,27 @@ import {
   withTaskTimeout,
 } from "./task-wait";
 import type { WorkbenchWorkflow, WorkbenchWorkflowStep } from "./workflows";
+import {
+  createFailedStepResult,
+  isTerminalStepResultStatus,
+  normalizeStepResult,
+  normalizeStepContract,
+  type StepResult,
+  type StepResultInput,
+} from "./step-protocol";
 
 export interface WorkflowStepExecutionResult {
-  output: unknown;
+  output?: unknown;
+  status?: StepResultInput["status"];
+  evidence?: StepResultInput["evidence"];
+  assumptions?: string[];
+  unresolvedQuestions?: string[];
+  unmetCriteria?: string[];
+  requestedContextKeys?: string[];
+  requestedAgentKind?: string;
+  blockedReason?: StepResultInput["blockedReason"];
+  error?: string;
+  errorDetail?: StepResultInput["errorDetail"];
 }
 
 export interface WorkflowExecutionResult {
@@ -31,6 +49,7 @@ export interface WorkflowExecutionResult {
   failedStepId?: string;
   error?: string;
   results: Map<string, unknown>;
+  stepResults: Record<string, StepResult>;
   contextSnapshot: Record<string, unknown>;
 }
 
@@ -50,6 +69,7 @@ export interface WorkflowResumeState {
   retryStepIds?: string[];
   contextSnapshot?: Record<string, unknown>;
   results?: Record<string, unknown>;
+  stepResults?: Record<string, StepResultInput>;
 }
 
 export interface WorkflowExecutionPolicy {
@@ -98,11 +118,13 @@ export interface WorkflowExecutorOptions {
     step: WorkbenchWorkflowStep,
     output: unknown,
     context: SharedTaskContext,
+    result?: StepResult,
   ): void;
   onStepFailed?(
     step: WorkbenchWorkflowStep,
     error: string,
     context: SharedTaskContext,
+    result?: StepResult,
   ): void;
   onStepFailureReplan?(request: {
     step: WorkbenchWorkflowStep;
@@ -163,12 +185,39 @@ export async function executeWorkflow({
 }: WorkflowExecutorOptions): Promise<WorkflowExecutionResult> {
   const activeWorkflow: WorkbenchWorkflow = {
     ...workflow,
-    steps: workflow.steps.map((step) => ({ ...step, dependsOn: [...step.dependsOn] })),
+    steps: workflow.steps.map((step) => ({
+      ...step,
+      ...normalizeStepContract({
+        title: step.title,
+        instruction: step.instruction ?? step.input,
+        hardConstraints: step.hardConstraints,
+        preferences: step.preferences,
+        acceptanceCriteria: step.acceptanceCriteria,
+        outputSchemaRef: step.outputSchemaRef ?? step.outputContextKey,
+        primaryCapability: step.primaryCapability,
+        artifactObligation: step.artifactObligation,
+        completionPolicy: step.completionPolicy,
+        outputContextKey: step.outputContextKey,
+        successCriteria: step.successCriteria ?? step.output,
+      }),
+      dependsOn: [...step.dependsOn],
+    })),
   };
   validateWorkflowDag(activeWorkflow);
 
   hydrateContextFromSnapshot(context, resumeFrom?.contextSnapshot, artifactExpectation);
   const resumeStepIds = validateResumeStepIds(resumeFrom, activeWorkflow);
+  const normalizedResumeStepResults = normalizeResumeStepResults(
+    readRestoredStepResults(resumeFrom?.stepResults, context, activeWorkflow),
+    activeWorkflow,
+  );
+  clearRestoredStepResults(context);
+  if (normalizedResumeStepResults) {
+    context.set("stepResults", normalizedResumeStepResults);
+    for (const [stepId, result] of Object.entries(normalizedResumeStepResults)) {
+      context.set(`stepResult:${stepId}`, result);
+    }
+  }
   const completed = new Set(resumeStepIds.completed);
   const abandoned = new Set(resumeStepIds.abandoned);
   const retry = new Set(resumeStepIds.retry);
@@ -298,6 +347,7 @@ export async function executeWorkflow({
     abandonedStepIds: abandoned.size > 0 ? [...abandoned] : undefined,
     replannedStepIds: replannedStepIds.length > 0 ? replannedStepIds : undefined,
     results,
+    stepResults: readStepResults(context),
     contextSnapshot: context.snapshot(),
   };
 }
@@ -414,6 +464,67 @@ function validateResumeStepIds(
   return groups;
 }
 
+function normalizeResumeStepResults(
+  stepResults: unknown,
+  workflow: WorkbenchWorkflow,
+): Record<string, StepResult> | undefined {
+  if (stepResults === undefined) return undefined;
+  if (!stepResults || typeof stepResults !== "object" || Array.isArray(stepResults)) {
+    throw new Error("Workflow resume stepResults is malformed.");
+  }
+  const knownStepIds = new Set(workflow.steps.map((step) => step.id));
+  const normalized: Record<string, StepResult> = {};
+  for (const [stepId, rawResult] of Object.entries(stepResults)) {
+    if (!knownStepIds.has(stepId)) {
+      throw new Error(`Workflow resume stepResults references unknown step ${stepId}.`);
+    }
+    if (!rawResult || typeof rawResult !== "object" || Array.isArray(rawResult)) {
+      throw new Error(`Workflow resume stepResults for ${stepId} is malformed.`);
+    }
+    const result = normalizeStepResult(rawResult);
+    normalized[stepId] = result.output === undefined || result.evidence.length > 0
+      ? result
+      : {
+          ...result,
+          evidence: [{
+            kind: "artifact",
+            label: `Step ${stepId} output`,
+            reference: workflow.steps.find((step) => step.id === stepId)?.outputContextKey ??
+              `step:${stepId}`,
+          }],
+        };
+  }
+  return normalized;
+}
+
+function readRestoredStepResults(
+  explicitStepResults: WorkflowResumeState["stepResults"],
+  context: SharedTaskContext,
+  workflow: WorkbenchWorkflow,
+): unknown {
+  const snapshot = context.snapshot();
+  const knownStepIds = new Set(workflow.steps.map((step) => step.id));
+  const individualResults: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(snapshot)) {
+    if (!key.startsWith("stepResult:")) continue;
+    const stepId = key.slice("stepResult:".length);
+    if (!knownStepIds.has(stepId)) {
+      throw new Error(`Workflow resume stepResults references unknown step ${stepId}.`);
+    }
+    individualResults[stepId] = value;
+  }
+  return explicitStepResults ?? snapshot.stepResults ??
+    (Object.keys(individualResults).length > 0 ? individualResults : undefined);
+}
+
+function clearRestoredStepResults(context: SharedTaskContext): void {
+  for (const key of Object.keys(context.snapshot())) {
+    if (key === "stepResults" || key.startsWith("stepResult:")) {
+      context.delete(key);
+    }
+  }
+}
+
 function createResultMap(
   resumeFrom: WorkflowResumeState | undefined,
   completed: Set<string>,
@@ -510,11 +621,16 @@ async function executeReadySteps(
   onCircuitBreakerOpen: WorkflowExecutorOptions["onCircuitBreakerOpen"],
 ): Promise<WorkflowExecutionResult | undefined> {
   const queue = [...steps];
-  const failures: Array<{ step: WorkbenchWorkflowStep; error: string }> = [];
+  const failures: Array<{ step: WorkbenchWorkflowStep; error: string; result: StepResult }> = [];
   const pending = new Set<TrackedStepExecution>();
   let circuitOpen = false;
-  const recordFailure = (step: WorkbenchWorkflowStep, error: string) => {
-    failures.push({ step, error });
+  const recordFailure = (
+    step: WorkbenchWorkflowStep,
+    error: string,
+    result = createFailedStepResult(error),
+  ) => {
+    recordStepResult(context, step.id, result);
+    failures.push({ step, error, result });
     schedulerState.consecutiveFailures += 1;
     const policy = resolveExecutionPolicy();
     if (
@@ -564,9 +680,39 @@ async function executeReadySteps(
     }
 
     const { step, result } = item;
-    results.set(step.id, result.output);
-    context.set(`step:${step.id}`, result.output);
-    writeStepOutput(step.outputContextKey, result.output, context);
+    const normalizedStepResult = normalizeStepResult(result);
+    const stepResult: StepResult = normalizedStepResult.evidence.length > 0 || normalizedStepResult.output === undefined
+      ? normalizedStepResult
+      : {
+          ...normalizedStepResult,
+          evidence: [{
+            kind: "artifact",
+            label: `Step ${step.id} output`,
+            reference: step.outputContextKey ?? `step:${step.id}`,
+          }],
+        };
+    recordStepResult(context, step.id, stepResult);
+    if (stepResult.status === "partial" &&
+        step.completionPolicy?.partial !== "publish_and_continue") {
+      const policy = step.completionPolicy?.partial ?? "stop";
+      recordFailure(
+        step,
+        stepResult.error ?? `Step ${step.id} returned partial output under ${policy} policy.`,
+        stepResult,
+      );
+      continue;
+    }
+    if (isTerminalStepResultStatus(stepResult.status)) {
+      recordFailure(
+        step,
+        stepResult.error ?? `Step ${step.id} returned status ${stepResult.status}.`,
+        stepResult,
+      );
+      continue;
+    }
+    results.set(step.id, stepResult.output);
+    context.set(`step:${step.id}`, stepResult.output);
+    writeStepOutput(step.outputContextKey, stepResult.output, context);
     const handoffFailure = validateCompletedStepHandoffs({
       step,
       workflow: activeWorkflow,
@@ -577,21 +723,27 @@ async function executeReadySteps(
     if (handoffFailure) {
       if (handoffFailure.step.id !== step.id) {
         completed.add(step.id);
-        onStepCompleted?.(step, result.output, context);
+        onStepCompleted?.(step, stepResult.output, context, stepResult);
       } else {
         clearFailedStepContext(step, context, results);
       }
-      recordFailure(handoffFailure.step, handoffFailure.error);
+      recordFailure(
+        handoffFailure.step,
+        handoffFailure.error,
+        handoffFailure.step.id === step.id
+          ? { ...stepResult, status: "failed", error: handoffFailure.error }
+          : undefined,
+      );
       continue;
     }
     completed.add(step.id);
     if (!circuitOpen) schedulerState.consecutiveFailures = 0;
-    onStepCompleted?.(step, result.output, context);
+    onStepCompleted?.(step, stepResult.output, context, stepResult);
   }
 
   if (failures.length > 0) {
     for (const failure of failures) {
-      onStepFailed?.(failure.step, failure.error, context);
+      onStepFailed?.(failure.step, failure.error, context, failure.result);
       const replanAction = await onStepFailureReplan?.({
         step: failure.step,
         error: failure.error,
@@ -838,7 +990,8 @@ function validateCompletedStepHandoffs({
   abandoned: Set<string>;
 }): { step: WorkbenchWorkflowStep; error: string } | undefined {
   if (step.outputContextKey) {
-    const outputValidation = validateContextValue(step.outputContextKey, context.get(step.outputContextKey));
+    const schemaKey = step.outputSchemaRef ?? step.outputContextKey;
+    const outputValidation = validateContextValue(schemaKey, context.get(step.outputContextKey));
     if (!outputValidation.valid) {
       return {
         step,
@@ -891,6 +1044,27 @@ function clearStepAttemptContext(
     if (key.startsWith(reactPrefix)) ownedKeys.add(key);
   }
   for (const key of ownedKeys) context.delete(key);
+  removeStepResult(context, step.id);
+}
+
+function recordStepResult(context: SharedTaskContext, stepId: string, result: StepResult): void {
+  context.set(`stepResult:${stepId}`, result);
+  const existing = context.get<Record<string, StepResult>>("stepResults") ?? {};
+  context.set("stepResults", { ...existing, [stepId]: result });
+}
+
+function removeStepResult(context: SharedTaskContext, stepId: string): void {
+  context.delete(`stepResult:${stepId}`);
+  const existing = context.get<Record<string, StepResult>>("stepResults");
+  if (!existing || !(stepId in existing)) return;
+  const next = { ...existing };
+  delete next[stepId];
+  context.set("stepResults", next);
+}
+
+function readStepResults(context: SharedTaskContext): Record<string, StepResult> {
+  const value = context.get<Record<string, StepResult>>("stepResults");
+  return value && typeof value === "object" ? value : {};
 }
 
 function defaultShouldRetryStep(request: {
@@ -988,6 +1162,7 @@ function failedResult({
     failedStepId,
     error,
     results,
+    stepResults: readStepResults(context),
     contextSnapshot: context.snapshot(),
   };
 }

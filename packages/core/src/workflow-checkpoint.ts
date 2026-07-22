@@ -1,4 +1,9 @@
 import type { WorkbenchWorkflow, WorkbenchWorkflowStep } from "./workflows";
+import type {
+  AgentRuntimeMetricsSnapshot,
+  AgentRuntimeRoutingMetricsSnapshot,
+} from "./agent-runtime/contracts";
+import type { TokenUsageSummary } from "@javis/tools";
 import {
   computeContentHash,
   createArtifactEnvelope,
@@ -22,6 +27,9 @@ export interface WorkflowCheckpoint {
 
   contextSnapshot: Record<string, ArtifactEnvelope>;
   approvalRequestIds: string[];
+  agentRuntimeMetrics?: AgentRuntimeMetricsSnapshot[];
+  agentRuntimeRoutingMetrics?: AgentRuntimeRoutingMetricsSnapshot[];
+  tokenUsage?: TokenUsageSummary;
 
   waitingReason?:
     | "human_approval"
@@ -102,10 +110,43 @@ export function computePlanHash(steps: WorkbenchWorkflowStep[]): string {
         capability: s.capability ?? "",
         choices: s.choices ?? [],
         successCriteria: s.successCriteria ?? "",
+        ...(hasStepContractFields(s)
+          ? {
+              instruction: s.instruction ?? "",
+              hardConstraints: s.hardConstraints ?? [],
+              preferences: s.preferences ?? [],
+              acceptanceCriteria: s.acceptanceCriteria ?? [],
+              outputSchemaRef: s.outputSchemaRef ?? "",
+            }
+          : {}),
+        ...(hasDualKernelContractFields(s)
+          ? {
+              primaryCapability: s.primaryCapability ?? "",
+              artifactObligation: s.artifactObligation ?? "",
+              completionPolicy: s.completionPolicy ?? null,
+            }
+          : {}),
       };
     })
     .sort((a, b) => a.id.localeCompare(b.id));
   return `plan-sha256-v2-${computeContentHash(normalized)}-${steps.length}`;
+}
+
+function hasStepContractFields(step: ExecutionPlanStep): boolean {
+  const legacyAcceptanceCriterion = step.successCriteria ?? step.output;
+  const acceptanceCriteriaMatchLegacy = step.acceptanceCriteria?.length === 1 &&
+    step.acceptanceCriteria[0] === legacyAcceptanceCriterion;
+  return step.instruction !== undefined && step.instruction !== step.input ||
+    (step.hardConstraints?.length ?? 0) > 0 ||
+    (step.preferences?.length ?? 0) > 0 ||
+    step.acceptanceCriteria !== undefined && !acceptanceCriteriaMatchLegacy ||
+    step.outputSchemaRef !== undefined && step.outputSchemaRef !== step.outputContextKey;
+}
+
+function hasDualKernelContractFields(step: ExecutionPlanStep): boolean {
+  return step.primaryCapability !== undefined ||
+    step.artifactObligation !== undefined ||
+    step.completionPolicy !== undefined;
 }
 
 export function buildCheckpointFromDagState(input: {
@@ -120,6 +161,9 @@ export function buildCheckpointFromDagState(input: {
   waitingReason?: WorkflowCheckpoint["waitingReason"];
   eventSequence: number;
   envelopes?: Record<string, ArtifactEnvelope>;
+  agentRuntimeMetrics?: AgentRuntimeMetricsSnapshot[];
+  agentRuntimeRoutingMetrics?: AgentRuntimeRoutingMetricsSnapshot[];
+  tokenUsage?: TokenUsageSummary;
 }): WorkflowCheckpoint {
   const allStepIds = new Set(input.workflow.steps.map((s) => s.id));
   const doneOrAbandoned = new Set([...input.completedStepIds, ...input.abandonedStepIds]);
@@ -175,6 +219,31 @@ export function buildCheckpointFromDagState(input: {
     runningStepIds: [...input.runningStepIds],
     contextSnapshot,
     approvalRequestIds: input.approvalRequestIds ?? [],
+    ...(input.agentRuntimeMetrics?.length
+      ? {
+          agentRuntimeMetrics: input.agentRuntimeMetrics.map((metrics) => ({
+            ...metrics,
+            ...(metrics.usage ? { usage: { ...metrics.usage } } : {}),
+          })),
+        }
+      : {}),
+    ...(input.agentRuntimeRoutingMetrics?.length
+      ? {
+          agentRuntimeRoutingMetrics: input.agentRuntimeRoutingMetrics.map((metrics) => ({
+            ...metrics,
+            fallbackReasons: metrics.fallbackReasons.map((entry) => ({ ...entry })),
+            observationIds: [...metrics.observationIds],
+          })),
+        }
+      : {}),
+    ...(input.tokenUsage
+      ? {
+          tokenUsage: {
+            ...input.tokenUsage,
+            byAgentKind: input.tokenUsage.byAgentKind.map((usage) => ({ ...usage })),
+          },
+        }
+      : {}),
     waitingReason: input.waitingReason,
     eventSequence: input.eventSequence,
     createdAt: new Date().toISOString(),

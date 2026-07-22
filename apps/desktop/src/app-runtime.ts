@@ -41,7 +41,7 @@ import type {
   RuntimeExecutionConfig,
   TaskSnapshot,
 } from "@javis/core";
-import { createDefaultAgentRegistry, demoAgents } from "@javis/core";
+import { createDefaultAgentRegistry, demoAgents, normalizeAgentKind } from "@javis/core";
 import type {
   AgentKind,
   AgentRegistry,
@@ -143,7 +143,7 @@ import type {
   WriteTextFileRequest,
   ToolDescriptor,
 } from "@javis/tools";
-import { encodeMcpToolServerName } from "@javis/tools";
+import { encodeMcpToolServerName, normalizeWorkspaceRelativeTextTargetPath } from "@javis/tools";
 import { initialToolDescriptors, isDisabledBrowserWriteToolName } from "@javis/tools";
 import { parseGitStatusFiles } from "./git-status";
 import {
@@ -158,8 +158,16 @@ import {
   createModelProviderFromProfile,
   type CompletionOptions,
   type CompletionResult,
+  type ModelUsage,
   type ModelProvider,
 } from "./model-provider";
+import {
+  createDesktopAgentRuntime,
+  createDesktopOpenCodeAgentRuntime,
+  resolveCommanderStepAgentRuntimeBackend,
+  resolveCommanderStepAgentRuntimeRoutingDecision,
+} from "./agent-runtime/create-agent-runtime";
+import type { OpenCodeProposalRequest } from "./agent-runtime/opencode/runner";
 import type { SkillContextSelectionRequest } from "./skill-context";
 import {
   DEFAULT_AGENT_SLOT,
@@ -749,7 +757,7 @@ const AGENT_PROMPT_CONTEXT_KINDS = new Set<AgentKind>([
   "commander",
   "file",
   "shell",
-  "browser",
+  "page-agent",
   "computer",
   "scheduler",
   "research",
@@ -1720,6 +1728,49 @@ export function createJavisRuntime({
       })(),
     ),
     getAvailableToolDescriptors: () => normalizeAvailableToolDescriptors(getAvailableToolDescriptors?.()),
+    getAgentRuntimeBackend: (agentKind, taskId, taskType, toolName, primaryCapability) => resolveCommanderStepAgentRuntimeBackend(
+      agentKind,
+      taskId,
+      providerFor(agentKind).settings,
+      undefined,
+      taskType,
+      toolName,
+      primaryCapability,
+    ),
+    getAgentRuntimeRoutingDecision: (agentKind, taskId, taskType, toolName, primaryCapability) =>
+      resolveCommanderStepAgentRuntimeRoutingDecision(
+        agentKind,
+        taskId,
+        providerFor(agentKind).settings,
+        undefined,
+        taskType,
+        toolName,
+        primaryCapability,
+    ),
+    getAgentRuntimeProviderId: (agentKind) => providerFor(agentKind).settings.provider,
+    getAgentRuntimeModelProfile: (agentKind) => {
+      const settings = providerFor(agentKind).settings;
+      return {
+        provider: settings.provider,
+        model: settings.model,
+        ...(settings.contextWindowTokens !== undefined
+          ? { contextWindowTokens: settings.contextWindowTokens }
+          : {}),
+      };
+    },
+    agentRuntimeFactories: {
+      langchain: ({ agentKind, toolGateway, toolSpecs }) =>
+        createDesktopAgentRuntime({
+          modelProvider: providerFor(agentKind),
+          toolGateway,
+          toolSpecs,
+        }),
+      opencode: ({ agentKind }) =>
+        createDesktopOpenCodeAgentRuntime({
+          proposeEdit: (request) =>
+            proposeCodeEditWithModelProvider(request, providerFor(agentKind)),
+        }),
+    },
     getCapabilityVerification,
     runtimeEventSink: runtimeEventStore,
     checkpointSink: checkpointStore,
@@ -1728,7 +1779,7 @@ export function createJavisRuntime({
       stream: (prompt, options) => providerForChat().stream(prompt, options),
     },
     commanderTool: {
-      plan: async (request) => {
+      plan: async (request, observer) => {
         const taskId = taskIdRef.current ?? "task-unknown";
         streamingAgentRef.current = "commander";
         eventBus.emit({ kind: "agent.chunk_start", taskId, agentKind: "commander" });
@@ -1752,6 +1803,7 @@ export function createJavisRuntime({
             getAvailableToolDescriptors?.(),
             currentModelTimeoutMs(),
             agentRegistry,
+            observer?.onUsage,
           );
           eventBus.emit({
             kind: "agent.chunk_end",
@@ -1771,7 +1823,7 @@ export function createJavisRuntime({
           throw error;
         }
       },
-      synthesize: async (request) => {
+      synthesize: async (request, observer) => {
         const taskId = taskIdRef.current ?? "task-unknown";
         try {
           const systemPrompt = [
@@ -1810,6 +1862,7 @@ export function createJavisRuntime({
               onFinish: (reason) => {
                 streamFinishReason = reason;
               },
+              onUsage: observer?.onUsage,
             })) {
               fullText += chunk.text;
             }
@@ -1840,6 +1893,7 @@ export function createJavisRuntime({
             if (isOutputTruncationFinishReason(result.finishReason)) {
               throw new Error(`Commander synthesis was truncated (${result.finishReason}).`);
             }
+            if (result.tokenUsage) observer?.onUsage?.(result.tokenUsage);
             message = result.text.trim();
           }
           // Keep model drafts private until the same evidence guard used by
@@ -1893,16 +1947,21 @@ export function createJavisRuntime({
         });
       },
       planWriteText: (request: WriteTextFileRequest, taskId?: string) => {
-        const workspacePath = getWorkspacePath();
+        const workspacePath = getWorkspacePath().trim();
+        const targetPath = normalizeWorkspaceRelativeTextTargetPath(
+          request.targetPath,
+          workspacePath || undefined,
+        );
         notifyWorkspaceToolActivity(
           "files",
           "file.planWriteText",
-          `Plan text write for ${request.targetPath}.`,
+          `Plan text write for ${targetPath}.`,
         );
         return invoke<TextFileWritePlan>("plan_write_text_file", {
           request: {
             ...request,
-            workspacePath: workspacePath.trim() || null,
+            targetPath,
+            workspacePath: workspacePath || null,
             taskId,
           },
         });
@@ -1912,18 +1971,23 @@ export function createJavisRuntime({
         approvalId: string,
         taskId?: string,
       ) => {
-        const workspacePath = getWorkspacePath();
+        const workspacePath = getWorkspacePath().trim();
+        const targetPath = normalizeWorkspaceRelativeTextTargetPath(
+          request.targetPath,
+          workspacePath || undefined,
+        );
         notifyWorkspaceToolActivity(
           "files",
           "file.writeText",
-          `Execute approved text write for ${request.targetPath}.`,
+          `Execute approved text write for ${targetPath}.`,
         );
         await invoke("approve_write_text_file", { approvalId, taskId });
         return invoke<TextFileWriteResult>("execute_write_text_file", {
           request: {
             approvalId,
             ...request,
-            workspacePath: workspacePath.trim() || null,
+            targetPath,
+            workspacePath: workspacePath || null,
             taskId,
           },
         });
@@ -2219,8 +2283,8 @@ export function createJavisRuntime({
             }),
         });
       },
-      proposeEdit: ({ userGoal, preview, taskId }) =>
-        proposeCodeEditWithModelProvider(userGoal, preview, providerFor("code"), taskId),
+      proposeEdit: (request) =>
+        proposeCodeEditWithModelProvider(request, providerFor("code")),
       applyProposedEdit: (edit: CodeProposedEdit, approval) => {
         notifyWorkspaceToolActivity(
           "review",
@@ -2701,7 +2765,7 @@ export function createJavisRuntime({
       },
     },
     verifierTool: {
-      check: async (request) => {
+      check: async (request, observer) => {
         const taskId = taskIdRef.current ?? "task-unknown";
         streamingAgentRef.current = "verifier";
         eventBus.emit({ kind: "agent.chunk_start", taskId, agentKind: "verifier" });
@@ -2711,6 +2775,7 @@ export function createJavisRuntime({
             providerFor("verifier"),
             () => undefined,
             currentModelTimeoutMs(),
+            observer?.onUsage,
           );
           eventBus.emit({
             kind: "agent.chunk_end",
@@ -2745,10 +2810,11 @@ export function createJavisRuntime({
       const prompt = buildReActDecisionUserPrompt(localizedRequest);
       let resultText = "";
       try {
-          // ReAct has an explicit trusted system contract. Do not append the
-          // generic agent identity prompt or agentKind metadata to this call;
-          // runtime observations and handoff data remain in the user payload.
-          const result = await providerFor(request.agentKind, false).complete(prompt, {
+        // ReAct has an explicit trusted system contract. Do not append the
+        // generic agent identity prompt or agentKind metadata to this call;
+        // runtime observations and handoff data remain in the user payload.
+        const modelProvider = providerFor(request.agentKind, false);
+        const result = await modelProvider.complete(prompt, {
           systemPrompt: buildReActDecisionSystemPrompt("zh-CN"),
           maxTokens: 600,
           temperature: 0,
@@ -2759,7 +2825,46 @@ export function createJavisRuntime({
           skillContextMaxChars: 6_000,
         });
         resultText = result.text;
-        return parseAgentReActDecision(parseJsonObject(result.text));
+        assertStructuredOutputWasNotTruncated(result.finishReason);
+        let decisionUsage = result.tokenUsage;
+        const decision = await parseNormalizeWithRepair(
+          prompt,
+          result.text,
+          { maxTokens: 600, temperature: 0 },
+          modelProvider,
+          (value) => parseAgentReActDecision(normalizeReActDecisionModelValue(value)),
+          {
+            systemPrompt: buildReActDecisionSystemPrompt("zh-CN"),
+            locale: "zh-CN",
+            timeoutMs: currentModelTimeoutMs(),
+            skipAgentMemory: true,
+            skillContextMaxSkills: 2,
+            skillContextMaxChars: 6_000,
+          },
+          (usage) => {
+            const inputTokens = (decisionUsage?.inputTokens ?? 0) + usage.inputTokens;
+            const outputTokens = (decisionUsage?.outputTokens ?? 0) + usage.outputTokens;
+            decisionUsage = {
+              inputTokens,
+              outputTokens,
+              totalTokens: inputTokens + outputTokens,
+              ...(usage.model ?? decisionUsage?.model ? { model: usage.model ?? decisionUsage?.model } : {}),
+              ...(usage.provider ?? decisionUsage?.provider
+                ? { provider: usage.provider ?? decisionUsage?.provider }
+                : {}),
+              ...(usage.contextWindowTokens ?? decisionUsage?.contextWindowTokens
+                ? { contextWindowTokens: Math.max(
+                    usage.contextWindowTokens ?? 0,
+                    decisionUsage?.contextWindowTokens ?? 0,
+                  ) }
+                : {}),
+            };
+          },
+        );
+        return {
+          ...decision,
+          ...(decisionUsage ? { usage: decisionUsage } : {}),
+        };
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         if (msg.includes("did not contain a JSON object") && resultText.trim().length > 0) {
@@ -2794,6 +2899,7 @@ export function createJavisRuntime({
       failedStepId?: string,
       failureReason?: string,
       modelImages?: string[],
+      onUsage?: (usage: ModelUsage) => void,
     ): Promise<CommanderDagPlan> => {
       const registry = agentRegistry ?? createDefaultAgentRegistry();
       const availableTools = commanderPromptToolDescriptors(
@@ -2832,6 +2938,7 @@ export function createJavisRuntime({
           skipSkillContext: true,
           skipAgentMemory: true,
         });
+        if (result.tokenUsage) onUsage?.(result.tokenUsage);
         const parsed = parseJsonObject(result.text) as Record<string, unknown>;
         return {
           title: (parsed.title as string) ?? "Recovery plan",
@@ -2913,6 +3020,7 @@ export function createJavisRuntime({
     start(userGoal: string, options?: Parameters<typeof runtime.start>[1]) {
       sharedContext.clear();
       currentUserGoalRef.current = userGoal;
+      const workspacePath = getWorkspacePath().trim();
       sharedContext.set(sharedContext.resolveKey(CONTEXT_KEYS.USER_GOAL, "zh-CN"), userGoal);
       preprocessingByTaskId.clear();
       preprocessingForNextTask = options?.mode === "chat"
@@ -2920,7 +3028,10 @@ export function createJavisRuntime({
         : {
             promise: preprocessChineseInput(userGoal, providerFor("commander")),
           };
-      runtime.start(userGoal, options);
+      runtime.start(userGoal, {
+        ...options,
+        ...(workspacePath ? { workspacePath } : {}),
+      });
     },
     stopTask() {
       activeComputerUseAbortController?.abort(new Error("Computer Use cancelled by user."));
@@ -3218,6 +3329,8 @@ type StructuredReviewCompletionOptions = Pick<
   | "timeoutMs"
   | "skipAgentMemory"
   | "skipSkillContext"
+  | "skillContextMaxSkills"
+  | "skillContextMaxChars"
 >;
 
 async function streamOrCompleteWithReview<T>(
@@ -3227,6 +3340,7 @@ async function streamOrCompleteWithReview<T>(
   onChunk: (chunk: { text: string }) => void,
   normalize: (value: unknown) => T,
   completionOptions: StructuredReviewCompletionOptions = {},
+  onUsage?: (usage: ModelUsage) => void,
 ): Promise<T> {
   let fullText: string;
   let finishReason: string | undefined;
@@ -3240,6 +3354,7 @@ async function streamOrCompleteWithReview<T>(
       onFinish: (reason) => {
         finishReason = reason;
       },
+      onUsage,
     })) {
       fullText += chunk.text;
       onChunk(chunk);
@@ -3251,12 +3366,29 @@ async function streamOrCompleteWithReview<T>(
     }
     // Provider doesn't support SSE — fall back to non-streaming complete()
     const result = await modelProvider.complete(prompt, { ...streamOptions, locale: "zh-CN", ...completionOptions });
+    if (result.tokenUsage) onUsage?.(result.tokenUsage);
     assertStructuredOutputWasNotTruncated(result.finishReason);
     onChunk({ text: result.text });
-    return parseNormalizeWithRepair(prompt, result.text, streamOptions, modelProvider, normalize, completionOptions);
+    return parseNormalizeWithRepair(
+      prompt,
+      result.text,
+      streamOptions,
+      modelProvider,
+      normalize,
+      completionOptions,
+      onUsage,
+    );
   }
 
-  return parseNormalizeWithRepair(prompt, fullText, streamOptions, modelProvider, normalize, completionOptions);
+  return parseNormalizeWithRepair(
+    prompt,
+    fullText,
+    streamOptions,
+    modelProvider,
+    normalize,
+    completionOptions,
+    onUsage,
+  );
 }
 
 async function parseNormalizeWithRepair<T>(
@@ -3266,6 +3398,7 @@ async function parseNormalizeWithRepair<T>(
   modelProvider: ModelProvider,
   normalize: (value: unknown) => T,
   completionOptions: StructuredReviewCompletionOptions = {},
+  onUsage?: (usage: ModelUsage) => void,
 ): Promise<T> {
   try {
     return normalize(parseJsonObject(rawText));
@@ -3279,6 +3412,7 @@ async function parseNormalizeWithRepair<T>(
       ...completionOptions,
       locale: repairLocale,
     });
+    if (repaired.tokenUsage) onUsage?.(repaired.tokenUsage);
     assertStructuredOutputWasNotTruncated(repaired.finishReason);
     return normalize(parseJsonObject(repaired.text));
   }
@@ -3340,6 +3474,7 @@ async function planWithModelProviderStreaming(
   fallbackToolDescriptors?: ToolDescriptor[],
   timeoutMs?: number,
   agentRegistry?: AgentRegistry,
+  onUsage?: (usage: ModelUsage) => void,
 ): Promise<CommanderPlanResult> {
   const requestWithDate = withCommanderCurrentDateContext(request);
   // Enrich available agents with capability tags so the Commander can
@@ -3433,6 +3568,7 @@ async function planWithModelProviderStreaming(
       memoryContext: formatCommanderMemoryContext(memoryContext, locale),
       timeoutMs,
     },
+    onUsage,
   );
 }
 
@@ -3499,6 +3635,7 @@ async function verifyWithModelProviderStreaming(
   modelProvider: ModelProvider,
   onChunk: (chunk: { text: string }) => void,
   timeoutMs?: number,
+  onUsage?: (usage: ModelUsage) => void,
 ): Promise<VerifierCheckResult> {
   const systemPrompt = [
     "You are Javis Verifier Agent. Return JSON only.",
@@ -3523,6 +3660,7 @@ async function verifyWithModelProviderStreaming(
     onChunk,
     (value) => normalizeVerifierCheck(value),
     { systemPrompt, timeoutMs, skipAgentMemory: true, skipSkillContext: true },
+    onUsage,
   );
 }
 
@@ -3713,6 +3851,16 @@ function parseJsonObject(text: string): unknown {
     throw new Error("Model response did not contain a JSON object.");
   }
   return JSON.parse(candidate.slice(start, end + 1));
+}
+
+function normalizeReActDecisionModelValue(value: unknown): unknown {
+  if (!isPlainJsonRecord(value)) return value;
+  if (value.requestedAgentKind === undefined || typeof value.requestedAgentKind === "string") {
+    return value;
+  }
+  const normalized = { ...value };
+  delete normalized.requestedAgentKind;
+  return normalized;
 }
 
 const REACT_DECISION_STATUSES = new Set<AgentReActDecision["status"]>([
@@ -3906,7 +4054,9 @@ function normalizeCommanderStep(
   request: CommanderPlanRequest,
   planNeedsClarification = false,
 ): CommanderPlanResult["steps"][number] {
-  const assignedAgentKind = stringValue(step.assignedAgentKind, stringValue(step.agentKind, "commander"));
+  const assignedAgentKind = normalizeAgentKind(
+    stringValue(step.assignedAgentKind, stringValue(step.agentKind, "commander")),
+  );
   const isClarificationStep =
     index === 0 &&
     planNeedsClarification &&
@@ -4088,19 +4238,23 @@ async function readChangedFilesForRepositoryPriority(
   }
 }
 
-function proposeCodeEditWithModelProvider(
-  userGoal: string,
-  preview: CodeReviewPreview,
+export function proposeCodeEditWithModelProvider(
+  request: Pick<OpenCodeProposalRequest, "userGoal" | "preview"> &
+    Partial<Pick<OpenCodeProposalRequest, "taskId" | "runId" | "workflowRunId" | "agentRunId" | "stepId" | "attempt">>,
   modelProvider: ModelProvider,
-  taskId?: string,
 ): Promise<CodeProposedEdit> {
   return invoke<CodeProposedEdit>("propose_code_edit", {
     request: {
-      workspacePath: preview.workspacePath,
-      userGoal,
-      changedFiles: preview.changedFiles,
-      diff: preview.diff,
-      taskId,
+      workspacePath: request.preview.workspacePath,
+      userGoal: request.userGoal,
+      changedFiles: request.preview.changedFiles,
+      diff: request.preview.diff,
+      taskId: request.taskId,
+      runId: request.runId,
+      workflowRunId: request.workflowRunId,
+      agentRunId: request.agentRunId,
+      stepId: request.stepId,
+      attempt: request.attempt,
       providerId: modelProvider.settings.provider,
       model: modelProvider.settings.model,
       apiKeyReference: modelProvider.settings.apiKeyReference,

@@ -16,16 +16,24 @@ import { normalizeBaseUrl } from "./adapter-utils";
 
 export class OpenAICompatibleAdapter implements ProviderAdapter {
   readonly protocol = "openai-compatible" as const;
+  readonly capabilities: ProviderCapabilities;
 
   constructor(
     readonly adapterId: string,
     private readonly defaultBaseUrl: string,
-    readonly capabilities: ProviderCapabilities = {
+    capabilities: ProviderCapabilities = {
       vision: true,
       code: true,
       longContext: true,
     },
-  ) {}
+  ) {
+    this.capabilities = {
+      nativeToolCalling: true,
+      streamingToolCalls: true,
+      parallelToolCalls: false,
+      ...capabilities,
+    };
+  }
 
   buildCompletionRequest(input: AdapterCompletionInput): AdapterRequestPayload {
     return {

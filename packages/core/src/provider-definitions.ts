@@ -37,18 +37,21 @@ const ALL_CAPS: ProviderCapabilities = {
   vision: true,
   code: true,
   longContext: true,
+  parallelToolCalls: true,
 };
 
 const NO_VISION: ProviderCapabilities = {
   vision: false,
   code: true,
   longContext: true,
+  parallelToolCalls: true,
 };
 
 const OLLAMA_CAPS: ProviderCapabilities = {
   vision: false,
   code: true,
   longContext: false,
+  parallelToolCalls: false,
 };
 
 // ── Provider list ───────────────────────────────────────────────────────

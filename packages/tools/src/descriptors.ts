@@ -36,7 +36,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "verifier.check",
     permissionLevel: "read",
-    summary: "Check collected evidence against success criteria and produce a verdict.",
+    summary: "Check collected evidence against success criteria. Return warn, not fail, for provenance-bound partial multi-source results that contain at least one valid completed source and an explicit blocked-source outcome; never pass incomplete results.",
     capabilityTags: ["evidence_check"],
     ownerAgentKinds: ["verifier"],
   },
@@ -259,10 +259,14 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "trend.fetchHotList",
     permissionLevel: "read",
-    summary: "Fetch a structured public hot/trending list from a supported provider such as Weibo, with item count and freshness metadata. Requires toolInput.provider, for example {\"provider\":\"weibo\",\"limit\":20}.",
+    summary: "Fetch a structured public hot/trending list when the provider has a registered adapter, with item count and freshness metadata. For an unsupported site, delegate Page Agent browser navigation/content extraction instead of retrying this tool. Requires toolInput.provider; limit is optional.",
     capabilityTags: ["trend_fetch", "web_fetch"],
     ownerAgentKinds: ["research"],
     requiredInputs: [{ name: "provider", type: "string", nonEmpty: true }],
+    metadata: {
+      failureFallbackAgentKind: "page-agent",
+      failureFallbackCapability: "browser_navigate",
+    },
   },
   {
     name: "memory.search",
@@ -475,7 +479,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     permissionLevel: "read",
     summary: "Navigate the browser to a URL and wait for page load.",
     capabilityTags: ["browser_navigate"],
-    ownerAgentKinds: ["browser"],
+    ownerAgentKinds: ["page-agent"],
     requiredInputs: [{ name: "url", type: "string", nonEmpty: true }],
   },
   {
@@ -483,14 +487,14 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     permissionLevel: "read",
     summary: "Capture a screenshot of the current page or a specific element.",
     capabilityTags: ["browser_navigate"],
-    ownerAgentKinds: ["browser"],
+    ownerAgentKinds: ["page-agent"],
   },
   {
     name: "browser.getContent",
     permissionLevel: "read",
     summary: "Extract text, HTML, or markdown content from the current page.",
     capabilityTags: ["browser_navigate"],
-    ownerAgentKinds: ["browser"],
+    ownerAgentKinds: ["page-agent"],
   },
   {
     name: "browser.click",
@@ -498,7 +502,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     writeRiskLevel: "risky",
     summary: "Click an element on the page after visible confirmed-write approval.",
     capabilityTags: ["browser_interact"],
-    ownerAgentKinds: ["browser"],
+    ownerAgentKinds: ["page-agent"],
     requiredInputs: [{ name: "selector", type: "string", nonEmpty: true }],
   },
   {
@@ -507,7 +511,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     writeRiskLevel: "risky",
     summary: "Type text into an input field after visible confirmed-write approval.",
     capabilityTags: ["browser_interact"],
-    ownerAgentKinds: ["browser"],
+    ownerAgentKinds: ["page-agent"],
     requiredInputs: [
       { name: "selector", type: "string", nonEmpty: true },
       { name: "text", type: "string" },
@@ -519,7 +523,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     writeRiskLevel: "dangerous",
     summary: "Execute JavaScript in the page context after visible confirmed-write approval.",
     capabilityTags: ["browser_interact"],
-    ownerAgentKinds: ["browser"],
+    ownerAgentKinds: ["page-agent"],
     requiredInputs: [{ name: "expression", type: "string", nonEmpty: true }],
   },
   {
@@ -528,7 +532,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     writeRiskLevel: "risky",
     summary: "Run a Playwright test script after visible confirmed-write approval and return pass/fail results.",
     capabilityTags: ["browser_test"],
-    ownerAgentKinds: ["browser"],
+    ownerAgentKinds: ["page-agent"],
     requiredInputs: [{ name: "script", type: "string", nonEmpty: true }],
   },
   {
@@ -536,26 +540,14 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     permissionLevel: "read",
     summary: "Extract all hyperlinks from the current page with href and text.",
     capabilityTags: ["browser_navigate"],
-    ownerAgentKinds: ["browser"],
-  },
-  {
-    name: "browser.upload",
-    permissionLevel: "confirmed_write",
-    writeRiskLevel: "risky",
-    summary: "Upload local file(s) to a file input element on the page. Disabled until browser approvals are implemented.",
-    capabilityTags: ["browser_interact"],
-    ownerAgentKinds: ["browser"],
-    requiredInputs: [
-      { name: "selector", type: "string", nonEmpty: true },
-      { name: "filePaths", type: "string[]", nonEmpty: true },
-    ],
+    ownerAgentKinds: ["page-agent"],
   },
   {
     name: "browser.followCandidateLinks",
     permissionLevel: "read",
     summary: "Follow candidate links extracted from the current page and collect content excerpts.",
     capabilityTags: ["browser_navigate"],
-    ownerAgentKinds: ["browser"],
+    ownerAgentKinds: ["page-agent"],
     requiredInputs: [{ name: "candidateLinks", type: "object[]", nonEmpty: true }],
   },
 

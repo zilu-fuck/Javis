@@ -269,7 +269,7 @@ function inferAgentName(text: string, fallback: string): string {
   if (lower.includes("research") || lower.includes("search")) return "Research Agent";
   if (lower.includes("computer") || lower.includes("desktop")) return "Computer Agent";
   if (lower.includes("command") || lower.includes("shell")) return "Shell Agent";
-  if (lower.includes("browser")) return "Browser Agent";
+  if (lower.includes("browser") || lower.includes("page-agent")) return "Page Agent";
   if (lower.includes("scheduler")) return "Scheduler Agent";
   if (lower.includes("verifier")) return "Verifier Agent";
   if (lower.includes("vision")) return "Vision Agent";

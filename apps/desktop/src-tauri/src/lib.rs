@@ -37,6 +37,7 @@ mod git;
 mod global_hotkey;
 mod inspect;
 mod mcpserv;
+mod model_chat;
 mod pdf;
 mod sandbox;
 mod scan;
@@ -50,8 +51,8 @@ mod workspace;
 // Re-import from extracted modules
 use code::{
     create_chat_completions_endpoint, default_model_for_locale, default_provider_for_locale,
-    infer_provider_id_from_model, normalize_openai_compatible_model_name,
-    normalize_optional_config_value, CodeProposeEditRequest, FileContentHash,
+    infer_provider_id_from_model, normalize_optional_config_value, CodeProposeEditRequest,
+    FileContentHash,
 };
 use web::WebSearchResult;
 
@@ -1823,22 +1824,6 @@ pub(crate) fn default_openai_compatible_base_url(request: &CodeProposeEditReques
         _ => "https://api.openai.com/v1".to_string(),
     }
 }
-pub(crate) fn create_provider_response_diagnostic(
-    request: &CodeProposeEditRequest,
-    endpoint: &str,
-    body: &str,
-) -> String {
-    let provider_id = normalize_optional_config_value(request.provider_id.as_deref())
-        .unwrap_or_else(|| infer_provider_id_from_model(request));
-    let model =
-        normalize_openai_compatible_model_name(request).unwrap_or_else(|| "unknown".to_string());
-    let body_hash = create_fnv1a_hash(body.as_bytes());
-    format!(
-        "provider={provider_id}; model={model}; endpointHost={}; bodyHash={body_hash}",
-        extract_url_host(endpoint)
-    )
-}
-
 pub(crate) fn extract_url_host(url: &str) -> String {
     // Parsing the URL removes user-info (including passwords) before the host
     // is included in diagnostics. Keep a conservative fallback for malformed
@@ -3983,36 +3968,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_response_diagnostics_are_redacted() {
-        let request = CodeProposeEditRequest {
-            workspace_path: "E:/Javis".to_string(),
-            user_goal: "Review changes".to_string(),
-            changed_files: vec!["src/message.txt".to_string()],
-            diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
-            task_id: None,
-            provider_id: Some("deepseek".to_string()),
-            model: Some("deepseek/deepseek-v4-flash".to_string()),
-            api_key: Some("sk-local-secret-that-must-not-leak".to_string()),
-            api_key_reference: None,
-            base_url: Some("https://api.deepseek.com".to_string()),
-            locale: None,
-        };
-
-        let diagnostic = create_provider_response_diagnostic(
-            &request,
-            "https://api.deepseek.com/v1/chat/completions",
-            r#"{"error":"Authorization Bearer sk-local-secret-that-must-not-leak apiKey failed"}"#,
-        );
-
-        assert!(diagnostic.contains("provider=deepseek"));
-        assert!(diagnostic.contains("model=deepseek-v4-flash"));
-        assert!(diagnostic.contains("endpointHost=api.deepseek.com"));
-        assert!(diagnostic.contains("bodyHash=fnv1a-"));
-        assert!(!diagnostic.contains("bodyPreview="));
-        assert!(!diagnostic.contains("sk-local-secret"));
-    }
-
-    #[test]
     fn model_completion_diagnostics_do_not_include_provider_body_text() {
         let diagnostic = create_model_completion_response_diagnostic(
             "deepseek",
@@ -4057,19 +4012,6 @@ mod tests {
         assert!(diagnostic.contains("bodyHash=fnv1a-"));
         assert!(!diagnostic.contains("private reasoning"));
         assert!(!diagnostic.contains("sk-secret"));
-    }
-
-    #[test]
-    fn openai_compatible_fallback_requests_json_object_output() {
-        let body = create_openai_compatible_proposal_body(
-            "deepseek-v4-flash",
-            "Return the CodeProposedEdit JSON object.",
-        );
-
-        assert_eq!(body["response_format"]["type"], "json_object");
-        assert_eq!(body["stream"], false);
-        assert_eq!(body["temperature"], 0);
-        assert_eq!(body["model"], "deepseek-v4-flash");
     }
 
     #[test]
@@ -4479,6 +4421,11 @@ mod tests {
             changed_files: vec!["src/message.txt".to_string()],
             diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
             task_id: None,
+            run_id: None,
+            workflow_run_id: None,
+            agent_run_id: None,
+            step_id: None,
+            attempt: None,
             provider_id: None,
             model: None,
             api_key: None,
@@ -4516,6 +4463,11 @@ mod tests {
             changed_files: vec!["src/message.txt".to_string()],
             diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
             task_id: None,
+            run_id: None,
+            workflow_run_id: None,
+            agent_run_id: None,
+            step_id: None,
+            attempt: None,
             provider_id: Some("openai".to_string()),
             model: Some("openai/gpt-5.1-codex".to_string()),
             api_key: Some("sk-test".to_string()),
@@ -4552,6 +4504,11 @@ mod tests {
             changed_files: vec!["src/message.txt".to_string()],
             diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
             task_id: None,
+            run_id: None,
+            workflow_run_id: None,
+            agent_run_id: None,
+            step_id: None,
+            attempt: None,
             provider_id: Some("custom".to_string()),
             model: Some("custom/local-model".to_string()),
             api_key: Some("local-key".to_string()),
@@ -4590,6 +4547,11 @@ mod tests {
             changed_files: vec!["src/message.txt".to_string()],
             diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
             task_id: None,
+            run_id: None,
+            workflow_run_id: None,
+            agent_run_id: None,
+            step_id: None,
+            attempt: None,
             provider_id: Some("deepseek".to_string()),
             model: Some("deepseek-v4-flash".to_string()),
             api_key: Some("sk-test".to_string()),
@@ -4613,91 +4575,36 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_openai_compatible_only_for_supported_provider_settings() {
-        let request = CodeProposeEditRequest {
-            workspace_path: "E:/Javis".to_string(),
-            user_goal: "Review changes".to_string(),
-            changed_files: vec!["src/message.txt".to_string()],
-            diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
-            task_id: None,
-            provider_id: Some("deepseek".to_string()),
-            model: Some("deepseek/deepseek-v4-flash".to_string()),
-            api_key: Some("sk-test".to_string()),
-            api_key_reference: None,
-            base_url: None,
-            locale: None,
-        };
+    fn code_proposal_backend_never_falls_back_to_direct_http() {
+        let source = include_str!("code.rs");
+        let start = source
+            .find("pub(crate) fn propose_code_edit_with_opencode(")
+            .expect("proposal entrypoint");
+        let end = source[start..]
+            .find("pub(crate) fn run_opencode_proposal_command(")
+            .map(|offset| start + offset)
+            .expect("proposal command boundary");
+        let entrypoint = &source[start..end];
 
-        assert!(should_fallback_to_openai_compatible(&request));
-        assert!(!should_fallback_to_openai_compatible(
-            &CodeProposeEditRequest {
-                api_key: None,
-                ..request.clone()
-            }
+        assert!(entrypoint.contains("run_opencode_proposal_command"));
+        assert!(!entrypoint.contains("reqwest"));
+        assert!(!source.contains("run_openai_compatible_proposal_request"));
+        assert!(!source.contains("should_fallback_to_openai_compatible"));
+    }
+
+    #[test]
+    fn serializes_opencode_unavailability_as_a_stable_runtime_error() {
+        let error = format_code_proposal_error(opencode_runtime_unavailable_error(
+            "sandbox backend is not installed",
         ));
-        assert!(!should_fallback_to_openai_compatible(
-            &CodeProposeEditRequest {
-                provider_id: Some("custom".to_string()),
-                model: Some("custom/local-model".to_string()),
-                api_key: Some("custom-key".to_string()),
-                base_url: None,
-                ..request.clone()
-            }
-        ));
-        assert!(should_fallback_to_openai_compatible(
-            &CodeProposeEditRequest {
-                provider_id: Some("custom".to_string()),
-                model: Some("custom/local-model".to_string()),
-                api_key: Some("custom-key".to_string()),
-                base_url: Some("http://127.0.0.1:11434/v1".to_string()),
-                ..request.clone()
-            }
-        ));
-        assert_eq!(
-            create_chat_completions_endpoint("https://api.deepseek.com"),
-            "https://api.deepseek.com/v1/chat/completions"
-        );
-        assert_eq!(
-            create_chat_completions_endpoint("https://api.deepseek.com/v1/chat/completions"),
-            "https://api.deepseek.com/v1/chat/completions"
-        );
-        // DeepSeek default base URL stays user-friendly; endpoint construction adds /v1.
-        assert_eq!(
-            default_openai_compatible_base_url_for_provider("deepseek"),
-            "https://api.deepseek.com"
-        );
-        assert_eq!(
-            create_chat_completions_endpoint(&default_openai_compatible_base_url_for_provider(
-                "deepseek"
-            )),
-            "https://api.deepseek.com/v1/chat/completions"
-        );
-        assert_eq!(
-            default_openai_compatible_base_url_for_provider("dashscope"),
-            "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        );
-        assert_eq!(
-            default_openai_compatible_base_url_for_provider("openrouter"),
-            "https://openrouter.ai/api/v1"
-        );
-        assert_eq!(
-            create_chat_completions_endpoint(&default_openai_compatible_base_url_for_provider(
-                "ollama"
-            )),
-            "http://localhost:11434/v1/chat/completions"
-        );
-        assert!(!openai_compatible_request_requires_api_key(
-            "ollama",
-            "http://localhost:11434/v1"
-        ));
-        assert!(!openai_compatible_request_requires_api_key(
-            "custom",
-            "http://127.0.0.1:11434/v1"
-        ));
-        assert!(openai_compatible_request_requires_api_key(
-            "openrouter",
-            "https://openrouter.ai/api/v1"
-        ));
+        let payload: serde_json::Value = serde_json::from_str(&error).expect("runtime error json");
+
+        assert_eq!(payload["code"], "runtime_unavailable");
+        assert_eq!(payload["phase"], "runtime");
+        assert_eq!(payload["retryable"], true);
+        assert!(payload["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("sandbox backend is not installed")));
     }
 
     #[test]
@@ -4714,6 +4621,11 @@ mod tests {
             changed_files: vec!["src/message.txt".to_string()],
             diff: "diff --git a/src/message.txt b/src/message.txt\n".to_string(),
             task_id: None,
+            run_id: None,
+            workflow_run_id: None,
+            agent_run_id: None,
+            step_id: None,
+            attempt: None,
             provider_id: Some("deepseek".to_string()),
             model: Some("deepseek/deepseek-v4-flash".to_string()),
             api_key: None,
@@ -4733,7 +4645,7 @@ mod tests {
     }
 
     #[test]
-    fn times_out_long_running_child_processes() {
+    fn times_out_and_reaps_long_running_child_processes() {
         let mut command = if cfg!(windows) {
             let mut command = Command::new("cmd");
             command.args(["/C", "ping", "127.0.0.1", "-n", "6", ">nul"]);
@@ -4748,11 +4660,32 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn sleeper");
+        let child_id = child.id();
 
         let error = wait_with_timeout(child, Duration::from_millis(50)).expect_err("timeout");
 
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert!(error.to_string().contains("timed out"));
+
+        #[cfg(windows)]
+        {
+            let filter = format!("PID eq {child_id}");
+            let output = Command::new("tasklist")
+                .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+                .output()
+                .expect("query timed-out child process");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(!stdout.contains(&format!("\"{child_id}\"")));
+        }
+
+        #[cfg(not(windows))]
+        {
+            let status = Command::new("sh")
+                .args(["-c", &format!("kill -0 {child_id}")])
+                .status()
+                .expect("query timed-out child process");
+            assert!(!status.success());
+        }
     }
 
     #[test]
@@ -4788,6 +4721,11 @@ mod tests {
                 changed_files: vec!["proposal.json".to_string()],
                 diff: "diff --git a/proposal.json b/proposal.json\n".to_string(),
                 task_id: None,
+                run_id: None,
+                workflow_run_id: None,
+                agent_run_id: None,
+                step_id: None,
+                attempt: None,
                 provider_id: None,
                 model: None,
                 api_key: None,
@@ -5445,32 +5383,6 @@ mod tests {
         }
     }
 
-    // 閳光偓閳光偓 DeepSeek API request construction tests 閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓
-
-    #[test]
-    fn deepseek_proposal_body_has_required_fields() {
-        let body = create_openai_compatible_proposal_body(
-            "deepseek-chat",
-            "Add a hello world message to src/main.txt",
-        );
-
-        assert_eq!(body["model"], "deepseek-chat");
-        assert_eq!(body["stream"], false);
-        assert_eq!(body["temperature"], 0);
-        assert_eq!(body["max_tokens"], 4096);
-        assert_eq!(body["thinking"]["type"], "disabled");
-        assert_eq!(body["response_format"]["type"], "json_object");
-        // Messages array: system + user
-        let messages = body["messages"].as_array().expect("messages array");
-        assert_eq!(messages.len(), 2);
-        assert_eq!(messages[0]["role"], "system");
-        assert_eq!(messages[1]["role"], "user");
-        assert!(messages[1]["content"]
-            .as_str()
-            .unwrap()
-            .contains("hello world"));
-    }
-
     #[test]
     fn creates_openai_compatible_embeddings_endpoint() {
         assert_eq!(
@@ -5480,62 +5392,6 @@ mod tests {
         assert_eq!(
             create_openai_compatible_embeddings_endpoint("https://api.example.test/v1/embeddings"),
             "https://api.example.test/v1/embeddings"
-        );
-    }
-
-    #[test]
-    fn deepseek_proposal_body_disables_thinking_like_live_verifier() {
-        let body = create_openai_compatible_proposal_body("deepseek-chat", "test prompt");
-
-        assert_eq!(body["thinking"]["type"], "disabled");
-    }
-
-    #[test]
-    fn deepseek_completion_body_matches_proposal_structure() {
-        let proposal_body = create_openai_compatible_proposal_body("deepseek-chat", "test");
-        let request = ModelCompletionRequest {
-            prompt: "test".to_string(),
-            system_prompt: None,
-            messages: None,
-            assistant_prefill: None,
-            image_data_url: None,
-            images: None,
-            media: None,
-            enable_media_uuid: false,
-            disable_thinking: false,
-            provider_id: Some("deepseek".to_string()),
-            model: Some("deepseek-chat".to_string()),
-            api_key: Some("sk-test".to_string()),
-            api_key_reference: None,
-            base_url: None,
-            max_tokens: Some(4096),
-            temperature: Some(0.0),
-            stop_sequences: None,
-            locale: None,
-            protocol: None,
-            timeout_ms: None,
-        };
-        let completion_body = create_openai_compatible_completion_body("deepseek-chat", &request);
-
-        // Both should have the same core structure
-        assert_eq!(proposal_body["model"], completion_body["model"]);
-        assert_eq!(proposal_body["stream"], completion_body["stream"]);
-        // Proposal has system message, completion does not
-        assert_eq!(
-            proposal_body["messages"]
-                .as_array()
-                .unwrap()
-                .first()
-                .unwrap()["role"],
-            "system"
-        );
-        assert_eq!(
-            completion_body["messages"]
-                .as_array()
-                .unwrap()
-                .first()
-                .unwrap()["role"],
-            "user"
         );
     }
 
@@ -5559,66 +5415,6 @@ mod tests {
         let endpoint4 =
             create_chat_completions_endpoint("https://api.deepseek.com/v1/chat/completions");
         assert_eq!(endpoint4, "https://api.deepseek.com/v1/chat/completions");
-    }
-
-    #[test]
-    fn deepseek_proposal_request_serializes_to_valid_json() {
-        let body = create_openai_compatible_proposal_body("deepseek-chat", "test prompt");
-        let json_text = serde_json::to_string(&body).expect("serialize proposal body");
-
-        // Must be valid JSON
-        let parsed: serde_json::Value =
-            serde_json::from_str(&json_text).expect("re-parse proposal body");
-        assert_eq!(parsed["model"], "deepseek-chat");
-
-        // Keep this aligned with docs/qa/2026-05-26/test_fallback.py, the live
-        // provider verifier that has produced parseable Code Agent proposals.
-        assert!(json_text.contains("\"thinking\""));
-        assert_eq!(parsed["thinking"]["type"], "disabled");
-    }
-
-    #[test]
-    fn deepseek_should_fallback_when_credentials_present() {
-        let request = CodeProposeEditRequest {
-            workspace_path: "E:/Test".to_string(),
-            user_goal: "Fix a bug".to_string(),
-            changed_files: vec![],
-            diff: String::new(),
-            task_id: None,
-            provider_id: Some("deepseek".to_string()),
-            model: Some("deepseek-chat".to_string()),
-            api_key: Some("sk-test-key".to_string()),
-            api_key_reference: None,
-            base_url: None,
-            locale: None,
-        };
-
-        assert!(
-            should_fallback_to_openai_compatible(&request),
-            "DeepSeek with API key should use direct HTTP API"
-        );
-    }
-
-    #[test]
-    fn deepseek_should_not_fallback_without_credentials() {
-        let request = CodeProposeEditRequest {
-            workspace_path: "E:/Test".to_string(),
-            user_goal: "Fix a bug".to_string(),
-            changed_files: vec![],
-            diff: String::new(),
-            task_id: None,
-            provider_id: Some("deepseek".to_string()),
-            model: Some("deepseek-chat".to_string()),
-            api_key: None,
-            api_key_reference: None,
-            base_url: None,
-            locale: None,
-        };
-
-        assert!(
-            !should_fallback_to_openai_compatible(&request),
-            "DeepSeek without API key should not use direct HTTP API"
-        );
     }
 
     // 閳光偓閳光偓 SKIP_DIRS + depth + mount roots 閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓
@@ -5843,6 +5639,9 @@ pub fn run() {
             fetch_provider_models,
             code::propose_code_edit,
             complete_model_prompt,
+            model_chat::complete_model_chat,
+            model_chat::stream_model_chat_start,
+            model_chat::stream_model_chat_cancel,
             embed_model_texts,
             streaming::stream_model_prompt_l1_start,
             streaming::stream_model_prompt_start,

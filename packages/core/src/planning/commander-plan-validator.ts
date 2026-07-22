@@ -7,7 +7,7 @@
 
 import type { CommanderDagPlan, CommanderDagStep, StepExecutionMode } from "../commander-plan-schema";
 import type { ToolDescriptor } from "@javis/tools";
-import { isValidCapabilityTag } from "../agent-capability";
+import { isRoleCapabilityForAgentKind, isValidCapabilityTag } from "../agent-capability";
 import type { PlanDiagnostic } from "./commander-plan-diagnostics";
 import { buildToolInputShape, type ToolRequiredInputShapeT } from "./schema";
 
@@ -49,10 +49,11 @@ function isApprovalGatedTool(tool: ToolDescriptor): boolean {
 }
 
 function stepCapabilities(step: CommanderDagStep): string[] {
-  return [
+  return [...new Set([
+    ...(step.primaryCapability ? [step.primaryCapability] : []),
     ...(step.capability ? [step.capability] : []),
     ...step.requiredCapabilities,
-  ];
+  ])];
 }
 
 function isComputerUseApprovalLoopStep(step: CommanderDagStep, capabilities: readonly string[]): boolean {
@@ -307,7 +308,7 @@ export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnosti
     if (approvalTools.length === 0) continue;
 
     diagnostics.push({
-      code: "UNSUPPORTED_APPROVAL_GATED_TOOL",
+      code: "MISSING_APPROVAL_TOOL_SELECTION",
       severity: "error",
       stepId: step.id,
       path: `steps[${i}].toolName`,
@@ -326,6 +327,7 @@ export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnosti
     if (step.toolName) continue;
     const capabilities = stepCapabilities(step).filter(isValidCapabilityTag);
     if (capabilities.length === 0 || isComputerUseApprovalLoopStep(step, capabilities)) continue;
+    if (step.executionMode === "react") continue;
     const agentAllowed = agentToolMap.get(step.assignedAgentKind) ?? new Set<string>();
     const candidate = availableTools.find((tool) =>
       agentAllowed.has(tool.name) &&
@@ -394,7 +396,12 @@ export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnosti
   }
 
   // --- Rule: Invalid Execution Mode -----------------------------------------
-  const validModes: StepExecutionMode[] = ["direct_response", "direct_tool_call", "react"];
+  const validModes: StepExecutionMode[] = [
+    "direct_response",
+    "direct_tool_call",
+    "react",
+    "desktop_input",
+  ];
   for (let i = 0; i < plan.steps.length; i++) {
     const step = plan.steps[i];
     if (step.executionMode && !validModes.includes(step.executionMode)) {
@@ -412,13 +419,33 @@ export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnosti
   // --- Rule: Execution Mode Constraints -------------------------------------
   for (let i = 0; i < plan.steps.length; i++) {
     const step = plan.steps[i];
-    const selectsSynthesis = step.toolName === "commander.synthesize" ||
-      (!step.toolName && (
+    if (step.executionMode === "react" && !step.primaryCapability) {
+      diagnostics.push({
+        code: "MISSING_PRIMARY_CAPABILITY",
+        severity: "error",
+        stepId: step.id,
+        path: `steps[${i}].primaryCapability`,
+        message: `React step "${step.id}" must declare exactly one primaryCapability for backend routing.`,
+        suggestedFix: "Set primaryCapability to the single capability that owns this Agent loop.",
+      });
+    }
+    if (step.executionMode === "desktop_input" && step.assignedAgentKind !== "computer") {
+      diagnostics.push({
+        code: "INVALID_EXECUTION_MODE",
+        severity: "error",
+        stepId: step.id,
+        path: `steps[${i}].executionMode`,
+        message: `executionMode "desktop_input" is reserved for the computer Agent.`,
+        suggestedFix: `Assign the step to agent kind "computer" or choose another execution mode.`,
+      });
+    }
+    const selectsCommanderSynthesis = step.toolName === "commander.synthesize" ||
+      (step.assignedAgentKind === "commander" && !step.toolName && (
         step.capability === "synthesis" ||
         step.requiredCapabilities.includes("synthesis")
       ));
     if (
-      selectsSynthesis &&
+      selectsCommanderSynthesis &&
       step.executionMode !== undefined &&
       step.executionMode !== "direct_response"
     ) {
@@ -429,6 +456,24 @@ export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnosti
         path: `steps[${i}].executionMode`,
         message: `Commander synthesis must use executionMode "direct_response" so its conclusion passes the evidence guard.`,
         suggestedFix: `Set executionMode to "direct_response" for commander.synthesize/synthesis steps.`,
+      });
+    }
+    const roleCapabilities = stepCapabilities(step).filter((capability) =>
+      isRoleCapabilityForAgentKind(step.assignedAgentKind, capability)
+    );
+    if (
+      !step.toolName &&
+      roleCapabilities.length > 0 &&
+      step.executionMode !== undefined &&
+      step.executionMode !== "react"
+    ) {
+      diagnostics.push({
+        code: "INVALID_EXECUTION_MODE",
+        severity: "error",
+        stepId: step.id,
+        path: `steps[${i}].executionMode`,
+        message: `Agent role capability "${roleCapabilities[0]}" must use executionMode "react" so the agent can select from its safe toolset.`,
+        suggestedFix: `Set executionMode to "react" or omit it to use the role-capability default.`,
       });
     }
     if (step.executionMode === "direct_tool_call") {
@@ -651,8 +696,10 @@ function isVerifierStep(step: CommanderDagStep): boolean {
 
 function isUserVisibleSynthesisStep(step: CommanderDagStep): boolean {
   return step.toolName === "commander.synthesize" ||
-    step.capability === "synthesis" ||
-    step.requiredCapabilities.includes("synthesis") ||
+    (step.assignedAgentKind === "commander" && (
+      step.capability === "synthesis" ||
+      step.requiredCapabilities.includes("synthesis")
+    )) ||
     step.executionMode === "direct_response";
 }
 

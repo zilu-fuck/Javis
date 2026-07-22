@@ -79,6 +79,72 @@ describe("buildCheckpointFromDagState", () => {
       files: ["README.md"],
     });
   });
+
+  it("copies durable Agent metrics and token usage without retaining mutable inputs", () => {
+    const metrics = {
+      backend: "langchain" as const,
+      runCount: 1,
+      completedRunCount: 1,
+      successRate: 1,
+      totalDurationMs: 20,
+      averageDurationMs: 20,
+      modelCalls: 2,
+      toolCalls: 1,
+      usage: { inputTokens: 13, outputTokens: 5, totalTokens: 18 },
+    };
+    const tokenUsage = {
+      inputTokens: 13,
+      outputTokens: 5,
+      totalTokens: 18,
+      modelCalls: 2,
+      byAgentKind: [{
+        agentKind: "research",
+        inputTokens: 13,
+        outputTokens: 5,
+        totalTokens: 18,
+        modelCalls: 2,
+      }],
+    };
+    const routingMetrics = [{
+      providerId: "openai",
+      agentKind: "research" as const,
+      taskType: "read",
+      routeCount: 2,
+      rolloutTargetCount: 2,
+      langchainRouteCount: 1,
+      legacyRouteCount: 1,
+      unavailableRouteCount: 0,
+      fallbackCount: 1,
+      fallbackRate: 0.5,
+      fallbackReasons: [{ reason: "runtime_factory_unavailable" as const, count: 1 }],
+      observationIds: ["run-1:scan", "run-1:legacy"],
+    }];
+    const checkpoint = buildCheckpointFromDagState({
+      taskId: "task-1",
+      runId: "run-1",
+      workflow,
+      completedStepIds: ["scan"],
+      abandonedStepIds: [],
+      runningStepIds: [],
+      contextSnapshot: {},
+      eventSequence: 9,
+      agentRuntimeMetrics: [metrics],
+      agentRuntimeRoutingMetrics: routingMetrics,
+      tokenUsage,
+    });
+
+    metrics.usage.inputTokens = 99;
+    tokenUsage.byAgentKind[0]!.inputTokens = 99;
+    routingMetrics[0]!.providerId = "changed";
+    routingMetrics[0]!.fallbackReasons[0]!.count = 99;
+    routingMetrics[0]!.observationIds[0] = "changed";
+
+    expect(checkpoint.agentRuntimeMetrics?.[0]?.usage?.inputTokens).toBe(13);
+    expect(checkpoint.tokenUsage?.byAgentKind[0]?.inputTokens).toBe(13);
+    expect(checkpoint.agentRuntimeRoutingMetrics?.[0]?.providerId).toBe("openai");
+    expect(checkpoint.agentRuntimeRoutingMetrics?.[0]?.fallbackReasons[0]?.count).toBe(1);
+    expect(checkpoint.agentRuntimeRoutingMetrics?.[0]?.observationIds[0]).toBe("run-1:scan");
+  });
 });
 
 function testWorkflow(): WorkbenchWorkflow {
@@ -177,6 +243,21 @@ describe("buildCheckpointFromDagState", () => {
       { ...commanderStep, capability: "code_trace" },
       { ...commanderStep, choices: [{ label: "All workspaces", value: "all" }] },
       { ...commanderStep, successCriteria: "A call chain is returned." },
+      { ...commanderStep, instruction: "Trace the repository call chain." },
+      { ...commanderStep, hardConstraints: ["Read-only"] },
+      { ...commanderStep, preferences: ["Prefer source-backed evidence"] },
+      { ...commanderStep, acceptanceCriteria: ["The call chain is source-backed."] },
+      { ...commanderStep, outputSchemaRef: "repoTrace" },
+      { ...commanderStep, primaryCapability: "code_trace" },
+      { ...commanderStep, artifactObligation: "required" as const },
+      {
+        ...commanderStep,
+        completionPolicy: {
+          partial: "publish_and_continue" as const,
+          blocked: "replan" as const,
+          needsClarification: "replan" as const,
+        },
+      },
     ]) {
       expect(computePlanHash([changed])).not.toBe(baseHash);
     }

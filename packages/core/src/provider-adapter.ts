@@ -12,6 +12,14 @@ export interface ProviderCapabilities {
   vision: boolean;
   code: boolean;
   longContext: boolean;
+  /** Provider-native assistant tool calls and tool result messages. Omit to enable. */
+  nativeToolCalling?: boolean;
+  /** Provider-native streaming tool-call argument deltas. Omit to enable. */
+  streamingToolCalls?: boolean;
+  /** Provider-native JSON Schema response format. Omit to use tool strategy. */
+  structuredOutput?: boolean;
+  /** Provider accepts parallel tool calls and the OpenAI parallel_tool_calls hint. */
+  parallelToolCalls?: boolean;
 }
 
 export interface ModelMediaInput {

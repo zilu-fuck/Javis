@@ -196,8 +196,10 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
           detail: event.detail,
           toolName: event.toolName,
         }),
-        agentId: event.agentKind ? agentIdFromKind(event.agentKind) : agentIdFromToolName(event.toolName ?? ""),
-        stepId: event.stepId,
+        ...optionalLogOwnership(
+          event.agentKind ? agentIdFromKind(event.agentKind) : agentIdFromToolName(event.toolName ?? ""),
+          event.stepId,
+        ),
       };
     case "task.timeout":
       return {
@@ -213,8 +215,10 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
           detail: event.detail,
           toolName: event.toolName,
         }),
-        agentId: event.agentKind ? agentIdFromKind(event.agentKind) : agentIdFromToolName(event.toolName ?? ""),
-        stepId: event.stepId,
+        ...optionalLogOwnership(
+          event.agentKind ? agentIdFromKind(event.agentKind) : agentIdFromToolName(event.toolName ?? ""),
+          event.stepId,
+        ),
       };
     case "task.cancelled":
       return {
@@ -227,35 +231,41 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
           label: event.label,
           detail: event.detail,
         }),
-        agentId: event.agentKind ? agentIdFromKind(event.agentKind) : undefined,
-        stepId: event.stepId,
+        ...optionalLogOwnership(
+          event.agentKind ? agentIdFromKind(event.agentKind) : undefined,
+          event.stepId,
+        ),
       };
-    case "task.replan_started":
+    case "task.replan_started": {
+      const safeError = redactTaskEventLogSecrets(event.error);
       return {
         id: `${event.taskId}-replan-started-${toLogIdPart(event.failedStepId)}`,
         kind: "event",
         title: "replan_started",
-        detail: `Replanning after ${event.failedStepId}: ${event.error}`,
+        detail: `Replanning after ${event.failedStepId}: ${safeError}`,
         userMessage: `Replanning after ${event.failedStepId}`,
         devDetail: JSON.stringify({
           failedStepId: event.failedStepId,
-          error: event.error,
+          error: safeError,
         }),
         stepId: event.failedStepId,
       };
-    case "task.replan_failed":
+    }
+    case "task.replan_failed": {
+      const safeError = redactTaskEventLogSecrets(event.error);
       return {
         id: `${event.taskId}-replan-failed-${toLogIdPart(event.failedStepId)}`,
         kind: "tool",
         title: "replan_failed",
-        detail: `Replan failed after ${event.failedStepId}: ${event.error}`,
+        detail: `Replan failed after ${event.failedStepId}: ${safeError}`,
         userMessage: `Replan failed after ${event.failedStepId}`,
         devDetail: JSON.stringify({
           failedStepId: event.failedStepId,
-          error: event.error,
+          error: safeError,
         }),
         stepId: event.failedStepId,
       };
+    }
     case "agent.status":
       return {
         id: `${event.taskId}-agent-${event.agentKind}-${event.status}`,
@@ -274,7 +284,7 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         detail: event.detail,
         userMessage: getToolUserMessage(event.toolName, "planned"),
         devDetail: event.detail,
-        agentId: agentIdFromToolName(event.toolName),
+        ...optionalLogOwnership(agentIdFromToolName(event.toolName), undefined),
       };
     case "tool.completed":
       return {
@@ -284,7 +294,7 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         detail: event.detail,
         userMessage: getToolUserMessage(event.toolName, "completed"),
         devDetail: event.detail,
-        agentId: agentIdFromToolName(event.toolName),
+        ...optionalLogOwnership(agentIdFromToolName(event.toolName), undefined),
       };
     case "permission.requested":
       return {
@@ -294,8 +304,7 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         detail: event.request.reason,
         userMessage: "需要你的确认才能继续",
         devDetail: event.request.reason,
-        agentId: agentIdFromToolName(event.toolName),
-        stepId: event.stepId,
+        ...optionalLogOwnership(agentIdFromToolName(event.toolName), event.stepId),
       };
     case "permission.resolved":
       return {
@@ -305,8 +314,7 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         detail: `Permission ${event.requestId} was ${event.decision}.`,
         userMessage: event.decision === "approved" ? "确认已通过" : "确认已拒绝",
         devDetail: `Permission ${event.requestId} was ${event.decision}.`,
-        agentId: agentIdFromToolName(event.toolName),
-        stepId: event.stepId,
+        ...optionalLogOwnership(agentIdFromToolName(event.toolName), event.stepId),
       };
     case "ask_user.requested":
       return {
@@ -335,15 +343,17 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         userMessage: event.detail ?? "任务已完成",
         devDetail: event.detail ?? "Task event bus recorded task completion.",
       };
-    case "task.failed":
+    case "task.failed": {
+      const safeError = redactTaskEventLogSecrets(event.error);
       return {
         id: `${event.taskId}-event-failed`,
         kind: "tool",
         title: "task.failed",
-        detail: event.error,
-        userMessage: `出错: ${toShortError(event.error)}`,
-        devDetail: event.error,
+        detail: safeError,
+        userMessage: `出错: ${toShortError(safeError)}`,
+        devDetail: safeError,
       };
+    }
     case "agent.chunk_start":
       return {
         id: `${event.taskId}-chunk-start-${event.agentKind}`,
@@ -382,8 +392,10 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         detail: event.detail,
         userMessage: event.detail,
         devDetail: `Step ${event.stepId} progress ${event.percent}%: ${event.detail}`,
-        agentId: event.agentId ?? agentIdFromOptionalKind(event.agentKind),
-        stepId: event.stepId,
+        ...optionalLogOwnership(
+          event.agentId ?? agentIdFromOptionalKind(event.agentKind),
+          event.stepId,
+        ),
       };
     case "step.started":
       return {
@@ -393,8 +405,10 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         detail: `Step ${event.stepId} started.`,
         userMessage: "正在执行下一步。",
         devDetail: `Dispatching step ${event.stepId}.`,
-        agentId: event.agentId ?? agentIdFromOptionalKind(event.agentKind),
-        stepId: event.stepId,
+        ...optionalLogOwnership(
+          event.agentId ?? agentIdFromOptionalKind(event.agentKind),
+          event.stepId,
+        ),
       };
     case "step.completed":
       return {
@@ -404,20 +418,26 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         detail: event.summary,
         userMessage: "这一步已完成。",
         devDetail: event.summary,
-        agentId: event.agentId ?? agentIdFromOptionalKind(event.agentKind),
-        stepId: event.stepId,
+        ...optionalLogOwnership(
+          event.agentId ?? agentIdFromOptionalKind(event.agentKind),
+          event.stepId,
+        ),
       };
-    case "step.failed":
+    case "step.failed": {
+      const safeError = redactTaskEventLogSecrets(event.error);
       return {
         id: `${event.taskId}-step-${event.stepId}-failed`,
         kind: "tool",
         title: "step.failed",
-        detail: event.error,
-        userMessage: `这一步失败了: ${toShortError(event.error)}`,
-        devDetail: event.error,
-        agentId: event.agentId ?? agentIdFromOptionalKind(event.agentKind),
-        stepId: event.stepId,
+        detail: safeError,
+        userMessage: `这一步失败了: ${toShortError(safeError)}`,
+        devDetail: safeError,
+        ...optionalLogOwnership(
+          event.agentId ?? agentIdFromOptionalKind(event.agentKind),
+          event.stepId,
+        ),
       };
+    }
     case "tool.partial":
       return {
         id: `${event.taskId}-tool-${event.toolCallId}-partial`,
@@ -431,7 +451,17 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
 }
 
 function agentIdFromKind(agentKind: AgentKind): string {
-  return `agent-${agentKind}`;
+  return `agent-${agentKind === "browser" ? "page-agent" : agentKind}`;
+}
+
+function optionalLogOwnership(
+  agentId: string | undefined,
+  stepId: string | undefined,
+): Partial<Pick<TaskLogEntry, "agentId" | "stepId">> {
+  return {
+    ...(agentId ? { agentId } : {}),
+    ...(stepId ? { stepId } : {}),
+  };
 }
 
 function toLogIdPart(value: string): string {
@@ -467,7 +497,7 @@ const AGENT_DISPLAY_NAMES: Partial<Record<AgentKind, string>> = {
   verifier: "Verifier",
   vision: "Vision Agent",
   workspace: "Workspace Agent",
-  browser: "Browser Agent",
+  "page-agent": "Page Agent",
 };
 
 const TOOL_DISPLAY_NAMES: Record<string, string> = {
@@ -526,5 +556,55 @@ function getToolUserMessage(toolName: string, phase: "planned" | "completed"): s
 }
 
 function toShortError(error: string): string {
-  return error.split(/\r?\n/u)[0]?.slice(0, 160) || "任务执行失败";
+  const firstLine = error.split(/\r?\n/u)[0]?.trim() || "";
+  if (/^Commander plan compilation failed:\s*$/iu.test(firstLine)) {
+    if (/\b(?:rate(?:\s+limit)?|429)\b/iu.test(error)) {
+      return "Commander 计划编译失败：请求频率过高，请稍后重试。";
+    }
+    if (/\b(?:timeout|timed out)\b/iu.test(error)) {
+      return "Commander 计划编译失败：模型请求超时，请重试。";
+    }
+    const diagnosticCodes = [...error.matchAll(/\b(?:ERROR|WARN)\s+([A-Z][A-Z0-9_]+)\b/gu)]
+      .map((match) => match[1]);
+    if (
+      diagnosticCodes.includes("MISSING_APPROVAL_TOOL_SELECTION") ||
+      diagnosticCodes.includes("MISSING_TOOL_INPUT")
+    ) {
+      return "Commander 计划中的工具或必要输入不完整，自动修复未成功，请重试。";
+    }
+    if (
+      diagnosticCodes.includes("MISSING_VERIFIER") ||
+      diagnosticCodes.includes("INVALID_EXECUTION_MODE")
+    ) {
+      return "Commander 计划缺少必要的验证或总结步骤，自动修复未成功，请重试。";
+    }
+    if (diagnosticCodes.includes("CAPABILITY_NOT_AVAILABLE")) {
+      return "Commander 计划中的 Agent 与能力不匹配，自动修复未成功，请重试。";
+    }
+    const diagnosticCode = diagnosticCodes[0];
+    return diagnosticCode
+      ? `Commander 计划编译失败（${diagnosticCode}），请查看任务详情。`
+      : "Commander 计划编译失败，请查看任务详情。";
+  }
+  return firstLine.slice(0, 160) || "任务执行失败";
+}
+
+export function redactTaskEventLogSecrets(value: string): string {
+  return value
+    .replace(
+      /data:image(?:\/|\\\/)[a-z0-9.+-]+;base64,[a-z0-9+/=_-]+/giu,
+      "[redacted:image data URL]",
+    )
+    .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]{8,}/giu, "Bearer [redacted:secret]")
+    .replace(/\b(?:Basic|Token)\s+[A-Za-z0-9._~+\/-]{8,}/giu, (match) =>
+      `${match.split(/\s+/u)[0]} [redacted:secret]`
+    )
+    .replace(
+      /\b((?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|authorization|token|secret|password|passwd|credential))\s*[:=]\s*["']?[^\s,;"']+/giu,
+      "$1=[redacted:secret]",
+    )
+    .replace(
+      /\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_-]{8,}|github_pat_[A-Za-z0-9_]{8,}|xox[abprs]-[A-Za-z0-9-]{8,}|AKIA[0-9A-Z]{12,}|AIza[0-9A-Za-z_-]{20,}|eyJ[A-Za-z0-9_-]{20,})\b/gu,
+      "[redacted:secret]",
+    );
 }

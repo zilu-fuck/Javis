@@ -206,6 +206,9 @@ export const zhCNWorkbenchLocale: WorkbenchLocale = {
   phrases: {
     "Ready": "就绪",
     "Waiting for a task": "等待任务",
+    "Execution details": "执行详情",
+    "Execution progress": "执行进度",
+    "Task progress": "任务进度",
     "created": "已创建",
     "planning": "规划中",
     "running": "运行中",
@@ -241,7 +244,7 @@ export const zhCNWorkbenchLocale: WorkbenchLocale = {
     "Commander": "指挥官",
     "Code Agent": "代码代理",
     "File Agent": "文件代理",
-    "Browser Agent": "浏览代理",
+    "Page Agent": "页面代理",
     "Shell Agent": "命令代理",
     "Research Agent": "研究代理",
     "Computer Agent": "电脑代理",

@@ -686,7 +686,193 @@ describe("JavisWorkbench permission cards", () => {
     expect(html).toContain("checking streamed evidence");
   });
 
-  it("keeps task sections visible while a response is streaming", () => {
+  it("shows the current Commander progress beside an active conversation", () => {
+    const html = renderWorkbench({
+      id: "task-live-progress",
+      title: "Inspecting project",
+      userGoal: "检查项目",
+      status: "running",
+      commanderMessage: "我会先检查项目结构，然后运行测试并持续汇报进度。",
+      conversationMessages: [
+        { role: "assistant", content: "你好，需要我做什么？" },
+        { role: "user", content: "检查项目" },
+      ],
+      plan: [],
+      agents: [],
+      logs: [],
+    });
+
+    expect(html).toContain("live-progress");
+    expect(html).toContain("我会先检查项目结构，然后运行测试并持续汇报进度。");
+  });
+
+  it("does not duplicate the Commander bubble after the final answer is recorded", () => {
+    const finalAnswer = "检查完成，所有测试均已通过。";
+    const html = renderWorkbench({
+      id: "task-finished-progress",
+      title: "Completed",
+      userGoal: "检查项目",
+      status: "completed",
+      commanderMessage: finalAnswer,
+      conversationMessages: [
+        { role: "user", content: "检查项目" },
+        { role: "assistant", content: finalAnswer },
+      ],
+      plan: [],
+      agents: [],
+      logs: [],
+    });
+
+    expect(html).not.toContain("live-progress");
+    expect(html.match(new RegExp(finalAnswer, "gu"))).toHaveLength(1);
+  });
+
+  it("uses Commander progress instead of an empty thinking bubble during planning", () => {
+    const html = renderWorkbench({
+      id: "task-planning-progress",
+      title: "Planning task",
+      userGoal: "检查项目",
+      status: "planning",
+      commanderMessage: "我正在梳理目标并选择可用工具。",
+      conversationMessages: [{ role: "user", content: "检查项目" }],
+      plan: [],
+      agents: [],
+      logs: [],
+      streamingText: "",
+      streamingAgentKind: "commander",
+      isStreaming: true,
+    });
+
+    expect(html).toContain("我正在梳理目标并选择可用工具。");
+    expect(html).toContain("live-progress");
+    expect(html).not.toContain("javis-thinking-indicator");
+  });
+
+  it("does not attribute Commander progress to an empty Verifier stream", () => {
+    const html = renderWorkbench({
+      id: "task-verifier-thinking",
+      title: "Verifying",
+      userGoal: "检查项目",
+      status: "verifying",
+      commanderMessage: "Commander 正在等待验证结果。",
+      conversationMessages: [{ role: "user", content: "检查项目" }],
+      plan: [],
+      agents: [],
+      logs: [],
+      streamingText: "",
+      streamingAgentKind: "verifier",
+      isStreaming: true,
+    });
+
+    expect(html).toContain("javis-thinking-indicator");
+    expect(html).not.toContain("Commander 正在等待验证结果。");
+  });
+
+  it("does not repeat a stale question while waiting for the next ask-user snapshot", () => {
+    const html = renderWorkbench({
+      id: "task-waiting-answer",
+      title: "Waiting for information",
+      userGoal: "整理文件",
+      status: "waiting_info",
+      commanderMessage: "你希望整理哪个目录？",
+      conversationMessages: [
+        { role: "user", content: "整理文件" },
+        { role: "user", content: "下载目录" },
+      ],
+      plan: [],
+      agents: [],
+      logs: [],
+      askUserQuestion: {
+        id: "ask-folder",
+        question: "你希望整理哪个目录？",
+        status: "pending",
+      },
+      streamingText: "旧的流式问题",
+      streamingAgentKind: "commander",
+      isStreaming: true,
+    });
+
+    expect(html).not.toContain("live-progress");
+    expect(html.match(/你希望整理哪个目录？/gu)).toHaveLength(1);
+    expect(html).not.toContain("旧的流式问题");
+    expect(html).not.toContain("javis-composer-stop-action");
+  });
+
+  it("gives a pending permission card priority over residual streaming text", () => {
+    const html = renderWorkbench({
+      ...createTaskWithPermission("pending"),
+      id: "task-waiting-permission-stream",
+      conversationMessages: [{ role: "user", content: "整理下载目录中的 PDF" }],
+      streamingText: "未验证的写入说明",
+      streamingAgentKind: "commander",
+      isStreaming: true,
+    });
+
+    expect(html).not.toContain("live-progress");
+    expect(html).not.toContain("未验证的写入说明");
+    expect(html.match(/Approve PDF move plan/gu)).toHaveLength(1);
+    expect(html).not.toContain("javis-composer-stop-action");
+  });
+
+  it("hides residual unverified stream text as soon as the task becomes terminal", () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const goal = "检查项目";
+    const finalAnswer = "检查完成，所有测试均已通过。";
+    const commonProps = {
+      draftGoal: "",
+      onDraftGoalChange: vi.fn(),
+      onSubmitGoal: vi.fn(),
+    };
+    const view = render(
+      <JavisWorkbench
+        {...commonProps}
+        task={{
+          id: "task-stream-handoff",
+          title: "Finishing",
+          userGoal: goal,
+          status: "running",
+          commanderMessage: "正在整理最终结果。",
+          conversationMessages: [{ role: "user", content: goal }],
+          plan: [],
+          agents: [],
+          logs: [],
+          streamingText: "未验证的内部草稿",
+          streamingAgentKind: "commander",
+          isStreaming: true,
+        }}
+      />,
+    );
+
+    view.rerender(
+      <JavisWorkbench
+        {...commonProps}
+        task={{
+          id: "task-stream-handoff",
+          title: "Completed",
+          userGoal: goal,
+          status: "completed",
+          commanderMessage: finalAnswer,
+          conversationMessages: [
+            { role: "user", content: goal },
+            { role: "assistant", content: finalAnswer },
+          ],
+          plan: [],
+          agents: [],
+          logs: [],
+          streamingText: "未验证的内部草稿",
+          streamingAgentKind: "commander",
+          isStreaming: false,
+        }}
+      />,
+    );
+
+    expect(view.container.querySelectorAll(".javis-message:not(.user)")).toHaveLength(1);
+    expect(view.container.textContent).toContain(finalAnswer);
+    expect(view.container.textContent).not.toContain("未验证的内部草稿");
+    expect(view.container.querySelector(".javis-composer-stop-action")).toBeNull();
+  });
+
+  it("collapses a terminal task even when a residual stream flag remains", () => {
     const html = renderWorkbench({
       id: "task-streaming-with-plan",
       title: "Inspecting project",
@@ -707,12 +893,13 @@ describe("JavisWorkbench permission cards", () => {
       isStreaming: true,
     });
 
-    // Streaming text still appears inline
-    expect(html).toContain("Shell Agent is checking package metadata");
+    // Terminal tasks never expose residual model drafts.
+    expect(html).not.toContain("Shell Agent is checking package metadata");
     // Failed status triggers inline recovery prompt
     expect(html).toContain("Recovery");
-    // Phase 2 keeps active DAG steps visible in the main thread progress card.
-    expect(html).toContain("Inspect package scripts");
+    expect(html).toContain("Execution details");
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).not.toContain("Inspect package scripts");
   });
 
   it("renders the confirmed-write dry-run when the activity log is expanded", () => {
@@ -1640,26 +1827,26 @@ describe("JavisWorkbench permission cards", () => {
     expect(eventList?.textContent).not.toContain("\"plan\"");
   });
 
-  it("links Browser Agent steps and browser tool logs into selected agent details", async () => {
+  it("links Page Agent steps and browser tool logs into selected agent details", async () => {
     Element.prototype.scrollIntoView = vi.fn();
     const task: WorkbenchTask = {
       id: "task-browser-detail",
       title: "Browse docs",
       userGoal: "Check docs in browser",
       status: "running",
-      commanderMessage: "Browser Agent checked the docs.",
+      commanderMessage: "Page Agent checked the docs.",
       plan: [
         {
           id: "open-docs",
           title: "Open docs page",
           status: "completed",
-          agentKind: "browser",
+          agentKind: "page-agent",
         },
       ],
       agents: [
         {
-          id: "agent-browser",
-          name: "Browser Agent",
+          id: "agent-page-agent",
+          name: "Page Agent",
           role: "Navigates web pages",
           status: "completed",
           task: "Opened the docs page",
@@ -1690,15 +1877,15 @@ describe("JavisWorkbench permission cards", () => {
       />,
     );
 
-    const browserCard = Array.from(
+    const pageAgentCard = Array.from(
       view.container.querySelectorAll<HTMLButtonElement>(".javis-agent-run-card"),
-    ).find((card) => card.textContent?.includes("Browser Agent"));
-    expect(browserCard).toBeTruthy();
-    fireEvent.click(browserCard!);
+    ).find((card) => card.textContent?.includes("Page Agent"));
+    expect(pageAgentCard).toBeTruthy();
+    fireEvent.click(pageAgentCard!);
 
     await waitFor(() => {
       expect(view.container.querySelector(".javis-selected-agent-detail")?.textContent)
-        .toContain("Browser Agent");
+        .toContain("Page Agent");
     });
 
     const detailsText = view.container.querySelector(".javis-task-overview")?.textContent ?? "";
@@ -2793,7 +2980,11 @@ describe("JavisWorkbench permission cards", () => {
   });
 
   it("shows repair priority badges on agent summary cards", () => {
-    const html = renderWorkbench({
+    const view = render(<JavisWorkbench
+      draftGoal="Inspect project"
+      onDraftGoalChange={vi.fn()}
+      onSubmitGoal={vi.fn()}
+      task={{
       id: "task-agent-summary-capability",
       title: "Project inspected",
       userGoal: "Inspect project",
@@ -2821,7 +3012,10 @@ describe("JavisWorkbench permission cards", () => {
         },
       }],
       logs: [],
-    });
+    }} />);
+
+    fireEvent.click(view.container.querySelector(".javis-terminal-execution-details-toggle")!);
+    const html = view.container.innerHTML;
 
     expect(html).toContain("Shell Agent");
     expect(html).toContain("repair high");
@@ -3145,6 +3339,7 @@ describe("JavisWorkbench permission cards", () => {
       />,
     );
 
+    fireEvent.click(container.querySelector(".javis-terminal-execution-details-toggle")!);
     const artifactCards = container.querySelectorAll(".javis-artifact-card");
     fireEvent.click(artifactCards[0]);
     expect(onOpenFile).toHaveBeenCalledWith("E:/Javis/docs/brief.md");
@@ -3178,6 +3373,7 @@ describe("JavisWorkbench permission cards", () => {
         }}
       />,
     );
+    fireEvent.click(codeView.container.querySelector(".javis-terminal-execution-details-toggle")!);
     fireEvent.click(codeView.container.querySelector(".javis-artifact-card")!);
     expect(onOpenDetail).toHaveBeenCalledWith(expect.objectContaining({ title: "Code patch proposal" }));
     expect(onOpenWorkspaceTool).toHaveBeenCalledWith("review");
@@ -3207,6 +3403,7 @@ describe("JavisWorkbench permission cards", () => {
         }}
       />,
     );
+    fireEvent.click(commandView.container.querySelector(".javis-terminal-execution-details-toggle")!);
     fireEvent.click(commandView.container.querySelector(".javis-artifact-card")!);
     expect(onOpenDetail).toHaveBeenCalledWith(expect.objectContaining({
       title: "pnpm --filter @javis/ui typecheck",
@@ -3275,6 +3472,7 @@ describe("JavisWorkbench permission cards", () => {
       />,
     );
 
+    fireEvent.click(view.container.querySelector(".javis-terminal-execution-details-toggle")!);
     const callCards = view.container.querySelectorAll(".javis-tool-call-card");
     expect(callCards).toHaveLength(3);
     expect(view.container.textContent).toContain("\u6587\u672c\u751f\u6210\u6a21\u578b");
@@ -4160,6 +4358,7 @@ describe("JavisWorkbench permission cards", () => {
     };
 
     const uncontrolled = render(<JavisWorkbench {...baseProps} />);
+    fireEvent.click(uncontrolled.container.querySelector(".javis-terminal-execution-details-toggle")!);
     fireEvent.click(uncontrolled.container.querySelector(".javis-artifact-card")!);
     await waitFor(() => expect(uncontrolled.container.textContent).toContain("Review"));
     uncontrolled.rerender(<JavisWorkbench {...baseProps} draftGoal="Use tools again" />);

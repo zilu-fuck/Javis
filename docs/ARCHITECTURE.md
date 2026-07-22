@@ -133,11 +133,14 @@ agent policy.
 
 Browser and Code Agent roles are required for product readiness. Code Agent now
 has an initial Core/UI scaffold for changed-file listing, diff preview,
-read-only verification, opencode-backed proposal metadata, and confirmed-write
-approval for patch application. The desktop app asks opencode for proposal-only
-JSON with the model/provider configured in the workbench, injects those
-settings into opencode's per-run config, and keeps file writes inside Javis's
-native approved-patch apply command.
+read-only verification, and OpenCode AgentRuntime patch proposals. The
+Commander DAG receives the final OpenCode `StepResult` as an
+`ArtifactEnvelope`; patch apply remains a separate Javis confirmed-write
+operation backed by Rust native guards. The desktop app asks OpenCode for
+proposal-only JSON with the model/provider configured in the workbench, injects
+those settings into OpenCode's per-run config, and keeps file writes inside
+Javis's native approved-patch apply command. The legacy code-review fallback is
+read-only and does not invoke the one-shot proposal callback.
 Browser/account-changing automation remains out of scope unless a future design
 adds explicit safety rules.
 

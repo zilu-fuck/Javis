@@ -77,6 +77,7 @@ import {
   getTaskUpdatedAt,
   isArchivableTask,
   loadTaskHistory,
+  persistTaskHistorySnapshot,
   upsertTaskHistory,
 } from "./task-history";
 import { useTaskRuntime, type ScheduledTasksRepositoryLike, type TaskHistoryRepositoryLike } from "./use-task-runtime";
@@ -3220,6 +3221,7 @@ function App() {
       ? {
           taskId: continuationTask.id,
           priorMessages: getConversationMessages(continuationTask),
+          initialTokenUsage: continuationTask.tokenUsage,
         }
       : undefined;
     const startMode =
@@ -4065,9 +4067,7 @@ function App() {
     setHistory((current) => {
       const updated = upsertTaskHistory(current, taskWithResumeMetadata);
       const repository = taskHistoryRepoRef.current;
-      if (repository) {
-        void repository.upsert(taskWithResumeMetadata);
-      }
+      persistTaskHistorySnapshot(repository, taskWithResumeMetadata);
       return updated;
     });
   }
@@ -4526,9 +4526,7 @@ function App() {
     historyCurrentRef.current = updatedHistory;
     setHistory(updatedHistory);
     const repository = taskHistoryRepoRef.current;
-    if (repository) {
-      void repository.upsert(updatedTask);
-    }
+    persistTaskHistorySnapshot(repository, updatedTask);
     return updatedTask;
   }
 

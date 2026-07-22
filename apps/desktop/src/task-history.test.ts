@@ -341,6 +341,164 @@ describe("task history persistence", () => {
     expect(history[0]?.title).toBe("Updated task");
   });
 
+  it("replaces a continued conversation with its failed terminal snapshot", async () => {
+    const database = createMemoryTaskHistoryDatabase();
+    const repository = createTaskHistoryRepository(database);
+    const taskId = "task-long-conversation-failed";
+    await repository.upsert({
+      ...createTask(taskId),
+      conversationMessages: [
+        { role: "user", content: "Collect the trend report" },
+        { role: "assistant", content: "The first run completed." },
+      ],
+    });
+    const failedTask = {
+      ...createTask(taskId, "failed"),
+      title: "Trend collection failed",
+      commanderMessage: "The fallback source was blocked.",
+      plan: [
+        {
+          id: "page-agent-fallback",
+          title: "Try a public fallback source",
+          assignedAgentKind: "page-agent",
+          agentId: undefined,
+          inputContextKeys: undefined,
+          outputContextKey: undefined,
+          status: "failed",
+          successCriteria: undefined,
+        },
+        {
+          id: "plugin-review",
+          title: "Review fallback evidence",
+          assignedAgentKind: "workspace.plugin-reviewer" as TaskSnapshot["plan"][number]["assignedAgentKind"],
+          status: "skipped",
+        },
+      ],
+      logs: [
+        {
+          id: `${taskId}-waiting`,
+          kind: "event",
+          title: "waiting_model",
+          detail: "Waiting for the fallback decision.",
+          userMessage: undefined,
+          devDetail: undefined,
+          agentId: undefined,
+          stepId: undefined,
+        },
+      ],
+      conversationMessages: [
+        { role: "user", content: "Collect the trend report" },
+        { role: "assistant", content: "The first run completed." },
+        { role: "user", content: "Retry with a browser fallback" },
+        { role: "assistant", content: "The fallback source was blocked." },
+      ],
+    } satisfies TaskSnapshot;
+
+    expect(sanitizeTaskSnapshot(failedTask)).not.toBeNull();
+    await repository.upsert(failedTask);
+    const restored = await repository.list();
+
+    expect(restored).toHaveLength(1);
+    expect(restored[0]).toMatchObject({
+      id: taskId,
+      status: "failed",
+      commanderMessage: "The fallback source was blocked.",
+    });
+    expect(restored[0]?.plan.map((step) => step.assignedAgentKind)).toEqual([
+      "page-agent",
+      "workspace.plugin-reviewer",
+    ]);
+    expect(restored[0]?.conversationMessages).toHaveLength(4);
+  });
+
+  it("serializes overlapping repository upserts", async () => {
+    const database = createMemoryTaskHistoryDatabase();
+    const execute = database.execute.bind(database);
+    let releaseFirstInsert = () => {};
+    let markFirstInsertStarted = () => {};
+    const firstInsertGate = new Promise<void>((resolve) => {
+      releaseFirstInsert = resolve;
+    });
+    const firstInsertStarted = new Promise<void>((resolve) => {
+      markFirstInsertStarted = resolve;
+    });
+    let shouldBlockFirstInsert = true;
+    database.execute = async (sql, values = []) => {
+      if (
+        shouldBlockFirstInsert &&
+        sql.startsWith("INSERT INTO task_history") &&
+        values[0] === "task-1000"
+      ) {
+        shouldBlockFirstInsert = false;
+        markFirstInsertStarted();
+        await firstInsertGate;
+      }
+      await execute(sql, values);
+    };
+    const repository = createTaskHistoryRepository(database);
+
+    const first = repository.upsert(createTask("task-1000"));
+    await firstInsertStarted;
+    const second = repository.upsert(createTask("task-2000"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(database.executedSql.filter((sql) => sql.startsWith("DELETE FROM task_history"))).toHaveLength(1);
+
+    releaseFirstInsert();
+    await Promise.all([first, second]);
+    await expect(repository.list()).resolves.toHaveLength(2);
+  });
+
+  it("restores partial-success progress from task history", async () => {
+    const repository = createTaskHistoryRepository(createMemoryTaskHistoryDatabase());
+    const task = {
+      ...createTask("task-progress-partial"),
+      taskProgress: {
+        title: "Trending sources",
+        status: "completed_with_warnings",
+        currentAction: "Summarizing the available results",
+        completedItems: 2,
+        totalItems: 3,
+        items: [
+          {
+            id: "weibo",
+            label: "Weibo Top 20",
+            status: "completed",
+            completedCount: 20,
+            expectedCount: 20,
+            sourceUrl: "https://s.weibo.com/top/summary",
+          },
+          {
+            id: "bilibili",
+            label: "Bilibili Top 20",
+            status: "completed",
+            completedCount: 20,
+            expectedCount: 20,
+            sourceUrl: "https://www.bilibili.com/v/popular/rank/all",
+          },
+          {
+            id: "xiaohongshu",
+            label: "Xiaohongshu Top 20",
+            status: "blocked",
+            detail: "The source returned risk-control code 300012.",
+            completedCount: 0,
+            expectedCount: 20,
+          },
+        ],
+      },
+    } satisfies TaskSnapshot;
+
+    await repository.upsert(task);
+    const restored = (await repository.list())[0];
+
+    expect(restored?.taskProgress).toEqual(task.taskProgress);
+    expect(restored?.taskProgress?.items[2]).toMatchObject({
+      status: "blocked",
+      detail: "The source returned risk-control code 300012.",
+    });
+  });
+
   it("keeps code review previews in completed task history", () => {
     const storage = createMemoryStorage();
     const task = {
@@ -855,6 +1013,9 @@ describe("task history persistence", () => {
         inputTokens: 1200,
         outputTokens: 340,
         totalTokens: 1540,
+        peakContextTokens: 1540,
+        contextUsedTokens: 1540,
+        contextWindowTokens: 32_000,
         modelCalls: 1,
         byAgentKind: [
           {
@@ -872,7 +1033,135 @@ describe("task history persistence", () => {
     const loaded = loadTaskHistory(storage);
 
     expect(loaded[0]?.tokenUsage?.totalTokens).toBe(1540);
+    expect(loaded[0]?.tokenUsage?.peakContextTokens).toBe(1540);
     expect(loaded[0]?.tokenUsage?.byAgentKind[0]?.agentKind).toBe("code");
+  });
+
+  it("drops token usage summaries with an invalid peak context value", () => {
+    const sanitized = sanitizeTaskSnapshot({
+      ...createTask("task-invalid-peak-context"),
+      tokenUsage: {
+        inputTokens: 12,
+        outputTokens: 3,
+        totalTokens: 15,
+        peakContextTokens: "15",
+        modelCalls: 1,
+        byAgentKind: [{
+          agentKind: "code",
+          inputTokens: 12,
+          outputTokens: 3,
+          totalTokens: 15,
+          modelCalls: 1,
+        }],
+      },
+    });
+
+    expect(sanitized?.tokenUsage).toBeUndefined();
+  });
+
+  it("keeps Agent runtime baseline metrics in completed task history", () => {
+    const storage = createMemoryStorage();
+    const task = {
+      ...createTask("task-runtime-metrics"),
+      agentRuntimeMetrics: [{
+        backend: "legacy" as const,
+        runCount: 2,
+        completedRunCount: 1,
+        successRate: 0.5,
+        totalDurationMs: 40,
+        averageDurationMs: 20,
+        modelCalls: 3,
+        toolCalls: 1,
+        usage: { inputTokens: 13, outputTokens: 5, totalTokens: 18 },
+      }, {
+        backend: "opencode" as const,
+        runCount: 1,
+        completedRunCount: 1,
+        successRate: 1,
+        totalDurationMs: 15,
+        averageDurationMs: 15,
+        modelCalls: 1,
+        toolCalls: 1,
+      }],
+    } satisfies TaskSnapshot;
+
+    saveTaskHistory(storage, [task]);
+    const loaded = loadTaskHistory(storage);
+
+    expect(loaded[0]?.agentRuntimeMetrics).toEqual(task.agentRuntimeMetrics);
+  });
+
+  it("keeps Agent runtime routing fallback metrics in completed task history", () => {
+    const storage = createMemoryStorage();
+    const task = {
+      ...createTask("task-runtime-routing-metrics"),
+      agentRuntimeRoutingMetrics: [{
+        providerId: "openai",
+        agentKind: "research" as const,
+        taskType: "read",
+        routeCount: 5,
+        rolloutTargetCount: 5,
+        langchainRouteCount: 3,
+        opencodeRouteCount: 1,
+        legacyRouteCount: 1,
+        unavailableRouteCount: 0,
+        fallbackCount: 1,
+        fallbackRate: 0.2,
+        fallbackReasons: [{ reason: "native_tool_call_unavailable" as const, count: 1 }],
+        observationIds: ["run-1:a", "run-1:b", "run-1:c", "run-1:d", "run-1:e"],
+      }],
+    } satisfies TaskSnapshot;
+
+    saveTaskHistory(storage, [task]);
+    const loaded = loadTaskHistory(storage);
+
+    expect(loaded[0]?.agentRuntimeRoutingMetrics).toEqual(
+      task.agentRuntimeRoutingMetrics,
+    );
+  });
+
+  it("drops malformed Agent runtime routing metrics from task history", () => {
+    const malformed = {
+      ...createTask("task-runtime-routing-malformed"),
+      agentRuntimeRoutingMetrics: [{
+        providerId: "openai",
+        agentKind: "research",
+        taskType: "read",
+        routeCount: 1,
+        rolloutTargetCount: 1,
+        langchainRouteCount: 0,
+        legacyRouteCount: 1,
+        unavailableRouteCount: 0,
+        fallbackCount: 1,
+        fallbackRate: 0,
+        fallbackReasons: [
+          { reason: "runtime_factory_unavailable", count: 1 },
+          { reason: "runtime_factory_unavailable", count: 1 },
+        ],
+        observationIds: ["run-1:step-1"],
+      }],
+    };
+
+    expect(sanitizeTaskSnapshot(malformed)?.agentRuntimeRoutingMetrics).toBeUndefined();
+
+    const nonCanonical = {
+      ...createTask("task-runtime-routing-whitespace"),
+      agentRuntimeRoutingMetrics: [{
+        providerId: " openai",
+        agentKind: "research",
+        taskType: "read",
+        routeCount: 1,
+        rolloutTargetCount: 1,
+        langchainRouteCount: 1,
+        legacyRouteCount: 0,
+        unavailableRouteCount: 0,
+        fallbackCount: 0,
+        fallbackRate: 0,
+        fallbackReasons: [],
+        observationIds: ["run-1:step-1:attempt-1"],
+      }],
+    };
+    expect(sanitizeTaskSnapshot(nonCanonical)?.agentRuntimeRoutingMetrics).toBeUndefined();
   });
 
   it("returns stable timestamps from task ids when available", () => {

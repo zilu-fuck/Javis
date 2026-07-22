@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createArtifactEnvelope } from "./artifact-envelope";
 import { createSharedTaskContext } from "./shared-context";
 import { executeWorkflow } from "./workflow-dag-executor";
@@ -50,6 +50,102 @@ describe("executeWorkflow", () => {
     expect(result.contextSnapshot["step:analyze-code"]).toEqual({
       id: "analyze-code",
       previousScan: { id: "scan-files" },
+    });
+    expect(result.stepResults["analyze-code"]).toMatchObject({
+      status: "completed",
+      evidence: [{ kind: "artifact", reference: "step:analyze-code" }],
+      assumptions: [],
+      unresolvedQuestions: [],
+    });
+  });
+
+  it("allows partial results to continue while preserving evidence and gaps", async () => {
+    const workflow = createWorkflow([
+      {
+        ...step("collect", [], false),
+        outputContextKey: "evidence",
+        completionPolicy: {
+          partial: "publish_and_continue",
+          blocked: "replan",
+          needsClarification: "replan",
+        },
+      },
+      { ...step("verify", ["collect"], false), inputContextKeys: ["evidence"] },
+    ]);
+    const result = await executeWorkflow({
+      workflow,
+      executeStep: async (workflowStep) => workflowStep.id === "collect"
+        ? {
+            status: "partial",
+            output: { files: ["README.md"] },
+            evidence: [{ kind: "file", label: "README", reference: "README.md" }],
+            assumptions: ["The manifest is unchanged."],
+            unresolvedQuestions: ["Should generated files be included?"],
+          }
+        : { output: "verified" },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.completedStepIds).toEqual(["collect", "verify"]);
+    expect(result.stepResults.collect).toMatchObject({
+      status: "partial",
+      evidence: [{ kind: "file", reference: "README.md" }],
+      unresolvedQuestions: ["Should generated files be included?"],
+    });
+    expect(result.contextSnapshot["stepResult:collect"]).toMatchObject({ status: "partial" });
+  });
+
+  it("stops and withholds partial output unless publication is explicit", async () => {
+    const downstream = vi.fn(async () => ({ output: "must not run" }));
+    const result = await executeWorkflow({
+      workflow: createWorkflow([
+        { ...step("collect", [], false), outputContextKey: "evidence" },
+        { ...step("verify", ["collect"], false), inputContextKeys: ["evidence"] },
+      ]),
+      executeStep: async (workflowStep) => workflowStep.id === "collect"
+        ? {
+            status: "partial",
+            output: { files: ["README.md"] },
+            unmetCriteria: ["package manifest was not inspected"],
+          }
+        : downstream(),
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.failedStepId).toBe("collect");
+    expect(result.contextSnapshot.evidence).toBeUndefined();
+    expect(result.contextSnapshot["step:collect"]).toBeUndefined();
+    expect(result.stepResults.collect).toMatchObject({
+      status: "partial",
+      unmetCriteria: ["package manifest was not inspected"],
+    });
+    expect(downstream).not.toHaveBeenCalled();
+  });
+
+  it("stops downstream work for blocked results and keeps the blocker", async () => {
+    const downstream = vi.fn(async () => ({ output: "must not run" }));
+    const result = await executeWorkflow({
+      workflow: createWorkflow([
+        step("clarify", [], false),
+        step("execute", ["clarify"], false),
+      ]),
+      executeStep: async (workflowStep) => workflowStep.id === "clarify"
+        ? {
+            status: "needs_clarification",
+            evidence: [{ kind: "manual", label: "Missing target" }],
+            assumptions: [],
+            unresolvedQuestions: ["Which workspace should be used?"],
+            error: "Target workspace is required.",
+          }
+        : downstream(),
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.failedStepId).toBe("clarify");
+    expect(downstream).not.toHaveBeenCalled();
+    expect(result.stepResults.clarify).toMatchObject({
+      status: "needs_clarification",
+      unresolvedQuestions: ["Which workspace should be used?"],
     });
   });
 
@@ -580,6 +676,51 @@ describe("executeWorkflow", () => {
     expect(result.results.get("scan-files")).toEqual({ scanned: true });
   });
 
+  it("normalizes legacy step results restored from checkpoints", async () => {
+    const workflow = createWorkflow([
+      {
+        ...step("scan-files", [], false),
+        outputContextKey: "diffPreview",
+      },
+      step("verify", ["scan-files"], false),
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      resumeFrom: {
+        completedStepIds: ["scan-files"],
+        contextSnapshot: {
+          "step:scan-files": { scanned: true },
+          diffPreview: { scanned: true },
+          stepResults: {
+            "scan-files": { output: { scanned: true } },
+          },
+          "stepResult:scan-files": { output: { scanned: true } },
+        },
+      },
+      executeStep: async (workflowStep, context) => {
+        expect(context.get("stepResult:scan-files")).toEqual({
+          status: "completed",
+          output: { scanned: true },
+          evidence: [{
+            kind: "artifact",
+            label: "Step scan-files output",
+            reference: "diffPreview",
+          }],
+          assumptions: [],
+          unresolvedQuestions: [],
+        });
+        return { output: workflowStep.id };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.stepResults["scan-files"]).toMatchObject({
+      status: "completed",
+      evidence: [{ kind: "artifact", reference: "diffPreview" }],
+    });
+  });
+
   it("restores artifact envelopes from resume checkpoints", async () => {
     const workflow = createWorkflow([
       {
@@ -696,6 +837,26 @@ describe("executeWorkflow", () => {
       resumeFrom: { completedStepIds: ["unknown-step"] },
       executeStep: async () => ({ output: "unreachable" }),
     })).rejects.toThrow("references unknown step unknown-step");
+
+    await expect(executeWorkflow({
+      workflow,
+      resumeFrom: {
+        contextSnapshot: {
+          stepResults: { "unknown-step": { output: "untrusted" } },
+        },
+      },
+      executeStep: async () => ({ output: "unreachable" }),
+    })).rejects.toThrow("stepResults references unknown step unknown-step");
+
+    await expect(executeWorkflow({
+      workflow,
+      resumeFrom: {
+        contextSnapshot: {
+          stepResults: { "scan-files": null },
+        },
+      },
+      executeStep: async () => ({ output: "unreachable" }),
+    })).rejects.toThrow("stepResults for scan-files is malformed");
 
     await expect(executeWorkflow({
       workflow,
