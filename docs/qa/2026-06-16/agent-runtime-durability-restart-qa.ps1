@@ -4,8 +4,10 @@ $qaDir = $PSScriptRoot
 $repoRoot = (Resolve-Path (Join-Path $qaDir "..\..\..")).Path
 $exe = Join-Path $repoRoot "apps\desktop\src-tauri\target\release\javis-desktop.exe"
 $workspaceRoot = Join-Path $qaDir "agent-runtime-durability-workspace"
+$qaAppDataRoot = Join-Path $qaDir "agent-runtime-durability-appdata"
 $fixturePath = Join-Path $qaDir "agent-runtime-durability-model-fixture.json"
 $outputPath = Join-Path $qaDir "agent-runtime-durability-restart-qa-output.txt"
+$qaDate = (Get-Date).ToString("yyyy-MM-dd")
 $script:LastWebView2CdpDiagnostics = $null
 
 if (!(Test-Path $exe)) {
@@ -149,12 +151,18 @@ function Wait-ForText($socket, [ref]$id, $text, $seconds) {
 }
 
 function Click-PendingPermissionButton($socket, [ref]$id, $label) {
-  $buttonIndex = if ($label -eq "Approve") { 0 } else { 1 }
+  $buttonClass = if ($label -eq "Approve") { ".javis-permission-approve" } else { ".javis-permission-deny" }
+  $buttonLabels = if ($label -eq "Approve") { @("Approve", "批准", "批准本次") } else { @("Deny", "拒绝") }
+  $buttonClassJson = $buttonClass | ConvertTo-Json -Compress
+  $buttonLabelsJson = ConvertTo-JsonArray $buttonLabels 5
   $expression = @"
 (() => {
-  const actions = document.querySelector('.javis-confirmation-actions');
-  const buttons = actions ? Array.from(actions.querySelectorAll('button')) : [];
-  const button = buttons[$buttonIndex];
+  const labels = $buttonLabelsJson;
+  const direct = document.querySelector($buttonClassJson);
+  const fallback = Array.from(document.querySelectorAll('button')).find((candidate) =>
+    labels.includes(candidate.textContent?.trim()) && !candidate.disabled
+  );
+  const button = direct || fallback;
   if (!button) {
     throw new Error('No permission button found.');
   }
@@ -257,7 +265,9 @@ function Invoke-Git($workspace, $arguments) {
 
 function New-QaWorkspace {
   Remove-Item -LiteralPath $workspaceRoot -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $qaAppDataRoot -Recurse -Force -ErrorAction SilentlyContinue
   New-Item -ItemType Directory -Force -Path (Join-Path $workspaceRoot "src") | Out-Null
+  New-Item -ItemType Directory -Force -Path $qaAppDataRoot | Out-Null
   Write-Utf8NoBom (Join-Path $workspaceRoot "src\message.txt") "hello reviewed`n"
   Invoke-Git $workspaceRoot @("init") | Out-Null
   Invoke-Git $workspaceRoot @("config", "user.email", "javis@example.test") | Out-Null
@@ -292,7 +302,75 @@ function New-DryRunBindingHash($dryRun) {
   return [AgentRuntimeDurabilityQaHash]::CreateFnv1a("dryrun-fnv1a-", $payload)
 }
 
-function New-CodePatchRecord($approvalId, $taskId, $workspace) {
+function ConvertTo-CanonicalJson($value) {
+  if ($null -eq $value) {
+    return "null"
+  }
+  if ($value -is [string]) {
+    return ($value | ConvertTo-Json -Compress)
+  }
+  if ($value -is [bool]) {
+    return $(if ($value) { "true" } else { "false" })
+  }
+  if ($value -is [System.Collections.IDictionary]) {
+    $entries = @($value.Keys | Sort-Object | ForEach-Object {
+      $key = [string]$_
+      "$(($key | ConvertTo-Json -Compress)):$(ConvertTo-CanonicalJson ($value[$key]))"
+    })
+    return "{$($entries -join ',')}"
+  }
+  if ($value -is [System.Management.Automation.PSCustomObject]) {
+    $entries = @($value.PSObject.Properties.Name | Sort-Object | ForEach-Object {
+      $key = $_
+      "$(($key | ConvertTo-Json -Compress)):$(ConvertTo-CanonicalJson ($value.PSObject.Properties[$key].Value))"
+    })
+    return "{$($entries -join ',')}"
+  }
+  if ($value -is [System.Collections.IEnumerable]) {
+    $items = @($value | ForEach-Object { ConvertTo-CanonicalJson $_ })
+    return "[$($items -join ',')]"
+  }
+  return [Convert]::ToString($value, [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function New-CanonicalContentHash($value) {
+  $canonical = ConvertTo-CanonicalJson $value
+  $bytes = [Text.Encoding]::UTF8.GetBytes($canonical)
+  $sha256 = [Security.Cryptography.SHA256]::Create()
+  try {
+    $hash = $sha256.ComputeHash($bytes)
+  } finally {
+    $sha256.Dispose()
+  }
+  return ([BitConverter]::ToString($hash) -replace "-", "").ToLowerInvariant()
+}
+
+function New-WorkflowPlanHash($steps) {
+  $normalized = @($steps | ForEach-Object {
+    [ordered]@{
+      id = $_.id
+      title = $_.title
+      input = $_.input
+      output = $_.output
+      deps = @($_.dependsOn | Sort-Object)
+      agent = $_.agentKind
+      cap = @($_.requiredCapabilities | Sort-Object)
+      inputContextKeys = @($_.inputContextKeys | Sort-Object)
+      outputContextKey = if ($_.outputContextKey) { $_.outputContextKey } else { "" }
+      permissionLevel = $_.permissionLevel
+      canRunInParallel = $_.canRunInParallel
+      toolName = if ($_.toolName) { $_.toolName } else { "" }
+      toolInput = if ($_.toolInput) { $_.toolInput } else { $null }
+      executionMode = if ($_.executionMode) { $_.executionMode } else { "" }
+      capability = if ($_.capability) { $_.capability } else { "" }
+      choices = @()
+      successCriteria = if ($_.successCriteria) { $_.successCriteria } else { "" }
+    }
+  } | Sort-Object { $_.id })
+  return "plan-sha256-v2-$(New-CanonicalContentHash $normalized)-$($normalized.Count)"
+}
+
+function New-CodePatchRecord($approvalId, $taskId, $runId, $workspace) {
   $createdAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
   $workspaceForRecord = Normalize-CanonicalWorkspaceForNative $workspace
   $proposalId = "$taskId-proposal"
@@ -337,6 +415,8 @@ function New-CodePatchRecord($approvalId, $taskId, $workspace) {
   $record = [ordered]@{
     approvalId = $approvalId
     taskId = $taskId
+    runId = $runId
+    workflowBound = $true
     toolName = "code.applyProposedEdit"
     workspacePath = $workspaceForRecord
     permissionLevel = "confirmed_write"
@@ -351,9 +431,11 @@ function New-CodePatchRecord($approvalId, $taskId, $workspace) {
 }
 
 function New-ArtifactEnvelope($taskId, $runId, $stepId, $agentKind, $type, $payload) {
-  $payloadJson = $payload | ConvertTo-Json -Depth 20 -Compress
+  $script:ArtifactSequence = 1 + $script:ArtifactSequence
+  $createdAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+  $createdAtMs = [DateTimeOffset]::Parse($createdAt).ToUnixTimeMilliseconds()
   return [ordered]@{
-    artifactId = "art-$runId-$type"
+    artifactId = "art-$runId-$($script:ArtifactSequence)-$createdAtMs"
     type = $type
     schemaVersion = 1
     taskId = $taskId
@@ -362,8 +444,8 @@ function New-ArtifactEnvelope($taskId, $runId, $stepId, $agentKind, $type, $payl
       stepId = $stepId
       agentKind = $agentKind
     }
-    createdAt = "2026-06-16T00:00:01.000Z"
-    contentHash = [AgentRuntimeDurabilityQaHash]::CreateFnv1a("simple-", $payloadJson)
+    createdAt = $createdAt
+    contentHash = New-CanonicalContentHash $payload
     hashAlgorithm = "sha256-canonical-json-v1"
     payload = $payload
     sensitivity = "workspace"
@@ -387,16 +469,17 @@ function New-RuntimeEvent($taskId, $runId, $sequence, $stepId, $payload) {
   }
 }
 
-function New-WorkflowStep($id, $title, $agentKind, $input, $output, $permissionLevel, $dependsOn, $outputContextKey) {
+function New-WorkflowStep($id, $title, $agentKind, $stepInput, $stepOutput, $permissionLevel, $dependsOn, $outputContextKey, $toolName) {
   $step = [ordered]@{
     id = $id
     title = $title
     agentKind = $agentKind
-    input = $input
-    output = $output
+    input = $stepInput
+    output = $stepOutput
     permissionLevel = $permissionLevel
     dependsOn = $dependsOn
     canRunInParallel = $false
+    toolName = $toolName
   }
   if ($outputContextKey) {
     $step.outputContextKey = $outputContextKey
@@ -416,7 +499,7 @@ function New-CommanderDagPlanFixture {
         toolName = "code.searchRepository"
         requiredCapabilities = @("code_search")
         dependsOn = @()
-        toolInput = [ordered]@{ query = "agent runtime durability" }
+        toolInput = [ordered]@{ goal = "agent runtime durability" }
         outputContextKey = "repoEvidence"
         successCriteria = "Upstream repo evidence is available."
       },
@@ -504,6 +587,7 @@ function Invoke-ApprovalRecordUpsert($socket, [ref]$id, $record) {
   $request = [ordered]@{
     approvalId = $record.approvalId
     taskId = $record.taskId
+    runId = $record.runId
     toolName = $record.toolName
     workspacePath = $record.workspacePath
     permissionLevel = $record.permissionLevel
@@ -558,9 +642,9 @@ function Insert-WorkflowCheckpoint($socket, [ref]$id, $checkpoint) {
 function New-RuntimeDurabilitySeed($record, $runId) {
   $taskId = $record.taskId
   $workflowSteps = @(
-    New-WorkflowStep "collect-evidence" "Collect durable upstream evidence" "code" "goal" "evidence" "read" @() "repoEvidence"
-    New-WorkflowStep "apply-approved-patch" "Apply approved patch" "code" "evidence" "patch" "confirmed_write" @("collect-evidence") "patchResult"
-    New-WorkflowStep "summarize-resume" "Summarize resume proof" "commander" "patch" "summary" "read" @("apply-approved-patch") "resumeSummary"
+    New-WorkflowStep "collect-evidence" "Collect durable upstream evidence" "code" "goal" "evidence" "read" @() "repoEvidence" "code.searchRepository"
+    New-WorkflowStep "apply-approved-patch" "Apply approved patch" "code" "evidence" "patch" "confirmed_write" @("collect-evidence") "patchResult" "code.applyProposedEdit"
+    New-WorkflowStep "summarize-resume" "Summarize resume proof" "commander" "patch" "summary" "read" @("apply-approved-patch") "resumeSummary" "commander.synthesize"
   )
   $workflow = [ordered]@{
     id = "read-current-project"
@@ -586,7 +670,7 @@ function New-RuntimeDurabilitySeed($record, $runId) {
     runId = $runId
     workflowId = "read-current-project"
     workflowVersion = 1
-    planHash = "plan-1dfe7a9b-3"
+    planHash = New-WorkflowPlanHash $workflowSteps
     workflowSnapshot = $workflow
     completedStepIds = @("collect-evidence")
     abandonedStepIds = @()
@@ -595,13 +679,14 @@ function New-RuntimeDurabilitySeed($record, $runId) {
     contextSnapshot = $contextSnapshot
     approvalRequestIds = @($record.approvalId)
     waitingReason = "human_approval"
-    eventSequence = 3
+    eventSequence = 4
     createdAt = "2026-06-16T00:00:04.000Z"
   }
   $events = @(
     New-RuntimeEvent $taskId $runId 1 "collect-evidence" ([ordered]@{ kind = "step.started"; taskId = $taskId; stepId = "collect-evidence"; title = "Collect durable upstream evidence" })
     New-RuntimeEvent $taskId $runId 2 "collect-evidence" ([ordered]@{ kind = "step.completed"; taskId = $taskId; stepId = "collect-evidence"; title = "Collect durable upstream evidence"; output = $repoEvidencePayload })
-    New-RuntimeEvent $taskId $runId 3 "apply-approved-patch" ([ordered]@{ kind = "permission.requested"; taskId = $taskId; request = $record.permissionRequest })
+    New-RuntimeEvent $taskId $runId 3 "apply-approved-patch" ([ordered]@{ kind = "step.started"; taskId = $taskId; stepId = "apply-approved-patch"; title = "Apply approved patch" })
+    New-RuntimeEvent $taskId $runId 4 "apply-approved-patch" ([ordered]@{ kind = "permission.requested"; taskId = $taskId; stepId = "apply-approved-patch"; approvalId = $record.approvalId; toolName = $record.toolName; previewHash = $record.previewHash; request = $record.permissionRequest })
   )
   return [ordered]@{
     Checkpoint = $checkpoint
@@ -619,22 +704,22 @@ function Seed-DurableRuntimeState($record) {
     Wait-ForText $session.Socket ([ref]$id) "Javis" 30 | Out-Null
     Eval-Js $session.Socket ([ref]$id) "localStorage.removeItem('javis.approvalRecords.v1'); localStorage.removeItem('javis.taskHistory.v1'); true" | Out-Null
     Invoke-ApprovalRecordUpsert $session.Socket ([ref]$id) $record
-    $runId = "run-$($record.taskId)"
+    $runId = $record.runId
     $seed = New-RuntimeDurabilitySeed $record $runId
     foreach ($event in $seed.Events) {
       Insert-RuntimeEvent $session.Socket ([ref]$id) $event
     }
     Insert-WorkflowCheckpoint $session.Socket ([ref]$id) $seed.Checkpoint
-    $approvalRows = Invoke-AppDbSelect $session.Socket ([ref]$id) "SELECT record_json FROM approval_records ORDER BY created_at DESC LIMIT ?" @(10)
+    $approvalRows = Invoke-AppDbSelect $session.Socket ([ref]$id) "SELECT record_json FROM approval_records ORDER BY created_at DESC" @()
     $seededApproval = @($approvalRows | ForEach-Object { $_.record_json | ConvertFrom-Json } | Where-Object { $_.approvalId -eq $record.approvalId } | Select-Object -First 1)[0]
     if (!$seededApproval) {
       throw "Seeded approval record was not found in SQLite."
     }
     $eventRows = Invoke-AppDbSelect $session.Socket ([ref]$id) "SELECT COUNT(*) as count FROM runtime_events WHERE run_id = ?" @($runId)
-    if ([int]$eventRows[0].count -lt 3) {
+    if ([int]$eventRows[0].count -lt 4) {
       throw "Seeded runtime events were not found in SQLite."
     }
-    $checkpointRows = Invoke-AppDbSelect $session.Socket ([ref]$id) "SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id = ? ORDER BY created_at DESC LIMIT 1" @($record.taskId)
+    $checkpointRows = Invoke-AppDbSelect $session.Socket ([ref]$id) "SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1" @($record.taskId)
     if (@($checkpointRows).Count -lt 1) {
       throw "Seeded workflow checkpoint was not found in SQLite."
     }
@@ -644,9 +729,9 @@ function Seed-DurableRuntimeState($record) {
 }
 
 function Get-RestartResumeDiagnostics($socket, [ref]$id, $approvalId, $taskId) {
-  $approvalRows = Invoke-AppDbSelect $socket $id "SELECT record_json FROM approval_records ORDER BY created_at DESC LIMIT ?" @(25)
+  $approvalRows = Invoke-AppDbSelect $socket $id "SELECT record_json FROM approval_records ORDER BY created_at DESC" @()
   $approvalRecords = @($approvalRows | ForEach-Object { $_.record_json | ConvertFrom-Json })
-  $checkpointRows = Invoke-AppDbSelect $socket $id "SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id = ? ORDER BY event_sequence DESC LIMIT ?" @($taskId, 3)
+  $checkpointRows = Invoke-AppDbSelect $socket $id "SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?" @($taskId, 3)
   $pageText = Get-PageText $socket $id
   $localStorageSnapshot = Eval-Js $socket $id @"
 (() => {
@@ -684,7 +769,8 @@ function Run-RestartResumeScenario {
   $runSuffix = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
   $taskId = "task-agent-runtime-durability-qa-$runSuffix"
   $approvalId = "approval-agent-runtime-durability-qa-$runSuffix"
-  $record = New-CodePatchRecord $approvalId $taskId $workspaceRoot
+  $runId = "run-$taskId"
+  $record = New-CodePatchRecord $approvalId $taskId $runId $workspaceRoot
   Seed-DurableRuntimeState $record
 
   $session = Start-JavisWithCdp 9262
@@ -692,7 +778,7 @@ function Run-RestartResumeScenario {
     return [ordered]@{
       PackagedApp = $true
       AppVersion = "0.1.0"
-      QaDate = "2026-06-16"
+      QaDate = $qaDate
       Blocked = $true
       Blocker = $session.Blocker
       Notes = @(
@@ -727,15 +813,15 @@ function Run-RestartResumeScenario {
     Capture-Window $session.Process.MainWindowHandle (Join-Path $qaDir "47-agent-runtime-resumed-downstream.png")
 
     $eventRows = Invoke-AppDbSelect $session.Socket ([ref]$id) "SELECT COUNT(*) as count FROM runtime_events WHERE run_id = ?" @("run-$taskId")
-    $checkpointRows = Invoke-AppDbSelect $session.Socket ([ref]$id) "SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id = ? ORDER BY event_sequence DESC LIMIT ?" @($taskId, 3)
-    $approvalRows = Invoke-AppDbSelect $session.Socket ([ref]$id) "SELECT record_json FROM approval_records ORDER BY created_at DESC LIMIT ?" @(10)
+    $checkpointRows = Invoke-AppDbSelect $session.Socket ([ref]$id) "SELECT checkpoint_json FROM workflow_checkpoints WHERE task_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?" @($taskId, 3)
+    $approvalRows = Invoke-AppDbSelect $session.Socket ([ref]$id) "SELECT record_json FROM approval_records ORDER BY created_at DESC" @()
     $fileText = [System.IO.File]::ReadAllText((Join-Path $workspaceRoot "src\message.txt"))
     $pageText = Get-PageText $session.Socket ([ref]$id)
     $eventCount = [int]$eventRows[0].count
     $checkpointCount = @($checkpointRows).Count
     $storedApproval = @($approvalRows | ForEach-Object { $_.record_json | ConvertFrom-Json } | Where-Object { $_.approvalId -eq $approvalId } | Select-Object -First 1)[0]
 
-    if ($eventCount -lt 3) {
+    if ($eventCount -lt 4) {
       throw "Expected persisted runtime events, found $eventCount."
     }
     if ($checkpointCount -lt 1) {
@@ -754,7 +840,7 @@ function Run-RestartResumeScenario {
     return [ordered]@{
       PackagedApp = $true
       AppVersion = "0.1.0"
-      QaDate = "2026-06-16"
+      QaDate = $qaDate
       Artifacts = @(
         "46-agent-runtime-restored-approval-linked.png",
         "47-agent-runtime-resumed-downstream.png"
@@ -794,7 +880,7 @@ function New-SandboxBackendBlockerResult($message) {
   return [ordered]@{
     PackagedApp = $true
     AppVersion = "0.1.0"
-    QaDate = "2026-06-16"
+    QaDate = $qaDate
     Blocked = $true
     Blocker = "Windows sandbox backend is unavailable in this environment."
     Diagnostics = [ordered]@{
@@ -833,6 +919,8 @@ function New-SandboxBackendBlockerResult($message) {
 $previousQaMode = [Environment]::GetEnvironmentVariable("JAVIS_QA_MODE", "Process")
 $previousCompletionFixture = [Environment]::GetEnvironmentVariable("JAVIS_MODEL_COMPLETION_FIXTURE_PATH", "Process")
 $previousCodeFixture = [Environment]::GetEnvironmentVariable("JAVIS_CODE_PROPOSAL_FIXTURE_PATH", "Process")
+$previousAppData = [Environment]::GetEnvironmentVariable("APPDATA", "Process")
+$env:APPDATA = $qaAppDataRoot
 
 try {
   try {
@@ -845,7 +933,7 @@ try {
       $result = [ordered]@{
         PackagedApp = $true
         AppVersion = "0.1.0"
-        QaDate = "2026-06-16"
+        QaDate = $qaDate
         Blocked = $true
         Blocker = $message
         Diagnostics = $script:LastWebView2CdpDiagnostics
@@ -874,4 +962,6 @@ try {
   if ($null -eq $previousQaMode) { Remove-Item Env:JAVIS_QA_MODE -ErrorAction SilentlyContinue } else { $env:JAVIS_QA_MODE = $previousQaMode }
   if ($null -eq $previousCompletionFixture) { Remove-Item Env:JAVIS_MODEL_COMPLETION_FIXTURE_PATH -ErrorAction SilentlyContinue } else { $env:JAVIS_MODEL_COMPLETION_FIXTURE_PATH = $previousCompletionFixture }
   if ($null -eq $previousCodeFixture) { Remove-Item Env:JAVIS_CODE_PROPOSAL_FIXTURE_PATH -ErrorAction SilentlyContinue } else { $env:JAVIS_CODE_PROPOSAL_FIXTURE_PATH = $previousCodeFixture }
+  if ($null -eq $previousAppData) { Remove-Item Env:APPDATA -ErrorAction SilentlyContinue } else { $env:APPDATA = $previousAppData }
+  Remove-Item -LiteralPath $qaAppDataRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
