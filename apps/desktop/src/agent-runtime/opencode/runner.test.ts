@@ -5,7 +5,10 @@ import {
   type AgentRunRequest,
 } from "@javis/core";
 import type { CodeProposedEdit, CodeReviewPreview } from "@javis/tools";
-import { createOpenCodeAgentRuntime } from "./runner";
+import {
+  createOpenCodeAgentRuntime,
+  type OpenCodeProposalResult,
+} from "./runner";
 
 const preview: CodeReviewPreview = {
   workspacePath: "E:/repo",
@@ -114,6 +117,70 @@ describe("OpenCodeAgentRuntime", () => {
         },
       },
     });
+  });
+
+  it("emits bounded internal read-only tool lifecycles with complete runtime identity", async () => {
+    const transportResult = {
+      proposal: createProposal(),
+      toolEvents: [{
+        toolCallId: "call-read",
+        toolName: "read",
+        status: "completed",
+        output: `Read src/value.ts ${"x".repeat(2_100)}`,
+        sessionId: "opencode-session-1",
+      }, {
+        toolCallId: "call-grep",
+        toolName: "grep",
+        status: "failed",
+        reason: "No matches.",
+        sessionId: "opencode-session-1",
+      }],
+      toolEventsTruncated: true,
+    } satisfies OpenCodeProposalResult;
+    const runtime = createOpenCodeAgentRuntime({
+      proposeEdit: async () => transportResult,
+    });
+    const handle = runtime.run(createDefinition(), createRequest());
+    const eventsPromise = collectEvents(handle.events);
+
+    await expect(handle.result).resolves.toMatchObject({
+      status: "completed",
+      metrics: { backend: "opencode", toolCalls: 2 },
+    });
+    const events = await eventsPromise;
+    expect(events.filter((event): event is Record<string, unknown> =>
+      typeof event === "object" && event !== null &&
+      typeof (event as Record<string, unknown>).type === "string" &&
+      String((event as Record<string, unknown>).type).startsWith("tool.")
+    ).map((event) => event.type)).toEqual([
+      "tool.requested",
+      "tool.started",
+      "tool.completed",
+      "tool.requested",
+      "tool.started",
+      "tool.failed",
+    ]);
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "tool.completed",
+        toolCallId: "call-read",
+        callId: "call-read",
+        runId: "agent-run-1",
+        workflowRunId: "workflow-run-1",
+        agentRunId: "agent-run-1",
+        stepId: "propose",
+        attempt: 1,
+        backendSessionId: "opencode-session-1",
+        output: {
+          summary: expect.stringMatching(/\.\.\.\[truncated\]$/u),
+          truncated: true,
+        },
+      }),
+      expect.objectContaining({
+        type: "backend.diagnostic",
+        code: "opencode_tool_events_truncated",
+      }),
+    ]));
   });
 
   it("returns transport cancellation without publishing a business StepResult", async () => {

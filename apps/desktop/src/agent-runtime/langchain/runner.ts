@@ -88,17 +88,20 @@ function runLangChainAgent(
     if (event.type === "usage.updated") usage = addAgentTokenUsage(usage, event.usage);
     if (event.type === "model.started") modelCalls += 1;
     if (event.type === "tool.started") toolCalls += 1;
+    const callId = event.type === "tool.requested" || event.type === "tool.started" ||
+        event.type === "tool.completed" || event.type === "tool.failed"
+      ? event.toolCallId
+      : event.type === "model.started" || event.type === "model.completed"
+        ? request.stepId ? `${request.stepId}:model:${event.callIndex}` : undefined
+        : event.type === "usage.updated" && activeModelCall > 0 && request.stepId
+          ? `${request.stepId}:model:${activeModelCall}`
+          : undefined;
     if (request.stepId && request.attempt !== undefined) {
-      const callId = event.type === "tool.requested" || event.type === "tool.started" ||
-          event.type === "tool.completed" || event.type === "tool.failed"
-        ? event.toolCallId
-        : event.type === "model.started" || event.type === "model.completed"
-          ? `${request.stepId}:model:${event.callIndex}`
-          : event.type === "usage.updated" && activeModelCall > 0
-            ? `${request.stepId}:model:${activeModelCall}`
-            : undefined;
       queue.push({
         ...event,
+        runId: request.runId,
+        ...(request.workflowRunId ? { workflowRunId: request.workflowRunId } : {}),
+        ...(request.agentRunId ? { agentRunId: request.agentRunId } : {}),
         stepId: request.stepId,
         attempt: request.attempt,
         ...(callId ? { callId } : {}),

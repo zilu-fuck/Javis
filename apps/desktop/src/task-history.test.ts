@@ -1196,6 +1196,17 @@ describe("task history persistence", () => {
     expect(getTaskWorkspacePath(task)).toBe("E:/Javis");
   });
 
+  it("does not derive a workspace path for explicit chat history", () => {
+    const task = {
+      ...createTask("task-chat-1000"),
+      originMode: "chat" as const,
+      workspacePath: "E:/测试",
+      project: { workspacePath: "E:/测试", scripts: [] },
+    } satisfies TaskSnapshot;
+
+    expect(getTaskWorkspacePath(task)).toBe("");
+  });
+
   it("ignores empty task workspace metadata when deriving workspace paths", () => {
     const task = {
       ...createTask("task-1000"),

@@ -37,6 +37,7 @@ import {
   resolveModelProfileForAgent,
   allowedToolNamesForAgent,
   proposeCodeEditWithModelProvider,
+  proposeCodeEditWithModelProviderResult,
   saveComputerUseLocalVisionSettingsToStorage,
   saveComputerUseSettingsToStorage,
 } from "./app-runtime";
@@ -89,6 +90,48 @@ describe("proposeCodeEditWithModelProvider", () => {
         stepId: "propose-edit",
         attempt: 2,
       }),
+    });
+  });
+
+  it("preserves sanitized OpenCode tool events for the Agent runtime transport", async () => {
+    const proposal = { proposalId: "proposal-1" };
+    vi.mocked(invoke).mockResolvedValue({
+      proposal,
+      toolEvents: [{
+        toolCallId: "call-read",
+        toolName: "read",
+        status: "completed",
+        output: "Read src/value.ts",
+        sessionId: "session-1",
+      }],
+      toolEventsTruncated: false,
+    } as never);
+    const provider = {
+      settings: {
+        provider: "openai",
+        model: "gpt-test",
+        apiKeyReference: "default",
+        baseUrl: "",
+      },
+    } as unknown as ModelProvider;
+    const preview = {
+      workspacePath: "E:/Javis",
+      changedFiles: ["src/value.ts"],
+      diffStat: " src/value.ts | 2 +-",
+      diff: "diff --git a/src/value.ts b/src/value.ts\n",
+    };
+
+    await expect(proposeCodeEditWithModelProviderResult({
+      userGoal: "Update the value",
+      preview,
+    }, provider)).resolves.toEqual({
+      proposal,
+      toolEvents: [expect.objectContaining({
+        toolCallId: "call-read",
+        toolName: "read",
+        sessionId: "session-1",
+      })],
+      toolEventsTruncated: false,
     });
   });
 });
@@ -2448,8 +2491,10 @@ describe("createJavisRuntime", () => {
       agentKind: "commander",
     });
     expect(streamCalls[0]?.options).toEqual(expect.objectContaining({
-      workspacePath: "E:/Javis",
       memoryContext: expect.stringContaining("Javis Agent memory stays local."),
+    }));
+    expect(streamCalls[0]?.options).not.toEqual(expect.objectContaining({
+      workspacePath: expect.any(String),
     }));
     expect(streamCalls[0]?.options).not.toEqual(expect.objectContaining({
       agentKind: "commander",
@@ -2861,7 +2906,13 @@ describe("createJavisRuntime", () => {
       skillContext: "Skill: Demo\nUse the demo ReAct guidance.",
       skillContextMaxSkills: 2,
       skillContextMaxChars: 6000,
+      maxTokens: 1200,
+      disableThinking: true,
     }));
+    expect(completeCalls
+      .filter((call) => call.options?.systemPrompt?.includes("ReAct decision agent"))
+      .every((call) => call.options?.disableThinking === true && call.options.maxTokens === 1200))
+      .toBe(true);
     expect(reactCall?.options).not.toEqual(expect.objectContaining({
       agentKind: "commander",
     }));

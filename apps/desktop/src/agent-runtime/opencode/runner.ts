@@ -16,6 +16,8 @@ const FORBIDDEN_OPENCODE_TOOL_NAMES = new Set([
   "code.proposeEdit",
   "code.applyProposedEdit",
 ]);
+const ALLOWED_OPENCODE_INTERNAL_TOOL_NAMES = new Set(["read", "grep", "glob"]);
+const MAX_OPENCODE_INTERNAL_TOOL_EVENTS = 64;
 
 export interface OpenCodeProposalRequest {
   taskId: string;
@@ -38,9 +40,25 @@ export interface OpenCodeProposalCancelRequest {
   attempt?: number;
 }
 
+export interface OpenCodeInternalToolEvent {
+  toolCallId: string;
+  toolName: "read" | "grep" | "glob";
+  status: "completed" | "failed";
+  output?: string;
+  reason?: string;
+  sessionId?: string;
+  outputTruncated?: boolean;
+}
+
+export interface OpenCodeProposalResult {
+  proposal: CodeProposedEdit;
+  toolEvents: readonly OpenCodeInternalToolEvent[];
+  toolEventsTruncated?: boolean;
+}
+
 export type OpenCodeProposalRunner = ((
   request: OpenCodeProposalRequest,
-) => Promise<CodeProposedEdit>) & {
+) => Promise<CodeProposedEdit | OpenCodeProposalResult>) & {
   cancel?: (request: OpenCodeProposalCancelRequest) => void | Promise<void>;
 };
 
@@ -86,23 +104,29 @@ function runOpenCodeAgent(
   request.signal?.addEventListener("abort", abortFromRequest, { once: true });
   if (request.signal?.aborted) abortFromRequest();
   const startedAt = Date.now();
+  let toolCalls = 0;
 
   const emit = (event: AgentEvent) => {
-    const callId = request.stepId && (
-      event.type === "model.started" || event.type === "model.completed"
+    if (event.type === "tool.started") toolCalls += 1;
+    const callId = event.type === "tool.requested" || event.type === "tool.started" ||
+        event.type === "tool.completed" || event.type === "tool.failed"
+      ? event.toolCallId
+      : request.stepId && (
+        event.type === "model.started" || event.type === "model.completed"
         ? `${request.stepId}:model:${event.callIndex}`
         : event.type === "usage.updated"
           ? `${request.stepId}:model:1`
           : undefined
-    );
-    queue.push(request.stepId && request.attempt !== undefined
-      ? {
-          ...event,
-          stepId: request.stepId,
-          attempt: request.attempt,
-          ...(callId ? { callId } : {}),
-        }
-      : event);
+      );
+    queue.push({
+      ...event,
+      runId: request.runId,
+      ...(request.workflowRunId ? { workflowRunId: request.workflowRunId } : {}),
+      ...(request.agentRunId ? { agentRunId: request.agentRunId } : {}),
+      ...(request.stepId ? { stepId: request.stepId } : {}),
+      ...(request.attempt !== undefined ? { attempt: request.attempt } : {}),
+      ...(callId ? { callId } : {}),
+    });
   };
   const result = executeOpenCodeProposal(
     options,
@@ -116,7 +140,7 @@ function runOpenCodeAgent(
       status: runResult.status,
       durationMs: Date.now() - startedAt,
       modelCalls: runResult.status === "request_input" ? 0 : 1,
-      toolCalls: 0,
+      toolCalls,
       ...(runResult.usage ? { usage: runResult.usage } : {}),
     },
     termination: runResult.status === "cancelled" ? "cancelled" : "returned",
@@ -185,7 +209,7 @@ async function executeOpenCodeProposal(
 
   try {
     emit({ type: "model.started", callIndex: 1 });
-    const proposedEdit = await waitForProposal(options.proposeEdit({
+    const transportResult = await waitForProposal(options.proposeEdit({
       taskId: request.taskId,
       runId: request.runId,
       workflowRunId: request.workflowRunId,
@@ -196,6 +220,56 @@ async function executeOpenCodeProposal(
       preview,
       signal: request.signal,
     }), request.signal);
+    const {
+      proposal: proposedEdit,
+      toolEvents,
+      toolEventsTruncated,
+    } = normalizeOpenCodeProposalResult(transportResult);
+    for (const toolEvent of toolEvents) {
+      const identity = toolEvent.sessionId
+        ? { backendSessionId: toolEvent.sessionId }
+        : {};
+      emit({
+        type: "tool.requested",
+        toolCallId: toolEvent.toolCallId,
+        toolName: toolEvent.toolName,
+        ...identity,
+      });
+      emit({
+        type: "tool.started",
+        toolCallId: toolEvent.toolCallId,
+        toolName: toolEvent.toolName,
+        ...identity,
+      });
+      if (toolEvent.status === "completed") {
+        emit({
+          type: "tool.completed",
+          toolCallId: toolEvent.toolCallId,
+          toolName: toolEvent.toolName,
+          output: {
+            summary: toolEvent.output ?? "OpenCode read-only tool completed.",
+            truncated: toolEvent.outputTruncated === true,
+          },
+          ...identity,
+        });
+      } else {
+        emit({
+          type: "tool.failed",
+          toolCallId: toolEvent.toolCallId,
+          toolName: toolEvent.toolName,
+          reason: toolEvent.reason ?? "OpenCode read-only tool failed.",
+          ...identity,
+        });
+      }
+    }
+    if (toolEventsTruncated) {
+      emit({
+        type: "backend.diagnostic",
+        code: "opencode_tool_events_truncated",
+        message: "OpenCode internal tool events exceeded the audit limit.",
+        phase: "runtime",
+      });
+    }
     const safetyError = validateCodeProposal(proposedEdit);
     if (safetyError) {
       throw new OpenCodeProtocolError(safetyError);
@@ -281,6 +355,71 @@ function readUserMessage(request: AgentRunRequest): string {
     ? message.content.flatMap((block) => block.type === "text" ? [block.text] : [])
     : []).join("\n").trim();
   return text || "Prepare a minimal code patch proposal.";
+}
+
+function normalizeOpenCodeProposalResult(
+  result: CodeProposedEdit | OpenCodeProposalResult,
+): OpenCodeProposalResult {
+  if (!("proposal" in result)) {
+    return { proposal: result, toolEvents: [] };
+  }
+  if (!Array.isArray(result.toolEvents)) {
+    return { proposal: result.proposal, toolEvents: [] };
+  }
+  const toolEvents = result.toolEvents
+    .map(normalizeOpenCodeInternalToolEvent)
+    .filter((event): event is OpenCodeInternalToolEvent => event !== undefined)
+    .slice(0, MAX_OPENCODE_INTERNAL_TOOL_EVENTS);
+  return {
+    proposal: result.proposal,
+    toolEvents,
+    toolEventsTruncated: result.toolEventsTruncated === true ||
+      result.toolEvents.length > MAX_OPENCODE_INTERNAL_TOOL_EVENTS,
+  };
+}
+
+function normalizeOpenCodeInternalToolEvent(value: unknown): OpenCodeInternalToolEvent | undefined {
+  if (!isRecord(value)) return undefined;
+  const toolCallId = normalizeEventIdentifier(value.toolCallId);
+  const toolName = typeof value.toolName === "string" ? value.toolName : "";
+  const status = value.status;
+  if (!toolCallId || !ALLOWED_OPENCODE_INTERNAL_TOOL_NAMES.has(toolName) ||
+      (status !== "completed" && status !== "failed")) {
+    return undefined;
+  }
+  const outputWasTruncated = typeof value.output === "string" &&
+    [...value.output.trim()].length > 2_000;
+  const output = normalizeEventText(value.output, 2_000);
+  const reason = normalizeEventText(value.reason, 500);
+  const sessionId = normalizeEventIdentifier(value.sessionId);
+  return {
+    toolCallId,
+    toolName: toolName as OpenCodeInternalToolEvent["toolName"],
+    status,
+    ...(output ? { output } : {}),
+    ...(reason ? { reason } : {}),
+    ...(sessionId ? { sessionId } : {}),
+    ...(value.outputTruncated === true || outputWasTruncated
+      ? { outputTruncated: true }
+      : {}),
+  };
+}
+
+function normalizeEventIdentifier(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  if (!normalized || /[\u0000-\u001f\u007f]/u.test(normalized)) return undefined;
+  return [...normalized].slice(0, 128).join("");
+}
+
+function normalizeEventText(value: unknown, maxCharacters: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  if (!normalized) return undefined;
+  const characters = [...normalized];
+  return characters.length <= maxCharacters
+    ? normalized
+    : `${characters.slice(0, maxCharacters).join("")}...[truncated]`;
 }
 
 function failedStepResult(

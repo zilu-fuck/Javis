@@ -32,6 +32,26 @@ describe("taskEventToLogEntry", () => {
     expect(log.agentId).toBe("agent-code");
   });
 
+  it("does not call an empty or failed stream a completed reply", () => {
+    const empty = taskEventToLogEntry({
+      kind: "agent.chunk_end",
+      taskId: "task-1",
+      agentKind: "commander",
+      fullText: "",
+    });
+    const failed = taskEventToLogEntry({
+      kind: "agent.chunk_end",
+      taskId: "task-1",
+      agentKind: "commander",
+      fullText: "partial",
+      error: "provider unavailable",
+    });
+
+    expect(empty.userMessage).toBe("回复生成结束（无正文）");
+    expect(empty.userMessage).not.toBe("回复生成完成");
+    expect(failed.userMessage).toContain("回复生成失败");
+  });
+
   it("links step events to explicit step and agent ids when agent kind is available", () => {
     const log = taskEventToLogEntry({
       kind: "step.started",
@@ -118,6 +138,44 @@ describe("taskEventToLogEntry", () => {
       agentId: "agent-file",
     });
     expect(resolved.devDetail).toBe("Permission permission-1 was approved.");
+  });
+
+  it("keeps tool lifecycle identity and failure state in Inspector logs", () => {
+    const started = taskEventToLogEntry({
+      kind: "tool.started",
+      taskId: "task-1",
+      toolName: "grep",
+      toolCallId: "call-1",
+      stepId: "inspect-code",
+      agentKind: "code",
+      agentRunId: "agent-run-1",
+      attempt: 2,
+      backendSessionId: "opencode-session-1",
+      detail: "Started grep (call-1).",
+    });
+    const failed = taskEventToLogEntry({
+      kind: "tool.failed",
+      taskId: "task-1",
+      toolName: "grep",
+      toolCallId: "call-1",
+      stepId: "inspect-code",
+      agentKind: "code",
+      reason: "No matches.",
+      detail: "grep (call-1) failed: No matches.",
+    });
+
+    expect(started).toMatchObject({
+      id: "task-1-tool-grep-call-1-started",
+      title: "tool_call.started",
+      agentId: "agent-code",
+      stepId: "inspect-code",
+    });
+    expect(failed).toMatchObject({
+      id: "task-1-tool-grep-call-1-failed",
+      title: "tool_call.failed",
+      agentId: "agent-code",
+      stepId: "inspect-code",
+    });
   });
 
   it("keeps raw errors in developer detail without exposing multiline internals", () => {
@@ -244,7 +302,15 @@ describe("taskEventToLogEntry", () => {
       { kind: "step.completed", taskId: "task-1", stepId: "step-1", summary: "Done" },
       { kind: "step.failed", taskId: "task-1", stepId: "step-2", error: "Build failed" },
       { kind: "tool.planned", taskId: "task-1", toolName: "file.scanMarkdownDocuments", detail: "Scan" },
+      { kind: "tool.started", taskId: "task-1", toolName: "file.scanMarkdownDocuments", detail: "Scanning" },
       { kind: "tool.completed", taskId: "task-1", toolName: "file.scanMarkdownDocuments", detail: "Scanned" },
+      {
+        kind: "tool.failed",
+        taskId: "task-1",
+        toolName: "file.scanMarkdownDocuments",
+        detail: "Scan failed",
+        reason: "Unavailable",
+      },
       { kind: "tool.partial", taskId: "task-1", toolCallId: "tool-1", partialOutput: "partial" },
       {
         kind: "permission.requested",

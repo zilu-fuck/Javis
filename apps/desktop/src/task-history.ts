@@ -67,6 +67,9 @@ export function isArchivableTask(task: TaskSnapshot): boolean {
 }
 
 export function getTaskWorkspacePath(task: TaskSnapshot): string {
+  if (task.originMode === "chat") {
+    return "";
+  }
   const workspacePath =
     firstNonEmptyString(
       task.workspacePath,

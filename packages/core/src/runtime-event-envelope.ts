@@ -39,7 +39,9 @@ export type RuntimeEventKind =
   | "step.completed"
   | "step.failed"
   | "tool.planned"
+  | "tool.started"
   | "tool.completed"
+  | "tool.failed"
   | "tool.partial"
   | "permission.requested"
   | "permission.resolved"
@@ -65,7 +67,9 @@ export const STRUCTURAL_EVENT_KINDS: ReadonlySet<RuntimeEventKind> = new Set([
   "ask_user.requested",
   "ask_user.responded",
   "tool.planned",
+  "tool.started",
   "tool.completed",
+  "tool.failed",
 ]);
 
 export const STREAMING_EVENT_KINDS: ReadonlySet<RuntimeEventKind> = new Set([

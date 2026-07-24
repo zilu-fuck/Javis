@@ -124,6 +124,54 @@ describe("ThreadView", () => {
     expect(view.container.querySelectorAll(".javis-user-task-progress")).toHaveLength(1);
   });
 
+  it("reopens execution progress when a task id is retried after a terminal run", () => {
+    const terminalTask = createTask({
+      id: "task-retry-same-id",
+      status: "failed",
+      commanderMessage: "执行失败",
+      conversationMessages: [
+        { role: "user", content: "收集来源" },
+        { role: "assistant", content: "执行失败" },
+      ],
+      plan: [{ id: "fetch-source", title: "获取来源", status: "failed" }],
+      agents: [{
+        id: "agent-page-agent",
+        name: "Page Agent",
+        role: "获取网页来源",
+        status: "failed",
+        task: "执行失败",
+      }],
+    });
+    const view = renderThreadView(terminalTask);
+
+    view.rerender(renderThreadViewElement({
+      ...terminalTask,
+      status: "running",
+      commanderMessage: "正在执行",
+      conversationMessages: [{ role: "user", content: "收集来源" }],
+      plan: [{ id: "fetch-source", title: "获取来源", status: "running" }],
+      agents: [{
+        id: "agent-page-agent",
+        name: "Page Agent",
+        role: "获取网页来源",
+        status: "running",
+        task: "获取公开来源",
+      }],
+      taskProgress: {
+        title: "来源采集",
+        status: "running",
+        completedItems: 0,
+        totalItems: 1,
+        items: [{ id: "fetch-source", label: "获取来源", status: "running" }],
+      },
+    }));
+
+    expect(view.container.querySelector(".javis-execution-summary")).not.toBeNull();
+    expect(view.container.textContent).toContain("执行进度");
+    expect(view.container.textContent).toContain("获取来源");
+    expect(view.container.querySelector(".javis-user-task-progress")).not.toBeNull();
+  });
+
   it("hides superseded progress bubbles and keeps one final summary", () => {
     const task = createTask({
       id: "task-progress-1",

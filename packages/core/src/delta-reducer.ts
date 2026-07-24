@@ -75,7 +75,7 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
                 : undefined;
           }
           current = { ...current, isStreaming: partialTexts.size > 0 };
-          if (!event.error) {
+          if (!event.error && event.fullText.trim().length > 0) {
             switch (event.agentKind) {
               case "commander":
                 current = { ...current, commanderMessage: event.fullText };

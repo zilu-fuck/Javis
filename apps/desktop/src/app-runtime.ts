@@ -167,7 +167,10 @@ import {
   resolveCommanderStepAgentRuntimeBackend,
   resolveCommanderStepAgentRuntimeRoutingDecision,
 } from "./agent-runtime/create-agent-runtime";
-import type { OpenCodeProposalRequest } from "./agent-runtime/opencode/runner";
+import type {
+  OpenCodeProposalRequest,
+  OpenCodeProposalResult,
+} from "./agent-runtime/opencode/runner";
 import type { SkillContextSelectionRequest } from "./skill-context";
 import {
   DEFAULT_AGENT_SLOT,
@@ -789,13 +792,14 @@ function withAgentPromptContext(
   }
   const kind = agentKind as AgentKind;
   const withContext = async (prompt: string, options?: CompletionOptions): Promise<CompletionOptions> => {
+    const workspacePath = options?.workspacePath?.trim() || getWorkspacePath().trim();
     const baseOptions: CompletionOptions = {
       ...options,
       ...(includeAgentSystemPrompt
         ? { agentKind: options?.agentKind ?? kind }
         : {}),
       ...(agentRegistry ? { agentRegistry } : {}),
-      workspacePath: options?.workspacePath ?? getWorkspacePath(),
+      ...(workspacePath ? { workspacePath } : {}),
     };
     let nextOptions = baseOptions;
     if (!baseOptions.skillContext && getSkillContext) {
@@ -1475,7 +1479,7 @@ export function createJavisRuntime({
     return withAgentPromptContext(
       provider,
       "commander",
-      getWorkspacePath,
+      () => "",
       getAgentMemoryContextForProvider,
       getEnabledSkillContext
         ? (contextAgentKind, options) => getEnabledSkillContext({
@@ -1768,7 +1772,7 @@ export function createJavisRuntime({
       opencode: ({ agentKind }) =>
         createDesktopOpenCodeAgentRuntime({
           proposeEdit: (request) =>
-            proposeCodeEditWithModelProvider(request, providerFor(agentKind)),
+            proposeCodeEditWithModelProviderResult(request, providerFor(agentKind)),
         }),
     },
     getCapabilityVerification,
@@ -2816,8 +2820,9 @@ export function createJavisRuntime({
         const modelProvider = providerFor(request.agentKind, false);
         const result = await modelProvider.complete(prompt, {
           systemPrompt: buildReActDecisionSystemPrompt("zh-CN"),
-          maxTokens: 600,
+          maxTokens: 1200,
           temperature: 0,
+          disableThinking: true,
           locale: "zh-CN",
           timeoutMs: currentModelTimeoutMs(),
           skipAgentMemory: true,
@@ -2830,7 +2835,7 @@ export function createJavisRuntime({
         const decision = await parseNormalizeWithRepair(
           prompt,
           result.text,
-          { maxTokens: 600, temperature: 0 },
+          { maxTokens: 1200, temperature: 0, disableThinking: true },
           modelProvider,
           (value) => parseAgentReActDecision(normalizeReActDecisionModelValue(value)),
           {
@@ -3020,10 +3025,13 @@ export function createJavisRuntime({
     start(userGoal: string, options?: Parameters<typeof runtime.start>[1]) {
       sharedContext.clear();
       currentUserGoalRef.current = userGoal;
-      const workspacePath = getWorkspacePath().trim();
+      const isChat = options?.originMode === "chat" || options?.mode === "chat";
+      const workspacePath = isChat
+        ? ""
+        : options?.workspacePath?.trim() || getWorkspacePath().trim();
       sharedContext.set(sharedContext.resolveKey(CONTEXT_KEYS.USER_GOAL, "zh-CN"), userGoal);
       preprocessingByTaskId.clear();
-      preprocessingForNextTask = options?.mode === "chat"
+      preprocessingForNextTask = isChat
         ? undefined
         : {
             promise: preprocessChineseInput(userGoal, providerFor("commander")),
@@ -3394,7 +3402,7 @@ async function streamOrCompleteWithReview<T>(
 async function parseNormalizeWithRepair<T>(
   originalPrompt: string,
   rawText: string,
-  streamOptions: { maxTokens: number; temperature: number },
+  streamOptions: { maxTokens: number; temperature: number; disableThinking?: boolean },
   modelProvider: ModelProvider,
   normalize: (value: unknown) => T,
   completionOptions: StructuredReviewCompletionOptions = {},
@@ -4243,7 +4251,16 @@ export function proposeCodeEditWithModelProvider(
     Partial<Pick<OpenCodeProposalRequest, "taskId" | "runId" | "workflowRunId" | "agentRunId" | "stepId" | "attempt">>,
   modelProvider: ModelProvider,
 ): Promise<CodeProposedEdit> {
-  return invoke<CodeProposedEdit>("propose_code_edit", {
+  return proposeCodeEditWithModelProviderResult(request, modelProvider)
+    .then((result) => result.proposal);
+}
+
+export async function proposeCodeEditWithModelProviderResult(
+  request: Pick<OpenCodeProposalRequest, "userGoal" | "preview"> &
+    Partial<Pick<OpenCodeProposalRequest, "taskId" | "runId" | "workflowRunId" | "agentRunId" | "stepId" | "attempt">>,
+  modelProvider: ModelProvider,
+): Promise<OpenCodeProposalResult> {
+  const result = await invoke<OpenCodeProposalResult | CodeProposedEdit>("propose_code_edit", {
     request: {
       workspacePath: request.preview.workspacePath,
       userGoal: request.userGoal,
@@ -4262,4 +4279,11 @@ export function proposeCodeEditWithModelProvider(
       locale: "zh-CN",
     },
   });
+  if (isRecord(result) && isRecord(result.proposal) && Array.isArray(result.toolEvents)) {
+    return result as unknown as OpenCodeProposalResult;
+  }
+  return {
+    proposal: result as CodeProposedEdit,
+    toolEvents: [],
+  };
 }

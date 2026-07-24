@@ -6,6 +6,16 @@ import type {
   TaskLogEntry,
 } from "./index";
 
+type ToolRuntimeIdentity = {
+  toolCallId?: ID;
+  stepId?: ID;
+  agentId?: ID;
+  agentKind?: AgentKind;
+  agentRunId?: ID;
+  attempt?: number;
+  backendSessionId?: string;
+};
+
 export type TaskRuntimeEvent =
   | { kind: "task.created"; taskId: ID }
   | {
@@ -56,8 +66,16 @@ export type TaskRuntimeEvent =
       status: AgentRunStatus;
       message: string;
     }
-  | { kind: "tool.planned"; taskId: ID; toolName: string; detail: string }
-  | { kind: "tool.completed"; taskId: ID; toolName: string; detail: string }
+  | ({ kind: "tool.planned"; taskId: ID; toolName: string; detail: string } & ToolRuntimeIdentity)
+  | ({ kind: "tool.started"; taskId: ID; toolName: string; detail: string } & ToolRuntimeIdentity)
+  | ({ kind: "tool.completed"; taskId: ID; toolName: string; detail: string } & ToolRuntimeIdentity)
+  | ({
+      kind: "tool.failed";
+      taskId: ID;
+      toolName: string;
+      detail: string;
+      reason: string;
+    } & ToolRuntimeIdentity)
   | {
       kind: "permission.requested";
       taskId: ID;
@@ -107,7 +125,9 @@ export const AGENT_RUN_EVENT_KINDS = [
   "step.completed",
   "step.failed",
   "tool.planned",
+  "tool.started",
   "tool.completed",
+  "tool.failed",
   "tool.partial",
   "permission.requested",
   "permission.resolved",
@@ -278,23 +298,43 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
       };
     case "tool.planned":
       return {
-        id: `${event.taskId}-tool-${event.toolName}-planned`,
+        id: toolEventLogId(event, "planned"),
         kind: "tool",
         title: "tool_call.planned",
         detail: event.detail,
         userMessage: getToolUserMessage(event.toolName, "planned"),
         devDetail: event.detail,
-        ...optionalLogOwnership(agentIdFromToolName(event.toolName), undefined),
+        ...optionalLogOwnership(toolEventOwnerId(event), event.stepId),
+      };
+    case "tool.started":
+      return {
+        id: toolEventLogId(event, "started"),
+        kind: "tool",
+        title: "tool_call.started",
+        detail: event.detail,
+        userMessage: getToolUserMessage(event.toolName, "started"),
+        devDetail: event.detail,
+        ...optionalLogOwnership(toolEventOwnerId(event), event.stepId),
       };
     case "tool.completed":
       return {
-        id: `${event.taskId}-tool-${event.toolName}-completed`,
+        id: toolEventLogId(event, "completed"),
         kind: "tool",
         title: "tool_call.updated",
         detail: event.detail,
         userMessage: getToolUserMessage(event.toolName, "completed"),
         devDetail: event.detail,
-        ...optionalLogOwnership(agentIdFromToolName(event.toolName), undefined),
+        ...optionalLogOwnership(toolEventOwnerId(event), event.stepId),
+      };
+    case "tool.failed":
+      return {
+        id: toolEventLogId(event, "failed"),
+        kind: "tool",
+        title: "tool_call.failed",
+        detail: event.detail,
+        userMessage: `${event.toolName} 执行失败`,
+        devDetail: event.detail,
+        ...optionalLogOwnership(toolEventOwnerId(event), event.stepId),
       };
     case "permission.requested":
       return {
@@ -375,13 +415,22 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         agentId: agentIdFromKind(event.agentKind),
       };
     case "agent.chunk_end":
+      const chunkEndUserMessage = event.error
+        ? `回复生成失败: ${toShortError(event.error)}`
+        : event.fullText.trim().length > 0
+          ? "回复生成完成"
+          : "回复生成结束（无正文）";
       return {
         id: `${event.taskId}-chunk-end-${event.agentKind}`,
         kind: "event",
         title: "agent.chunk_end",
-        detail: `${event.agentKind} completed output (${event.fullText.length} chars).`,
-        userMessage: "回复生成完成",
-        devDetail: `${event.agentKind} completed output (${event.fullText.length} chars).`,
+        detail: event.error
+          ? `${event.agentKind} output failed after ${event.fullText.length} chars: ${event.error}`
+          : `${event.agentKind} output ended (${event.fullText.length} chars).`,
+        userMessage: chunkEndUserMessage,
+        devDetail: event.error
+          ? `${event.agentKind} output failed after ${event.fullText.length} chars: ${event.error}`
+          : `${event.agentKind} output ended (${event.fullText.length} chars).`,
         agentId: agentIdFromKind(event.agentKind),
       };
     case "step.progress":
@@ -546,13 +595,25 @@ function getAgentStatusUserMessage(
   return message;
 }
 
-function getToolUserMessage(toolName: string, phase: "planned" | "completed"): string {
+function getToolUserMessage(toolName: string, phase: "planned" | "started" | "completed"): string {
   const readableName = TOOL_DISPLAY_NAMES[toolName] ?? toolName
     .replace(/^commander\./, "")
     .replace(/\./g, " ");
-  return phase === "planned"
-    ? `准备执行: ${readableName}`
-    : `${readableName} 已完成`;
+  if (phase === "planned") return `准备执行: ${readableName}`;
+  if (phase === "started") return `${readableName} 执行中`;
+  return `${readableName} 已完成`;
+}
+
+function toolEventLogId(
+  event: { taskId: ID; toolName: string; toolCallId?: ID },
+  phase: string,
+): string {
+  const callId = event.toolCallId ? `-${toLogIdPart(event.toolCallId)}` : "";
+  return `${event.taskId}-tool-${event.toolName}${callId}-${phase}`;
+}
+
+function toolEventOwnerId(event: ToolRuntimeIdentity & { toolName: string }): ID | undefined {
+  return event.agentId ?? (event.agentKind ? agentIdFromKind(event.agentKind) : agentIdFromToolName(event.toolName));
 }
 
 function toShortError(error: string): string {

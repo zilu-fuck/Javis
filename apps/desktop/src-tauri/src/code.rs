@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
     env, fs,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -20,12 +21,15 @@ use crate::sandbox::{
 use crate::{
     capture_current_git_head, create_approval_id, create_file_content_hashes, create_fnv1a_hash,
     create_native_approval_binding, env_flag_enabled, hydrate_model_api_key_secret, normalize_path,
-    require_current_git_head_matches, require_native_approval_binding, resolve_command_program,
-    resolve_workspace_path, summarize_provider_output_for_error, NativeApprovalBinding,
-    JAVIS_TERMINOLOGY_PROMPT_PREFIX, OPENCODE_PROPOSAL_TIMEOUT,
+    redact_secret_like_text, require_current_git_head_matches, require_native_approval_binding,
+    resolve_command_program, resolve_workspace_path, summarize_provider_output_for_error,
+    NativeApprovalBinding, JAVIS_TERMINOLOGY_PROMPT_PREFIX, OPENCODE_PROPOSAL_TIMEOUT,
 };
 
 pub(crate) const CODE_PATCH_APPROVAL_TOOL_NAME: &str = "code.applyProposedEdit";
+pub(crate) const MAX_OPENCODE_TOOL_EVENTS: usize = 64;
+const MAX_OPENCODE_TOOL_OUTPUT_CHARS: usize = 2_000;
+const MAX_OPENCODE_TOOL_ERROR_CHARS: usize = 500;
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -135,6 +139,42 @@ pub(crate) struct CodeProposedEdit {
     pub(crate) hunks: Option<Vec<CodeProposalHunk>>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CodeProposeEditResult {
+    pub(crate) proposal: CodeProposedEdit,
+    pub(crate) tool_events: Vec<OpenCodeToolEvent>,
+    pub(crate) tool_events_truncated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OpenCodeToolEvent {
+    pub(crate) tool_call_id: String,
+    pub(crate) tool_name: String,
+    pub(crate) status: OpenCodeToolEventStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) output: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) session_id: Option<String>,
+    pub(crate) output_truncated: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OpenCodeToolEventStatus {
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ParsedOpenCodeToolEvents {
+    pub(crate) events: Vec<OpenCodeToolEvent>,
+    pub(crate) truncated: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CodeProposalHunk {
@@ -215,7 +255,7 @@ pub(crate) fn propose_code_edit(
     app: AppHandle,
     mut request: CodeProposeEditRequest,
     approval_state: tauri::State<'_, Mutex<CodePatchApprovalState>>,
-) -> Result<CodeProposedEdit, String> {
+) -> Result<CodeProposeEditResult, String> {
     let workspace =
         resolve_workspace_path(Some(request.workspace_path.clone())).map_err(|e| e.to_string())?;
     if !env_flag_enabled("JAVIS_QA_MODE")
@@ -224,17 +264,17 @@ pub(crate) fn propose_code_edit(
         hydrate_model_api_key_secret(&app, &mut request).map_err(JavisError::Internal)?;
     }
     let task_id = request.task_id.clone();
-    let proposal =
+    let result =
         propose_code_edit_with_opencode(&workspace, request).map_err(format_code_proposal_error)?;
-    register_pending_code_patch(&approval_state, &proposal, task_id.as_deref())
+    register_pending_code_patch(&approval_state, &result.proposal, task_id.as_deref())
         .map_err(|e| e.to_string())?;
-    Ok(proposal)
+    Ok(result)
 }
 
 pub(crate) fn propose_code_edit_with_opencode(
     workspace: &Path,
     request: CodeProposeEditRequest,
-) -> Result<CodeProposedEdit, JavisError> {
+) -> Result<CodeProposeEditResult, JavisError> {
     let canonical_workspace = fs::canonicalize(workspace)
         .map_err(|error| JavisError::Io(format!("Workspace is not accessible: {error}")))?;
     if request.user_goal.trim().is_empty() {
@@ -265,11 +305,16 @@ pub(crate) fn propose_code_edit_with_opencode(
             let content = fs::read_to_string(path).map_err(|error| {
                 JavisError::Io(format!("Could not read code proposal fixture: {error}"))
             })?;
-            return parse_code_proposal_from_text_for_request(
+            let proposal = parse_code_proposal_from_text_for_request(
                 &canonical_workspace,
                 &content,
                 &request,
-            );
+            )?;
+            return Ok(CodeProposeEditResult {
+                proposal,
+                tool_events: Vec::new(),
+                tool_events_truncated: false,
+            });
         }
     } else if env::var_os("JAVIS_CODE_PROPOSAL_FIXTURE_PATH").is_some() {
         return Err(JavisError::Validation(
@@ -279,7 +324,14 @@ pub(crate) fn propose_code_edit_with_opencode(
 
     let prompt = create_opencode_proposal_prompt(&request);
     let output = run_opencode_proposal_command(&canonical_workspace, &prompt, &request)?;
-    parse_code_proposal_from_text_for_request(&canonical_workspace, &output, &request)
+    let parsed_tool_events = parse_opencode_tool_events(&output);
+    let proposal =
+        parse_code_proposal_from_text_for_request(&canonical_workspace, &output, &request)?;
+    Ok(CodeProposeEditResult {
+        proposal,
+        tool_events: parsed_tool_events.events,
+        tool_events_truncated: parsed_tool_events.truncated,
+    })
 }
 
 pub(crate) fn format_code_proposal_error(error: JavisError) -> String {
@@ -350,6 +402,110 @@ pub(crate) fn run_opencode_proposal_command(
         });
     }
     Ok(output.stdout)
+}
+
+pub(crate) fn parse_opencode_tool_events(text: &str) -> ParsedOpenCodeToolEvents {
+    let mut parsed = ParsedOpenCodeToolEvents::default();
+    let mut seen_tool_calls = HashSet::new();
+
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        if value.get("type").and_then(serde_json::Value::as_str) != Some("tool_use") {
+            continue;
+        }
+        let Some(part) = value.get("part").and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        let Some(tool_name) = part.get("tool").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !matches!(tool_name, "read" | "grep" | "glob") {
+            continue;
+        }
+        let Some(tool_call_id) = ["id", "callID", "callId"]
+            .iter()
+            .find_map(|key| part.get(*key).and_then(serde_json::Value::as_str))
+            .and_then(|id| sanitize_opencode_identifier(id, 128))
+        else {
+            continue;
+        };
+        let Some(state) = part.get("state").and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        let Some(status) = state.get("status").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let status = match status {
+            "completed" => OpenCodeToolEventStatus::Completed,
+            "error" => OpenCodeToolEventStatus::Failed,
+            _ => continue,
+        };
+        if !seen_tool_calls.insert(tool_call_id.clone()) {
+            continue;
+        }
+        if parsed.events.len() >= MAX_OPENCODE_TOOL_EVENTS {
+            parsed.truncated = true;
+            break;
+        }
+
+        let (output, output_truncated) = state
+            .get("output")
+            .map(|value| sanitize_opencode_event_value(value, MAX_OPENCODE_TOOL_OUTPUT_CHARS))
+            .unwrap_or((None, false));
+        let reason = state
+            .get("error")
+            .map(|value| sanitize_opencode_event_value(value, MAX_OPENCODE_TOOL_ERROR_CHARS).0)
+            .flatten();
+        let session_id = value
+            .get("sessionID")
+            .or_else(|| part.get("sessionID"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|session_id| sanitize_opencode_identifier(session_id, 128));
+
+        parsed.events.push(OpenCodeToolEvent {
+            tool_call_id,
+            tool_name: tool_name.to_string(),
+            status,
+            output,
+            reason,
+            session_id,
+            output_truncated,
+        });
+    }
+
+    parsed
+}
+
+fn sanitize_opencode_event_value(
+    value: &serde_json::Value,
+    max_chars: usize,
+) -> (Option<String>, bool) {
+    let raw = value
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| serde_json::to_string(value).ok())
+        .unwrap_or_default();
+    let redacted = redact_secret_like_text(raw.trim());
+    if redacted.is_empty() {
+        return (None, false);
+    }
+    let length = redacted.chars().count();
+    if length <= max_chars {
+        return (Some(redacted), false);
+    }
+    let mut bounded = redacted.chars().take(max_chars).collect::<String>();
+    bounded.push_str("...[truncated]");
+    (Some(bounded), true)
+}
+
+fn sanitize_opencode_identifier(value: &str, max_chars: usize) -> Option<String> {
+    let normalized = value.trim();
+    if normalized.is_empty() || normalized.chars().any(char::is_control) {
+        return None;
+    }
+    Some(normalized.chars().take(max_chars).collect())
 }
 
 #[cfg(test)]
@@ -714,6 +870,15 @@ pub(crate) fn extract_raw_code_proposal(text: &str) -> Result<RawCodeProposal, J
             }
             if let Some(text) = value.get("text").and_then(|text| text.as_str()) {
                 if let Ok(raw) = serde_json::from_str::<RawCodeProposal>(text.trim()) {
+                    return Ok(raw);
+                }
+            }
+            if let Some(text) = value
+                .get("part")
+                .and_then(|part| part.get("text"))
+                .and_then(serde_json::Value::as_str)
+            {
+                if let Some(raw) = parse_raw_code_proposal_candidate(text.trim()) {
                     return Ok(raw);
                 }
             }

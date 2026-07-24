@@ -261,7 +261,7 @@ describe("runtime-event-envelope", () => {
   });
 
   describe("event classification", () => {
-    it("structural events include task lifecycle, step lifecycle, permission, ask_user, tool planned/completed", () => {
+    it("structural events include task, step, permission, ask_user, and complete tool lifecycles", () => {
       expect(isStructuralEvent("task.created")).toBe(true);
       expect(isStructuralEvent("task.completed")).toBe(true);
       expect(isStructuralEvent("task.failed")).toBe(true);
@@ -274,7 +274,9 @@ describe("runtime-event-envelope", () => {
       expect(isStructuralEvent("permission.resolved")).toBe(true);
       expect(isStructuralEvent("ask_user.requested")).toBe(true);
       expect(isStructuralEvent("tool.planned")).toBe(true);
+      expect(isStructuralEvent("tool.started")).toBe(true);
       expect(isStructuralEvent("tool.completed")).toBe(true);
+      expect(isStructuralEvent("tool.failed")).toBe(true);
     });
 
     it("streaming events include chunk and tool.partial", () => {

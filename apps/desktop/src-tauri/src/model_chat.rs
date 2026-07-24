@@ -769,11 +769,7 @@ fn finalize_stream_tools(
             .ok_or_else(|| format!("Model chat stream tool call {id} arguments must be an object."))?;
         events.push(ModelChatStreamEvent::ToolCallEnd { index });
     }
-    validate_tool_finish_reason(
-        "Model chat stream",
-        finish_reason,
-        !tool_calls.is_empty(),
-    )?;
+    validate_tool_finish_reason("Model chat stream", finish_reason, !tool_calls.is_empty())?;
     events.push(ModelChatStreamEvent::MessageEnd {
         finish_reason: if tool_calls.is_empty() {
             normalize_finish_reason(finish_reason)
@@ -1647,10 +1643,7 @@ fn validate_tool_finish_reason(
     reason: Option<&str>,
     has_tool_calls: bool,
 ) -> Result<(), String> {
-    let reports_tool_calls = matches!(
-        reason,
-        Some("tool_calls" | "tool_use" | "function_call")
-    );
+    let reports_tool_calls = matches!(reason, Some("tool_calls" | "tool_use" | "function_call"));
     if has_tool_calls && reason.is_some() && !reports_tool_calls {
         return Err(format!(
             "{label} contains tool calls but reported finish reason {}.",
@@ -2458,11 +2451,8 @@ mod tests {
 
     #[test]
     fn invalid_stream_json_does_not_echo_sensitive_payloads() {
-        let error = parse_stream_json(
-            "{\"apiKey\":\"sk-live-secret\"",
-            "Model chat stream",
-        )
-        .expect_err("invalid JSON");
+        let error = parse_stream_json("{\"apiKey\":\"sk-live-secret\"", "Model chat stream")
+            .expect_err("invalid JSON");
         assert!(error.contains("returned invalid JSON"));
         assert!(!error.contains("sk-live-secret"));
         assert!(!error.contains("apiKey"));
@@ -2476,12 +2466,11 @@ mod tests {
                 "finish_reason": "tool_calls"
             }]
         });
-        assert!(parse_openai_chat_response(
-            &openai_without_calls,
-            &request("openai-compatible"),
-        )
-        .expect_err("OpenAI missing calls")
-        .contains("without tool calls"));
+        assert!(
+            parse_openai_chat_response(&openai_without_calls, &request("openai-compatible"),)
+                .expect_err("OpenAI missing calls")
+                .contains("without tool calls")
+        );
 
         let anthropic_with_conflict = serde_json::json!({
             "content": [{
@@ -2492,21 +2481,22 @@ mod tests {
             }],
             "stop_reason": "end_turn"
         });
-        assert!(parse_anthropic_chat_response(
-            &anthropic_with_conflict,
-            &request("anthropic"),
-        )
-        .expect_err("Anthropic conflicting finish reason")
-        .contains("contains tool calls"));
+        assert!(
+            parse_anthropic_chat_response(&anthropic_with_conflict, &request("anthropic"),)
+                .expect_err("Anthropic conflicting finish reason")
+                .contains("contains tool calls")
+        );
 
         let mut stream = OpenAiStreamState {
             saw_done: true,
             finish_reason: Some("tool_calls".to_string()),
             ..OpenAiStreamState::default()
         };
-        assert!(finalize_openai_stream(&request("openai-compatible"), &stream)
-            .expect_err("stream missing calls")
-            .contains("without tool calls"));
+        assert!(
+            finalize_openai_stream(&request("openai-compatible"), &stream)
+                .expect_err("stream missing calls")
+                .contains("without tool calls")
+        );
         stream.finish_reason = Some("stop".to_string());
         assert!(finalize_openai_stream(&request("openai-compatible"), &stream).is_ok());
     }
@@ -2522,9 +2512,11 @@ mod tests {
             }],
             "stop_reason": "tool_use"
         });
-        assert!(parse_anthropic_chat_response(&unknown, &request("anthropic"))
-            .expect_err("unknown tool")
-            .contains("unknown tool name"));
+        assert!(
+            parse_anthropic_chat_response(&unknown, &request("anthropic"))
+                .expect_err("unknown tool")
+                .contains("unknown tool name")
+        );
 
         let invalid = serde_json::json!({
             "content": [{
@@ -2535,9 +2527,11 @@ mod tests {
             }],
             "stop_reason": "tool_use"
         });
-        assert!(parse_anthropic_chat_response(&invalid, &request("anthropic"))
-            .expect_err("invalid input")
-            .contains("input must be an object"));
+        assert!(
+            parse_anthropic_chat_response(&invalid, &request("anthropic"))
+                .expect_err("invalid input")
+                .contains("input must be an object")
+        );
     }
 
     #[test]

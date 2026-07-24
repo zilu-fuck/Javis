@@ -172,6 +172,34 @@ describe("Sidebar", () => {
     expect(html).toContain("暂无历史");
   });
 
+  it("groups chat history under chat even when a stale workspace path remains", () => {
+    const html = renderToStaticMarkup(
+      <Sidebar
+        currentWorkspacePath="E:/Javis"
+        labels={labels}
+        locale={zhCNWorkbenchLocale}
+        modelSettings={{ provider: "", model: "", apiKey: "", apiKeyReference: "default", baseUrl: "" }}
+        historyEntries={[
+          {
+            id: "chat-1",
+            title: "你会做些什么",
+            status: "completed",
+            userGoal: "你会做些什么",
+            updatedAt: "2026-07-22T00:00:00.000Z",
+            originMode: "chat",
+            workspacePath: "E:/测试",
+          },
+        ]}
+        sidebarSearchQuery=""
+        onSidebarSearchQueryChange={vi.fn()}
+      />,
+    );
+
+    expect(html).toContain("聊天");
+    expect(html).toContain("你会做些什么");
+    expect(html).not.toContain("E:/测试");
+  });
+
   it("switches the compose mode from the new chat submenu", () => {
     const onChangeActiveView = vi.fn();
     const onSelectComposeMode = vi.fn();

@@ -3859,6 +3859,77 @@ mod tests {
     }
 
     #[test]
+    fn parses_opencode_text_event_proposals_and_bounded_read_only_tool_events() {
+        let root = create_test_directory("opencode-json-events");
+        let file = root.join("src").join("message.txt");
+        fs::create_dir_all(file.parent().expect("file parent")).expect("create src");
+        fs::write(&file, "before\n").expect("write file");
+        let proposal_text = r#"{"summary":"Tighten message copy.","changedFiles":["src/message.txt"],"patch":"diff --git a/src/message.txt b/src/message.txt\n--- a/src/message.txt\n+++ b/src/message.txt\n@@ -1 +1 @@\n-before\n+after\n"}"#;
+        let grep_event = serde_json::json!({
+            "type": "tool_use",
+            "sessionID": "session-1",
+            "part": {
+                "id": "call-grep",
+                "tool": "grep",
+                "state": {
+                    "status": "completed",
+                    "output": format!("api_key=sk-secret-value\nmatch{}", "x".repeat(2_100)),
+                },
+            },
+        });
+        let output = format!(
+            "{}\n{}\n{}",
+            grep_event,
+            format!(
+                r#"{{"type":"text","part":{{"text":{}}}}}"#,
+                serde_json::to_string(proposal_text).expect("json text")
+            ),
+            r#"{"type":"tool_use","sessionID":"session-1","part":{"id":"call-bash","tool":"bash","state":{"status":"completed","output":"should not be surfaced"}}}"#,
+        );
+
+        let parsed = parse_opencode_tool_events(&output);
+        assert_eq!(parsed.events.len(), 1);
+        assert_eq!(parsed.events[0].tool_name, "grep");
+        assert_eq!(parsed.events[0].session_id.as_deref(), Some("session-1"));
+        assert!(parsed.events[0].output_truncated);
+        assert!(parsed.events[0]
+            .output
+            .as_deref()
+            .is_some_and(|output| output.contains("[redacted-secret]")));
+        assert!(!parsed.events[0]
+            .output
+            .as_deref()
+            .is_some_and(|output| output.contains("sk-secret-value")));
+
+        let proposal = parse_code_proposal_from_text(&root, &output).expect("proposal");
+        assert_eq!(proposal.summary, "Tighten message copy.");
+        fs::remove_dir_all(root).expect("cleanup test directory");
+    }
+
+    #[test]
+    fn bounds_opencode_tool_event_count() {
+        let output = (0..(MAX_OPENCODE_TOOL_EVENTS + 1))
+            .map(|index| {
+                serde_json::json!({
+                    "type": "tool_use",
+                    "sessionID": "session",
+                    "part": {
+                        "id": format!("call-{index}"),
+                        "tool": "read",
+                        "state": { "status": "completed", "output": "ok" },
+                    },
+                })
+                .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let parsed = parse_opencode_tool_events(&output);
+        assert_eq!(parsed.events.len(), MAX_OPENCODE_TOOL_EVENTS);
+        assert!(parsed.truncated);
+    }
+
+    #[test]
     fn parses_openai_content_object_code_proposal() {
         let root = create_test_directory("code-proposal-content-object");
         let file = root.join("src").join("message.txt");

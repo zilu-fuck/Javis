@@ -33,6 +33,22 @@ describe("createDeltaReducer streaming metadata", () => {
     expect(completed.streamingText).toBeUndefined();
     expect(completed.verificationSummary).toBe("verified");
   });
+
+  it("does not overwrite an existing reply with an empty chunk end", () => {
+    const initial = createInitialTaskSnapshot();
+    initial.commanderMessage = "已有回复";
+    const reducer = createDeltaReducer(initial);
+
+    const result = reducer.apply({
+      kind: "agent.chunk_end",
+      taskId: "task-1",
+      agentKind: "commander",
+      fullText: "",
+    });
+
+    expect(result.commanderMessage).toBe("已有回复");
+    expect(result.isStreaming).toBe(false);
+  });
 });
 
 describe("createDeltaReducer step.failed", () => {

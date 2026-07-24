@@ -4,6 +4,10 @@ type AgentEventIdentity = {
   callId?: string;
   stepId?: string;
   attempt?: number;
+  runId?: string;
+  workflowRunId?: string;
+  agentRunId?: string;
+  backendSessionId?: string;
 };
 
 export type AgentEvent =

@@ -662,7 +662,9 @@ function groupHistoryEntriesByWorkspace(
   }
 
   for (const entry of entries) {
-    const normalizedWorkspacePath = normalizeWorkspacePath(entry.workspacePath ?? "");
+    const normalizedWorkspacePath = entry.originMode === "chat"
+      ? ""
+      : normalizeWorkspacePath(entry.workspacePath ?? "");
     const key = normalizedWorkspacePath || "__unknown__";
     const existing = groups.get(key);
     const updatedAt = getEntrySortValue(entry);

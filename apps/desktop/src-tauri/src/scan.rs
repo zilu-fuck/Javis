@@ -1742,8 +1742,7 @@ fn resolve_mount_browse_root(
     let requested = validate_workspace_read_root(requested_root)?;
     let requested_path = PathBuf::from(&requested);
     let is_enumerated_root = roots.iter().any(|root| {
-        fs::canonicalize(&root.path)
-            .is_ok_and(|candidate| candidate == requested_path)
+        fs::canonicalize(&root.path).is_ok_and(|candidate| candidate == requested_path)
     });
     if !is_enumerated_root {
         return Err("Computer browsing requires an enumerated local mount root.".to_string());
@@ -2104,7 +2103,10 @@ mod tests {
         }];
 
         let allowed = resolve_mount_browse_root(&roots[0].path, &roots).unwrap();
-        assert_eq!(allowed, vec![fs::canonicalize(tmp.path()).unwrap().to_string_lossy()]);
+        assert_eq!(
+            allowed,
+            vec![fs::canonicalize(tmp.path()).unwrap().to_string_lossy()]
+        );
         assert!(resolve_mount_browse_root(&nested.to_string_lossy(), &roots).is_err());
     }
 
