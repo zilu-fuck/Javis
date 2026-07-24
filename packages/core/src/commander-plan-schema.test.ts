@@ -75,6 +75,8 @@ describe("buildCommanderPlanPrompt", () => {
     expect(prompt).toContain("targetPath must be relative to the selected workspace");
     expect(prompt).toContain("Ordinary generated-file output uses file_execute");
     expect(prompt).toContain("hides plan JSON, run ids, logs, route ids, and tool dumps");
+    expect(prompt).toContain("parallelize only non-Page-Agent roots");
+    expect(prompt).toContain("pair browser navigate/read");
     expect(prompt).toContain("{title:string, reasoning:string, executionPolicy?:ExecutionPolicy, steps:Step[1..12]}");
     expect(prompt).not.toContain('"properties"');
   });
@@ -96,6 +98,7 @@ describe("buildCommanderPlanPrompt", () => {
     expect(prompt).toContain("file.writeText 必须显式填写 toolName");
     expect(prompt).toContain("targetPath 必须是相对路径");
     expect(prompt).toContain("普通生成文件只使用 file_execute");
+    expect(prompt).toContain("Page Agent 串行");
     expect(prompt).toContain("输出必须符合此结构");
     expect(prompt).toContain("可用 Agent:");
     expect(prompt).not.toContain("Available agents / 可用 Agent");
@@ -356,6 +359,12 @@ describe("buildCommanderPlanPrompt", () => {
           summary: "List directory",
           capabilityTags: ["directory_list"],
           ownerAgentKinds: ["computer"],
+          inputSchema: {
+            type: "object",
+            properties: { path: { type: "string", minLength: 1 } },
+            required: ["path"],
+            additionalProperties: false,
+          },
           requiredInputs: [{ name: "path", type: "string", nonEmpty: true }],
         },
         {
@@ -379,6 +388,8 @@ describe("buildCommanderPlanPrompt", () => {
 
     expect(prompt).toContain("Required toolInput fields");
     expect(prompt).toContain("computer.listDirectory -> path: string (non-empty)");
+    expect(prompt).toContain('inputSchema: {"type":"object"');
+    expect(prompt).toContain('"additionalProperties":false');
     expect(prompt).toContain("git.stageFiles -> paths: string[]");
     expect(prompt).toContain("mcp.search.flags -> flags: boolean[]");
   });

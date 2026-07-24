@@ -369,6 +369,74 @@ describe("compileCommanderPlan", () => {
     }
   });
 
+  it("rejects toolInput that violates a governed input schema", () => {
+    const plan = validPlan();
+    plan.steps[0].toolInput = {
+      goal: "find tool registry",
+      maxAttempts: 0,
+      typo: true,
+    };
+    const input = makeInput({ plan });
+    input.availableTools = input.availableTools.map((tool) =>
+      tool.name === "code.searchRepository"
+        ? {
+            ...tool,
+            inputSchema: {
+              type: "object",
+              properties: {
+                goal: { type: "string", minLength: 1 },
+                maxAttempts: { type: "integer", minimum: 1, maximum: 20 },
+              },
+              required: ["goal"],
+              additionalProperties: false,
+            },
+          }
+        : tool
+    );
+
+    const result = compileCommanderPlan(input);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.diagnostics).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          code: "MISSING_TOOL_INPUT",
+          message: expect.stringMatching(/undeclared field|greater than or equal/u),
+        }),
+      ]));
+    }
+  });
+
+  it("retains non-empty input checks alongside governed schemas", () => {
+    const plan = validPlan();
+    plan.steps[0].toolInput = { goal: " " };
+    const input = makeInput({ plan });
+    input.availableTools = input.availableTools.map((tool) =>
+      tool.name === "code.searchRepository"
+        ? {
+            ...tool,
+            inputSchema: {
+              type: "object",
+              properties: { goal: { type: "string", minLength: 1, pattern: "\\S" } },
+              required: ["goal"],
+              additionalProperties: false,
+            },
+          }
+        : tool
+    );
+
+    const result = compileCommanderPlan(input);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.diagnostics).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          code: "MISSING_TOOL_INPUT",
+          path: "steps[0].toolInput",
+          message: expect.stringContaining(".goal"),
+        }),
+      ]));
+    }
+  });
+
   it("normalizes legacy Browser Agent steps to Page Agent", () => {
     const plan: CommanderDagPlan = {
       title: "Legacy browser plan",

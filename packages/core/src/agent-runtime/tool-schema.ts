@@ -15,8 +15,10 @@ export function toolDescriptorsToAgentToolSpecs(
 }
 
 export function toolDescriptorToJsonSchema(
-  descriptor: Pick<ToolDescriptor, "metadata" | "requiredInputs">,
+  descriptor: Pick<ToolDescriptor, "inputSchema" | "metadata" | "requiredInputs">,
 ): JsonSchema {
+  if (descriptor.inputSchema) return descriptor.inputSchema as JsonSchema;
+
   const mcpSchema = descriptor.metadata?.mcpInputSchema;
   if (isJsonSchemaObject(mcpSchema)) return mcpSchema;
 

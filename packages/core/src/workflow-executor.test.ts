@@ -1932,7 +1932,12 @@ describe("runCommanderDagTask observability", () => {
     }));
     let tamperReads = 0;
     const mutableResult = {
-      keyFiles: ["packages/core/src/index.ts"],
+      get keyFiles() {
+        tamperReads += 1;
+        return tamperReads <= 5
+          ? ["packages/core/src/index.ts"]
+          : ["packages/core/src/changed.ts"];
+      },
       actualFound: [],
       inferred: [],
       needsConfirmation: [],
@@ -1940,10 +1945,6 @@ describe("runCommanderDagTask observability", () => {
       testFileCandidates: [],
       clusters: [],
       attempts: [],
-      get tamperMarker() {
-        tamperReads += 1;
-        return tamperReads === 1 ? "sealed" : "changed";
-      },
     };
     const { controller, emitted } = createTestController();
 
@@ -2001,7 +2002,12 @@ describe("runCommanderDagTask observability", () => {
     }));
     let tamperReads = 0;
     const mutableResult = {
-      keyFiles: ["packages/core/src/index.ts"],
+      get keyFiles() {
+        tamperReads += 1;
+        return tamperReads <= 5
+          ? ["packages/core/src/index.ts"]
+          : ["packages/core/src/changed.ts"];
+      },
       actualFound: [],
       inferred: [],
       needsConfirmation: [],
@@ -2009,10 +2015,6 @@ describe("runCommanderDagTask observability", () => {
       testFileCandidates: [],
       clusters: [],
       attempts: [],
-      get tamperMarker() {
-        tamperReads += 1;
-        return tamperReads === 1 ? "sealed" : "changed";
-      },
     };
     const { controller, emitted } = createTestController();
 
@@ -3021,6 +3023,128 @@ describe("Commander direct_response evidence boundary", () => {
   });
 });
 
+describe("Commander Page Agent scheduling", () => {
+  it("keeps dependent browser reads with their navigation on the single shared page", async () => {
+    let currentUrl = "";
+    const browserOrder: string[] = [];
+    const navigate = vi.fn<BrowserTool["navigate"]>(async ({ url }) => {
+      currentUrl = url;
+      browserOrder.push(`navigate:${url}`);
+      return { url, title: url, status: 200, loadState: "load" };
+    });
+    const getContent = vi.fn<BrowserTool["getContent"]>(async () => {
+      browserOrder.push(`content:${currentUrl}`);
+      const label = currentUrl.includes("alpha") ? "Alpha" : "Beta";
+      return {
+        content: `${label} page content`,
+        url: currentUrl,
+        title: `${label} page`,
+      };
+    });
+    let synthesisEvidence = "";
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "Read two browser pages",
+        reasoning: "Each page must be read from the navigation that produced it.",
+        steps: [{
+          id: "navigate-alpha",
+          title: "Navigate alpha",
+          assignedAgentKind: "page-agent",
+          toolName: "browser.navigate",
+          requiredCapabilities: ["browser_navigate"],
+          toolInput: { url: "https://alpha.example/" },
+          executionMode: "direct_tool_call" as const,
+          dependsOn: [],
+          outputContextKey: "alphaNavigation",
+          successCriteria: "Alpha loaded.",
+        }, {
+          id: "navigate-beta",
+          title: "Navigate beta",
+          assignedAgentKind: "page-agent",
+          toolName: "browser.navigate",
+          requiredCapabilities: ["browser_navigate"],
+          toolInput: { url: "https://beta.example/" },
+          executionMode: "direct_tool_call" as const,
+          dependsOn: [],
+          outputContextKey: "betaNavigation",
+          successCriteria: "Beta loaded.",
+        }, {
+          id: "read-alpha",
+          title: "Read alpha",
+          assignedAgentKind: "page-agent",
+          toolName: "browser.getContent",
+          requiredCapabilities: ["browser_navigate"],
+          executionMode: "direct_tool_call" as const,
+          dependsOn: ["navigate-alpha"],
+          outputContextKey: "alphaContent",
+          successCriteria: "Alpha content collected.",
+        }, {
+          id: "read-beta",
+          title: "Read beta",
+          assignedAgentKind: "page-agent",
+          toolName: "browser.getContent",
+          requiredCapabilities: ["browser_navigate"],
+          executionMode: "direct_tool_call" as const,
+          dependsOn: ["navigate-beta"],
+          outputContextKey: "betaContent",
+          successCriteria: "Beta content collected.",
+        }, {
+          id: "verify-pages",
+          title: "Verify both pages",
+          assignedAgentKind: "verifier",
+          toolName: "verifier.check",
+          requiredCapabilities: ["evidence_check"],
+          executionMode: "direct_tool_call" as const,
+          dependsOn: ["read-alpha", "read-beta"],
+          inputContextKeys: ["alphaContent", "betaContent"],
+          outputContextKey: "verificationResult",
+          successCriteria: "Both page results match their source URLs.",
+        }, {
+          id: "synthesize-pages",
+          title: "Summarize both pages",
+          assignedAgentKind: "commander",
+          toolName: "commander.synthesize",
+          requiredCapabilities: ["synthesis"],
+          executionMode: "direct_response" as const,
+          dependsOn: ["verify-pages"],
+          inputContextKeys: ["alphaContent", "betaContent", "verificationResult"],
+          successCriteria: "Return both page summaries.",
+        }],
+      })),
+      synthesize: vi.fn(async (request) => {
+        synthesisEvidence = JSON.stringify(request.evidence);
+        return { message: "Alpha page content.\nBeta page content." };
+      }),
+    };
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      browserTool: createBrowserTool({ navigate, getContent }),
+      verifierTool: {
+        check: vi.fn(async () => ({
+          status: "pass" as const,
+          summary: "Both browser pages are source-bound.",
+          detail: "Alpha and beta content URLs match their navigation outputs.",
+        })),
+      },
+      taskId: "task-serial-page-agent",
+      userGoal: "Read alpha and beta pages",
+    });
+
+    expect(browserOrder).toEqual([
+      "navigate:https://alpha.example/",
+      "content:https://alpha.example/",
+      "navigate:https://beta.example/",
+      "content:https://beta.example/",
+    ]);
+    expect(synthesisEvidence).toContain("Alpha page content");
+    expect(synthesisEvidence).toContain("Beta page content");
+    expect(emitted[emitted.length - 1]?.status).toBe("completed");
+  });
+});
+
 describe("executeCapabilityStep repository search dispatch", () => {
   it("dispatches code.searchRepository when the code tool implements it", async () => {
     const context = createSharedTaskContext({
@@ -3084,6 +3208,201 @@ describe("executeCapabilityStep repository search dispatch", () => {
     expect(context.get("repoSearch")).toMatchObject({
       keyFiles: ["packages/core/src/memory.ts"],
     });
+  });
+
+  it("rejects undeclared code.searchRepository input before the registry handler", async () => {
+    const searchRepository = vi.fn<NonNullable<CodeTool["searchRepository"]>>(async () => ({
+      actualFound: [],
+      inferred: [],
+      needsConfirmation: [],
+      keyFiles: [],
+      relatedTestFiles: [],
+      testFileCandidates: [],
+      clusters: [],
+      attempts: [],
+    }));
+
+    await expect(executeCapabilityStep(
+      {
+        id: "search-repo-invalid-input",
+        title: "Search repository",
+        assignedAgentKind: "code",
+        capability: "code_search",
+        requiredCapabilities: ["code_search"],
+        dependsOn: [],
+        toolInput: { goal: "find registry", typo: true },
+        successCriteria: "Repository search evidence is collected.",
+      },
+      createSharedTaskContext({}),
+      {
+        codeTool: {
+          inspectRepository: vi.fn(async () => ({
+            workspacePath: "E:/Javis",
+            changedFiles: [],
+            diffStat: "0 files changed",
+            diff: "",
+          })),
+          searchRepository,
+        },
+      },
+    )).rejects.toThrow("undeclared field: typo");
+    expect(searchRepository).not.toHaveBeenCalled();
+  });
+
+  it("rejects governed tool input that exceeds the descriptor byte limit", async () => {
+    const baseDescriptor = initialToolDescriptors.find(
+      (tool) => tool.name === "code.searchRepository",
+    );
+    expect(baseDescriptor).toBeDefined();
+    if (!baseDescriptor) return;
+    const descriptor: ToolDescriptor = {
+      ...baseDescriptor,
+      limits: { ...baseDescriptor.limits, maxInputBytes: 32 },
+    };
+    const searchRepository = vi.fn<NonNullable<CodeTool["searchRepository"]>>(async () => ({
+      actualFound: [],
+      inferred: [],
+      needsConfirmation: [],
+      keyFiles: [],
+      relatedTestFiles: [],
+      testFileCandidates: [],
+      clusters: [],
+      attempts: [],
+    }));
+
+    await expect(executeCapabilityStep(
+      {
+        id: "search-repo-large-input",
+        title: "Search repository",
+        assignedAgentKind: "code",
+        capability: "code_search",
+        requiredCapabilities: ["code_search"],
+        dependsOn: [],
+        toolInput: { goal: "x".repeat(100) },
+        successCriteria: "Repository search evidence is collected.",
+      },
+      createSharedTaskContext({}),
+      { codeTool: { inspectRepository: vi.fn(), searchRepository } },
+      { availableToolDescriptors: [descriptor] },
+    )).rejects.toThrow("exceeds maxInputBytes");
+    expect(searchRepository).not.toHaveBeenCalled();
+  });
+
+  it("rejects governed tool output that violates its schema before writing context", async () => {
+    const context = createSharedTaskContext({});
+    const searchRepository = vi.fn(async () => ({
+      actualFound: [],
+      inferred: [],
+      needsConfirmation: [],
+      keyFiles: [],
+      relatedTestFiles: [],
+      testFileCandidates: [],
+      clusters: [],
+      attempts: [],
+      undeclared: true,
+    }));
+
+    await expect(executeCapabilityStep(
+      {
+        id: "search-repo-invalid-output",
+        title: "Search repository",
+        assignedAgentKind: "code",
+        capability: "code_search",
+        requiredCapabilities: ["code_search"],
+        dependsOn: [],
+        toolInput: { goal: "find registry" },
+        outputContextKey: "repoSearch",
+        successCriteria: "Repository search evidence is collected.",
+      },
+      context,
+      { codeTool: { inspectRepository: vi.fn(), searchRepository } },
+    )).rejects.toThrow("Tool code.searchRepository output contains an undeclared field: undeclared");
+    expect(context.has("repoSearch")).toBe(false);
+  });
+
+  it("rejects governed tool output that exceeds the descriptor byte limit", async () => {
+    const baseDescriptor = initialToolDescriptors.find(
+      (tool) => tool.name === "code.searchRepository",
+    );
+    expect(baseDescriptor).toBeDefined();
+    if (!baseDescriptor) return;
+    const descriptor: ToolDescriptor = {
+      ...baseDescriptor,
+      limits: { ...baseDescriptor.limits, maxOutputBytes: 32 },
+    };
+
+    await expect(executeCapabilityStep(
+      {
+        id: "search-repo-large-output",
+        title: "Search repository",
+        assignedAgentKind: "code",
+        capability: "code_search",
+        requiredCapabilities: ["code_search"],
+        dependsOn: [],
+        toolInput: { goal: "find registry" },
+        outputContextKey: "repoSearch",
+        successCriteria: "Repository search evidence is collected.",
+      },
+      createSharedTaskContext({}),
+      {
+        codeTool: {
+          inspectRepository: vi.fn(),
+          searchRepository: vi.fn(async () => ({
+            actualFound: [],
+            inferred: [],
+            needsConfirmation: [],
+            keyFiles: [],
+            relatedTestFiles: [],
+            testFileCandidates: [],
+            clusters: [],
+            attempts: [],
+          })),
+        },
+      },
+      { availableToolDescriptors: [descriptor] },
+    )).rejects.toThrow("exceeds maxOutputBytes");
+  });
+
+  it("uses the governed descriptor timeout when it is lower than the caller timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const baseDescriptor = initialToolDescriptors.find(
+        (tool) => tool.name === "code.searchRepository",
+      );
+      expect(baseDescriptor).toBeDefined();
+      if (!baseDescriptor) return;
+      const descriptor: ToolDescriptor = {
+        ...baseDescriptor,
+        limits: { ...baseDescriptor.limits, timeoutMs: 10 },
+      };
+      const execution = executeCapabilityStep(
+        {
+          id: "search-repo-timeout",
+          title: "Search repository",
+          assignedAgentKind: "code",
+          capability: "code_search",
+          requiredCapabilities: ["code_search"],
+          dependsOn: [],
+          toolInput: { goal: "find registry" },
+          successCriteria: "Repository search evidence is collected.",
+        },
+        createSharedTaskContext({}),
+        {
+          codeTool: {
+            inspectRepository: vi.fn(),
+            searchRepository: vi.fn<NonNullable<CodeTool["searchRepository"]>>(
+              () => new Promise(() => undefined),
+            ),
+          },
+        },
+        { availableToolDescriptors: [descriptor], timeoutMs: 5_000 },
+      );
+      const assertion = expect(execution).rejects.toThrow("timed out after 10ms");
+      await vi.advanceTimersByTimeAsync(10);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not dispatch code.searchRepository when the code tool omits it", async () => {
@@ -4189,7 +4508,6 @@ describe("runCommanderDagTask plan repair loop", () => {
         title: "Analyze",
         assignedAgentKind: "code",
         toolName: "code.inspectRepository",
-        toolInput: { workspacePath: "E:/Javis" },
         requiredCapabilities: [],
         dependsOn: ["ghost-step"],
         successCriteria: "Done.",
@@ -4203,7 +4521,6 @@ describe("runCommanderDagTask plan repair loop", () => {
         title: "Analyze",
         assignedAgentKind: "code",
         toolName: "code.inspectRepository",
-        toolInput: { workspacePath: "E:/Javis" },
         requiredCapabilities: [],
         dependsOn: [],
         successCriteria: "Done.",
@@ -6121,6 +6438,38 @@ describe("executeCapabilityStep permissions", () => {
     });
   });
 
+  it("rejects browser content from a different page than its navigation dependency", async () => {
+    const context = createSharedTaskContext({
+      "step:navigate-alpha": {
+        url: "https://alpha.example/",
+        title: "Alpha",
+        status: 200,
+        loadState: "load",
+      },
+    });
+    const browserTool = createBrowserTool({
+      getContent: vi.fn(async () => ({
+        content: "Beta page content",
+        url: "https://beta.example/",
+        title: "Beta",
+      })),
+    });
+
+    await expect(executeCapabilityStep(
+      {
+        id: "read-alpha",
+        title: "Read alpha",
+        assignedAgentKind: "page-agent",
+        toolName: "browser.getContent",
+        requiredCapabilities: ["browser_navigate"],
+        dependsOn: ["navigate-alpha"],
+        successCriteria: "Alpha content extracted.",
+      },
+      context,
+      { browserTool },
+    )).rejects.toThrow(/different page.*alpha\.example.*beta\.example/u);
+  });
+
   it("dispatches explicit installed app scans through the FileTool contract", async () => {
     const scanInstalledApps = vi.fn<NonNullable<FileTool["scanInstalledApps"]>>(async () => [{
       name: "Calculator",
@@ -7473,12 +7822,20 @@ describe("executeCapabilityStep permissions", () => {
           result,
           cancel: vi.fn(),
           events: (async function* (): AsyncGenerator<AgentEvent> {
+            const runtimeEventIdentity = {
+              runId: request.runId,
+              workflowRunId: request.workflowRunId,
+              agentRunId: request.agentRunId,
+              stepId: request.stepId,
+              attempt: request.attempt,
+            };
             yield { type: "run.started", runId: request.runId };
             yield { type: "model.started", callIndex: 1 };
             yield {
               type: "tool.requested",
               toolCallId: "call-1",
               toolName: toolSpecs[0]!.canonicalName,
+              ...runtimeEventIdentity,
             };
             yield {
               type: "usage.updated",
@@ -7489,6 +7846,7 @@ describe("executeCapabilityStep permissions", () => {
               type: "tool.started",
               toolCallId: "call-1",
               toolName: toolSpecs[0]!.canonicalName,
+              ...runtimeEventIdentity,
             };
             const completed = await result;
             if (completed.status === "completed") {
@@ -7497,6 +7855,7 @@ describe("executeCapabilityStep permissions", () => {
                 toolCallId: "call-1",
                 toolName: toolSpecs[0]!.canonicalName,
                 output: { ok: true },
+                ...runtimeEventIdentity,
               };
               yield { type: "model.started", callIndex: 2 };
               yield { type: "model.delta", delta: "Rust " };
@@ -7513,6 +7872,7 @@ describe("executeCapabilityStep permissions", () => {
       },
     }));
     const { controller, emitted } = createTestController();
+    const runtimeEvents: RuntimeEventEnvelope[] = [];
     const getAgentRuntimeBackend = vi.fn(() => "langchain" as const);
 
     await runCommanderDagTask({
@@ -7531,6 +7891,11 @@ describe("executeCapabilityStep permissions", () => {
       reactDecideNext,
       getAgentRuntimeBackend,
       createAgentRuntime,
+      runtimeEventSink: {
+        append: async (event) => {
+          runtimeEvents.push(event);
+        },
+      },
       taskId: "task-langchain-runtime",
       userGoal: "research rust",
       availableToolDescriptors: initialToolDescriptors,
@@ -7579,12 +7944,32 @@ describe("executeCapabilityStep permissions", () => {
     expect(finalSnapshot?.streamingText).toBeUndefined();
     expect(finalSnapshot?.isStreaming).toBe(false);
     const toolCallLogs = finalSnapshot?.logs.filter((log) => log.detail.includes("call-1")) ?? [];
-    expect(toolCallLogs).toHaveLength(3);
+    expect(toolCallLogs).toHaveLength(4);
     expect(toolCallLogs.map((log) => log.title)).toEqual([
       "tool_call.planned",
+      "tool_call.started",
       "waiting_tool",
       "tool_call.updated",
     ]);
+    const persistedToolEvents = runtimeEvents.filter((event) =>
+      (event.payload as { toolCallId?: string }).toolCallId === "call-1" &&
+      ["tool.planned", "tool.started", "tool.completed", "tool.failed"].includes(
+        (event.payload as { kind?: string }).kind ?? "",
+      )
+    );
+    expect(persistedToolEvents.map((event) => (event.payload as { kind: string }).kind)).toEqual([
+      "tool.planned",
+      "tool.started",
+      "tool.completed",
+    ]);
+    expect(persistedToolEvents[1]).toMatchObject({
+      stepId: "langchain-search",
+      payload: {
+        toolCallId: "call-1",
+        agentRunId: expect.stringContaining(":langchain-search:agent-attempt-1"),
+        attempt: 1,
+      },
+    });
   });
 
   it("routes an explicitly selected preview tool through AgentRuntime without exposing writes", async () => {

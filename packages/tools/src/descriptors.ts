@@ -1,4 +1,4 @@
-import type { ToolDescriptor } from "./types";
+import type { ToolDescriptor, ToolJsonSchema } from "./types";
 
 const DISABLED_BROWSER_WRITE_TOOL_NAMES = new Set([
   "browser.upload",
@@ -7,6 +7,206 @@ const DISABLED_BROWSER_WRITE_TOOL_NAMES = new Set([
 export function isDisabledBrowserWriteToolName(toolName: string): boolean {
   return DISABLED_BROWSER_WRITE_TOOL_NAMES.has(toolName);
 }
+
+const governedToolLimits = {
+  timeoutMs: 90_000,
+  maxInputBytes: 16_384,
+  maxOutputBytes: 262_144,
+};
+
+const stringSchema: ToolJsonSchema = { type: "string" };
+const nonEmptyStringSchema: ToolJsonSchema = { type: "string", minLength: 1, pattern: "\\S" };
+const finiteNumberSchema: ToolJsonSchema = { type: "number" };
+const integerSchema: ToolJsonSchema = { type: "integer" };
+
+function objectSchema(
+  properties: Record<string, ToolJsonSchema>,
+  required: string[] = Object.keys(properties),
+): ToolJsonSchema {
+  return { type: "object", properties, required, additionalProperties: false };
+}
+
+function stringArraySchema(maxItems?: number): ToolJsonSchema {
+  return {
+    type: "array",
+    items: stringSchema,
+    ...(maxItems === undefined ? {} : { maxItems }),
+  };
+}
+
+const markdownDocumentSchema = objectSchema({
+  path: nonEmptyStringSchema,
+  modifiedAt: stringSchema,
+  sizeBytes: finiteNumberSchema,
+  heading: stringSchema,
+  excerpt: stringSchema,
+}, ["path", "modifiedAt", "sizeBytes"]);
+
+const computerFileCandidateSchema = objectSchema({
+  name: nonEmptyStringSchema,
+  path: nonEmptyStringSchema,
+  isDir: { type: "boolean" },
+  sizeBytes: finiteNumberSchema,
+  modifiedAt: stringSchema,
+  extension: stringSchema,
+}, ["name", "path", "isDir"]);
+
+const codeSearchEvidenceSchema = objectSchema({
+  path: nonEmptyStringSchema,
+  line: integerSchema,
+  column: integerSchema,
+  excerpt: stringSchema,
+  matchedTerms: stringArraySchema(),
+  score: finiteNumberSchema,
+}, ["path", "excerpt", "matchedTerms"]);
+
+const codeSearchAttemptSchema = objectSchema({
+  id: nonEmptyStringSchema,
+  query: stringSchema,
+  reason: stringSchema,
+  resultCount: integerSchema,
+  status: { type: "string", enum: ["completed", "failed"] },
+  durationMs: finiteNumberSchema,
+  error: stringSchema,
+  errorKind: { type: "string", enum: ["timeout", "unavailable", "permission", "cancelled", "unknown"] },
+  provider: stringSchema,
+  retryCount: integerSchema,
+}, ["id", "query", "reason"]);
+
+const codeSearchOutputSchema = objectSchema({
+  actualFound: { type: "array", items: codeSearchEvidenceSchema },
+  inferred: stringArraySchema(),
+  needsConfirmation: stringArraySchema(),
+  keyFiles: stringArraySchema(),
+  relatedTestFiles: stringArraySchema(),
+  testFileCandidates: stringArraySchema(),
+  clusters: {
+    type: "array",
+    items: objectSchema({
+      id: nonEmptyStringSchema,
+      label: nonEmptyStringSchema,
+      paths: stringArraySchema(),
+      resultCount: integerSchema,
+      score: finiteNumberSchema,
+      topTerms: stringArraySchema(),
+    }),
+  },
+  semanticDiagnostics: {
+    type: "array",
+    items: objectSchema({
+      provider: nonEmptyStringSchema,
+      status: { type: "string", enum: ["completed", "failed", "skipped"] },
+      candidateCount: integerSchema,
+      rerankedCount: integerSchema,
+      durationMs: finiteNumberSchema,
+      error: stringSchema,
+    }, ["provider", "status", "candidateCount", "rerankedCount"]),
+  },
+  attempts: { type: "array", items: codeSearchAttemptSchema },
+}, [
+  "actualFound",
+  "inferred",
+  "needsConfirmation",
+  "keyFiles",
+  "relatedTestFiles",
+  "testFileCandidates",
+  "clusters",
+  "attempts",
+]);
+
+const traceEvidenceSchema = objectSchema({
+  path: nonEmptyStringSchema,
+  line: integerSchema,
+  column: integerSchema,
+  excerpt: stringSchema,
+  matchedTerms: stringArraySchema(),
+  symbol: stringSchema,
+  score: finiteNumberSchema,
+}, ["path", "excerpt", "matchedTerms"]);
+
+const tracePackageHintSchema = objectSchema({
+  manifestPath: nonEmptyStringSchema,
+  name: stringSchema,
+  main: stringSchema,
+  module: stringSchema,
+  types: stringSchema,
+  exports: stringArraySchema(),
+}, ["manifestPath"]);
+
+const traceModuleLinkSchema = objectSchema({
+  specifier: nonEmptyStringSchema,
+  kind: { type: "string", enum: ["relative", "workspace", "external"] },
+  evidencePaths: stringArraySchema(),
+  importCount: integerSchema,
+  exportCount: integerSchema,
+  dynamicImportCount: integerSchema,
+  confidence: finiteNumberSchema,
+  resolutionStatus: { type: "string", enum: ["resolved", "unresolved", "failed"] },
+  resolvedPaths: stringArraySchema(),
+  resolverProvider: stringSchema,
+  resolutionError: stringSchema,
+  packageHints: { type: "array", items: tracePackageHintSchema },
+}, [
+  "specifier",
+  "kind",
+  "evidencePaths",
+  "importCount",
+  "exportCount",
+  "dynamicImportCount",
+  "confidence",
+]);
+
+const traceSymbolNodeSchema = objectSchema({
+  id: nonEmptyStringSchema,
+  kind: { type: "string", enum: ["file", "symbol"] },
+  label: nonEmptyStringSchema,
+  path: stringSchema,
+  symbol: stringSchema,
+  confidence: finiteNumberSchema,
+}, ["id", "kind", "label", "confidence"]);
+
+const traceSymbolEdgeSchema = objectSchema({
+  from: nonEmptyStringSchema,
+  to: nonEmptyStringSchema,
+  relation: { type: "string", enum: ["declares", "references", "imports", "exports", "calls"] },
+  evidencePath: nonEmptyStringSchema,
+  line: integerSchema,
+  confidence: finiteNumberSchema,
+}, ["from", "to", "relation", "evidencePath", "confidence"]);
+
+const traceOutputSchema = objectSchema({
+  target: nonEmptyStringSchema,
+  direction: { type: "string", enum: ["forward", "backward", "bidirectional"] },
+  actualFound: { type: "array", items: traceEvidenceSchema },
+  nodes: { type: "array", items: objectSchema({
+    id: nonEmptyStringSchema,
+    label: nonEmptyStringSchema,
+    kind: { type: "string", enum: ["target", "entrypoint", "candidate"] },
+    path: stringSchema,
+    symbol: stringSchema,
+    score: finiteNumberSchema,
+  }, ["id", "label", "kind", "score"]) },
+  edges: { type: "array", items: objectSchema({
+    from: nonEmptyStringSchema,
+    to: nonEmptyStringSchema,
+    relation: { type: "string", enum: ["references", "may_call", "imports", "exports", "entrypoint_to_candidate"] },
+    evidencePath: nonEmptyStringSchema,
+    line: integerSchema,
+    excerpt: stringSchema,
+    confidence: finiteNumberSchema,
+    moduleSpecifier: stringSchema,
+    moduleKind: { type: "string", enum: ["relative", "workspace", "external"] },
+  }, ["from", "to", "relation", "evidencePath", "excerpt", "confidence"]) },
+  moduleLinks: { type: "array", items: traceModuleLinkSchema },
+  symbolGraph: objectSchema({
+    nodes: { type: "array", items: traceSymbolNodeSchema },
+    edges: { type: "array", items: traceSymbolEdgeSchema },
+  }),
+  inferred: stringArraySchema(),
+  needsConfirmation: stringArraySchema(),
+  keyFiles: stringArraySchema(),
+  attempts: { type: "array", items: codeSearchAttemptSchema },
+});
 
 export const initialToolDescriptors: ToolDescriptor[] = [
   // ── Commander ──────────────────────────────────────────────────────────
@@ -48,6 +248,9 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Scan Markdown documents inside the active workspace.",
     capabilityTags: ["file_scan"],
     ownerAgentKinds: ["file", "verifier", "doc-updater", "explorer"],
+    inputSchema: objectSchema({}),
+    outputSchema: { type: "array", items: markdownDocumentSchema },
+    limits: governedToolLimits,
   },
   {
     name: "file.scanUserDocuments",
@@ -146,6 +349,14 @@ export const initialToolDescriptors: ToolDescriptor[] = [
       "perf-analyzer",
       "refactor",
     ],
+    inputSchema: objectSchema({}),
+    outputSchema: objectSchema({
+      workspacePath: nonEmptyStringSchema,
+      changedFiles: stringArraySchema(),
+      diffStat: stringSchema,
+      diff: stringSchema,
+    }),
+    limits: governedToolLimits,
   },
   {
     name: "code.searchRepository",
@@ -164,6 +375,17 @@ export const initialToolDescriptors: ToolDescriptor[] = [
       "perf-analyzer",
       "refactor",
     ],
+    requiredInputs: [{ name: "goal", type: "string", nonEmpty: true }],
+    inputSchema: objectSchema({
+      goal: nonEmptyStringSchema,
+      knownTerms: stringArraySchema(64),
+      entryFile: nonEmptyStringSchema,
+      priorityPaths: stringArraySchema(64),
+      maxAttempts: { type: "integer", minimum: 1, maximum: 20 },
+      maxKeyFiles: { type: "integer", minimum: 1, maximum: 20 },
+    }, ["goal"]),
+    outputSchema: codeSearchOutputSchema,
+    limits: governedToolLimits,
   },
   {
     name: "code.traceCallChain",
@@ -180,6 +402,23 @@ export const initialToolDescriptors: ToolDescriptor[] = [
       "perf-analyzer",
       "refactor",
     ],
+    requiredInputs: [
+      { name: "goal", type: "string", nonEmpty: true },
+      { name: "target", type: "string", nonEmpty: true },
+    ],
+    inputSchema: objectSchema({
+      goal: nonEmptyStringSchema,
+      target: nonEmptyStringSchema,
+      entrypoints: stringArraySchema(64),
+      workspaceModulePrefixes: stringArraySchema(64),
+      direction: { type: "string", enum: ["forward", "backward", "bidirectional"] },
+      maxDepth: { type: "integer", minimum: 1, maximum: 20 },
+      maxEdges: { type: "integer", minimum: 1, maximum: 100 },
+      knownTerms: stringArraySchema(64),
+      maxAttempts: { type: "integer", minimum: 1, maximum: 20 },
+    }, ["goal", "target"]),
+    outputSchema: traceOutputSchema,
+    limits: governedToolLimits,
   },
   {
     name: "code.proposeEdit",
@@ -306,6 +545,9 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     capabilityTags: ["directory_list"],
     ownerAgentKinds: ["computer"],
     requiredInputs: [{ name: "path", type: "string", nonEmpty: true }],
+    inputSchema: objectSchema({ path: nonEmptyStringSchema }),
+    outputSchema: { type: "array", items: computerFileCandidateSchema },
+    limits: governedToolLimits,
   },
   {
     name: "computer.openPath",

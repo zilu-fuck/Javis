@@ -71,9 +71,18 @@ export interface AgentReActLoopOptions {
   }): Promise<AgentReActDecision> | AgentReActDecision;
   /** Called after each ReAct iteration (tool execution) to emit progress snapshots. */
   onIteration?: (iteration: number, observation: AgentReActObservation) => void;
+  onToolEvent?: (event: AgentReActToolEvent) => void;
   onWaiting?: (phase: "waiting_model" | "waiting_tool", iteration: number, detail: string) => void;
   onTimeout?: (phase: "waiting_model" | "waiting_tool", iteration: number, detail: string) => void;
   onRunMetrics?: (metrics: AgentRuntimeRunMetrics) => void;
+}
+
+export interface AgentReActToolEvent {
+  phase: "requested" | "started" | "completed" | "failed";
+  toolCallId: string;
+  toolName: string;
+  reason?: string;
+  outputTruncated?: boolean;
 }
 
 export interface AgentReActLoopResult {
@@ -285,8 +294,19 @@ async function runAgentReActLoopInternal(
       };
     }
 
+    const toolCallId = `${step.id}:react:${iteration}`;
+    options.onToolEvent?.({
+      phase: "requested",
+      toolCallId,
+      toolName: decision.toolName,
+    });
     let observation: AgentReActObservation;
     try {
+      options.onToolEvent?.({
+        phase: "started",
+        toolCallId,
+        toolName: decision.toolName,
+      });
       options.onWaiting?.("waiting_tool", iteration, `Waiting for tool ${decision.toolName}.`);
       const output = await withTaskTimeout(
         () => tool.execute({
@@ -323,6 +343,13 @@ async function runAgentReActLoopInternal(
       };
     }
     observations.push(observation);
+    options.onToolEvent?.({
+      phase: observation.status === "succeeded" ? "completed" : "failed",
+      toolCallId,
+      toolName: decision.toolName,
+      ...(observation.error ? { reason: observation.error } : {}),
+      ...(observation.outputTruncated ? { outputTruncated: true } : {}),
+    });
     writeBoundedObservationContext(context, step.id, observations);
     options.onIteration?.(iteration, observation);
     if (

@@ -5,6 +5,43 @@ export type PermissionLevel = "read" | "preview" | "confirmed_write" | "dangerou
 /** Risk classification for confirmed_write operations. */
 export type WriteRiskLevel = "safe" | "risky" | "dangerous";
 
+/**
+ * Bounded JSON Schema subset used by first-party tools.
+ *
+ * The schema is deliberately data-only so it can be consumed by planners,
+ * model adapters, and runtime guards without importing an execution layer.
+ */
+export type ToolJsonSchemaType =
+  | "object"
+  | "array"
+  | "string"
+  | "number"
+  | "integer"
+  | "boolean";
+
+export interface ToolJsonSchema {
+  type?: ToolJsonSchemaType;
+  description?: string;
+  properties?: Readonly<Record<string, ToolJsonSchema>>;
+  required?: readonly string[];
+  additionalProperties?: boolean;
+  items?: ToolJsonSchema;
+  enum?: readonly (string | number | boolean | null)[];
+  minLength?: number;
+  maxLength?: number;
+  pattern?: string;
+  minItems?: number;
+  maxItems?: number;
+  minimum?: number;
+  maximum?: number;
+}
+
+export interface ToolLimits {
+  timeoutMs?: number;
+  maxInputBytes?: number;
+  maxOutputBytes?: number;
+}
+
 /** Human-readable risk labels (bilingual). */
 export const WRITE_RISK_LABELS: Record<WriteRiskLevel, { en: string; zhCN: string }> = {
   safe:       { en: "Safe",       zhCN: "安全" },
@@ -1469,6 +1506,12 @@ export interface ToolDescriptor {
   capabilityTags: string[];
   /** Agent kinds that are allowed to use this tool. */
   ownerAgentKinds: string[];
+  /** Complete input contract for tools migrated to the governed registry. */
+  inputSchema?: ToolJsonSchema;
+  /** Shape of the successful tool result, for model/planner/UI consumers. */
+  outputSchema?: ToolJsonSchema;
+  /** Resource and payload bounds enforced by the execution layer. */
+  limits?: ToolLimits;
   /**
    * Required fields on `toolInput` for this tool. Shared between the plan
    * compiler and planner prompt via descriptor-derived Zod schema; the

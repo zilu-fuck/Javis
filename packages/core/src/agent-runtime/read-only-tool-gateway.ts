@@ -1,6 +1,7 @@
 import {
   sanitizeMcpInputSchema,
   validateMcpInput,
+  validateToolSchema,
   type PermissionLevel,
   type ToolDescriptor,
 } from "@javis/tools";
@@ -88,6 +89,14 @@ export function createScopedToolExecutionGateway(
       }
       const inputError = validateRequiredInputs(descriptor, request.input);
       if (inputError) return { status: "error", reason: inputError };
+      if (descriptor.inputSchema) {
+        const schemaError = validateToolSchema(
+          descriptor.inputSchema,
+          request.input,
+          `Tool ${descriptor.name} input`,
+        );
+        if (schemaError) return { status: "error", reason: schemaError };
+      }
       if (descriptor.metadata?.mcpInputSchema !== undefined) {
         const schema = sanitizeMcpInputSchema(descriptor.metadata.mcpInputSchema);
         if (!schema) {

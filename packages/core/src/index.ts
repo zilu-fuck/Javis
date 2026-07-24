@@ -2195,9 +2195,12 @@ export function createFileScanTaskRuntime({
         },
       ],
       tokenUsage: cloneTokenUsageSummary(initialTokenUsage),
-      streamingText: "",
-      streamingAgentKind: "commander",
-      isStreaming: true,
+      // The immediate feedback message is already visible to the user. Do not
+      // represent an empty stream as active output, otherwise the UI shows a
+      // thinking carousel before any model content exists.
+      streamingText: undefined,
+      streamingAgentKind: undefined,
+      isStreaming: false,
     });
   }
 

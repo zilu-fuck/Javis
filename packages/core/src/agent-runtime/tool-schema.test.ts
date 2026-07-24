@@ -37,6 +37,20 @@ describe("agent tool schemas", () => {
     })).toBe(mcpInputSchema);
   });
 
+  it("uses a governed first-party schema and rejects undeclared fields", () => {
+    const inputSchema = {
+      type: "object",
+      properties: { query: { type: "string", minLength: 1 } },
+      required: ["query"],
+      additionalProperties: false,
+    } as const;
+
+    expect(toolDescriptorToJsonSchema({
+      ...baseDescriptor,
+      inputSchema,
+    })).toBe(inputSchema);
+  });
+
   it("keeps canonical and provider names separate", () => {
     expect(toolDescriptorsToAgentToolSpecs([baseDescriptor])).toEqual([{
       canonicalName: "web.search",

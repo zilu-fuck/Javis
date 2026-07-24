@@ -86,4 +86,40 @@ describe("scoped Agent runtime tool gateway", () => {
     });
     expect(dispatch).not.toHaveBeenCalled();
   });
+
+  it("enforces governed first-party schemas before dispatch", async () => {
+    const descriptor = initialToolDescriptors.find(
+      (candidate) => candidate.name === "code.searchRepository",
+    );
+    expect(descriptor).toBeDefined();
+    if (!descriptor) return;
+    const dispatch = vi.fn(async () => ({ ok: true }));
+    const gateway = createReadOnlyToolExecutionGateway({
+      descriptors: [descriptor],
+      getAllowedToolNames: () => [descriptor.name],
+      dispatch,
+    });
+
+    await expect(gateway.execute({
+      taskId: "task-schema",
+      runId: "run-schema",
+      agentKind: "code",
+      toolName: descriptor.name,
+      input: { goal: "find registry", typo: true },
+    })).resolves.toMatchObject({
+      status: "error",
+      reason: expect.stringContaining("undeclared field: typo"),
+    });
+    await expect(gateway.execute({
+      taskId: "task-schema",
+      runId: "run-schema",
+      agentKind: "code",
+      toolName: descriptor.name,
+      input: { goal: "find registry", maxAttempts: 0 },
+    })).resolves.toMatchObject({
+      status: "error",
+      reason: expect.stringContaining("greater than or equal to 1"),
+    });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
 });

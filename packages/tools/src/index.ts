@@ -4,4 +4,5 @@ export * from "./mcp-tool-names";
 export * from "./mcp-input-schema";
 export * from "./plan-schema";
 export * from "./text-write-path";
+export * from "./tool-schema-validation";
 export type * from "./types";

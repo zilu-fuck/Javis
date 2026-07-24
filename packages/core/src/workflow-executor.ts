@@ -39,6 +39,7 @@ import {
   normalizeWorkspaceRelativeTextTargetPath,
   sanitizeMcpInputSchema,
   validateMcpInput,
+  validateToolSchema,
 } from "@javis/tools";
 import { summarizeMarkdownDocuments } from "@javis/tools";
 import {
@@ -1441,6 +1442,7 @@ function toolDescriptorsForPlanner(
     summary: descriptor.summary,
     capabilityTags: descriptor.capabilityTags,
     ownerAgentKinds: descriptor.ownerAgentKinds,
+    ...(descriptor.inputSchema ? { inputSchema: descriptor.inputSchema } : {}),
     ...(descriptor.requiredInputs ? { requiredInputs: descriptor.requiredInputs } : {}),
     ...(descriptor.metadata ? { metadata: descriptor.metadata } : {}),
   }));
@@ -2349,6 +2351,91 @@ export function isAcademicSearchIntent(query: string): boolean {
   return /academic|paper|literature|scholar|research.paper|doi:|citation|arxiv|semantic[._-]?scholar|学术|论文|研究文献/i.test(query);
 }
 
+type GovernedToolHandler = (input: Record<string, unknown>) => Promise<unknown>;
+
+/**
+ * First-party handlers migrated to the contract registry. The remaining
+ * legacy handlers stay below until their descriptors have complete schemas.
+ */
+function createGovernedToolHandlerRegistry(
+  tools: AllCapabilityTools,
+): ReadonlyMap<string, GovernedToolHandler> {
+  return new Map<string, GovernedToolHandler>([
+    ["file.scanMarkdownDocuments", async () => {
+      if (!tools.fileTool) throw new Error("file.scanMarkdownDocuments tool not available");
+      return tools.fileTool.scanMarkdownDocuments();
+    }],
+    ["code.inspectRepository", async () => {
+      if (!tools.codeTool) throw new Error("code.inspectRepository tool not available");
+      return tools.codeTool.inspectRepository();
+    }],
+    ["code.searchRepository", async (input) => {
+      if (!tools.codeTool?.searchRepository) throw new Error("code.searchRepository tool not available");
+      return tools.codeTool.searchRepository({
+        goal: input.goal as string,
+        knownTerms: input.knownTerms as string[] | undefined,
+        entryFile: input.entryFile as string | undefined,
+        priorityPaths: input.priorityPaths as string[] | undefined,
+        maxAttempts: input.maxAttempts as number | undefined,
+        maxKeyFiles: input.maxKeyFiles as number | undefined,
+      });
+    }],
+    ["code.traceCallChain", async (input) => {
+      if (!tools.codeTool?.traceCallChain) throw new Error("code.traceCallChain tool not available");
+      return tools.codeTool.traceCallChain({
+        goal: input.goal as string,
+        target: input.target as string,
+        entrypoints: input.entrypoints as string[] | undefined,
+        workspaceModulePrefixes: input.workspaceModulePrefixes as string[] | undefined,
+        direction: input.direction as "forward" | "backward" | "bidirectional" | undefined,
+        maxDepth: input.maxDepth as number | undefined,
+        maxEdges: input.maxEdges as number | undefined,
+        knownTerms: input.knownTerms as string[] | undefined,
+        maxAttempts: input.maxAttempts as number | undefined,
+      });
+    }],
+    ["computer.listDirectory", async (input) => {
+      if (!tools.computerTool) throw new Error("computer.listDirectory tool not available");
+      assertRequiredComputerPathInput("computer.listDirectory", input);
+      return tools.computerTool.listDirectory({ path: input.path });
+    }],
+  ]);
+}
+
+function getBrowserNavigationDependencyUrl(
+  step: CommanderDagStep,
+  context: SharedTaskContext,
+): string | undefined {
+  for (const dependencyId of [...(step.dependsOn ?? [])].reverse()) {
+    const output = context.get(`step:${dependencyId}`);
+    if (
+      !isPlainRecord(output) ||
+      typeof output.url !== "string" ||
+      typeof output.status !== "number" ||
+      typeof output.loadState !== "string"
+    ) {
+      continue;
+    }
+    const url = output.url.trim();
+    if (url) return url;
+  }
+  return undefined;
+}
+
+function browserPageUrlsMatch(expectedUrl: string, actualUrl: string): boolean {
+  const normalize = (value: string): string | undefined => {
+    try {
+      const url = new URL(value);
+      url.hash = "";
+      return url.toString();
+    } catch {
+      const trimmed = value.trim();
+      return trimmed || undefined;
+    }
+  };
+  return normalize(expectedUrl) === normalize(actualUrl);
+}
+
 /**
  * Dispatch a tool by name to its concrete implementation.
  * Maps tool names from ToolDescriptor to the corresponding tool interface method.
@@ -2359,15 +2446,18 @@ async function dispatchToolByName(
   tools: AllCapabilityTools,
   toolDescriptors: readonly ToolDescriptor[] = DEFAULT_AVAILABLE_TOOL_DESCRIPTORS,
   onModelUsage?: (usage: ModelUsage) => void,
+  step?: CommanderDagStep,
+  context?: SharedTaskContext,
 ): Promise<unknown> {
-  if (!findToolDescriptorByNameIn(toolDescriptors, toolName)) {
+  const descriptor = findToolDescriptorByNameIn(toolDescriptors, toolName);
+  if (!descriptor) {
     throw new Error(`Tool ${toolName} is not available.`);
   }
   assertToolCanDispatchWithoutApproval(toolName, toolDescriptors);
+  validateToolDescriptorInputs(descriptor, input);
 
   if (toolName.startsWith("mcp.")) {
     if (!tools.mcpTool) throw new Error("MCP tool bridge is not available");
-    const descriptor = findToolDescriptorByNameIn(toolDescriptors, toolName);
     const parsedMcpTool = parseMcpToolName(toolName, descriptor);
     if (!parsedMcpTool) {
       throw new Error(`Invalid MCP tool name: ${toolName}`);
@@ -2407,6 +2497,9 @@ async function dispatchToolByName(
       ...(parsedMcpTool.action === "listTools" ? { timeoutMs: MCP_LIST_TOOLS_TIMEOUT_MS } : {}),
     });
   }
+
+  const registeredHandler = createGovernedToolHandlerRegistry(tools).get(toolName);
+  if (registeredHandler) return registeredHandler(input);
 
   switch (toolName) {
     // ── Web tools ─────────────────────────────────────────────────────────
@@ -2460,10 +2553,6 @@ async function dispatchToolByName(
       });
     }
     // ── File tools ────────────────────────────────────────────────────────
-    case "file.scanMarkdownDocuments": {
-      if (!tools.fileTool) throw new Error("file.scanMarkdownDocuments tool not available");
-      return tools.fileTool.scanMarkdownDocuments();
-    }
     case "file.planPdfOrganization": {
       if (!tools.fileTool?.planPdfOrganization) throw new Error("file.planPdfOrganization tool not available");
       return tools.fileTool.planPdfOrganization(input.taskId as string | undefined);
@@ -2527,11 +2616,20 @@ async function dispatchToolByName(
     }
     case "browser.getContent": {
       if (!tools.browserTool) throw new Error("browser.getContent tool not available");
-      return tools.browserTool.getContent({
+      const result = await tools.browserTool.getContent({
         selector: input.selector as string | undefined,
         format: (input.format as "text" | "html" | "markdown") ?? "text",
         maxLength: (input.maxLength as number) ?? 5000,
       });
+      const expectedUrl = step && context
+        ? getBrowserNavigationDependencyUrl(step, context)
+        : undefined;
+      if (expectedUrl && !browserPageUrlsMatch(expectedUrl, result.url)) {
+        throw new Error(
+          `browser.getContent read a different page than its navigation dependency: expected ${expectedUrl}, received ${result.url || "(empty URL)"}.`,
+        );
+      }
+      return result;
     }
     case "browser.extractLinks": {
       if (!tools.browserTool?.extractLinks) throw new Error("browser.extractLinks tool not available");
@@ -2571,47 +2669,6 @@ async function dispatchToolByName(
       });
     }
     // ── Code tools ────────────────────────────────────────────────────────
-    case "code.inspectRepository": {
-      if (!tools.codeTool) throw new Error("code.inspectRepository tool not available");
-      return tools.codeTool.inspectRepository();
-    }
-    case "code.searchRepository": {
-      if (!tools.codeTool?.searchRepository) throw new Error("code.searchRepository tool not available");
-      return tools.codeTool.searchRepository({
-        goal: String(input.goal ?? input.query ?? input.userGoal ?? ""),
-        knownTerms: Array.isArray(input.knownTerms)
-          ? input.knownTerms.filter((term): term is string => typeof term === "string")
-          : undefined,
-        entryFile: typeof input.entryFile === "string" ? input.entryFile : undefined,
-        priorityPaths: Array.isArray(input.priorityPaths)
-          ? input.priorityPaths.filter((path): path is string => typeof path === "string" && path.trim().length > 0)
-          : undefined,
-        maxAttempts: typeof input.maxAttempts === "number" ? input.maxAttempts : undefined,
-        maxKeyFiles: typeof input.maxKeyFiles === "number" ? input.maxKeyFiles : undefined,
-      });
-    }
-    case "code.traceCallChain": {
-      if (!tools.codeTool?.traceCallChain) throw new Error("code.traceCallChain tool not available");
-      return tools.codeTool.traceCallChain({
-        goal: String(input.goal ?? input.query ?? input.userGoal ?? ""),
-        target: String(input.target ?? input.symbol ?? input.query ?? input.userGoal ?? ""),
-        entrypoints: Array.isArray(input.entrypoints)
-          ? input.entrypoints.filter((entrypoint): entrypoint is string => typeof entrypoint === "string")
-          : undefined,
-        workspaceModulePrefixes: Array.isArray(input.workspaceModulePrefixes)
-          ? input.workspaceModulePrefixes.filter((prefix): prefix is string => typeof prefix === "string")
-          : undefined,
-        direction: input.direction === "forward" || input.direction === "backward" || input.direction === "bidirectional"
-          ? input.direction
-          : undefined,
-        maxDepth: typeof input.maxDepth === "number" ? input.maxDepth : undefined,
-        maxEdges: typeof input.maxEdges === "number" ? input.maxEdges : undefined,
-        knownTerms: Array.isArray(input.knownTerms)
-          ? input.knownTerms.filter((term): term is string => typeof term === "string")
-          : undefined,
-        maxAttempts: typeof input.maxAttempts === "number" ? input.maxAttempts : undefined,
-      });
-    }
     case "code.proposeEdit": {
       if (!tools.codeTool?.proposeEdit) throw new Error("code.proposeEdit tool not available");
       return tools.codeTool.proposeEdit({
@@ -2638,13 +2695,6 @@ async function dispatchToolByName(
       return tools.computerTool.searchLocalDocuments({
         query: input.query as string,
         maxResults: (input.maxResults as number) ?? 20,
-      });
-    }
-    case "computer.listDirectory": {
-      if (!tools.computerTool) throw new Error("computer.listDirectory tool not available");
-      assertRequiredComputerPathInput("computer.listDirectory", input);
-      return tools.computerTool.listDirectory({
-        path: input.path,
       });
     }
     case "computer.openPath": {
@@ -2841,13 +2891,22 @@ export async function executeCapabilityStep(
       ? verifyStructuredTrendEvidence(step, context)
       : undefined;
     const output = deterministicVerifierResult ?? await withTaskTimeout(
-      () => dispatchToolByName(step.toolName!, input, tools, effectiveToolDescriptors, onModelUsage),
+      () => dispatchToolByName(
+        step.toolName!,
+        input,
+        tools,
+        effectiveToolDescriptors,
+        onModelUsage,
+        step,
+        context,
+      ),
       {
         label: `tool ${step.toolName}`,
-        timeoutMs,
+        timeoutMs: resolveToolExecutionTimeoutMs(descriptor, timeoutMs),
         signal,
       },
     );
+    if (descriptor) validateToolDescriptorOutput(descriptor, output);
     writeStepOutput(step.outputContextKey, output, context);
     return { output, toolName: step.toolName };
   }
@@ -2883,13 +2942,22 @@ export async function executeCapabilityStep(
     ? verifyStructuredTrendEvidence(step, context)
     : undefined;
   const output = deterministicVerifierResult ?? await withTaskTimeout(
-    () => dispatchToolByName(descriptor.name, input, tools, effectiveToolDescriptors, onModelUsage),
+    () => dispatchToolByName(
+      descriptor.name,
+      input,
+      tools,
+      effectiveToolDescriptors,
+      onModelUsage,
+      step,
+      context,
+    ),
     {
       label: `tool ${descriptor.name}`,
-      timeoutMs,
+      timeoutMs: resolveToolExecutionTimeoutMs(descriptor, timeoutMs),
       signal,
     },
   );
+  validateToolDescriptorOutput(descriptor, output);
 
   writeStepOutput(step.outputContextKey, output, context);
 
@@ -3007,19 +3075,31 @@ function isVerifierEvidenceItem(value: unknown): boolean {
 
 /** Defense-in-depth validation for plans that reach runtime with mutated context. */
 function validateToolDescriptorInputs(
-  descriptor: Pick<ToolDescriptor, "name" | "requiredInputs">,
+  descriptor: Pick<ToolDescriptor, "name" | "inputSchema" | "limits" | "requiredInputs">,
   input: Record<string, unknown>,
 ): void {
   // Preserve the more actionable, path/command-specific guards used by the
   // concrete dispatcher while still validating every other descriptor here.
   if (descriptor.name === "shell.runReadOnlyCommand") {
     assertRequiredShellReadOnlyInput(input);
-    return;
   }
   if (descriptor.name === "computer.listDirectory" || descriptor.name === "computer.openPath") {
     assertRequiredComputerPathInput(descriptor.name, input);
-    return;
   }
+  if (descriptor.inputSchema) {
+    const schemaError = validateToolSchema(
+      descriptor.inputSchema,
+      input,
+      `Tool ${descriptor.name} input`,
+    );
+    if (schemaError) throw new Error(schemaError);
+  }
+  validateToolPayloadSize(
+    descriptor.name,
+    "input",
+    input,
+    descriptor.limits?.maxInputBytes,
+  );
   for (const required of descriptor.requiredInputs ?? []) {
     const value = input[required.name];
     const valid = required.type === "string"
@@ -3199,6 +3279,60 @@ function isPublicHttpUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function validateToolDescriptorOutput(
+  descriptor: Pick<ToolDescriptor, "name" | "limits" | "outputSchema">,
+  output: unknown,
+): void {
+  if (descriptor.outputSchema) {
+    const schemaError = validateToolSchema(
+      descriptor.outputSchema,
+      output,
+      `Tool ${descriptor.name} output`,
+    );
+    if (schemaError) throw new Error(schemaError);
+  }
+  validateToolPayloadSize(
+    descriptor.name,
+    "output",
+    output,
+    descriptor.limits?.maxOutputBytes,
+  );
+}
+
+function validateToolPayloadSize(
+  toolName: string,
+  direction: "input" | "output",
+  value: unknown,
+  maxBytes: number | undefined,
+): void {
+  if (maxBytes === undefined) return;
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    throw new Error(`Tool ${toolName} ${direction} must be JSON-serializable.`);
+  }
+  if (serialized === undefined) {
+    throw new Error(`Tool ${toolName} ${direction} must be JSON-serializable.`);
+  }
+  const actualBytes = new TextEncoder().encode(serialized).length;
+  if (actualBytes > maxBytes) {
+    throw new Error(
+      `Tool ${toolName} ${direction} exceeds max${direction === "input" ? "Input" : "Output"}Bytes (${actualBytes} > ${maxBytes}).`,
+    );
+  }
+}
+
+function resolveToolExecutionTimeoutMs(
+  descriptor: Pick<ToolDescriptor, "limits"> | undefined,
+  requestedTimeoutMs: number,
+): number {
+  const declaredTimeoutMs = descriptor?.limits?.timeoutMs;
+  return declaredTimeoutMs === undefined
+    ? requestedTimeoutMs
+    : Math.min(requestedTimeoutMs, declaredTimeoutMs);
 }
 
 function getFailureFallbackAgentKind(
@@ -6196,6 +6330,7 @@ interface CommanderExecutionAssessment {
 function buildCommanderExecutionAssessment(options: {
   plan: CommanderDagPlan;
   completedStepIds: readonly string[];
+  blockedStepIds?: readonly string[];
   abandonedStepIds?: readonly string[];
   retryCount: number;
   recoveryCount: number;
@@ -6206,6 +6341,7 @@ function buildCommanderExecutionAssessment(options: {
   executionPolicy: WorkflowExecutionPolicy;
 }): CommanderExecutionAssessment {
   const completed = new Set(options.completedStepIds);
+  const blocked = new Set(options.blockedStepIds ?? []);
   const abandonedStepIds = [...(options.abandonedStepIds ?? [])];
   let reliabilityScore = 100
     - abandonedStepIds.length * 12
@@ -6219,7 +6355,7 @@ function buildCommanderExecutionAssessment(options: {
     status: options.executionSucceeded && options.verificationPassed ? "succeeded" : "failed",
     reliabilityScore: Math.max(0, Math.min(100, reliabilityScore)),
     successfulFlow: options.plan.steps
-      .filter((step) => completed.has(step.id))
+      .filter((step) => completed.has(step.id) && !blocked.has(step.id))
       .map((step) => step.title),
     completedStepIds: [...options.completedStepIds],
     abandonedStepIds,
@@ -6819,6 +6955,27 @@ function sanitizeTaskRuntimeEventValue(value: unknown): unknown {
   return value;
 }
 
+function projectedToolRuntimeIdentity(
+  event: Extract<AgentEvent, {
+    type: "tool.requested" | "tool.started" | "tool.completed" | "tool.failed";
+  }>,
+  agentKind: AgentKind,
+) {
+  const agentRunId = event.agentRunId ?? event.runId;
+  return {
+    toolCallId: event.toolCallId,
+    agentKind,
+    ...(event.stepId ? { stepId: event.stepId } : {}),
+    ...(event.attempt !== undefined ? { attempt: event.attempt } : {}),
+    ...(agentRunId ? { agentRunId } : {}),
+    ...(event.backendSessionId ? { backendSessionId: event.backendSessionId } : {}),
+  };
+}
+
+function isAgentRuntimeControlTool(toolName: string): boolean {
+  return toolName === "javis.requestInput" || toolName.startsWith("javis.structuredOutput.");
+}
+
 async function projectAgentRuntimeEvents(
   events: AsyncIterable<AgentEvent>,
   agentKind: AgentKind,
@@ -6870,17 +7027,36 @@ async function projectAgentRuntimeEvents(
         });
         break;
       case "tool.requested":
-        emitSnapshot({
-          ...snapshot,
-          logs: appendLog(snapshot, taskEventToLogEntry({
+        if (isAgentRuntimeControlTool(event.toolName)) break;
+        {
+          const toolEvent: TaskRuntimeEvent = {
             kind: "tool.planned",
             taskId,
             toolName: event.toolName,
             detail: sanitizeReActReasonForLog(`${event.toolName} (${event.toolCallId})`),
-          })),
-        });
+            ...projectedToolRuntimeIdentity(event, agentKind),
+          };
+          emitSnapshot({
+            ...snapshot,
+            logs: appendLog(snapshot, emitEvent(toolEvent)),
+          });
+        }
         break;
       case "tool.started":
+        if (isAgentRuntimeControlTool(event.toolName)) break;
+        {
+          const toolEvent: TaskRuntimeEvent = {
+            kind: "tool.started",
+            taskId,
+            toolName: event.toolName,
+            detail: sanitizeReActReasonForLog(`Started ${event.toolName} (${event.toolCallId}).`),
+            ...projectedToolRuntimeIdentity(event, agentKind),
+          };
+          emitSnapshot({
+            ...snapshot,
+            logs: appendLog(snapshot, emitEvent(toolEvent)),
+          });
+        }
         emitWaitingLog({
           taskId,
           phase: "waiting_tool",
@@ -6888,33 +7064,38 @@ async function projectAgentRuntimeEvents(
           detail: `Waiting for ${event.toolName} (${event.toolCallId}).`,
           agentKind,
           toolName: event.toolName,
+          stepId: event.stepId,
           getSnapshot,
           emitSnapshot,
           emitEvent,
         });
         break;
       case "tool.completed":
+        if (isAgentRuntimeControlTool(event.toolName)) break;
         emitSnapshot({
-          ...snapshot,
-          logs: appendLog(snapshot, taskEventToLogEntry({
+          ...getSnapshot(),
+          logs: appendLog(getSnapshot(), emitEvent({
             kind: "tool.completed",
             taskId,
             toolName: event.toolName,
-            detail: sanitizeReActReasonForLog(`${event.toolName} (${event.toolCallId})`),
+            detail: sanitizeReActReasonForLog(`Completed ${event.toolName} (${event.toolCallId}).`),
+            ...projectedToolRuntimeIdentity(event, agentKind),
           })),
         });
         break;
       case "tool.failed":
+        if (isAgentRuntimeControlTool(event.toolName)) break;
         emitSnapshot({
-          ...snapshot,
-          logs: appendLog(snapshot, taskEventToLogEntry({
-            kind: "agent.status",
+          ...getSnapshot(),
+          logs: appendLog(getSnapshot(), emitEvent({
+            kind: "tool.failed",
             taskId,
-            agentKind,
-            status: "failed",
-            message: sanitizeReActReasonForLog(
-              `${event.toolName} (${event.toolCallId}): ${event.reason}`,
+            toolName: event.toolName,
+            reason: sanitizeReActReasonForLog(event.reason),
+            detail: sanitizeReActReasonForLog(
+              `${event.toolName} (${event.toolCallId}) failed: ${event.reason}`,
             ),
+            ...projectedToolRuntimeIdentity(event, agentKind),
           })),
         });
         break;
@@ -7741,7 +7922,7 @@ export async function runCommanderDagTask({
       dependsOn: (step.dependsOn ?? []).filter(
         (dependency) => !resumedAbandonedDependencies.has(dependency),
       ),
-      canRunInParallel: true,
+      canRunInParallel: step.assignedAgentKind !== "page-agent",
       requiredCapabilities: step.requiredCapabilities as AgentCapabilityTag[] | undefined,
       inputContextKeys: step.inputContextKeys,
       outputContextKey: step.outputContextKey,
@@ -7892,6 +8073,8 @@ export async function runCommanderDagTask({
       }
     }
     const completedSteps = new Set<string>(resumeState?.completedStepIds ?? []);
+    const blockedAgentIds = new Set<string>();
+    const blockedStepIds = new Set<string>();
     for (const stepId of resumeState?.abandonedStepIds ?? []) {
       abandonedStepIds.add(stepId);
     }
@@ -8650,13 +8833,16 @@ export async function runCommanderDagTask({
                   tools,
                   availableTools,
                   (usage) => recordModelUsage(dagStep.assignedAgentKind as AgentKind, usage),
+                  dagStep,
+                  context,
                 ),
                 {
                   label: `ReAct tool ${td.name}`,
-                  timeoutMs: runtimeTimeouts.toolTimeoutMs,
+                  timeoutMs: resolveToolExecutionTimeoutMs(td, runtimeTimeouts.toolTimeoutMs),
                   signal: stepSignal,
                 },
               );
+              validateToolDescriptorOutput(td, output);
               const sanitizedOutput = sanitizeAgentReActOutput(output);
               return sanitizedOutput;
             },
@@ -9027,6 +9213,54 @@ export async function runCommanderDagTask({
                 getSnapshot,
                 emitSnapshot,
                 emitEvent,
+              });
+            },
+            onToolEvent: (event) => {
+              const identity = {
+                toolCallId: event.toolCallId,
+                stepId: dagStep.id,
+                agentKind: dagStep.assignedAgentKind as AgentKind,
+                agentRunId,
+                attempt: routeAttempt,
+              };
+              const taskEvent: TaskRuntimeEvent = event.phase === "requested"
+                ? {
+                    kind: "tool.planned",
+                    taskId,
+                    toolName: event.toolName,
+                    detail: sanitizeReActReasonForLog(`${event.toolName} (${event.toolCallId})`),
+                    ...identity,
+                  }
+                : event.phase === "started"
+                  ? {
+                      kind: "tool.started",
+                      taskId,
+                      toolName: event.toolName,
+                      detail: sanitizeReActReasonForLog(`Started ${event.toolName} (${event.toolCallId}).`),
+                      ...identity,
+                    }
+                  : event.phase === "completed"
+                    ? {
+                        kind: "tool.completed",
+                        taskId,
+                        toolName: event.toolName,
+                        detail: sanitizeReActReasonForLog(`Completed ${event.toolName} (${event.toolCallId}).`),
+                        ...identity,
+                      }
+                    : {
+                        kind: "tool.failed",
+                        taskId,
+                        toolName: event.toolName,
+                        reason: sanitizeReActReasonForLog(event.reason ?? "Tool failed."),
+                        detail: sanitizeReActReasonForLog(
+                          `${event.toolName} (${event.toolCallId}) failed: ${event.reason ?? "Tool failed."}`,
+                        ),
+                        ...identity,
+                      };
+              const current = getSnapshot();
+              emitSnapshot({
+                ...current,
+                logs: appendLog(current, emitEvent(taskEvent)),
               });
             },
             onTimeout: (phase, iteration, detail) => {
@@ -9822,7 +10056,7 @@ export async function runCommanderDagTask({
           output: (s.acceptanceCriteria ?? [s.successCriteria]).join("\n"),
           permissionLevel: getDagStepPermissionLevel(s, availableTools, agentRegistry),
           dependsOn: (s.dependsOn ?? []).filter((depId) => depId !== failedId),
-          canRunInParallel: true,
+          canRunInParallel: s.assignedAgentKind !== "page-agent",
           requiredCapabilities: s.requiredCapabilities as AgentCapabilityTag[] | undefined,
           inputContextKeys: s.inputContextKeys,
           outputContextKey: s.outputContextKey,
@@ -9977,7 +10211,7 @@ export async function runCommanderDagTask({
           })),
         });
       },
-      onStepCompleted: (_step, _output, _ctx) => {
+      onStepCompleted: (_step, _output, _ctx, stepResult) => {
         const dagStep = dagPlan.steps.find((s) => s.id === _step.id);
         const isVerifierStep =
           dagStep?.toolName === "verifier.check" ||
@@ -9994,7 +10228,24 @@ export async function runCommanderDagTask({
           context.set("verifierCheck", result);
         }
         const currentSnapshot = getSnapshot();
-        const nextPlan = markStep(currentSnapshot.plan, _step.id, "completed");
+        const blockedSource = stepResult?.status === "partial" &&
+          isBlockedSourceCollectionResult(_output);
+        const nextPlan = markStep(
+          currentSnapshot.plan,
+          _step.id,
+          blockedSource ? "failed" : "completed",
+        );
+        if (blockedSource) {
+          const agentId = resolveAgentId(_step.agentKind);
+          blockedStepIds.add(_step.id);
+          blockedAgentIds.add(agentId);
+          if (agentTracker.getState(agentId)) {
+            agentTracker.setState(agentId, {
+              status: "failed",
+              task: `Blocked: ${_output.reason}`,
+            });
+          }
+        }
         const progressItemId = taskProgressStepAliases.get(_step.id) ?? _step.id;
         const isZh = /[\u3400-\u9fff]/u.test(userGoal);
         let taskProgress = currentSnapshot.taskProgress;
@@ -10036,16 +10287,30 @@ export async function runCommanderDagTask({
         }
         emitSnapshot({
           ...currentSnapshot,
-          commanderMessage: formatCommanderStepProgressMessage(userGoal, _step, nextPlan, "completed"),
+          commanderMessage: formatCommanderStepProgressMessage(
+            userGoal,
+            _step,
+            nextPlan,
+            blockedSource ? "failed" : "completed",
+          ),
           ...(taskProgress ? { taskProgress } : {}),
           plan: nextPlan,
-          logs: appendLog(currentSnapshot, emitEvent({
-            kind: "step.completed",
-            taskId,
-            stepId: _step.id,
-            summary: `Step ${_step.id} completed.`,
-            agentKind: _step.agentKind,
-          })),
+          agents: agentTracker.getSnapshots(),
+          logs: appendLog(currentSnapshot, emitEvent(blockedSource
+            ? {
+                kind: "step.failed",
+                taskId,
+                stepId: _step.id,
+                error: _output.reason,
+                agentKind: _step.agentKind,
+              }
+            : {
+                kind: "step.completed",
+                taskId,
+                stepId: _step.id,
+                summary: `Step ${_step.id} completed.`,
+                agentKind: _step.agentKind,
+              })),
         });
       },
       onStepFailed: (step, error) => {
@@ -10262,6 +10527,7 @@ export async function runCommanderDagTask({
     const executionAssessment = buildCommanderExecutionAssessment({
       plan: dagPlan,
       completedStepIds: execution.completedStepIds,
+      blockedStepIds: [...blockedStepIds],
       abandonedStepIds: execution.abandonedStepIds,
       retryCount: stepRetryCount,
       recoveryCount: recoveryAttempts.length,
@@ -10343,6 +10609,22 @@ export async function runCommanderDagTask({
       status: finalCompleted ? "completed" : "failed",
       task: finalCompleted ? "Task conclusion written" : "Some steps failed",
     });
+    for (const agent of agentTracker.getSnapshots()) {
+      if (agent.id === "agent-commander") continue;
+      const state = agentTracker.getState(agent.id);
+      if (!state) continue;
+      if (blockedAgentIds.has(agent.id)) {
+        agentTracker.setState(agent.id, {
+          status: "failed",
+          task: "One or more assigned sources were blocked",
+        });
+      } else if (["planning", "running", "waiting_permission", "verifying"].includes(state.status)) {
+        agentTracker.setState(agent.id, {
+          status: finalCompleted ? "completed" : "failed",
+          task: finalCompleted ? "Assigned work finished" : "Task ended before assigned work completed",
+        });
+      }
+    }
 
     const now = Date.now();
     const priorVerificationSummary = getSnapshot().verificationSummary;
@@ -10444,6 +10726,17 @@ export async function runCommanderDagTask({
       status: cancelled ? "cancelled" : "failed",
       task: cancelled ? "Task cancelled" : userError,
     });
+    for (const agent of agentTracker.getSnapshots()) {
+      if (agent.id === "agent-commander") continue;
+      const state = agentTracker.getState(agent.id);
+      if (!state || !["planning", "running", "waiting_permission", "verifying"].includes(state.status)) {
+        continue;
+      }
+      agentTracker.setState(agent.id, {
+        status: cancelled ? "cancelled" : "failed",
+        task: cancelled ? "Task cancelled" : "Task failed before assigned work completed",
+      });
+    }
 
     const completionEvent: TaskRuntimeEvent = cancelled
       ? { kind: "task.completed", taskId, detail: "Task cancelled." }

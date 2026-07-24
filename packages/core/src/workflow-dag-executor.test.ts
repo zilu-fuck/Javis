@@ -168,6 +168,32 @@ describe("executeWorkflow", () => {
     expect(started[2]).toBe("summarize");
   });
 
+  it("recomputes readiness after each serial step and prioritizes its dependent step", async () => {
+    const order: string[] = [];
+    const workflow = createWorkflow([
+      step("navigate-alpha", [], false),
+      step("navigate-beta", [], false),
+      step("content-alpha", ["navigate-alpha"], false),
+      step("content-beta", ["navigate-beta"], false),
+    ]);
+
+    const result = await executeWorkflow({
+      workflow,
+      executeStep: async (workflowStep) => {
+        order.push(workflowStep.id);
+        return { output: workflowStep.id };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(order).toEqual([
+      "navigate-alpha",
+      "content-alpha",
+      "navigate-beta",
+      "content-beta",
+    ]);
+  });
+
   it("runs the read-current-project DAG: 3 parallel → barrier → final", async () => {
     const started: string[] = [];
     const completedOrder: string[] = [];

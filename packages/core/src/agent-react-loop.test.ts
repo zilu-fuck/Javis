@@ -82,6 +82,45 @@ describe("runAgentReActLoop", () => {
     }));
   });
 
+  it("emits ordered requested, started, and terminal events for legacy tools", async () => {
+    const toolEvents: Array<{ phase: string; toolCallId: string; toolName: string }> = [];
+    const result = await runAgentReActLoop({
+      agent: mustAgent("code"),
+      step: step("code"),
+      context: createSharedTaskContext(),
+      tools: [{
+        name: "code.inspectRepository",
+        execute: async () => ({ changedFiles: ["src/app.ts"] }),
+      }, {
+        name: "code.searchRepository",
+        execute: async () => {
+          throw new Error("Search unavailable.");
+        },
+      }],
+      decideNext: ({ observations }) => observations.length === 0
+        ? { status: "continue", toolName: "code.inspectRepository", reason: "inspect" }
+        : observations.length === 1
+          ? { status: "continue", toolName: "code.searchRepository", reason: "search" }
+          : { status: "failed", reason: "search failed" },
+      onToolEvent: (event) => toolEvents.push(event),
+    });
+
+    expect(result.status).toBe("failed");
+    expect(toolEvents).toEqual([
+      { phase: "requested", toolCallId: "react-step:react:1", toolName: "code.inspectRepository" },
+      { phase: "started", toolCallId: "react-step:react:1", toolName: "code.inspectRepository" },
+      { phase: "completed", toolCallId: "react-step:react:1", toolName: "code.inspectRepository" },
+      { phase: "requested", toolCallId: "react-step:react:2", toolName: "code.searchRepository" },
+      { phase: "started", toolCallId: "react-step:react:2", toolName: "code.searchRepository" },
+      expect.objectContaining({
+        phase: "failed",
+        toolCallId: "react-step:react:2",
+        toolName: "code.searchRepository",
+        reason: "Search unavailable.",
+      }),
+    ]);
+  });
+
   it("does not report zero token usage when the provider omits usage", async () => {
     const result = await runAgentReActLoop({
       agent: mustAgent("file"),

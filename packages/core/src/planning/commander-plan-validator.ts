@@ -6,7 +6,7 @@
  */
 
 import type { CommanderDagPlan, CommanderDagStep, StepExecutionMode } from "../commander-plan-schema";
-import type { ToolDescriptor } from "@javis/tools";
+import { validateToolSchema, type ToolDescriptor } from "@javis/tools";
 import { isRoleCapabilityForAgentKind, isValidCapabilityTag } from "../agent-capability";
 import type { PlanDiagnostic } from "./commander-plan-diagnostics";
 import { buildToolInputShape, type ToolRequiredInputShapeT } from "./schema";
@@ -357,6 +357,24 @@ export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnosti
 
     const tool = toolByName.get(step.toolName);
     if (!tool) continue; // already flagged as UNKNOWN_TOOL
+    if (tool.inputSchema) {
+      const schemaError = validateToolSchema(
+        tool.inputSchema,
+        step.toolInput ?? {},
+        `Tool ${tool.name} input`,
+      );
+      if (schemaError) {
+        diagnostics.push({
+          code: "MISSING_TOOL_INPUT",
+          severity: "error",
+          stepId: step.id,
+          path: `steps[${i}].toolInput`,
+          message: schemaError,
+          suggestedFix: `Adjust the toolInput for "${tool.name}" to match its declared input schema.`,
+        });
+        continue;
+      }
+    }
     const requiredInputs: ToolRequiredInputShapeT[] = (tool.requiredInputs ?? []) as ToolRequiredInputShapeT[];
     if (requiredInputs.length === 0) continue;
 

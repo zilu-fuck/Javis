@@ -237,6 +237,7 @@ export async function executeWorkflow({
     nextStartAt: 0,
     consecutiveFailures: 0,
   };
+  let lastSerialStepId: string | undefined;
   const resolveExecutionPolicy = () => normalizeWorkflowExecutionPolicy(
     {
       ...executionPolicy,
@@ -310,9 +311,13 @@ export async function executeWorkflow({
       }
     }
 
-    for (const step of serialSteps) {
+    const preferredSerialDependency = lastSerialStepId;
+    const nextSerialStep = preferredSerialDependency
+      ? serialSteps.find((step) => step.dependsOn.includes(preferredSerialDependency)) ?? serialSteps[0]
+      : serialSteps[0];
+    if (nextSerialStep) {
       const serialResult = await executeReadySteps(
-        [step],
+        [nextSerialStep],
         activeWorkflow,
         context,
         completed,
@@ -338,6 +343,7 @@ export async function executeWorkflow({
       if (serialResult) {
         return serialResult;
       }
+      lastSerialStepId = nextSerialStep.id;
     }
   }
 
