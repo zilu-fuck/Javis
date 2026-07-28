@@ -65,7 +65,12 @@ import { runPdfOrganizationPreviewTask } from "./pdf-organization-flow";
 import { isTextWriteGoal, runTextWriteTask } from "./text-write-flow";
 import { isVisionGoal, runVisionTask } from "./vision-flow";
 import { runProjectInspectionTask } from "./project-inspection-flow";
-import { runResearchSearchTask, runResearchSourceTask } from "./research-flow";
+import {
+  isContextualResearchPageReference,
+  resolveResearchSourceUrls,
+  runResearchSearchTask,
+  runResearchSourceTask,
+} from "./research-flow";
 import {
   isReadCurrentProjectGoal,
   runGenericWorkbenchWorkflow,
@@ -401,16 +406,23 @@ export {
   isRepairable,
   validateCommanderPlan,
   attemptPlanRepair,
+  applyDeterministicPlanRepairs,
+  buildCommanderPlanTemplateSkeleton,
+  detectCommanderPlanIntents,
+  scanRawPlanOutputText,
 } from "./planning";
 export type {
   AttemptPlanRepairInput,
   AttemptPlanRepairResult,
+  CommanderPlanIntents,
   CompileCommanderPlanInput,
   CompileCommanderPlanResult,
   CompiledCommanderPlan,
   PlanDiagnostic,
   PlanDiagnosticCode,
   PlanValidationInput,
+  RawPlanLexicalIssue,
+  RawPlanLexicalIssueKind,
   RepairAttemptRecord,
 } from "./planning";
 export {
@@ -1444,6 +1456,9 @@ function filterRuntimeToolDescriptorsForAvailableTools(
     if (descriptor.name === "code.searchRepository") {
       return hasRuntimeFunction(tools.codeTool, "searchRepository");
     }
+    if (descriptor.name === "code.inspectWorkspace") {
+      return hasRuntimeFunction(tools.codeTool, "inspectWorkspace");
+    }
     if (descriptor.name === "code.traceCallChain") {
       return hasRuntimeFunction(tools.codeTool, "traceCallChain");
     }
@@ -1545,6 +1560,7 @@ function filterCodeToolForAvailability(
   }
   return {
     inspectRepository: codeTool.inspectRepository,
+    inspectWorkspace: hasTool("code.inspectWorkspace") ? codeTool.inspectWorkspace : undefined,
     searchRepository: hasTool("code.searchRepository") ? codeTool.searchRepository : undefined,
     traceCallChain: hasTool("code.traceCallChain") ? codeTool.traceCallChain : undefined,
     proposeEdit: hasTool("code.proposeEdit") && hasTool("code.applyProposedEdit")
@@ -2348,7 +2364,7 @@ export function createFileScanTaskRuntime({
         webTool,
         workspaceTool,
       });
-      const urls = extractUrls(routingGoal);
+      const urls = resolveResearchSourceUrls(routingGoal, modelContext.messages);
       const recommendedWorkflowIds = getRecommendedWorkflowIds(routingGoal, undefined, 3, routeRegistry);
       const customWorkflowId = workflowRegistry
         ? recommendedWorkflowIds.find((workflowId) =>
@@ -2433,12 +2449,16 @@ export function createFileScanTaskRuntime({
           runClarificationTask(taskId, userGoal);
           return;
         }
-        if (availableWebTool?.searchWeb && hasTool("web.search") && hasTool("web.fetchSource")) {
-          void runResearchSearchTask({ controller, taskId, userGoal, webTool: availableWebTool, commanderTool });
+        if (availableWebTool?.fetchWebSource && urls.length > 0) {
+          void runResearchSourceTask({ controller, taskId, userGoal, webTool: availableWebTool, commanderTool, sourceUrls: urls });
           return;
         }
-        if (availableWebTool?.fetchWebSource && urls.length > 0) {
-          void runResearchSourceTask({ controller, taskId, userGoal, webTool: availableWebTool, commanderTool });
+        if (isContextualResearchPageReference(routingGoal)) {
+          runResearchUrlClarificationTask(taskId, userGoal);
+          return;
+        }
+        if (availableWebTool?.searchWeb && hasTool("web.search") && hasTool("web.fetchSource")) {
+          void runResearchSearchTask({ controller, taskId, userGoal, webTool: availableWebTool, commanderTool });
           return;
         }
         if (chatTool) {
@@ -2535,7 +2555,7 @@ export function createFileScanTaskRuntime({
         (textWriteGoal || !commanderTool)
       ) {
         if (availableWebTool && hasTool("web.fetchSource") && urls.length > 0) {
-          void runResearchSourceTask({ controller, taskId, userGoal, webTool: availableWebTool, commanderTool });
+          void runResearchSourceTask({ controller, taskId, userGoal, webTool: availableWebTool, commanderTool, sourceUrls: urls });
           return;
         }
         if (
@@ -2718,8 +2738,8 @@ export function createFileScanTaskRuntime({
       //   3. Backward compatibility with workspace definitions lacking commander
       // Do NOT add new features here. New goal types -> Commander DAG path above.
 
-      if (availableWebTool && hasTool("web.fetchSource") && extractUrls(routingGoal).length > 0) {
-        void runResearchSourceTask({ controller, taskId, userGoal, webTool: availableWebTool, commanderTool });
+      if (availableWebTool && hasTool("web.fetchSource") && urls.length > 0) {
+        void runResearchSourceTask({ controller, taskId, userGoal, webTool: availableWebTool, commanderTool, sourceUrls: urls });
         return;
       }
       const [recommendedWorkflowId] = recommendedWorkflowIds;
@@ -3469,6 +3489,33 @@ export function createFileScanTaskRuntime({
             : "User input did not match any known task intent.",
         },
       ],
+    });
+  }
+
+  function runResearchUrlClarificationTask(taskId: ID, userGoal: string) {
+    const isChinese = /[\u3400-\u9fff]/u.test(userGoal);
+    emit({
+      id: taskId,
+      title: isChinese ? "需要网页链接" : "Page URL needed",
+      userGoal,
+      status: "completed",
+      commanderMessage: isChinese
+        ? "请把要查看的网页链接发给我。当前消息和最近对话里都没有可用的网页 URL。"
+        : "Please send the page URL. No usable web URL was found in the current message or recent conversation.",
+      plan: [],
+      agents: createRuntimeAgentSnapshots((agent) => ({
+        status: "completed",
+        task: agent.kind === "commander"
+          ? (isChinese ? "请求网页链接" : "Request page URL")
+          : (isChinese ? "等待链接" : "Waiting for URL"),
+      })),
+      tokenUsage: tokenUsageForTask(taskId),
+      logs: [{
+        id: `${taskId}-missing-research-url`,
+        kind: "event",
+        title: "request_input",
+        detail: "Contextual page reference had no URL in the current or recent conversation context.",
+      }],
     });
   }
 

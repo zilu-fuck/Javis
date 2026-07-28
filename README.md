@@ -1,17 +1,17 @@
 # Javis
 
-## 2026-07-10 review update
+## 2026-07-28 planning and workspace safety update
 
-The latest hardening pass focused on making the runtime chain, approval boundaries, and CI gate more reliable:
+The latest hardening pass focused on deterministic Commander routing, selected-workspace evidence, and native approval boundaries:
 
-- Runtime routing now separates direct chat, single-agent tool flows, vision tasks, and Commander DAG work through a dedicated runtime-chain decision layer.
-- Commander workflows now preserve checkpoint context, report malformed initial plans with structured diagnostics, and support safer evidence-backed file-write DAG steps.
-- Desktop/browser/computer/native safety gates were tightened: tool allowlists fail closed, browser write approvals show script previews, MCP stdio launch from Javis config is blocked, and native directory listing is constrained to allowed roots.
-- Model settings now handle custom providers and stored provider keys more defensively.
-- `pnpm check` is the expected source-level gate. It runs TypeScript checks, Vitest, Rust tests/checks, local-vision worker tests, and the desktop frontend build.
-- Source-level Rust checks no longer require a real `artifacts/local-vision/yolo26n-ui.onnx`; release packaging still must include the real model and is guarded by `local-vision:verify-release-resources`.
+- Commander plans now pass a five-layer legality pipeline: prompt constraints, deterministic repair, strict schema validation, a preset JSON template, and lexical diagnostics for unsafe paths, secrets, or malformed model output.
+- Specialist requests can no longer silently collapse into a Commander-only response. The planner and compiler share a route contract, and unavailable Agent or tool routes produce explicit guidance.
+- Selected-workspace project understanding now starts with bounded `code.inspectWorkspace` evidence and can read a specific safe text file through `file.readWorkspaceText`; repository search remains supplemental evidence rather than a replacement for directory inventory.
+- Test, typecheck, and check scripts use `shell.runWorkspaceCommand`, with an allowlisted preview, UI approval, native task/tool/hash binding, workspace-write sandboxing, and one-shot consumption.
+- `workspace.create` and `workspace.delete` now use dedicated plan, approval, and native execute stages. ReAct agents can request missing context explicitly, which is converted into a handoff-aware Commander replan.
+- `pnpm check` remains the source-level CI gate. It covers TypeScript, package boundaries, Vitest, Rust tests/checks, local-vision worker tests, and the desktop frontend build.
 
-Detailed review notes live in `docs/qa/2026-07-10/final-review-and-fix-log.md`.
+Implementation details are tracked in [Commander DAG Plan Compiler](docs/COMMANDER_DAG_PLAN_COMPILER_PLAN.md). The next-generation declarative routing design is documented separately in [Commander Capability Routing Refactor Plan](docs/COMMANDER_CAPABILITY_ROUTING_REFACTOR_PLAN.md) and should not be read as fully shipped behavior yet.
 
 Javis 是一个本地优先的桌面 Agent 工作台，面向“让 AI 真正参与日常项目工作”这个目标构建。它不是只把聊天窗口搬到桌面上，而是把任务拆解、工具调用、证据记录、权限审批和结果恢复都放进同一个可观察的界面里。
 
@@ -77,10 +77,12 @@ Javis 的设计重心是可见、可审计、可恢复。界面里同时展示�
 ### 项目与文件理解
 
 - 选择或恢复工作区路径。
+- 使用 `code.inspectWorkspace` 在 native 工作区边界内递归盘点目录、模块候选、manifest、忽略目录和风险提示；该流程不要求工作区必须是 Git 仓库。
+- 使用 `file.readWorkspaceText` 按工作区相对路径读取受限文本文件；敏感文件、符号链接、越界路径和不支持的二进制类型会在 native 边界拒绝。
 - 扫描 Markdown / 文档类资源并生成摘要。
 - 检查项目环境，识别 package scripts、推荐启动/测试命令。
 - 通过只读 allowlist 运行环境检查，例如 Node、pnpm、git status 等。
-- 仓库搜索和调用链追踪正在产品化：核心合约、rg 后端、证据报告和 UI 展示已接入，完整 packaged QA 仍在补齐。
+- 仓库搜索和调用链追踪作为补充证据使用：核心合约、rg 后端、证据报告和 UI 展示已接入，完整 packaged QA 仍在补齐。
 
 ### 研究与资料收集
 
@@ -93,6 +95,7 @@ Javis 的设计重心是可见、可审计、可恢复。界面里同时展示�
 
 - 读取当前 git diff 和变更文件。
 - 生成代码审查计划和候选 patch。
+- 测试、类型检查和 `check` 脚本必须通过 `shell.runWorkspaceCommand` 生成预览并经用户批准，再在 workspace-write sandbox 中执行。
 - 使用 opencode / OpenAI-compatible provider 作为 proposal backend。
 - 应用补丁前需要经过 confirmed-write 审批。
 - Native 层会检查 proposal hash、approval id、文件路径、当前文件 hash 和一次性消费状态。
@@ -104,6 +107,7 @@ Code Agent 已有 fixture QA 覆盖拒绝和批准路径；真实 provider 的 l
 - 任务历史存储在本地 SQLite。
 - 已完成、失败和取消任务可以在侧边栏恢复或删除。
 - recent workspace、model settings、approval records、user preferences、task-session JSONL 等存储已完成迁移。
+- 工作区定义的创建和删除使用 plan -> UI approval -> native approve -> one-shot execute 链，并绑定 task、tool 和 payload hash。
 - Durable approval 已覆盖 PDF、Code Patch、Git stage / commit / push、PR create / comment 等路径的源级逻辑，部分 packaged QA 证据仍在补齐。
 
 ### 本地视觉与 Computer Use
@@ -120,7 +124,7 @@ Javis 默认把“看见”和“改变”分开处理：
 | --- | --- | --- |
 | `read` | 读取文件、列目录、运行安全的只读检查 | 可直接执行，但必须记录结果 |
 | `preview` | 生成计划、diff、dry-run、候选操作 | 不改变本地状态 |
-| `confirmed_write` | 写文件、移动文件、应用补丁、git 写操作 | 必须有当前可见审批 |
+| `confirmed_write` | 写文件、移动文件、应用补丁、项目校验命令、工作区定义与 git 写操作 | 必须有当前可见审批 |
 | `dangerous` | 高风险或难以恢复的操作 | 默认拒绝或需要更强约束 |
 
 一个典型例子是 PDF 整理流程：
@@ -274,6 +278,8 @@ Javis 当前不是“完成品发布版”，而是一个可运行、可验证�
 已经比较扎实的部分：
 
 - 桌面工作台和任务可视化。
+- Commander 计划合法性、能力路由约束和 handoff-aware replan。
+- 非 Git 工作区的确定性目录盘点与受限文本读取。
 - 本地项目检查、资料收集、PDF dry-run 审批。
 - SQLite 持久化迁移。
 - 多类 confirmed-write 的源级安全绑定。

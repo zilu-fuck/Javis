@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildCommanderPlanRepairPrompt } from "../../commander-plan-schema";
 import { attemptPlanRepair } from "../commander-plan-repair";
+import { compileCommanderPlan } from "../commander-plan-compiler";
 import type { CommanderDagPlan } from "../../commander-plan-schema";
 import type { CommanderPlanResult, ToolDescriptor } from "@javis/tools";
 import type { PlanDiagnostic } from "../commander-plan-diagnostics";
@@ -23,12 +24,13 @@ function makeToolDescriptor(
 
 const availableAgents = [
   { kind: "commander", allowedToolNames: ["commander.synthesize"] },
-  { kind: "code", allowedToolNames: ["code.searchRepository"] },
+  { kind: "code", allowedToolNames: ["code.inspectWorkspace", "code.searchRepository"] },
   { kind: "verifier", allowedToolNames: ["verifier.check"] },
   { kind: "computer", allowedToolNames: ["computer.listDirectory"] },
 ] as const;
 
 const availableTools: ToolDescriptor[] = [
+  makeToolDescriptor("code.inspectWorkspace", { capabilityTags: ["workspace_inspect"], ownerAgentKinds: ["code"] }),
   makeToolDescriptor("code.searchRepository", { capabilityTags: ["code_search"], ownerAgentKinds: ["code"] }),
   makeToolDescriptor("verifier.check", { capabilityTags: ["evidence_check"], ownerAgentKinds: ["verifier"] }),
   makeToolDescriptor("computer.listDirectory", { capabilityTags: ["directory_list"], ownerAgentKinds: ["computer"] }),
@@ -200,6 +202,143 @@ describe("attemptPlanRepair", () => {
     expect(planCall).toHaveBeenCalledTimes(2);
   });
 
+  it("preserves routing fields that are unrelated to the reported repair", async () => {
+    const invalidPlan: CommanderDagPlan = {
+      title: "Search repository",
+      reasoning: "Search before reporting.",
+      steps: [{
+        id: "search",
+        title: "Search repository",
+        assignedAgentKind: "code",
+        toolName: "code.searchRepository",
+        requiredCapabilities: ["code_search"],
+        dependsOn: [],
+        executionMode: "direct_tool_call",
+        successCriteria: "Search evidence is returned.",
+      }],
+    };
+    const missingInputDiagnostic: PlanDiagnostic = {
+      code: "MISSING_TOOL_INPUT",
+      severity: "error",
+      stepId: "search",
+      path: "steps[0].toolInput.query",
+      message: "Search query is missing.",
+    };
+    const planCall = vi.fn<Parameters<typeof attemptPlanRepair>[0]["commanderPlan"]>();
+    planCall.mockResolvedValueOnce({
+      title: "Search repository",
+      reasoning: "Supply the missing query.",
+      steps: [{
+        id: "search",
+        title: "Search repository",
+        assignedAgentKind: "computer",
+        requiredCapabilities: [],
+        dependsOn: [],
+        toolInput: { query: "primary capability" },
+        executionMode: "react",
+        successCriteria: "Search evidence is returned.",
+      }],
+    });
+
+    const result = await attemptPlanRepair({
+      commanderPlan: planCall,
+      originalUserGoal: "Search the repository",
+      invalidPlan,
+      diagnostics: [missingInputDiagnostic],
+      availableAgents: availableAgents as unknown as Array<{
+        kind: string;
+        allowedToolNames: string[];
+        capabilities?: readonly string[];
+      }>,
+      availableTools,
+      maxAttempts: 1,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.plan.steps[0]).toMatchObject({
+        assignedAgentKind: "code",
+        toolName: "code.searchRepository",
+        requiredCapabilities: ["code_search"],
+        executionMode: "direct_tool_call",
+        toolInput: { query: "primary capability" },
+      });
+    }
+  });
+
+  it("allows a plan-level route diagnostic to reassign an existing step to the required agent", async () => {
+    const writeTool = makeToolDescriptor("file.writeText", {
+      permissionLevel: "confirmed_write",
+      requiredPlanIntent: "write",
+      capabilityTags: ["file_execute"],
+      ownerAgentKinds: ["file", "doc-updater"],
+      requiredInputs: [
+        { name: "targetPath", type: "string", nonEmpty: true },
+        { name: "content", type: "string", nonEmpty: true },
+      ],
+    });
+    const invalidPlan: CommanderDagPlan = {
+      title: "Save summary",
+      reasoning: "Persist the requested summary.",
+      steps: [{
+        id: "write-summary",
+        title: "Write summary",
+        assignedAgentKind: "doc-updater",
+        primaryCapability: "doc_update",
+        toolName: "file.writeText",
+        toolInput: { targetPath: "summary.md", content: "Summary" },
+        requiredCapabilities: ["file_execute"],
+        dependsOn: [],
+        executionMode: "direct_tool_call",
+        successCriteria: "summary.md is written.",
+      }],
+    };
+    const routeDiagnostics: PlanDiagnostic[] = [{
+      code: "MISSING_REQUIRED_AGENT_ROUTE",
+      severity: "error",
+      path: "steps",
+      message: "The file persistence route is missing.",
+    }, {
+      code: "MISSING_REQUIRED_ROUTE_TOOL",
+      severity: "error",
+      path: "steps",
+      message: "The File Agent must use file.writeText.",
+    }];
+    const planCall = vi.fn<Parameters<typeof attemptPlanRepair>[0]["commanderPlan"]>();
+    planCall.mockResolvedValueOnce({
+      ...invalidPlan,
+      steps: [{
+        ...invalidPlan.steps[0],
+        assignedAgentKind: "file",
+        primaryCapability: "file_execute",
+      }],
+    });
+
+    const result = await attemptPlanRepair({
+      commanderPlan: planCall,
+      originalUserGoal: "把这份总结保存成 summary.md。",
+      invalidPlan,
+      diagnostics: routeDiagnostics,
+      availableAgents: [
+        { kind: "file", allowedToolNames: ["file.writeText"] },
+        { kind: "doc-updater", allowedToolNames: ["file.writeText"] },
+      ],
+      availableTools: [writeTool],
+      supportedApprovalGatedTools: ["file.writeText"],
+      planIntents: { write: true, export: false, statistics: false, retrieval: false },
+      maxAttempts: 1,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.plan.steps[0]).toMatchObject({
+        assignedAgentKind: "file",
+        primaryCapability: "file_execute",
+        toolName: "file.writeText",
+      });
+    }
+  });
+
   it("fails after maxAttempts when both repairs still fail", async () => {
     const planCall = vi.fn<Parameters<typeof attemptPlanRepair>[0]["commanderPlan"]>();
     planCall.mockResolvedValue(invalidMissingDepPlan() as unknown as CommanderPlanResult);
@@ -290,7 +429,8 @@ describe("attemptPlanRepair", () => {
 
   it("short-circuits mid-loop when a repair attempt introduces a non-repairable error", async () => {
     const planCall = vi.fn<Parameters<typeof attemptPlanRepair>[0]["commanderPlan"]>();
-    // First repair keeps the missing dep, but also introduces a non-repairable error.
+    // First repair adds a new step with a non-repairable error. Existing-step
+    // routing fields are intentionally stabilized by the repair loop.
     const secondAttemptPlan: CommanderDagPlan = {
       title: "Worse",
       reasoning: "Introduces unknown agent",
@@ -298,9 +438,17 @@ describe("attemptPlanRepair", () => {
         {
           id: "analyze",
           title: "Analyze",
-          assignedAgentKind: "ghost-agent",
+          assignedAgentKind: "code",
           requiredCapabilities: ["code_search"],
           dependsOn: [],
+          successCriteria: "Done.",
+        },
+        {
+          id: "ghost-step",
+          title: "Unknown agent step",
+          assignedAgentKind: "ghost-agent",
+          requiredCapabilities: [],
+          dependsOn: ["analyze"],
           successCriteria: "Done.",
         },
       ],
@@ -479,6 +627,218 @@ describe("attemptPlanRepair", () => {
     if (!result.ok) {
       expect(result.repairable).toBe(false);
       expect(result.attempts[0].diagnostics[0].code).toBe("INVALID_PLAN_SHAPE");
+    }
+  });
+
+  it("runs the deterministic local repair before any model call (Layer 2)", async () => {
+    // The invalid plan's only problem is an absolute write target inside
+    // the selected workspace. The deterministic fixer relativizes it, the
+    // plan compiles, and the model is never called.
+    const writeAgents = [
+      { kind: "commander", allowedToolNames: ["commander.synthesize"] },
+      { kind: "file", allowedToolNames: ["file.writeText"] },
+      { kind: "research", allowedToolNames: ["web.search"] },
+    ] as const;
+    const writeTools: ToolDescriptor[] = [
+      makeToolDescriptor("web.search", { capabilityTags: ["web_search"], ownerAgentKinds: ["research"] }),
+      makeToolDescriptor("file.writeText", {
+        permissionLevel: "confirmed_write",
+        capabilityTags: ["file_execute"],
+        ownerAgentKinds: ["file"],
+        requiredInputs: [
+          { name: "targetPath", type: "string", nonEmpty: true },
+          { name: "content", type: "string" },
+        ],
+      }),
+    ];
+    const invalidPlan: CommanderDagPlan = {
+      title: "Write report",
+      reasoning: "Report must be saved.",
+      steps: [
+        {
+          id: "collect",
+          title: "Collect evidence",
+          assignedAgentKind: "research",
+          toolName: "web.search",
+          requiredCapabilities: ["web_search"],
+          dependsOn: [],
+          toolInput: { query: "topic" },
+          outputContextKey: "researchEvidence",
+          successCriteria: "Evidence collected.",
+        },
+        {
+          id: "write",
+          title: "Write report",
+          assignedAgentKind: "file",
+          toolName: "file.writeText",
+          requiredCapabilities: [],
+          dependsOn: ["collect"],
+          inputContextKeys: ["researchEvidence"],
+          toolInput: { targetPath: "E:/workspace/reports/out.md" },
+          successCriteria: "Report written.",
+        },
+      ],
+    };
+    const unsafePathDiag: PlanDiagnostic = {
+      code: "UNSAFE_WRITE_PATH",
+      severity: "error",
+      stepId: "write",
+      path: "steps[1].toolInput.targetPath",
+      message: "file.writeText targetPath is an absolute path.",
+      suggestedFix: "Use a workspace-relative path.",
+    };
+    const planCall = vi.fn<Parameters<typeof attemptPlanRepair>[0]["commanderPlan"]>();
+
+    const result = await attemptPlanRepair({
+      commanderPlan: planCall,
+      originalUserGoal: "Save the trend report to a file",
+      workspacePath: "E:/workspace",
+      invalidPlan,
+      diagnostics: [unsafePathDiag],
+      availableAgents: writeAgents as unknown as Array<{
+        kind: string;
+        allowedToolNames: string[];
+        capabilities?: readonly string[];
+      }>,
+      availableTools: writeTools,
+      supportedApprovalGatedTools: ["file.writeText"],
+      planIntents: { write: true, export: false, statistics: false, retrieval: true },
+      maxAttempts: 2,
+    });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.attempts).toHaveLength(1);
+      expect(result.attempts[0].channel).toBe("deterministic");
+      expect(result.attempts[0].repairNotes?.some((note) => note.includes("relativized"))).toBe(true);
+      expect(result.plan.steps[1]?.toolInput?.targetPath).toBe("reports/out.md");
+    }
+    // The model was never consulted — deterministic repair sufficed.
+    expect(planCall).not.toHaveBeenCalled();
+  });
+
+  it("allows a misrouted project-inspection step to be fully reassigned from Computer to Code", async () => {
+    const projectTools: ToolDescriptor[] = [
+      ...availableTools,
+      makeToolDescriptor("commander.synthesize", {
+        capabilityTags: ["synthesis"],
+        ownerAgentKinds: ["commander"],
+      }),
+    ];
+    const projectIntents = {
+      write: false,
+      export: false,
+      statistics: false,
+      retrieval: false,
+      projectUnderstanding: true,
+      desktopInteraction: false,
+    };
+    const invalidPlan: CommanderDagPlan = {
+      title: "Inspect project",
+      reasoning: "Inspect, verify, and summarize the selected workspace.",
+      steps: [
+        {
+          id: "inspect-project",
+          title: "Inspect project structure",
+          assignedAgentKind: "computer",
+          toolName: "computer.listDirectory",
+          executionMode: "direct_tool_call",
+          requiredCapabilities: ["directory_list"],
+          dependsOn: [],
+          toolInput: { path: "E:/workspace" },
+          outputContextKey: "projectEvidence",
+          successCriteria: "Collect evidence about project modules and risks.",
+        },
+        {
+          id: "verify-project",
+          title: "Verify project evidence",
+          assignedAgentKind: "verifier",
+          toolName: "verifier.check",
+          executionMode: "direct_tool_call",
+          requiredCapabilities: ["evidence_check"],
+          dependsOn: ["inspect-project"],
+          inputContextKeys: ["projectEvidence"],
+          outputContextKey: "verifiedProjectEvidence",
+          successCriteria: "Verify the repository evidence.",
+        },
+        {
+          id: "answer-project",
+          title: "Answer with verified findings",
+          assignedAgentKind: "commander",
+          executionMode: "direct_response",
+          requiredCapabilities: ["synthesis"],
+          dependsOn: ["verify-project"],
+          inputContextKeys: ["projectEvidence", "verifiedProjectEvidence"],
+          successCriteria: "Return the verified module and risk summary.",
+        },
+      ],
+    };
+    const initialCompile = compileCommanderPlan({
+      plan: invalidPlan,
+      availableAgents: availableAgents as unknown as Array<{
+        kind: string;
+        allowedToolNames: string[];
+        capabilities?: readonly string[];
+      }>,
+      availableTools: projectTools,
+      planIntents: projectIntents,
+    });
+    expect(initialCompile.ok).toBe(false);
+    if (initialCompile.ok) throw new Error("Expected the Computer-routed plan to fail compilation.");
+    expect(initialCompile.diagnostics.map((entry) => entry.code)).toEqual(expect.arrayContaining([
+      "MISROUTED_PROJECT_INSPECTION",
+      "MISSING_PROJECT_EVIDENCE_STEP",
+    ]));
+
+    const repairedPlan: CommanderPlanResult = {
+      ...invalidPlan,
+      reasoning: "Use repository-aware evidence before verification and synthesis.",
+      steps: [
+        {
+          ...invalidPlan.steps[0],
+          assignedAgentKind: "code",
+          toolName: "code.inspectWorkspace",
+          requiredCapabilities: ["workspace_inspect"],
+          toolInput: { maxDepth: 3, maxEntries: 400 },
+        },
+        invalidPlan.steps[1],
+        invalidPlan.steps[2],
+      ],
+    };
+    const planCall = vi.fn<Parameters<typeof attemptPlanRepair>[0]["commanderPlan"]>();
+    planCall.mockResolvedValueOnce(repairedPlan);
+
+    const result = await attemptPlanRepair({
+      commanderPlan: planCall,
+      originalUserGoal: "Inspect the current project structure, modules, and obvious risks.",
+      workspacePath: "E:/workspace",
+      invalidPlan,
+      diagnostics: initialCompile.diagnostics,
+      availableAgents: availableAgents as unknown as Array<{
+        kind: string;
+        allowedToolNames: string[];
+        capabilities?: readonly string[];
+      }>,
+      availableTools: projectTools,
+      planIntents: projectIntents,
+      maxAttempts: 2,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(planCall).toHaveBeenCalledTimes(1);
+    if (result.ok) {
+      expect(result.plan.steps[0]).toMatchObject({
+        id: "inspect-project",
+        assignedAgentKind: "code",
+        toolName: "code.inspectWorkspace",
+        executionMode: "direct_tool_call",
+        requiredCapabilities: ["workspace_inspect"],
+      });
+      expect(result.plan.steps.map((step) => step.assignedAgentKind)).toEqual([
+        "code",
+        "verifier",
+        "commander",
+      ]);
     }
   });
 });

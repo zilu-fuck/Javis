@@ -28,6 +28,7 @@ import type {
 } from "@javis/core";
 import type { Agent } from "@javis/core";
 import type { RouteScore } from "@javis/core";
+import type { WorkspaceMutationPlan } from "@javis/tools";
 
 const MAX_WORKSPACE_ID_LENGTH = 64;
 const MAX_WORKSPACE_TITLE_LENGTH = 120;
@@ -91,14 +92,54 @@ export async function loadWorkspaceDefinitions(): Promise<WorkspaceDefinition[]>
   return definitions;
 }
 
-/** Save a workspace definition to disk. */
-export async function saveWorkspaceDefinition(def: WorkspaceDefinition): Promise<void> {
-  await invoke("save_workspace_definition", { definition: def });
+/** Build the native-bound preview for a workspace definition create. */
+export async function planWorkspaceDefinitionCreate(
+  def: WorkspaceDefinition,
+  taskId?: string,
+): Promise<WorkspaceMutationPlan> {
+  const definition = validateWorkspaceDefinition(def);
+  return invoke<WorkspaceMutationPlan>("plan_workspace_create", {
+    request: { definition, taskId },
+  });
 }
 
-/** Delete a workspace definition from disk. */
-export async function deleteWorkspaceDefinition(workspaceId: string): Promise<void> {
-  await invoke("delete_workspace_definition", { workspaceId });
+/** Execute a workspace create through its one-shot native approval binding. */
+export async function saveWorkspaceDefinition(
+  def: WorkspaceDefinition,
+  approvalId: string,
+  taskId?: string,
+): Promise<void> {
+  const definition = validateWorkspaceDefinition(def);
+  await invoke("approve_workspace_mutation", {
+    request: { approvalId, taskId },
+  });
+  await invoke("execute_workspace_create", {
+    request: { approvalId, definition, taskId },
+  });
+}
+
+/** Build the native-bound preview for a workspace definition delete. */
+export async function planWorkspaceDefinitionDelete(
+  workspaceId: string,
+  taskId?: string,
+): Promise<WorkspaceMutationPlan> {
+  return invoke<WorkspaceMutationPlan>("plan_workspace_delete", {
+    request: { workspaceId, taskId },
+  });
+}
+
+/** Execute a workspace delete through its one-shot native approval binding. */
+export async function deleteWorkspaceDefinition(
+  workspaceId: string,
+  approvalId: string,
+  taskId?: string,
+): Promise<void> {
+  await invoke("approve_workspace_mutation", {
+    request: { approvalId, taskId },
+  });
+  await invoke("execute_workspace_delete", {
+    request: { approvalId, workspaceId, taskId },
+  });
 }
 
 /** Build sidebar nav items from workspace definitions. Only enabled workspaces are included. */

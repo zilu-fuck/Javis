@@ -3736,7 +3736,7 @@ describe("JavisWorkbench permission cards", () => {
     }), "Summarize this workspace"));
   });
 
-  it("shows a visible approval gate before starting an interactive terminal", async () => {
+  it("does not prepare an interactive terminal approval until the user asks", async () => {
     const terminalService = {
       planCreate: vi.fn(async () => ({
         approvalId: "terminal-approval-1",
@@ -3771,11 +3771,42 @@ describe("JavisWorkbench permission cards", () => {
     );
 
     expect(view.container.textContent).toContain("Start interactive terminal");
-    expect(view.container.textContent).toContain("Approve and start");
+    expect(view.container.textContent).toContain("Prepare approval");
+    expect(terminalService.planCreate).not.toHaveBeenCalled();
+    fireEvent.click(view.getByText("Prepare approval"));
     await waitFor(() => expect(view.container.textContent).toContain("terminal-approval-1"));
     expect(view.container.textContent).toContain("terminal-preview-hash");
-    expect(terminalService.planCreate).toHaveBeenCalled();
+    expect(view.container.textContent).toContain("Approve and start");
+    expect(terminalService.planCreate).toHaveBeenCalledTimes(1);
     expect(terminalService.create).not.toHaveBeenCalled();
+  });
+
+  it("reuses an existing terminal tab for repeated runtime tool activity", async () => {
+    const baseProps = {
+      activeHistoryEntryId: "thread-1",
+      currentWorkspacePath: "E:/Javis",
+      draftGoal: "Inspect with read-only shell commands",
+      initialIsInspectorOpen: true,
+      onDraftGoalChange: vi.fn(),
+      onSubmitGoal: vi.fn(),
+      task: createIdleTask(),
+    };
+    const view = render(
+      <JavisWorkbench
+        {...baseProps}
+        workspaceToolRequest={{ id: "shell-activity-1", tool: "terminal", source: "shell.runReadOnlyCommand" }}
+      />,
+    );
+    await waitFor(() => expect(view.container.querySelectorAll(".javis-tool-tab")).toHaveLength(1));
+
+    view.rerender(
+      <JavisWorkbench
+        {...baseProps}
+        workspaceToolRequest={{ id: "shell-activity-2", tool: "terminal", source: "shell.runReadOnlyCommand" }}
+      />,
+    );
+
+    await waitFor(() => expect(view.container.querySelectorAll(".javis-tool-tab")).toHaveLength(1));
   });
 
   it("prepares and executes a Git push approval from the review tool", async () => {

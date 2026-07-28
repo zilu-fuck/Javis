@@ -10,6 +10,17 @@ import { validateToolSchema, type ToolDescriptor } from "@javis/tools";
 import { isRoleCapabilityForAgentKind, isValidCapabilityTag } from "../agent-capability";
 import type { PlanDiagnostic } from "./commander-plan-diagnostics";
 import { buildToolInputShape, type ToolRequiredInputShapeT } from "./schema";
+import {
+  findSensitiveToolInputKeys,
+  hasPathTraversalSegment,
+  isAbsolutePathLike,
+  PLAN_CONTEXT_KEY_PATTERN,
+  type CommanderPlanIntents,
+} from "./plan-legality";
+import type {
+  CommanderRouteAvailability,
+  CommanderRouteRequirement,
+} from "./commander-route-contract";
 
 // --- Validation Input --------------------------------------------------------
 
@@ -28,6 +39,11 @@ export interface PlanValidationInput {
   }>;
   supportedApprovalGatedTools?: string[];
   preloadedContextKeys?: string[];
+  /** User intents recognized from the goal by the Layer 5 pre-filter. */
+  planIntents: CommanderPlanIntents;
+  requiredAgentRoutes?: CommanderRouteRequirement[];
+  unavailableAgentRoutes?: CommanderRouteAvailability[];
+  requiresClarification?: boolean;
 }
 
 // --- Validation Rules --------------------------------------------------------
@@ -43,6 +59,17 @@ const COMPUTER_USE_APPROVAL_CAPABILITIES = new Set([
   "desktop_ui_input",
   "desktop_input",
 ]);
+
+function isDeterministicProjectEvidenceStep(step: CommanderDagStep): boolean {
+  return step.assignedAgentKind === "code" &&
+    step.toolName === "code.inspectWorkspace" &&
+    step.executionMode === "direct_tool_call";
+}
+
+function isUnderspecifiedProjectExplorationStep(step: CommanderDagStep): boolean {
+  return step.assignedAgentKind === "explorer" ||
+    stepCapabilities(step).includes("code_explore");
+}
 
 function isApprovalGatedTool(tool: ToolDescriptor): boolean {
   return tool.permissionLevel === "confirmed_write" || tool.permissionLevel === "dangerous";
@@ -88,6 +115,86 @@ export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnosti
     })),
   ];
   const allStepIds = new Set(allSteps.map((s) => s.id));
+
+  if (input.requiresClarification === true) {
+    const hasReadyClarificationStep = plan.steps.some((step) =>
+      step.assignedAgentKind === "commander" &&
+      (step.toolName === "commander.askUser" || step.capability === "clarification") &&
+      step.dependsOn.length === 0,
+    );
+    if (!hasReadyClarificationStep) {
+      diagnostics.push({
+        code: "MISSING_REQUIRED_CLARIFICATION",
+        severity: "error",
+        path: "steps",
+        message: "The goal uses an unresolved code/file reference, but the plan starts work without asking what target the user means.",
+        suggestedFix: "Replace exploratory work with a dependency-free Commander commander.askUser step that asks for the file path, symbol, selection, or pasted code.",
+      });
+    }
+  }
+
+  for (const route of input.requiredAgentRoutes ?? []) {
+    if (!plan.steps.some((step) => step.assignedAgentKind === route.agentKind)) {
+      diagnostics.push({
+        code: "MISSING_REQUIRED_AGENT_ROUTE",
+        severity: "error",
+        path: "steps",
+        message: `The user goal requires ${route.agentKind} (${route.reason}), but the plan does not assign that route.`,
+        suggestedFix: `Assign the ${route.reason} work to ${route.agentKind}; use other agents only for distinct evidence or verification.`,
+      });
+    }
+    for (const toolName of route.requiredToolNames) {
+      if (plan.steps.some((step) =>
+        step.assignedAgentKind === route.agentKind && step.toolName === toolName
+      )) {
+        continue;
+      }
+      diagnostics.push({
+        code: "MISSING_REQUIRED_ROUTE_TOOL",
+        severity: "error",
+        path: "steps",
+        message: `${route.agentKind} must use ${toolName} for ${route.reason}.`,
+        suggestedFix: `Add a ${route.agentKind} direct_tool_call step using ${toolName} with the descriptor-required inputs.`,
+      });
+    }
+    const requiredAnyToolNames = route.requiredAnyToolNames ?? [];
+    if (
+      requiredAnyToolNames.length > 0 &&
+      !plan.steps.some((step) =>
+        step.assignedAgentKind === route.agentKind &&
+        Boolean(step.toolName) &&
+        requiredAnyToolNames.includes(step.toolName!)
+      )
+    ) {
+      diagnostics.push({
+        code: "MISSING_REQUIRED_ROUTE_TOOL",
+        severity: "error",
+        path: "steps",
+        message: `${route.agentKind} must use one of ${requiredAnyToolNames.join(", ")} for ${route.reason}.`,
+        suggestedFix: `Add a ${route.agentKind} direct_tool_call step using one available tool from that set with descriptor-required inputs.`,
+      });
+    }
+  }
+
+  for (const route of input.unavailableAgentRoutes ?? []) {
+    const missing = [
+      ...(route.missingAgent ? [`agent ${route.requirement.agentKind}`] : []),
+      ...route.missingToolNames.map((toolName) => `tool ${toolName}`),
+      ...(route.missingRequiredAnyToolNames.length > 0
+        ? [`one of ${route.missingRequiredAnyToolNames.join(", ")}`]
+        : []),
+      ...(route.missingAvailabilityToolNames.length > 0
+        ? [`one of ${route.missingAvailabilityToolNames.join(", ")}`]
+        : []),
+    ];
+    diagnostics.push({
+      code: "REQUIRED_ROUTE_UNAVAILABLE",
+      severity: "warning",
+      path: "steps",
+      message: `The ${route.requirement.reason} route is unavailable because ${missing.join("; ")} is not enabled.`,
+      suggestedFix: "Do not substitute an unrelated agent or claim the operation completed; report the unavailable capability or ask the user to enable it.",
+    });
+  }
 
   // --- Rule: Duplicate Step IDs ----------------------------------------------
   const seenIds = new Map<string, number>();
@@ -388,6 +495,12 @@ export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnosti
       // single-level `toolInput` map the first segment is the field
       // name. Empty path means the whole toolInput object was wrong.
       const fieldName = typeof issue.path[0] === "string" ? issue.path[0] : reqNameForIssue(issue);
+      // Runtime dispatch merges declared SharedContext inputs into toolInput.
+      // A same-named context key can therefore satisfy this field; context
+      // existence and producer ordering are validated by the handoff rules.
+      if (fieldName && step.inputContextKeys?.includes(fieldName)) {
+        continue;
+      }
       // file.writeText derives content from a declared upstream artifact;
       // keep targetPath static while letting the runtime validate evidence.
       if (
@@ -519,6 +632,188 @@ export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnosti
           suggestedFix: `Either remove toolName (and let Commander synthesize the response) or change executionMode to "direct_tool_call" / "react".`,
         });
       }
+    }
+  }
+
+  // --- Rule: file.writeText conditional constraints --------------------------
+  // Compile-enforced counterparts of the prompt's conditional rules:
+  //  - file.writeText must run as direct_tool_call (the dedicated approval
+  //    runner cannot drive it from a react/direct_response step);
+  //  - toolInput.targetPath must be a workspace-relative path. This is a
+  //    lexical pre-check; real path safety is enforced by path resolution,
+  //    workspace containment, and symlink checks at the write boundary.
+  for (let i = 0; i < plan.steps.length; i++) {
+    const step = plan.steps[i];
+    if (step.toolName !== "file.writeText") continue;
+    if (step.executionMode !== undefined && step.executionMode !== "direct_tool_call") {
+      diagnostics.push({
+        code: "INVALID_EXECUTION_MODE",
+        severity: "error",
+        stepId: step.id,
+        path: `steps[${i}].executionMode`,
+        message: `file.writeText step "${step.id}" must use executionMode "direct_tool_call", not "${step.executionMode}".`,
+        suggestedFix: `Set executionMode to "direct_tool_call" for the file.writeText step.`,
+      });
+    }
+    const targetPath = step.toolInput?.targetPath;
+    if (typeof targetPath === "string" && targetPath.trim()) {
+      if (isAbsolutePathLike(targetPath)) {
+        diagnostics.push({
+          code: "UNSAFE_WRITE_PATH",
+          severity: "error",
+          stepId: step.id,
+          path: `steps[${i}].toolInput.targetPath`,
+          message: `file.writeText targetPath "${targetPath}" is an absolute path; write targets must be workspace-relative.`,
+          suggestedFix: `Replace targetPath with a workspace-relative path such as "reports/result.md".`,
+        });
+      } else if (hasPathTraversalSegment(targetPath)) {
+        diagnostics.push({
+          code: "UNSAFE_WRITE_PATH",
+          severity: "error",
+          stepId: step.id,
+          path: `steps[${i}].toolInput.targetPath`,
+          message: `file.writeText targetPath "${targetPath}" contains a ".." traversal segment.`,
+          suggestedFix: `Remove ".." segments so the target stays inside the selected workspace.`,
+        });
+      }
+    }
+  }
+
+  // --- Rule: no write steps without a user persistence intent -----------------
+  // Layer 5 deterministic filter: when the user never asked to persist,
+  // export, or produce a document artifact, the planner must not add
+  // document-write tools on its own — the answer belongs in the final
+  // response instead.
+  if (input.planIntents?.write !== true) {
+    for (let i = 0; i < plan.steps.length; i++) {
+      const step = plan.steps[i];
+      const descriptor = step.toolName ? toolByName.get(step.toolName) : undefined;
+      if (descriptor?.requiredPlanIntent !== "write") continue;
+      diagnostics.push({
+        code: "WRITE_WITHOUT_USER_INTENT",
+        severity: "error",
+        stepId: step.id,
+        path: `steps[${i}].toolName`,
+        message: `Step "${step.id}" uses ${descriptor.name}, but the user goal has no persistence/export intent.`,
+        suggestedFix: `Remove the ${descriptor.name} step and deliver the result in the final response, or keep it only if the user explicitly asked to save/export a file.`,
+      });
+    }
+  }
+
+  // --- Rule: project understanding uses repository-aware agents -------------
+  // Computer owns generic local-browsing tools, but a directory listing alone
+  // cannot establish module boundaries, entrypoints, or code risks. Unless the
+  // user explicitly requests GUI/File Explorer interaction, keep Computer out
+  // of this evidence chain and require repository-aware evidence.
+  if (input.planIntents?.projectUnderstanding === true && input.planIntents.desktopInteraction !== true) {
+    const projectEvidenceSteps = plan.steps.filter(isDeterministicProjectEvidenceStep);
+    for (let i = 0; i < plan.steps.length; i++) {
+      const step = plan.steps[i];
+      const isComputerBrowsing = step.assignedAgentKind === "computer";
+      const isUnsupportedInitialExploration =
+        projectEvidenceSteps.length === 0 && isUnderspecifiedProjectExplorationStep(step);
+      if (!isComputerBrowsing && !isUnsupportedInitialExploration) continue;
+      diagnostics.push({
+        code: "MISROUTED_PROJECT_INSPECTION",
+        severity: "error",
+        stepId: step.id,
+        path: `steps[${i}].assignedAgentKind`,
+        message: isComputerBrowsing
+          ? `Project-understanding step "${step.id}" is assigned to Computer Agent even though the user did not request desktop interaction.`
+          : `Project-understanding step "${step.id}" uses Explorer/code_explore before a deterministic repository evidence artifact exists.`,
+        suggestedFix: `Replace the initial evidence step with Code Agent + code.inspectWorkspace + direct_tool_call; preserve its outputContextKey for verifier/Commander handoff. code.searchRepository and Explorer may only add supplemental tracing after that artifact exists.`,
+      });
+    }
+
+    if (projectEvidenceSteps.length === 0) {
+      diagnostics.push({
+        code: "MISSING_PROJECT_EVIDENCE_STEP",
+        severity: "error",
+        path: "steps",
+        message: "Project-understanding plan has no deterministic Code Agent workspace inventory step, so directory, module, and risk conclusions would be unsupported.",
+        suggestedFix: `Add Code Agent + code.inspectWorkspace + direct_tool_call, write its outputContextKey, then have verifier and final Commander consume that artifact.`,
+      });
+    } else {
+      const projectEvidenceKeys = new Set(projectEvidenceSteps.flatMap((step) => [
+        `step:${step.id}`,
+        ...(step.outputContextKey ? [step.outputContextKey] : []),
+      ]));
+      const projectVerifierSteps = plan.steps.filter((step) =>
+        isVerifierStep(step) &&
+        (step.inputContextKeys ?? []).some((key) => projectEvidenceKeys.has(key))
+      );
+
+      if (projectVerifierSteps.length === 0) {
+        diagnostics.push({
+          code: "MISSING_VERIFIER",
+          severity: "error",
+          path: "steps",
+          message: "Project-understanding evidence is not consumed by an independent verifier step.",
+          suggestedFix: "Add verifier.check/evidence_check after the repository evidence step and consume its outputContextKey or step:<id> artifact.",
+        });
+      }
+
+      const verifierEvidenceKeys = new Set(projectVerifierSteps.flatMap((step) => [
+        `step:${step.id}`,
+        ...(step.outputContextKey ? [step.outputContextKey] : []),
+      ]));
+      const hasProjectSynthesisStep = plan.steps.some((step) =>
+        step.assignedAgentKind === "commander" &&
+        isUserVisibleSynthesisStep(step) &&
+        (step.inputContextKeys ?? []).some((key) => projectEvidenceKeys.has(key)) &&
+        (step.inputContextKeys ?? []).some((key) => verifierEvidenceKeys.has(key))
+      );
+      if (!hasProjectSynthesisStep) {
+        diagnostics.push({
+          code: "MISSING_PROJECT_SYNTHESIS_STEP",
+          severity: "error",
+          path: "steps",
+          message: "Project-understanding plan has no final Commander step that consumes both repository evidence and its verifier result.",
+          suggestedFix: "Add a Commander direct_response/commander.synthesize step after the verifier and list both the repository evidence key and verifier output key in inputContextKeys.",
+        });
+      }
+    }
+  }
+
+  // --- Rule: context key format ------------------------------------------------
+  // Lexical format check for handoff keys (camelCase identifiers or the
+  // implicit step:<id> form). Warning only — unknown formats still flow
+  // through SharedContext, but they almost always indicate a typo.
+  for (let i = 0; i < plan.steps.length; i++) {
+    const step = plan.steps[i];
+    const keys = [
+      ...(step.inputContextKeys ?? []),
+      ...(step.outputContextKey ? [step.outputContextKey] : []),
+    ];
+    for (const key of keys) {
+      if (!PLAN_CONTEXT_KEY_PATTERN.test(key)) {
+        diagnostics.push({
+          code: "INVALID_CONTEXT_KEY_FORMAT",
+          severity: "warning",
+          stepId: step.id,
+          path: `steps[${i}].inputContextKeys`,
+          message: `Context key "${key}" is not a camelCase identifier or step:<id> reference.`,
+          suggestedFix: `Rename the key to camelCase (e.g. "uiEvidence") or use "step:<step-id>".`,
+        });
+      }
+    }
+  }
+
+  // --- Rule: secret-looking values in toolInput --------------------------------
+  // Plans must never carry credentials. Warning only: the value may be a
+  // false positive, but it should be reviewed before execution.
+  for (let i = 0; i < plan.steps.length; i++) {
+    const step = plan.steps[i];
+    const sensitiveKeys = findSensitiveToolInputKeys(step.toolInput);
+    for (const key of sensitiveKeys) {
+      diagnostics.push({
+        code: "SENSITIVE_DATA_IN_TOOL_INPUT",
+        severity: "warning",
+        stepId: step.id,
+        path: `steps[${i}].toolInput.${key}`,
+        message: `toolInput."${key}" looks like a credential; plans must not carry secrets.`,
+        suggestedFix: `Remove "${key}" from toolInput; credentials belong to the OS credential store, never to plan JSON.`,
+      });
     }
   }
 
@@ -660,7 +955,12 @@ export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnosti
       consumesProducerArtifact(step, plan.steps, existingSteps ?? [], preloadedSet),
     );
     const synthesisEvidenceStep = explicitSynthesisStep;
-    if (synthesisEvidenceStep && verifierSteps.length === 0 && verifierToolAvailable) {
+    if (
+      synthesisEvidenceStep &&
+      verifierSteps.length === 0 &&
+      verifierToolAvailable &&
+      !diagnostics.some((diagnostic) => diagnostic.code === "MISSING_VERIFIER")
+    ) {
       diagnostics.push({
         code: "MISSING_VERIFIER",
         severity: "error",

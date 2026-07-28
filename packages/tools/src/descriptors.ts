@@ -42,6 +42,12 @@ const markdownDocumentSchema = objectSchema({
   excerpt: stringSchema,
 }, ["path", "modifiedAt", "sizeBytes"]);
 
+const workspaceTextReadOutputSchema = objectSchema({
+  path: nonEmptyStringSchema,
+  content: stringSchema,
+  truncated: { type: "boolean" },
+});
+
 const computerFileCandidateSchema = objectSchema({
   name: nonEmptyStringSchema,
   path: nonEmptyStringSchema,
@@ -59,6 +65,36 @@ const codeSearchEvidenceSchema = objectSchema({
   matchedTerms: stringArraySchema(),
   score: finiteNumberSchema,
 }, ["path", "excerpt", "matchedTerms"]);
+
+const codeWorkspaceInspectionEntrySchema = objectSchema({
+  name: nonEmptyStringSchema,
+  relativePath: nonEmptyStringSchema,
+  isDir: { type: "boolean" },
+  depth: integerSchema,
+  sizeBytes: finiteNumberSchema,
+  extension: stringSchema,
+}, ["name", "relativePath", "isDir", "depth"]);
+
+const codeWorkspaceRiskIndicatorSchema = objectSchema({
+  code: {
+    type: "string",
+    enum: ["sensitive_name", "large_file", "inspection_truncated", "manifest_missing"],
+  },
+  severity: { type: "string", enum: ["info", "warning"] },
+  path: stringSchema,
+  detail: nonEmptyStringSchema,
+}, ["code", "severity", "detail"]);
+
+const codeWorkspaceInspectionOutputSchema = objectSchema({
+  workspacePath: nonEmptyStringSchema,
+  entries: { type: "array", items: codeWorkspaceInspectionEntrySchema },
+  topLevelDirectories: stringArraySchema(),
+  moduleCandidates: stringArraySchema(),
+  manifests: stringArraySchema(),
+  ignoredDirectories: stringArraySchema(),
+  riskIndicators: { type: "array", items: codeWorkspaceRiskIndicatorSchema },
+  truncated: { type: "boolean" },
+});
 
 const codeSearchAttemptSchema = objectSchema({
   id: nonEmptyStringSchema,
@@ -257,14 +293,14 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     permissionLevel: "read",
     summary: "Scan user document files across Desktop, Documents, and Downloads.",
     capabilityTags: ["file_scan"],
-    ownerAgentKinds: ["file", "doc-updater"],
+    ownerAgentKinds: ["file"],
   },
   {
     name: "file.classifyDocuments",
     permissionLevel: "read",
     summary: "Classify scanned local documents into predefined categories using AI.",
     capabilityTags: ["document_classify"],
-    ownerAgentKinds: ["file", "doc-updater"],
+    ownerAgentKinds: ["file"],
     requiredInputs: [{ name: "files", type: "object[]", nonEmpty: true }],
   },
   {
@@ -287,6 +323,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "file.planWriteText",
     permissionLevel: "preview",
+    requiredPlanIntent: "write",
     summary: "Create a dry-run plan for writing text content to a file.",
     capabilityTags: ["file_scan"],
     ownerAgentKinds: ["file", "doc-updater"],
@@ -298,6 +335,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
   {
     name: "file.writeText",
     permissionLevel: "confirmed_write",
+    requiredPlanIntent: "write",
     writeRiskLevel: "safe",
     summary: "Write approved text content to a target file.",
     capabilityTags: ["file_execute"],
@@ -330,6 +368,23 @@ export const initialToolDescriptors: ToolDescriptor[] = [
       { name: "args", type: "string[]", nonEmpty: true },
     ],
   },
+  {
+    name: "shell.runWorkspaceCommand",
+    permissionLevel: "confirmed_write",
+    writeRiskLevel: "risky",
+    summary: "Run an approved test, typecheck, or verification command inside the selected workspace with native one-shot approval binding and workspace-write OS sandbox enforcement.",
+    capabilityTags: ["shell_execute"],
+    ownerAgentKinds: ["shell", "code", "verifier", "build-fix", "test-runner"],
+    requiredInputs: [
+      { name: "program", type: "string", nonEmpty: true },
+      { name: "args", type: "string[]", nonEmpty: true },
+    ],
+    inputSchema: objectSchema({
+      program: nonEmptyStringSchema,
+      args: stringArraySchema(),
+    }, ["program", "args"]),
+    limits: governedToolLimits,
+  },
 
   // ── Code ───────────────────────────────────────────────────────────────
   {
@@ -339,7 +394,6 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     capabilityTags: ["git_inspect"],
     ownerAgentKinds: [
       "code",
-      "research",
       "language-reviewer",
       "security-reviewer",
       "build-fix",
@@ -356,6 +410,45 @@ export const initialToolDescriptors: ToolDescriptor[] = [
       diffStat: stringSchema,
       diff: stringSchema,
     }),
+    limits: governedToolLimits,
+  },
+  {
+    name: "file.readWorkspaceText",
+    permissionLevel: "read",
+    summary: "Read a specific text file inside the selected workspace. Requires a workspace-relative path; maxLines is optional and defaults to 200. Sensitive files, symlinks, paths outside the workspace, and unsupported binary extensions are rejected by the native read boundary.",
+    capabilityTags: ["workspace_text_read"],
+    ownerAgentKinds: [
+      "file",
+      "code",
+      "verifier",
+      "language-reviewer",
+      "security-reviewer",
+      "build-fix",
+      "test-runner",
+      "doc-updater",
+      "explorer",
+      "perf-analyzer",
+      "refactor",
+    ],
+    requiredInputs: [{ name: "path", type: "string", nonEmpty: true }],
+    inputSchema: objectSchema({
+      path: nonEmptyStringSchema,
+      maxLines: { type: "integer", minimum: 1, maximum: 500 },
+    }, ["path"]),
+    outputSchema: workspaceTextReadOutputSchema,
+    limits: governedToolLimits,
+  },
+  {
+    name: "code.inspectWorkspace",
+    permissionLevel: "read",
+    summary: "Inspect the selected workspace tree without requiring Git, returning bounded directory evidence, module candidates, manifests, and obvious risk indicators.",
+    capabilityTags: ["workspace_inspect"],
+    ownerAgentKinds: ["code"],
+    inputSchema: objectSchema({
+      maxDepth: { type: "integer", minimum: 1, maximum: 4 },
+      maxEntries: { type: "integer", minimum: 20, maximum: 1000 },
+    }, []),
+    outputSchema: codeWorkspaceInspectionOutputSchema,
     limits: governedToolLimits,
   },
   {
@@ -705,6 +798,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Save a new workspace definition to disk.",
     capabilityTags: ["workspace_create"],
     ownerAgentKinds: ["workspace"],
+    requiredInputs: [{ name: "definition", type: "object", nonEmpty: true }],
   },
   {
     name: "workspace.delete",
@@ -713,6 +807,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     summary: "Remove a workspace definition from disk.",
     capabilityTags: ["workspace_delete"],
     ownerAgentKinds: ["workspace"],
+    requiredInputs: [{ name: "workspaceId", type: "string", nonEmpty: true }],
   },
 
   // ── Browser ───────────────────────────────────────────────────────────

@@ -340,6 +340,34 @@ describe("tool call audit persistence", () => {
     expect(JSON.stringify(memoryLine)).not.toContain("SECRET_MEMORY_FACT_BODY");
   });
 
+  it("audits approved workspace commands as confirmed writes", () => {
+    const snapshot: TaskSnapshot = {
+      ...createTaskSnapshot(),
+      status: "completed",
+      permissionRequest: undefined,
+      logs: [{
+        id: "task-1-tool-shell.runWorkspaceCommand-completed",
+        kind: "tool",
+        title: "shell.runWorkspaceCommand completed",
+        detail: "pnpm --filter @javis/core test exited with code 0.",
+      }],
+    };
+
+    const line = createTaskSnapshotAuditJsonLines(
+      snapshot,
+      "2026-05-25T00:00:00.000Z",
+    ).find((entry) => entry.kind === "tool_call_audit");
+
+    expect(line).toEqual(expect.objectContaining({
+      kind: "tool_call_audit",
+      record: expect.objectContaining({
+        toolName: "shell.runWorkspaceCommand",
+        permissionLevel: "confirmed_write",
+        status: "succeeded",
+      }),
+    }));
+  });
+
   it("appends task snapshot audit lines to localStorage without duplicating seen records", async () => {
     const storage = createMemoryStorage();
     const writer = createLocalStorageTaskAuditJsonLineWriter(storage);

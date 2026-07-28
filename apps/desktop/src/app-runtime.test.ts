@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CompletionOptions, CompletionResult, ModelProvider } from "./model-provider";
+import { createModelProviderFromProfile } from "./model-provider";
 import appRuntimeSource from "./app-runtime.ts?raw";
 
 const normalizedAppRuntimeSource = appRuntimeSource.replace(/\r\n/g, "\n");
 
 const modelMocks = vi.hoisted(() => ({
   provider: undefined as ModelProvider | undefined,
+  providersByProfileId: {} as Record<string, ModelProvider>,
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -21,7 +23,9 @@ vi.mock("./model-provider", async () => {
   return {
     ...actual,
     createConfiguredModelProvider: vi.fn(() => modelMocks.provider),
-    createModelProviderFromProfile: vi.fn(() => modelMocks.provider),
+    createModelProviderFromProfile: vi.fn((profile: { id?: string }) =>
+      (profile.id ? modelMocks.providersByProfileId[profile.id] : undefined) ?? modelMocks.provider
+    ),
   };
 });
 
@@ -33,7 +37,9 @@ import {
   loadComputerUseConfigFromStorage,
   loadComputerUseLocalVisionSettingsFromStorage,
   loadComputerUseSettingsFromStorage,
+  normalizeNativeMarkdownDocuments,
   parseAgentReActDecision,
+  resolveWorkspaceTextReadPath,
   resolveModelProfileForAgent,
   allowedToolNamesForAgent,
   proposeCodeEditWithModelProvider,
@@ -41,7 +47,7 @@ import {
   saveComputerUseLocalVisionSettingsToStorage,
   saveComputerUseSettingsToStorage,
 } from "./app-runtime";
-import { DEFAULT_MODEL_SETTINGS } from "./model-settings";
+import { DEFAULT_MODEL_SETTINGS, type ModelProfile } from "./model-settings";
 import { encodeMcpToolServerName, initialToolDescriptors } from "@javis/tools";
 import {
   createAgentRegistry,
@@ -51,6 +57,33 @@ import {
 } from "@javis/core";
 
 const COMMANDER_PLAN_SCHEMA_MARKER = '"requestKind":"commander-plan"';
+
+describe("native tool output normalization", () => {
+  it("omits null Markdown metadata before strict tool output validation", () => {
+    expect(normalizeNativeMarkdownDocuments([{
+      path: "E:/Javis/README.md",
+      modifiedAt: "2026-07-26T00:00:00.000Z",
+      sizeBytes: 128,
+      heading: null,
+      excerpt: null,
+    }])).toEqual([{
+      path: "E:/Javis/README.md",
+      modifiedAt: "2026-07-26T00:00:00.000Z",
+      sizeBytes: 128,
+    }]);
+  });
+
+  it("resolves only workspace-relative text read paths", () => {
+    expect(resolveWorkspaceTextReadPath("E:\\Javis", "packages/core/package.json")).toEqual({
+      path: "packages/core/package.json",
+      absolutePath: "E:\\Javis\\packages\\core\\package.json",
+    });
+    expect(() => resolveWorkspaceTextReadPath("E:\\Javis", "../secrets.txt"))
+      .toThrow("cannot contain parent traversal");
+    expect(() => resolveWorkspaceTextReadPath("E:\\Javis", "C:/Windows/win.ini"))
+      .toThrow("must be workspace-relative");
+  });
+});
 
 describe("proposeCodeEditWithModelProvider", () => {
   it("forwards the complete OpenCode runtime identity to the native transport", async () => {
@@ -175,6 +208,7 @@ describe("createJavisRuntime", () => {
     vi.mocked(invoke).mockReset();
     vi.clearAllMocks();
     modelMocks.provider = undefined;
+    modelMocks.providersByProfileId = {};
   });
 
   it("resolves Vision Bridge capability from the effective Commander override", () => {
@@ -199,6 +233,194 @@ describe("createJavisRuntime", () => {
 
     expect(resolveModelProfileForAgent("commander", config)?.id).toBe("commander-low");
     expect(resolveModelProfileForAgent("commander", config)?.capabilities.vision).toBe(false);
+  });
+
+  it("selects only a usable vision-capable profile for Vision Agent", () => {
+    const profile = (
+      id: string,
+      slot: "primary" | "multimodal",
+      vision: boolean,
+      hasStoredApiKey: boolean,
+    ) => ({
+      id,
+      slot,
+      displayName: id,
+      provider: vision ? "openai" : "deepseek",
+      model: vision ? "gpt-4o" : "deepseek-chat",
+      apiKeyReference: `model.${id}`,
+      baseUrl: "",
+      hasStoredApiKey,
+      capabilities: { vision, code: !vision, longContext: false },
+    });
+    const config = {
+      profiles: [
+        profile("primary", "primary", false, true),
+        profile("multimodal", "multimodal", true, true),
+      ],
+      agentOverrides: {},
+    };
+
+    expect(resolveModelProfileForAgent("vision", config)?.id).toBe("multimodal");
+    expect(resolveModelProfileForAgent("computer", config)?.id).toBe("multimodal");
+  });
+
+  it("does not fall back to a non-vision or credential-less profile", () => {
+    const primary = {
+      id: "primary",
+      slot: "primary" as const,
+      displayName: "Primary",
+      provider: "deepseek",
+      model: "deepseek-chat",
+      apiKeyReference: "model.primary",
+      baseUrl: "",
+      hasStoredApiKey: true,
+      capabilities: { vision: false, code: true, longContext: false },
+    };
+    const unavailableVision = {
+      id: "multimodal",
+      slot: "multimodal" as const,
+      displayName: "Multimodal",
+      provider: "openai",
+      model: "gpt-4o",
+      apiKeyReference: "model.multimodal",
+      baseUrl: "",
+      hasStoredApiKey: false,
+      capabilities: { vision: true, code: false, longContext: false },
+    };
+
+    expect(resolveModelProfileForAgent("vision", {
+      profiles: [primary],
+      agentOverrides: {},
+    })).toBeUndefined();
+    expect(resolveModelProfileForAgent("vision", {
+      profiles: [primary, unavailableVision],
+      agentOverrides: {},
+    })).toBeUndefined();
+    expect(resolveModelProfileForAgent("vision", {
+      profiles: [primary, { ...unavailableVision, hasStoredApiKey: true }],
+      agentOverrides: { vision: "primary" },
+    })).toBeUndefined();
+  });
+
+  it("runs a short attached-image OCR plan with Vision and the multimodal profile", async () => {
+    const imageDataUrl = "data:image/png;base64,AA==";
+    const commanderComplete = vi.fn((prompt: string, options?: unknown) => {
+      if (prompt.includes("Chinese input preprocessor")) {
+        return Promise.resolve({ text: "{}" });
+      }
+      if (combinedPlannerPrompt(prompt, options).includes(COMMANDER_PLAN_SCHEMA_MARKER)) {
+        return Promise.resolve({
+          text: JSON.stringify({
+            title: "读取图片文字",
+            reasoning: "使用视觉 OCR 读取已有图片。",
+            steps: [{
+              id: "extract-image-text",
+              title: "读取图片文字",
+              assignedAgentKind: "vision",
+              toolName: "vision.extractText",
+              requiredCapabilities: ["image_ocr"],
+              executionMode: "direct_tool_call",
+              dependsOn: [],
+              inputContextKeys: ["imagePath"],
+              successCriteria: "提取出图片中的可见文字。",
+            }],
+          }),
+        });
+      }
+      return Promise.resolve({ text: "图片上写着设置完成。" });
+    });
+    const visionComplete = vi.fn(() => Promise.resolve({ text: "设置完成" }));
+    const commanderProvider = makeTestModelProvider("deepseek", "deepseek-chat", commanderComplete);
+    const visionProvider = makeTestModelProvider("openai", "gpt-4o", visionComplete);
+    modelMocks.provider = commanderProvider;
+    modelMocks.providersByProfileId = {
+      primary: commanderProvider,
+      multimodal: visionProvider,
+    };
+    const runtime = createJavisRuntime({
+      getWorkspacePath: () => "E:/Javis",
+      modelSettings: DEFAULT_MODEL_SETTINGS,
+      getModelConfiguration: () => ({
+        profiles: [
+          modelProfile("primary", "primary", "deepseek", "deepseek-chat", false, true),
+          modelProfile("multimodal", "multimodal", "openai", "gpt-4o", true, true),
+        ],
+        agentOverrides: {},
+      }),
+    });
+    const snapshots = subscribeToRuntime(runtime);
+
+    runtime.start(`看看这张图写了什么 ${imageDataUrl}`, {
+      mode: "project",
+      taskId: "task-vision-ocr-runtime",
+    });
+
+    await vi.waitFor(() => expect(snapshots[snapshots.length - 1]?.status).toBe("completed"));
+    expect(visionComplete).toHaveBeenCalledWith(
+      expect.stringContaining("Extract all visible text"),
+      expect.objectContaining({ imageDataUrl }),
+    );
+    expect(snapshots[snapshots.length - 1]?.plan).toEqual(expect.arrayContaining([
+      expect.objectContaining({ assignedAgentKind: "vision" }),
+    ]));
+    expect(snapshots[snapshots.length - 1]?.plan.some((step) => step.assignedAgentKind === "computer")).toBe(false);
+
+    runtime.dispose();
+  });
+
+  it("fails an attached-image task when no usable visual profile exists", async () => {
+    const commanderComplete = vi.fn((prompt: string, options?: unknown) => {
+      if (prompt.includes("Chinese input preprocessor")) {
+        return Promise.resolve({ text: "{}" });
+      }
+      if (combinedPlannerPrompt(prompt, options).includes(COMMANDER_PLAN_SCHEMA_MARKER)) {
+        return Promise.resolve({
+          text: JSON.stringify({
+            title: "读取图片文字",
+            reasoning: "图片内容必须由视觉代理处理。",
+            steps: [{
+              id: "extract-image-text",
+              title: "读取图片文字",
+              assignedAgentKind: "vision",
+              toolName: "vision.extractText",
+              requiredCapabilities: ["image_ocr"],
+              executionMode: "direct_tool_call",
+              dependsOn: [],
+              inputContextKeys: ["imagePath"],
+              successCriteria: "提取出图片中的可见文字。",
+            }],
+          }),
+        });
+      }
+      return Promise.resolve({ text: "无法读取图片。" });
+    });
+    const commanderProvider = makeTestModelProvider("deepseek", "deepseek-chat", commanderComplete);
+    modelMocks.provider = commanderProvider;
+    modelMocks.providersByProfileId = { primary: commanderProvider };
+    const runtime = createJavisRuntime({
+      getWorkspacePath: () => "E:/Javis",
+      modelSettings: DEFAULT_MODEL_SETTINGS,
+      getRuntimePreferences: () => ({ failureRecoveryPolicy: "stop" }),
+      getModelConfiguration: () => ({
+        profiles: [modelProfile("primary", "primary", "deepseek", "deepseek-chat", false, true)],
+        agentOverrides: {},
+      }),
+    });
+    const snapshots = subscribeToRuntime(runtime);
+
+    runtime.start("看看这张图写了什么 data:image/png;base64,AA==", {
+      mode: "project",
+      taskId: "task-vision-unavailable-runtime",
+    });
+
+    await vi.waitFor(() => expect(snapshots[snapshots.length - 1]?.status).toBe("failed"));
+    const latest = snapshots[snapshots.length - 1];
+    expect(JSON.stringify(latest?.logs ?? [])).toContain("No usable model profile satisfies the requirements for agent vision");
+    expect(latest?.plan.some((step) => step.assignedAgentKind === "computer")).toBe(false);
+    expect(vi.mocked(createModelProviderFromProfile).mock.calls.map(([profile]) => profile.id))
+      .toEqual(expect.not.arrayContaining(["multimodal"]));
+
+    runtime.dispose();
   });
 
   it("includes explicitly allowlisted built-in tools for workspace agents", () => {
@@ -227,6 +449,11 @@ describe("createJavisRuntime", () => {
     expect(appRuntimeSource).toContain("resolveModuleSpecifierWithFileSearch(moduleRequest");
   });
 
+  it("injects the registered specialist role into the trusted ReAct system prompt", () => {
+    expect(normalizedAppRuntimeSource).toContain("getAgentSystemPrompt(reactAgent, \"zh-CN\")");
+    expect(normalizedAppRuntimeSource).toContain("buildReActDecisionSystemPrompt(\n        \"zh-CN\",\n        reactAgentInstructions");
+  });
+
   it("emits workspace tool activity and audit records from agent tool calls", () => {
     expect(appRuntimeSource).toContain("onWorkspaceToolActivity?: (activity: RuntimeWorkspaceToolActivity) => void");
     expect(appRuntimeSource).toContain("function notifyWorkspaceToolActivity(");
@@ -234,6 +461,10 @@ describe("createJavisRuntime", () => {
     expect(appRuntimeSource).toContain("notifyWorkspaceToolActivity(\"browser\", \"browser.navigate\"");
     expect(normalizedAppRuntimeSource).toContain("notifyWorkspaceToolActivity(\n          \"review\",\n          \"git.stageFiles\"");
     expect(normalizedAppRuntimeSource).toContain("notifyWorkspaceToolActivity(\n          \"terminal\",\n          \"shell.runReadOnlyCommand\"");
+    expect(normalizedAppRuntimeSource).toContain("invoke<Omit<WorkspaceCommandPlan, \"dryRun\">>(\"plan_workspace_command\"");
+    expect(normalizedAppRuntimeSource).toContain("await invoke(\"approve_workspace_command\", { request: approval })");
+    expect(normalizedAppRuntimeSource).toContain("invoke<ShellCommandOutput>(\"run_approved_workspace_command\"");
+    expect(normalizedAppRuntimeSource).toContain("notifyWorkspaceToolActivity(\n          \"terminal\",\n          \"shell.runWorkspaceCommand\"");
     expect(normalizedAppRuntimeSource).toContain("notifyWorkspaceToolActivity(\n          \"files\",\n          \"file.scanMarkdownDocuments\"");
   });
 
@@ -1433,7 +1664,7 @@ describe("createJavisRuntime", () => {
     });
     const snapshots = subscribeToRuntime(runtime);
 
-    runtime.start("Create a demo workspace", { mode: "project" });
+    runtime.start("Draft a demo workspace", { mode: "project" });
 
     await vi.waitFor(() => expect(snapshots[snapshots.length - 1]?.status).toBe("completed"));
     const scaffoldCall = completeCalls.find((call) =>
@@ -2181,6 +2412,8 @@ describe("createJavisRuntime", () => {
       .map(([prompt]) => prompt)
       .find((prompt) => prompt.includes("Previous invalid output:"));
     expect(repairPrompt).toContain("Only repair syntax/shape; preserve semantics, do not add facts, and do not change decisions.");
+    expect(repairPrompt).toContain("[json_parse_failure]");
+    expect(repairPrompt).toContain("may be truncated");
     expect(repairPrompt).not.toContain("原始指令:");
     expect(repairOptions?.messages).toEqual([
       { role: "user", content: "Earlier user context." },
@@ -2248,18 +2481,18 @@ describe("createJavisRuntime", () => {
       }
       return Promise.resolve({
         text: JSON.stringify({
-          title: "Recall memory",
-          reasoning: "The user referenced prior work.",
+          title: "回顾上次工作",
+          reasoning: "用户引用了之前的任务。",
           steps: [{
             id: "recall-memory",
-            title: "Search memory",
-            assignedAgentKind: "commander",
+            title: "搜索任务记忆",
+            assignedAgentKind: "workspace",
             toolName: "memory.search",
             requiredCapabilities: ["memory_search"],
             dependsOn: [],
             executionMode: "direct_tool_call",
             inputContextKeys: ["userGoal"],
-            successCriteria: "Memory was searched.",
+            successCriteria: "找到与上次性能问题相关的记录。",
           }],
         }),
       });
@@ -2293,11 +2526,11 @@ describe("createJavisRuntime", () => {
     });
     const snapshots = subscribeToRuntime(runtime);
 
-    runtime.start("What did we decide before?", { mode: "project", taskId: "task-memory-search" });
+    runtime.start("上次那个性能问题后来怎么样了？", { mode: "project", taskId: "task-memory-search" });
 
     await vi.waitFor(() => expect(searchAgentMemory).toHaveBeenCalledOnce());
     expect(searchAgentMemory).toHaveBeenCalledWith(expect.objectContaining({
-      query: "What did we decide before?",
+      query: "上次那个性能问题后来怎么样了？",
       taskId: "task-memory-search",
     }));
     await vi.waitFor(() => expect(snapshots[snapshots.length - 1]?.status).toBe("completed"));
@@ -2361,11 +2594,11 @@ describe("createJavisRuntime", () => {
     });
     const snapshots = subscribeToRuntime(runtime);
 
-    runtime.start("What did we decide before?", { mode: "project", taskId: "task-memory-prompt" });
+    runtime.start("How should we structure this task?", { mode: "project", taskId: "task-memory-prompt" });
 
     await vi.waitFor(() => expect(commanderPlanPrompts).toHaveLength(1));
     expect(buildAgentMemoryPromptContext).toHaveBeenCalledWith({
-      userGoal: "What did we decide before?",
+      userGoal: "How should we structure this task?",
       taskId: "task-memory-prompt",
       agentKind: "commander",
     });
@@ -2432,7 +2665,7 @@ describe("createJavisRuntime", () => {
     });
     const snapshots = subscribeToRuntime(runtime);
 
-    runtime.start("What did we decide before?", { mode: "project", taskId: "task-memory-off" });
+    runtime.start("How should we structure this task?", { mode: "project", taskId: "task-memory-off" });
 
     await vi.waitFor(() => expect(commanderPlanPrompts).toHaveLength(1));
     expect(buildAgentMemoryPromptContext).not.toHaveBeenCalled();
@@ -3181,7 +3414,7 @@ describe("createJavisRuntime", () => {
           steps: [{
             id: "recall-memory",
             title: "Search memory",
-            assignedAgentKind: "commander",
+            assignedAgentKind: "workspace",
             toolName: "memory.search",
             requiredCapabilities: ["memory_search"],
             dependsOn: [],
@@ -3900,6 +4133,48 @@ function subscribeToRuntime(runtime: ReturnType<typeof createJavisRuntime>) {
     snapshots.push(snapshot);
   });
   return snapshots;
+}
+
+function makeTestModelProvider(
+  provider: string,
+  model: string,
+  complete: ModelProvider["complete"],
+): ModelProvider {
+  return {
+    id: `${provider}-${model}`,
+    settings: {
+      provider,
+      model,
+      apiKeyReference: `model.${provider}`,
+      baseUrl: "",
+    },
+    complete,
+    stream: vi.fn(async function* () {
+      throw new Error("stream unavailable in test");
+    }),
+    defaultSettingsForLocale: vi.fn(),
+  } as unknown as ModelProvider;
+}
+
+function modelProfile(
+  id: string,
+  slot: "primary" | "multimodal",
+  provider: string,
+  model: string,
+  vision: boolean,
+  hasStoredApiKey: boolean,
+): ModelProfile {
+  return {
+    id,
+    slot,
+    displayName: id,
+    provider,
+    model,
+    apiKeyReference: `model.${id}`,
+    hasStoredApiKey,
+    baseUrl: "",
+    capabilities: { vision, code: !vision, longContext: false },
+  };
 }
 
 function deferred<T>() {

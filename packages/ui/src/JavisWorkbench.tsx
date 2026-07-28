@@ -441,8 +441,7 @@ export function JavisWorkbench({
       setDetailItem(null);
       setSelectedAgentId(undefined);
       setOpenTabs((prev) => {
-        const shouldReuse = action === "files" || action === "review";
-        const existing = shouldReuse ? prev.find((tab) => tab.tool === action) : undefined;
+        const existing = prev.find((tab) => tab.tool === action);
         if (existing) {
           setActiveToolTabId(existing.id);
           return prev;

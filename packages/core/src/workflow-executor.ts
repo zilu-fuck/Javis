@@ -4,6 +4,7 @@ import type {
   CommanderSynthesizeResult,
   ComputerFileCandidate,
   ComputerTool,
+  CodeWorkspaceInspectionResult,
   CodeTool,
   CommanderTool,
   FileTool,
@@ -18,6 +19,7 @@ import type {
   ResearchReport,
   ShellCommandOutput,
   ShellTool,
+  ScheduledTaskDraft,
   SchedulerTool,
   TokenUsageSummary,
   ToolDescriptor,
@@ -63,6 +65,7 @@ import {
 import {
   computeContentHash,
   isArtifactEnvelope,
+  sanitizeArtifactForPersistence,
   validateArtifactEnvelope,
   type ArtifactEnvelope,
 } from "./artifact-envelope";
@@ -78,6 +81,10 @@ import {
   type PlanDiagnostic,
 } from "./planning/commander-plan-diagnostics";
 import { attemptPlanRepair } from "./planning/commander-plan-repair";
+import {
+  applyDeterministicPlanRepairs,
+  detectCommanderPlanIntents,
+} from "./planning/plan-legality";
 import {
   buildPlanGenerationTrace,
   classifyCompileStatus,
@@ -415,6 +422,9 @@ function filterAvailableToolDescriptorsForRuntime(
     if (descriptor.name === "code.searchRepository") {
       return hasRuntimeFunction(tools.codeTool, "searchRepository");
     }
+    if (descriptor.name === "code.inspectWorkspace") {
+      return hasRuntimeFunction(tools.codeTool, "inspectWorkspace");
+    }
     if (descriptor.name === "code.inspectRepository") {
       return hasRuntimeFunction(tools.codeTool, "inspectRepository");
     }
@@ -459,12 +469,24 @@ function filterAvailableToolDescriptorsForRuntime(
     if (descriptor.name === "shell.runReadOnlyCommand") {
       return hasRuntimeFunction(tools.shellTool, "runReadOnlyCommand");
     }
+    if (descriptor.name === "shell.runWorkspaceCommand") {
+      return hasRuntimeFunction(tools.shellTool, "planWorkspaceCommand") &&
+        hasRuntimeFunction(tools.shellTool, "runWorkspaceCommand");
+    }
     if (descriptor.name.startsWith("computer.")) {
       const actionName = descriptor.name.slice("computer.".length);
       return hasRuntimeFunction(tools.computerTool, actionName);
     }
     if (descriptor.name === "scheduler.createTask") {
       return hasRuntimeFunction(tools.schedulerTool, "createTask");
+    }
+    if (descriptor.name === "workspace.create") {
+      return hasRuntimeFunction(tools.workspaceTool, "planCreate") &&
+        hasRuntimeFunction(tools.workspaceTool, "create");
+    }
+    if (descriptor.name === "workspace.delete") {
+      return hasRuntimeFunction(tools.workspaceTool, "planDelete") &&
+        hasRuntimeFunction(tools.workspaceTool, "delete");
     }
     if (descriptor.name.startsWith("workspace.")) {
       const actionName = descriptor.name.slice("workspace.".length);
@@ -493,6 +515,9 @@ function filterAvailableToolDescriptorsForBlueprintWorkflow(
   tools: { browserTool?: BrowserTool; codeTool?: CodeTool; trendTool?: TrendTool },
 ): ToolDescriptor[] {
   return toolDescriptors.filter((descriptor) => {
+    if (descriptor.name === "code.inspectWorkspace") {
+      return hasRuntimeFunction(tools.codeTool, "inspectWorkspace");
+    }
     if (descriptor.name === "code.searchRepository") {
       return hasRuntimeFunction(tools.codeTool, "searchRepository");
     }
@@ -2240,14 +2265,14 @@ function findToolDescriptorForDagStep(
   agentRegistry?: AgentRegistry,
 ): ToolDescriptor | undefined {
   if (step.toolName) return findToolDescriptorByNameIn(toolDescriptors, step.toolName);
-  const capability = step.capability ?? step.requiredCapabilities?.[0];
+  const capability = step.primaryCapability ?? step.capability ?? step.requiredCapabilities?.[0];
   return capability
     ? findToolDescriptorByCapabilityIn(toolDescriptors, capability, step.assignedAgentKind, agentRegistry)
     : undefined;
 }
 
 function stepUsesRoleCapability(step: CommanderDagStep): boolean {
-  return [step.capability, ...(step.requiredCapabilities ?? [])].some((capability) =>
+  return [step.primaryCapability, step.capability, ...(step.requiredCapabilities ?? [])].some((capability) =>
     typeof capability === "string" &&
     isRoleCapabilityForAgentKind(step.assignedAgentKind, capability),
   );
@@ -2365,9 +2390,23 @@ function createGovernedToolHandlerRegistry(
       if (!tools.fileTool) throw new Error("file.scanMarkdownDocuments tool not available");
       return tools.fileTool.scanMarkdownDocuments();
     }],
+    ["file.readWorkspaceText", async (input) => {
+      if (!tools.fileTool?.readWorkspaceText) throw new Error("file.readWorkspaceText tool not available");
+      return tools.fileTool.readWorkspaceText({
+        path: input.path as string,
+        maxLines: input.maxLines as number | undefined,
+      });
+    }],
     ["code.inspectRepository", async () => {
       if (!tools.codeTool) throw new Error("code.inspectRepository tool not available");
       return tools.codeTool.inspectRepository();
+    }],
+    ["code.inspectWorkspace", async (input) => {
+      if (!tools.codeTool?.inspectWorkspace) throw new Error("code.inspectWorkspace tool not available");
+      return tools.codeTool.inspectWorkspace({
+        maxDepth: input.maxDepth as number | undefined,
+        maxEntries: input.maxEntries as number | undefined,
+      });
     }],
     ["code.searchRepository", async (input) => {
       if (!tools.codeTool?.searchRepository) throw new Error("code.searchRepository tool not available");
@@ -2878,12 +2917,19 @@ export async function executeCapabilityStep(
     normalizeAvailableToolDescriptors(availableToolDescriptors),
     tools,
   );
-  throwIfTaskAborted(signal, `tool ${step.toolName ?? step.capability ?? step.id}`);
+  throwIfTaskAborted(signal, `tool ${step.toolName ?? step.primaryCapability ?? step.capability ?? step.id}`);
   if (step.toolName) {
     assertToolOwnedByAgent(step.toolName, step.assignedAgentKind, effectiveToolDescriptors, agentRegistry);
     assertToolCanDispatchWithoutApproval(step.toolName, effectiveToolDescriptors);
-    const input = adaptCapabilityToolInput(step, mergeStepInput(step, context), context, step.toolName);
     const descriptor = findToolDescriptorByNameIn(effectiveToolDescriptors, step.toolName);
+    const input = adaptCapabilityToolInput(
+      step,
+      descriptor
+        ? buildDescriptorToolInput(step, context, descriptor)
+        : mergeStepInput(step, context),
+      context,
+      step.toolName,
+    );
     if (descriptor) {
       validateToolDescriptorInputs(descriptor, input);
     }
@@ -2911,7 +2957,7 @@ export async function executeCapabilityStep(
     return { output, toolName: step.toolName };
   }
 
-  const capability = step.capability ?? step.requiredCapabilities[0];
+  const capability = step.primaryCapability ?? step.capability ?? step.requiredCapabilities[0];
   if (!capability) {
     throw new Error(`Step "${step.id}" has no capability tag for dispatch. ` +
       `Set step.capability or step.requiredCapabilities[0].`);
@@ -2936,7 +2982,12 @@ export async function executeCapabilityStep(
     );
   }
 
-  const input = adaptCapabilityToolInput(step, mergeStepInput(step, context), context, descriptor.name);
+  const input = adaptCapabilityToolInput(
+    step,
+    buildDescriptorToolInput(step, context, descriptor),
+    context,
+    descriptor.name,
+  );
   validateToolDescriptorInputs(descriptor, input);
   const deterministicVerifierResult = descriptor.name === "verifier.check"
     ? verifyStructuredTrendEvidence(step, context)
@@ -3160,7 +3211,7 @@ function filterToolDescriptorsForStep(
   allowedToolNames: string[],
   toolDescriptors: readonly ToolDescriptor[] = DEFAULT_AVAILABLE_TOOL_DESCRIPTORS,
 ): ToolDescriptor[] {
-  const capability = step.capability ?? step.requiredCapabilities?.[0];
+  const capability = step.primaryCapability ?? step.capability ?? step.requiredCapabilities?.[0];
   const exposesRoleToolset = !step.toolName && stepUsesRoleCapability(step);
   const filtered = toolDescriptors.filter((descriptor) => {
     if (!allowedToolNames.includes(descriptor.name)) return false;
@@ -3484,6 +3535,38 @@ function mergeStepInput(
   };
 }
 
+function buildAgentReActToolBaseInput(
+  step: CommanderDagStep,
+  context: SharedTaskContext,
+  descriptor: ToolDescriptor,
+): Record<string, unknown> {
+  return buildDescriptorToolInput(step, context, descriptor);
+}
+
+function buildDescriptorToolInput(
+  step: CommanderDagStep,
+  context: SharedTaskContext,
+  descriptor: ToolDescriptor,
+): Record<string, unknown> {
+  const contextInput = resolveStepInput(step.inputContextKeys, context);
+  const declaredProperties = descriptor.inputSchema?.type === "object" &&
+    descriptor.inputSchema.additionalProperties === false
+    ? descriptor.inputSchema.properties
+    : undefined;
+  const filteredContextInput = declaredProperties
+    ? Object.fromEntries(
+        Object.entries(contextInput).filter(([key]) =>
+          Object.prototype.hasOwnProperty.call(declaredProperties, key)
+        ),
+      )
+    : contextInput;
+
+  return {
+    ...filteredContextInput,
+    ...(isPlainRecord(step.toolInput) ? step.toolInput : {}),
+  };
+}
+
 function assertRequiredComputerPathInput(
   toolName: "computer.listDirectory" | "computer.openPath",
   input: Record<string, unknown>,
@@ -3589,6 +3672,10 @@ const GIT_COMMIT_TOOL_NAME = "git.createCommit";
 const GIT_CREATE_PR_TOOL_NAME = "git.createPullRequest";
 const GIT_COMMENT_PR_TOOL_NAME = "git.commentPullRequest";
 const FILE_WRITE_TEXT_TOOL_NAME = "file.writeText";
+const SCHEDULER_CREATE_TASK_TOOL_NAME = "scheduler.createTask";
+const WORKSPACE_COMMAND_TOOL_NAME = "shell.runWorkspaceCommand";
+const WORKSPACE_CREATE_TOOL_NAME = "workspace.create";
+const WORKSPACE_DELETE_TOOL_NAME = "workspace.delete";
 
 /**
  * Closed allowlist of approval-gated tools that may enter the Commander DAG
@@ -3629,6 +3716,10 @@ export const SUPPORTED_APPROVAL_GATED_TOOLS = [
   GIT_CREATE_PR_TOOL_NAME,
   GIT_COMMENT_PR_TOOL_NAME,
   FILE_WRITE_TEXT_TOOL_NAME,
+  SCHEDULER_CREATE_TASK_TOOL_NAME,
+  WORKSPACE_COMMAND_TOOL_NAME,
+  WORKSPACE_CREATE_TOOL_NAME,
+  WORKSPACE_DELETE_TOOL_NAME,
   ...COMPUTER_USE_APPROVAL_GATED_TOOLS,
 ] as const;
 
@@ -3894,6 +3985,42 @@ function formatGenericStepOutputMarkdownSection(key: string, output: GenericStep
   ].filter((line) => line.length > 0);
 }
 
+function isSchedulerCreateTaskDagStep(
+  step: CommanderDagStep,
+  capability: string | undefined,
+): boolean {
+  return step.toolName === SCHEDULER_CREATE_TASK_TOOL_NAME ||
+    capability === "schedule_create" ||
+    step.requiredCapabilities?.includes("schedule_create") === true;
+}
+
+function isWorkspaceMutationDagStep(step: CommanderDagStep): boolean {
+  return step.toolName === WORKSPACE_CREATE_TOOL_NAME ||
+    step.toolName === WORKSPACE_DELETE_TOOL_NAME;
+}
+
+function isWorkspaceCommandDagStep(
+  step: CommanderDagStep,
+  capability: string | undefined,
+): boolean {
+  return step.toolName === WORKSPACE_COMMAND_TOOL_NAME ||
+    capability === "shell_execute" ||
+    step.requiredCapabilities?.includes("shell_execute") === true;
+}
+
+function isApprovalManagedDagStep(step: CommanderDagStep): boolean {
+  const capability = step.primaryCapability ?? step.capability ?? step.requiredCapabilities?.[0];
+  return isGitStageDagStep(step, capability) ||
+    isGitCommitDagStep(step, capability) ||
+    isGitCreatePullRequestDagStep(step, capability) ||
+    isGitCommentPullRequestDagStep(step, capability) ||
+    isFileWriteTextDagStep(step) ||
+    isSchedulerCreateTaskDagStep(step, capability) ||
+    isWorkspaceMutationDagStep(step) ||
+    isWorkspaceCommandDagStep(step, capability) ||
+    isComputerUseDagStep(step);
+}
+
 function formatBlockedSourceCollectionMarkdownSection(
   result: BlockedSourceCollectionResult,
 ): string[] {
@@ -3978,6 +4105,564 @@ function safeMarkdownJson(value: unknown): string {
   } catch (error) {
     return JSON.stringify({ error: "Unable to serialize evidence.", detail: summarizeToolError(error) }, null, 2);
   }
+}
+
+async function executeSchedulerCreateTaskDagStep(options: {
+  dagStep: CommanderDagStep;
+  agentId: string;
+  taskId: string;
+  userGoal: string;
+  context: SharedTaskContext;
+  schedulerTool?: SchedulerTool;
+  getSnapshot: () => TaskSnapshot;
+  emitSnapshot: (snapshot: TaskSnapshot) => void;
+  emitEvent: (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number];
+  agentTracker: ReturnType<typeof createAgentStateTracker>;
+  setPendingPermissionHandler?: (
+    requestId: string,
+    handler: ((decision: string) => void | Promise<void>) | undefined,
+  ) => void;
+  signal?: AbortSignal;
+  toolTimeoutMs: number;
+  userWaitTimeoutMs: number;
+  beforeWrite: () => Promise<void>;
+}): Promise<unknown> {
+  const {
+    dagStep,
+    agentId,
+    taskId,
+    userGoal,
+    context,
+    schedulerTool,
+    getSnapshot,
+    emitSnapshot,
+    emitEvent,
+    agentTracker,
+    setPendingPermissionHandler,
+    signal,
+    toolTimeoutMs,
+    userWaitTimeoutMs,
+    beforeWrite,
+  } = options;
+  if (!schedulerTool) throw new Error("scheduler.createTask tool is not available.");
+  if (!setPendingPermissionHandler) {
+    throw new Error("scheduler.createTask requires a permission handler for durable reminders.");
+  }
+
+  const draft = extractScheduledTaskDraft(mergeStepInput(dagStep, context), userGoal);
+  const permissionRequest = createPendingPermissionRequest({
+    id: `approval-${taskId}-${dagStep.id}`,
+    level: "confirmed_write",
+    writeRiskLevel: "safe",
+    title: "Approve scheduled task",
+    reason: "Creating a reminder stores a durable task that can run later.",
+    dryRun: {
+      operation: SCHEDULER_CREATE_TASK_TOOL_NAME,
+      affectedPaths: [{
+        source: draft.goal,
+        target: `scheduled-task:${draft.name}`,
+        action: "create",
+      }],
+      riskSummary: `Creates an enabled ${draft.schedule.type} reminder for ${draft.nextRunAt}.`,
+      reversible: true,
+    },
+    allowAlways: false,
+  });
+  const previewHash = createDryRunBindingHash(permissionRequest.dryRun);
+  let resolvedPermissionRequest = permissionRequest;
+  const approved = await withTaskTimeout(
+    new Promise<boolean>((resolve, reject) => {
+      if (agentTracker.getState(agentId)) {
+        agentTracker.setState(agentId, {
+          status: "waiting_permission",
+          task: `Waiting for scheduled task approval: ${draft.name}`,
+          currentStepId: dagStep.id,
+        });
+      }
+      emitSnapshot({
+        ...getSnapshot(),
+        status: "waiting_permission",
+        commanderMessage: `Scheduled task needs approval: ${draft.name}.`,
+        permissionRequest,
+        agents: agentTracker.getSnapshots(),
+        logs: [
+          ...getSnapshot().logs,
+          emitEvent({
+            kind: "permission.requested",
+            taskId,
+            stepId: dagStep.id,
+            toolName: SCHEDULER_CREATE_TASK_TOOL_NAME,
+            previewHash,
+            request: permissionRequest,
+          }),
+          emitEvent({
+            kind: "task.waiting",
+            taskId,
+            phase: "waiting_user",
+            label: `Scheduled task approval ${permissionRequest.id}`,
+            detail: `Waiting for permission to create ${draft.name}.`,
+            stepId: dagStep.id,
+            agentKind: dagStep.assignedAgentKind as AgentKind,
+            toolName: SCHEDULER_CREATE_TASK_TOOL_NAME,
+          }),
+        ],
+      });
+      setPendingPermissionHandler(permissionRequest.id, async (decision) => {
+        try {
+          resolvedPermissionRequest = resolvePermissionRequest(
+            permissionRequest,
+            decision as PermissionDecision,
+          );
+          setPendingPermissionHandler(permissionRequest.id, undefined);
+          emitSnapshot({
+            ...getSnapshot(),
+            permissionRequest: resolvedPermissionRequest,
+            logs: appendLog(getSnapshot(), emitEvent({
+              kind: "permission.resolved",
+              taskId,
+              stepId: dagStep.id,
+              toolName: SCHEDULER_CREATE_TASK_TOOL_NAME,
+              previewHash,
+              requestId: permissionRequest.id,
+              decision: decision === "denied" ? "denied" : "approved",
+            })),
+          });
+          resolve(decision !== "denied");
+        } catch (error) {
+          setPendingPermissionHandler(permissionRequest.id, undefined);
+          reject(error);
+        }
+      });
+    }),
+    {
+      label: `Scheduled task approval ${permissionRequest.id}`,
+      timeoutMs: userWaitTimeoutMs,
+      signal,
+      onTimeout: () => setPendingPermissionHandler(permissionRequest.id, undefined),
+      onAbort: () => setPendingPermissionHandler(permissionRequest.id, undefined),
+    },
+  );
+  if (!approved) {
+    throw new Error(`Scheduled task creation was denied: ${draft.name}.`);
+  }
+
+  await beforeWrite();
+  const result = await withTaskTimeout(
+    () => schedulerTool.createTask(draft),
+    {
+      label: `tool ${SCHEDULER_CREATE_TASK_TOOL_NAME}`,
+      timeoutMs: toolTimeoutMs,
+      signal,
+    },
+  );
+  emitSnapshot({
+    ...getSnapshot(),
+    status: "running",
+    permissionRequest: resolvedPermissionRequest,
+    logs: appendLog(getSnapshot(), emitEvent({
+      kind: "tool.completed",
+      taskId,
+      toolName: SCHEDULER_CREATE_TASK_TOOL_NAME,
+      detail: `Created scheduled task ${result.id}.`,
+    })),
+  });
+  return result;
+}
+
+async function executeWorkspaceMutationDagStep(options: {
+  dagStep: CommanderDagStep;
+  agentId: string;
+  taskId: string;
+  context: SharedTaskContext;
+  workspaceTool?: WorkspaceTool;
+  getSnapshot: () => TaskSnapshot;
+  emitSnapshot: (snapshot: TaskSnapshot) => void;
+  emitEvent: (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number];
+  agentTracker: ReturnType<typeof createAgentStateTracker>;
+  setPendingPermissionHandler?: (
+    requestId: string,
+    handler: ((decision: string) => void | Promise<void>) | undefined,
+  ) => void;
+  signal?: AbortSignal;
+  toolTimeoutMs: number;
+  userWaitTimeoutMs: number;
+  beforeWrite: () => Promise<void>;
+}): Promise<unknown> {
+  const {
+    dagStep,
+    agentId,
+    taskId,
+    context,
+    workspaceTool,
+    getSnapshot,
+    emitSnapshot,
+    emitEvent,
+    agentTracker,
+    setPendingPermissionHandler,
+    signal,
+    toolTimeoutMs,
+    userWaitTimeoutMs,
+    beforeWrite,
+  } = options;
+  if (!workspaceTool || !setPendingPermissionHandler) {
+    throw new Error(`${dagStep.toolName} requires the Workspace tool and a permission handler.`);
+  }
+
+  const input = mergeStepInput(dagStep, context);
+  const isCreate = dagStep.toolName === WORKSPACE_CREATE_TOOL_NAME;
+  const toolName = isCreate ? WORKSPACE_CREATE_TOOL_NAME : WORKSPACE_DELETE_TOOL_NAME;
+  const definition = isCreate && isPlainRecord(input.definition) ? input.definition : undefined;
+  const workspaceId = isCreate
+    ? (typeof definition?.id === "string" ? definition.id.trim() : "")
+    : (typeof input.workspaceId === "string" ? input.workspaceId.trim() : "");
+  if (!workspaceId || (isCreate && !definition)) {
+    throw new Error(isCreate
+      ? "workspace.create requires toolInput.definition with a non-empty id."
+      : "workspace.delete requires a non-empty toolInput.workspaceId.");
+  }
+
+  const plan = await withTaskTimeout(
+    () => isCreate
+      ? workspaceTool.planCreate(definition!, taskId)
+      : workspaceTool.planDelete(workspaceId, taskId),
+    {
+      label: `tool ${toolName} plan`,
+      timeoutMs: toolTimeoutMs,
+      signal,
+    },
+  );
+  if (plan.workspaceId !== workspaceId || plan.action !== (isCreate ? "create" : "delete")) {
+    throw new Error(`${toolName} returned a preview for a different workspace mutation.`);
+  }
+
+  const permissionRequest = createPendingPermissionRequest({
+    id: plan.approvalId,
+    level: "confirmed_write",
+    writeRiskLevel: isCreate ? "safe" : "risky",
+    title: isCreate ? "Approve workspace creation" : "Approve workspace deletion",
+    reason: isCreate
+      ? "Creating a workspace stores a durable local definition."
+      : "Deleting a workspace removes its local definition.",
+    dryRun: plan.dryRun,
+    allowAlways: false,
+  });
+  const previewHash = createDryRunBindingHash(permissionRequest.dryRun);
+  let resolvedPermissionRequest = permissionRequest;
+
+  const approved = await withTaskTimeout(
+    new Promise<boolean>((resolve, reject) => {
+      if (agentTracker.getState(agentId)) {
+        agentTracker.setState(agentId, {
+          status: "waiting_permission",
+          task: `Waiting for ${toolName} approval`,
+          currentStepId: dagStep.id,
+        });
+      }
+      emitSnapshot({
+        ...getSnapshot(),
+        status: "waiting_permission",
+        commanderMessage: `${toolName} needs approval for ${workspaceId}.`,
+        permissionRequest,
+        agents: agentTracker.getSnapshots(),
+        logs: [
+          ...getSnapshot().logs,
+          emitEvent({
+            kind: "permission.requested",
+            taskId,
+            stepId: dagStep.id,
+            toolName,
+            previewHash,
+            request: permissionRequest,
+          }),
+          emitEvent({
+            kind: "task.waiting",
+            taskId,
+            phase: "waiting_user",
+            label: `${toolName} approval ${permissionRequest.id}`,
+            detail: `Waiting for permission to ${plan.action} workspace ${workspaceId}.`,
+            stepId: dagStep.id,
+            agentKind: dagStep.assignedAgentKind as AgentKind,
+            toolName,
+          }),
+        ],
+      });
+      setPendingPermissionHandler(permissionRequest.id, async (decision) => {
+        try {
+          resolvedPermissionRequest = resolvePermissionRequest(
+            permissionRequest,
+            decision as PermissionDecision,
+          );
+          setPendingPermissionHandler(permissionRequest.id, undefined);
+          emitSnapshot({
+            ...getSnapshot(),
+            permissionRequest: resolvedPermissionRequest,
+            logs: appendLog(getSnapshot(), emitEvent({
+              kind: "permission.resolved",
+              taskId,
+              stepId: dagStep.id,
+              toolName,
+              previewHash,
+              requestId: permissionRequest.id,
+              decision: decision === "denied" ? "denied" : "approved",
+            })),
+          });
+          resolve(decision !== "denied");
+        } catch (error) {
+          setPendingPermissionHandler(permissionRequest.id, undefined);
+          reject(error);
+        }
+      });
+    }),
+    {
+      label: `${toolName} approval ${permissionRequest.id}`,
+      timeoutMs: userWaitTimeoutMs,
+      signal,
+      onTimeout: () => setPendingPermissionHandler(permissionRequest.id, undefined),
+      onAbort: () => setPendingPermissionHandler(permissionRequest.id, undefined),
+    },
+  );
+
+  if (!approved) {
+    const output = { workspaceId, action: plan.action, changed: false, denied: true };
+    if (agentTracker.getState(agentId)) {
+      agentTracker.setState(agentId, { status: "completed", task: `Skipped: ${dagStep.title}` });
+    }
+    emitSnapshot({
+      ...getSnapshot(),
+      status: "running",
+      permissionRequest: resolvedPermissionRequest,
+      plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
+      agents: agentTracker.getSnapshots(),
+      logs: appendLog(getSnapshot(), emitEvent({
+        kind: "tool.completed",
+        taskId,
+        toolName,
+        detail: `${toolName} was denied; workspace ${workspaceId} was unchanged.`,
+      })),
+    });
+    return output;
+  }
+
+  await beforeWrite();
+  await withTaskTimeout(
+    () => isCreate
+      ? workspaceTool.create(definition!, plan.approvalId, taskId)
+      : workspaceTool.delete(workspaceId, plan.approvalId, taskId),
+    { label: `tool ${toolName} execute`, timeoutMs: toolTimeoutMs, signal },
+  );
+  const output = { workspaceId, action: plan.action, changed: true };
+  if (agentTracker.getState(agentId)) {
+    agentTracker.setState(agentId, { status: "completed", task: `Completed: ${dagStep.title}` });
+  }
+  emitSnapshot({
+    ...getSnapshot(),
+    status: "running",
+    permissionRequest: resolvedPermissionRequest,
+    plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
+    agents: agentTracker.getSnapshots(),
+    logs: appendLog(getSnapshot(), emitEvent({
+      kind: "tool.completed",
+      taskId,
+      toolName,
+      detail: `${toolName} completed for workspace ${workspaceId}.`,
+    })),
+  });
+  return output;
+}
+
+function extractScheduledTaskDraft(
+  input: Record<string, unknown>,
+  userGoal: string,
+): ScheduledTaskDraft {
+  const fallback = createScheduleDraft(userGoal);
+  const scheduleInput = isPlainRecord(input.schedule) ? input.schedule : undefined;
+  const scheduleType = scheduleInput?.type;
+  const scheduleValue = scheduleInput?.value;
+  const schedule: ScheduledTaskDraft["schedule"] = (
+    isScheduledTaskType(scheduleType) &&
+    typeof scheduleValue === "string" && scheduleValue.trim()
+  )
+    ? { type: scheduleType, value: scheduleValue.trim() }
+    : fallback.schedule;
+  return {
+    name: typeof input.name === "string" && input.name.trim()
+      ? input.name.trim()
+      : fallback.name,
+    goal: typeof input.goal === "string" && input.goal.trim()
+      ? input.goal.trim()
+      : fallback.goal,
+    schedule,
+    nextRunAt: typeof input.nextRunAt === "string" && input.nextRunAt.trim()
+      ? input.nextRunAt.trim()
+      : fallback.nextRunAt,
+  };
+}
+
+function isScheduledTaskType(value: unknown): value is ScheduledTaskDraft["schedule"]["type"] {
+  return value === "interval" || value === "daily" || value === "weekly" || value === "once";
+}
+
+async function executeWorkspaceCommandDagStep(options: {
+  dagStep: CommanderDagStep;
+  agentId: string;
+  taskId: string;
+  context: SharedTaskContext;
+  shellTool?: ShellTool;
+  getSnapshot: () => TaskSnapshot;
+  emitSnapshot: (snapshot: TaskSnapshot) => void;
+  emitEvent: (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number];
+  agentTracker: ReturnType<typeof createAgentStateTracker>;
+  setPendingPermissionHandler?: (
+    requestId: string,
+    handler: ((decision: string) => void | Promise<void>) | undefined,
+  ) => void;
+  signal?: AbortSignal;
+  toolTimeoutMs: number;
+  userWaitTimeoutMs: number;
+  beforeWrite: () => Promise<void>;
+}): Promise<ShellCommandOutput> {
+  const {
+    dagStep,
+    agentId,
+    taskId,
+    context,
+    shellTool,
+    getSnapshot,
+    emitSnapshot,
+    emitEvent,
+    agentTracker,
+    setPendingPermissionHandler,
+    signal,
+    toolTimeoutMs,
+    userWaitTimeoutMs,
+    beforeWrite,
+  } = options;
+  if (!shellTool?.planWorkspaceCommand || !shellTool.runWorkspaceCommand) {
+    throw new Error("shell.runWorkspaceCommand tool is not available.");
+  }
+  if (!setPendingPermissionHandler) {
+    throw new Error("shell.runWorkspaceCommand requires a permission handler.");
+  }
+  const input = normalizeWorkspaceCommandInput(mergeStepInput(dagStep, context));
+  const plan = await withTaskTimeout(
+    () => shellTool.planWorkspaceCommand!(input, taskId),
+    { label: `tool ${WORKSPACE_COMMAND_TOOL_NAME} plan`, timeoutMs: toolTimeoutMs, signal },
+  );
+  const permissionRequest = createPendingPermissionRequest({
+    id: plan.approvalId,
+    level: "confirmed_write",
+    writeRiskLevel: "risky",
+    title: "Approve workspace command",
+    reason: "Project tests and typechecks can execute repository code and write generated files.",
+    dryRun: plan.dryRun,
+    allowAlways: false,
+  });
+  const durablePreviewHash = createDryRunBindingHash(permissionRequest.dryRun);
+  const approved = await withTaskTimeout(
+    new Promise<boolean>((resolve, reject) => {
+      if (agentTracker.getState(agentId)) {
+        agentTracker.setState(agentId, {
+          status: "waiting_permission",
+          task: `Waiting for command approval: ${plan.command}`,
+          currentStepId: dagStep.id,
+        });
+      }
+      emitSnapshot({
+        ...getSnapshot(),
+        status: "waiting_permission",
+        commanderMessage: `Workspace command needs approval: ${plan.command}`,
+        permissionRequest,
+        agents: agentTracker.getSnapshots(),
+        logs: [
+          ...getSnapshot().logs,
+          emitEvent({
+            kind: "permission.requested",
+            taskId,
+            stepId: dagStep.id,
+            toolName: WORKSPACE_COMMAND_TOOL_NAME,
+            previewHash: durablePreviewHash,
+            request: permissionRequest,
+          }),
+          emitEvent({
+            kind: "task.waiting",
+            taskId,
+            phase: "waiting_user",
+            label: `Workspace command approval ${plan.approvalId}`,
+            detail: `Waiting for permission to run ${plan.command}.`,
+            stepId: dagStep.id,
+            agentKind: dagStep.assignedAgentKind as AgentKind,
+            toolName: WORKSPACE_COMMAND_TOOL_NAME,
+          }),
+        ],
+      });
+      setPendingPermissionHandler(plan.approvalId, async (decision) => {
+        try {
+          setPendingPermissionHandler(plan.approvalId, undefined);
+          emitSnapshot({
+            ...getSnapshot(),
+            permissionRequest: resolvePermissionRequest(
+              permissionRequest,
+              decision as PermissionDecision,
+            ),
+            logs: appendLog(getSnapshot(), emitEvent({
+              kind: "permission.resolved",
+              taskId,
+              stepId: dagStep.id,
+              toolName: WORKSPACE_COMMAND_TOOL_NAME,
+              previewHash: durablePreviewHash,
+              requestId: plan.approvalId,
+              decision: decision === "denied" ? "denied" : "approved",
+            })),
+          });
+          resolve(decision !== "denied");
+        } catch (error) {
+          setPendingPermissionHandler(plan.approvalId, undefined);
+          reject(error);
+        }
+      });
+    }),
+    {
+      label: `Workspace command approval ${plan.approvalId}`,
+      timeoutMs: userWaitTimeoutMs,
+      signal,
+      onTimeout: () => setPendingPermissionHandler(plan.approvalId, undefined),
+      onAbort: () => setPendingPermissionHandler(plan.approvalId, undefined),
+    },
+  );
+  if (!approved) throw new Error(`Workspace command was denied: ${plan.command}.`);
+
+  await beforeWrite();
+  return withTaskTimeout(
+    () => shellTool.runWorkspaceCommand!(input, {
+      approvalId: plan.approvalId,
+      taskId,
+      previewHash: plan.previewHash,
+    }),
+    { label: `tool ${WORKSPACE_COMMAND_TOOL_NAME}`, timeoutMs: toolTimeoutMs, signal },
+  );
+}
+
+function normalizeWorkspaceCommandInput(input: Record<string, unknown>): {
+  program: string;
+  args: string[];
+  workspacePath?: string | null;
+} {
+  if (typeof input.program !== "string" || !input.program.trim()) {
+    throw new Error("shell.runWorkspaceCommand requires explicit toolInput.program.");
+  }
+  if (!Array.isArray(input.args) || input.args.length === 0 ||
+      input.args.some((arg) => typeof arg !== "string" || !arg.trim())) {
+    throw new Error("shell.runWorkspaceCommand requires explicit toolInput.args.");
+  }
+  if (input.workspacePath !== undefined && input.workspacePath !== null &&
+      typeof input.workspacePath !== "string") {
+    throw new Error("shell.runWorkspaceCommand workspacePath must be a string or null.");
+  }
+  return {
+    program: input.program.trim(),
+    args: input.args.map((arg) => String(arg).trim()),
+    ...(input.workspacePath === undefined ? {} : { workspacePath: input.workspacePath }),
+  };
 }
 
 async function executeFileWriteTextDagStep(options: {
@@ -5332,6 +6017,38 @@ const COMPUTER_USE_CAPABILITIES = new Set([
   "desktop_input",
 ]);
 
+const COMPUTER_USE_TOOL_NAMES = new Set([
+  "computer.screenshot",
+  "computer.listWindows",
+  "computer.inspectUi",
+  "computer.focusWindow",
+  "computer.moveMouse",
+  "computer.click",
+  "computer.type",
+  "computer.keyCombo",
+  "computer.scroll",
+  "computer.invokeUi",
+  "computer.setUiValue",
+  "computer.wait",
+]);
+
+const COMPUTER_DIRECT_READ_TOOL_NAMES = new Set([
+  "computer.screenshot",
+  "computer.listWindows",
+  "computer.inspectUi",
+]);
+
+function isDirectComputerReadDagStep(step: {
+  assignedAgentKind: string;
+  toolName?: string;
+  executionMode?: string;
+}): boolean {
+  return step.assignedAgentKind === "computer" &&
+    step.executionMode === "direct_tool_call" &&
+    step.toolName !== undefined &&
+    COMPUTER_DIRECT_READ_TOOL_NAMES.has(step.toolName);
+}
+
 function isComputerUseCapability(capability: string | undefined): boolean {
   return capability !== undefined && COMPUTER_USE_CAPABILITIES.has(capability);
 }
@@ -5339,12 +6056,19 @@ function isComputerUseCapability(capability: string | undefined): boolean {
 function isComputerUseDagStep(step: {
   assignedAgentKind: string;
   toolName?: string;
+  primaryCapability?: string;
   capability?: string;
   requiredCapabilities?: string[];
+  executionMode?: string;
 }): boolean {
+  if (isDirectComputerReadDagStep(step)) {
+    return false;
+  }
   return step.assignedAgentKind === "computer" &&
     (
-      step.toolName?.startsWith("computer.") ||
+      step.executionMode === "desktop_input" ||
+      (step.toolName !== undefined && COMPUTER_USE_TOOL_NAMES.has(step.toolName)) ||
+      isComputerUseCapability(step.primaryCapability) ||
       isComputerUseCapability(step.capability) ||
       (step.requiredCapabilities ?? []).some(isComputerUseCapability)
     );
@@ -5787,7 +6511,10 @@ function stringifyForPlanTrace(value: unknown): string | undefined {
   }
 }
 
-function normalizeCommanderDagPlan(plan: CommanderPlanResult): CommanderDagPlan {
+function normalizeCommanderDagPlan(
+  plan: CommanderPlanResult,
+  options: { workspacePath?: string } = {},
+): CommanderDagPlan {
   const parsed = CommanderPlanResultShape.safeParse(plan);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
@@ -5802,7 +6529,12 @@ function normalizeCommanderDagPlan(plan: CommanderPlanResult): CommanderDagPlan 
         "Return a JSON object with title, reasoning, and steps[] matching the Commander plan schema.",
     });
   }
-  const normalized = parsed.data;
+  // Layer 2/4 of the legality pipeline: deterministic local repair and
+  // template defaulting run before semantic compilation so mechanical
+  // defects never consume a model repair round.
+  const normalized = applyDeterministicPlanRepairs(parsed.data, {
+    workspacePath: options.workspacePath,
+  }).plan;
   return {
     title: normalized.title,
     reasoning: normalized.reasoning,
@@ -7532,12 +8264,13 @@ export async function runCommanderDagTask({
   }
   function clearVerifierCheck(stepId: string): void {
     const removed = verifierChecks.delete(stepId);
-    if (removed) {
-      context.set("verifierChecks", Object.fromEntries(verifierChecks));
-    }
-    // Prevent the legacy single-result fallback from resurrecting a verdict
-    // after a verifier step is retried or fails.
-    context.set("verifierCheck", undefined);
+    if (!removed) return;
+    context.set("verifierChecks", Object.fromEntries(verifierChecks));
+    // Keep the legacy key aligned with the remaining per-step checks. Starting
+    // an unrelated downstream step must not erase a valid verifier verdict.
+    const remainingChecks = [...verifierChecks.values()];
+    const latestRemaining = remainingChecks[remainingChecks.length - 1];
+    context.set("verifierCheck", latestRemaining);
   }
   let durableResumeMetadata: TaskSnapshot["durableResume"] | undefined;
   let restoredReplanAttemptCount = 0;
@@ -7659,7 +8392,9 @@ export async function runCommanderDagTask({
           },
         );
         try {
-          uncompiledPlan = normalizeCommanderDagPlan(rawPlan);
+          uncompiledPlan = normalizeCommanderDagPlan(rawPlan, {
+            workspacePath: selectedWorkspacePath,
+          });
         } catch (shapeError) {
           const diagnostic = commanderPlanShapeDiagnostic(shapeError);
           initialExtractedJson = stringifyForPlanTrace(rawPlan);
@@ -7732,6 +8467,10 @@ export async function runCommanderDagTask({
     // assertToolCanDispatchWithoutApproval).
     const supportedApprovalGatedTools: string[] = [...SUPPORTED_APPROVAL_GATED_TOOLS];
     const preloadedContextKeys = [...DEFAULT_PRELOADED_CONTEXT_KEYS];
+    // Layer 5 pre-filter: recognize user intents (write/export/statistics/
+    // retrieval) from the raw goal. The compile gate rejects file.writeText
+    // steps when the user never asked to persist results.
+    const commanderPlanIntents = detectCommanderPlanIntents(userGoal);
     const compilesRestoredActiveSubgraph = Boolean(
       restoredCheckpointPlan &&
       resumeFromCheckpoint &&
@@ -7745,10 +8484,12 @@ export async function runCommanderDagTask({
       : uncompiledPlan;
     let compilationResult = compileCommanderPlan({
       plan: planForCompilation,
+      userGoal,
       availableAgents,
       availableTools: planningAvailableTools,
       supportedApprovalGatedTools,
       preloadedContextKeys,
+      planIntents: commanderPlanIntents,
     });
     if (compilesRestoredActiveSubgraph && compilationResult.ok) {
       // The active subgraph passed the full gate. The complete artifact is
@@ -7808,6 +8549,7 @@ export async function runCommanderDagTask({
         availableTools: planningAvailableTools,
         supportedApprovalGatedTools,
         preloadedContextKeys,
+        planIntents: commanderPlanIntents,
         workflowId: COMMANDER_DAG_WORKFLOW_ID,
         locale: /[\u3400-\u9fff]/u.test(userGoal) ? "zh-CN" : "en",
         maxAttempts: 2,
@@ -7847,10 +8589,12 @@ export async function runCommanderDagTask({
         );
         compilationResult = compileCommanderPlan({
           plan: uncompiledPlan,
+          userGoal,
           availableAgents,
           availableTools: planningAvailableTools,
           supportedApprovalGatedTools,
           preloadedContextKeys,
+          planIntents: commanderPlanIntents,
         });
       } else {
         compilationResult = {
@@ -7916,6 +8660,9 @@ export async function runCommanderDagTask({
       input: step.instruction ?? step.title,
       output: (step.acceptanceCriteria ?? [step.successCriteria]).join("\n"),
       permissionLevel: getDagStepPermissionLevel(step, availableTools, agentRegistry),
+      ...(isApprovalManagedDagStep(step)
+        ? { executionTimeoutMode: "approval_managed" as const }
+        : {}),
       // Recovery plans may retain a dependency on the failed step in the
       // Commander artifact, while the live workflow intentionally removes it
       // so the abandoned step is treated as a satisfied boundary.
@@ -8072,7 +8819,6 @@ export async function runCommanderDagTask({
         }
       }
     }
-    const completedSteps = new Set<string>(resumeState?.completedStepIds ?? []);
     const blockedAgentIds = new Set<string>();
     const blockedStepIds = new Set<string>();
     for (const stepId of resumeState?.abandonedStepIds ?? []) {
@@ -8290,7 +9036,6 @@ export async function runCommanderDagTask({
       ) {
         const existingAnswer = context.get(`askUserAnswer:${dagStep.id}`) as string | undefined;
         if (existingAnswer !== undefined) {
-          completedSteps.add(dagStep.id);
           emitSnapshot({
             ...getSnapshot(),
             plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
@@ -8321,7 +9066,6 @@ export async function runCommanderDagTask({
             signal: stepSignal,
             timeoutMs: runtimeTimeouts.userWaitTimeoutMs,
           });
-          completedSteps.add(dagStep.id);
           context.set(dagStep.outputContextKey ?? "clarification", answer);
           emitSnapshot({
             ...getSnapshot(),
@@ -8337,7 +9081,6 @@ export async function runCommanderDagTask({
           return { output: answer };
         }
         // No askUser handler available — skip silently
-        completedSteps.add(dagStep.id);
         emitSnapshot({
           ...getSnapshot(),
           plan: markStep(getSnapshot().plan, dagStep.id, "completed"),
@@ -8349,6 +9092,83 @@ export async function runCommanderDagTask({
       const capability = dagStep.capability
         ?? dagStep.requiredCapabilities?.[0]
         ?? "synthesis";
+      if (isWorkspaceCommandDagStep(dagStep, capability)) {
+        const output = await executeWorkspaceCommandDagStep({
+          dagStep,
+          agentId,
+          taskId,
+          context,
+          shellTool,
+          getSnapshot,
+          emitSnapshot,
+          emitEvent,
+          agentTracker,
+          setPendingPermissionHandler: controller.setPendingPermissionHandler,
+          signal: stepSignal,
+          toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
+          userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
+          beforeWrite: flushDurablePersistenceQueue,
+        });
+        writeCommanderStepOutput(dagStep, output, WORKSPACE_COMMAND_TOOL_NAME);
+        if (output.exitCode !== 0) {
+          const detail = output.stderr || output.stdout || `${output.command} exited with ${output.exitCode}.`;
+          return normalizeStepResult({
+            status: "failed",
+            output,
+            evidence: [{
+              kind: "command",
+              label: output.command,
+              reference: dagStep.outputContextKey ?? `step:${dagStep.id}`,
+            }],
+            assumptions: [],
+            unresolvedQuestions: [],
+            unmetCriteria: [dagStep.successCriteria],
+            error: `Workspace command failed with exit code ${output.exitCode}: ${detail}`,
+          });
+        }
+        return { output };
+      }
+      if (isSchedulerCreateTaskDagStep(dagStep, capability)) {
+        const output = await executeSchedulerCreateTaskDagStep({
+          dagStep,
+          agentId,
+          taskId,
+          userGoal,
+          context,
+          schedulerTool,
+          getSnapshot,
+          emitSnapshot,
+          emitEvent,
+          agentTracker,
+          setPendingPermissionHandler: controller.setPendingPermissionHandler,
+          signal: stepSignal,
+          toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
+          userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
+          beforeWrite: flushDurablePersistenceQueue,
+        });
+        writeCommanderStepOutput(dagStep, output, SCHEDULER_CREATE_TASK_TOOL_NAME);
+        return { output };
+      }
+      if (isWorkspaceMutationDagStep(dagStep)) {
+        const output = await executeWorkspaceMutationDagStep({
+          dagStep,
+          agentId,
+          taskId,
+          context,
+          workspaceTool,
+          getSnapshot,
+          emitSnapshot,
+          emitEvent,
+          agentTracker,
+          setPendingPermissionHandler: controller.setPendingPermissionHandler,
+          signal: stepSignal,
+          toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
+          userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
+          beforeWrite: flushDurablePersistenceQueue,
+        });
+        writeCommanderStepOutput(dagStep, output, dagStep.toolName!);
+        return { output };
+      }
       if (isGitStageDagStep(dagStep, capability)) {
         const descriptor = findToolDescriptorByNameIn(availableTools, GIT_STAGE_TOOL_NAME);
         if (!descriptor) {
@@ -8375,7 +9195,6 @@ export async function runCommanderDagTask({
             workspaceRuntime,
             beforeWrite: flushDurablePersistenceQueue,
           });
-          completedSteps.add(dagStep.id);
           writeCommanderStepOutput(dagStep, output, descriptor.name);
           return { output };
         } catch (error) {
@@ -8428,7 +9247,6 @@ export async function runCommanderDagTask({
             workspaceRuntime,
             beforeWrite: flushDurablePersistenceQueue,
           });
-          completedSteps.add(dagStep.id);
           writeCommanderStepOutput(dagStep, output, GIT_COMMIT_TOOL_NAME);
           return { output };
         } catch (error) {
@@ -8480,7 +9298,6 @@ export async function runCommanderDagTask({
             userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
             beforeWrite: flushDurablePersistenceQueue,
           });
-          completedSteps.add(dagStep.id);
           writeCommanderStepOutput(dagStep, output, GIT_CREATE_PR_TOOL_NAME);
           return { output };
         } catch (error) {
@@ -8532,7 +9349,6 @@ export async function runCommanderDagTask({
             userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
             beforeWrite: flushDurablePersistenceQueue,
           });
-          completedSteps.add(dagStep.id);
           writeCommanderStepOutput(dagStep, output, descriptor.name);
           return { output };
         } catch (error) {
@@ -8585,7 +9401,6 @@ export async function runCommanderDagTask({
             userWaitTimeoutMs: runtimeTimeouts.userWaitTimeoutMs,
             beforeWrite: flushDurablePersistenceQueue,
           });
-          completedSteps.add(dagStep.id);
           writeCommanderStepOutput(dagStep, output, descriptor.name);
           return { output };
         } catch (error) {
@@ -8612,7 +9427,10 @@ export async function runCommanderDagTask({
         }
       }
 
-      if (isComputerUseDagStep(dagStep) || isComputerUseCapability(capability)) {
+      if (
+        !isDirectComputerReadDagStep(dagStep) &&
+        (isComputerUseDagStep(dagStep) || isComputerUseCapability(capability))
+      ) {
         const descriptor = findToolDescriptorForDagStep(dagStep, availableTools, agentRegistry);
         if (!descriptor) {
           throw new Error(`No available Computer Use tool is registered for step ${dagStep.id}.`);
@@ -8736,7 +9554,6 @@ export async function runCommanderDagTask({
         }
 
         const sanitizedSteps = steps.map((step) => sanitizeComputerUseStepForContext(step as ComputerUseStep));
-        completedSteps.add(dagStep.id);
         writeCommanderStepOutput(dagStep, sanitizedSteps, "computer.useLoop");
         if (agentTracker.getState(agentId)) {
           agentTracker.setState(agentId, {
@@ -8767,6 +9584,7 @@ export async function runCommanderDagTask({
         });
       }
 
+      const executionMode = resolveStepExecutionMode(dagStep);
       emitSnapshot({
         ...getSnapshot(),
         plan: markStep(getSnapshot().plan, dagStep.id, "running"),
@@ -8775,13 +9593,12 @@ export async function runCommanderDagTask({
           kind: "tool.planned",
           taskId,
           toolName: `${dagStep.assignedAgentKind}.${dagStep.id}`,
-          detail: `Dispatching step ${dagStep.id} via capability: ${capability ?? "unknown"} (ReAct loop)`,
+          detail: `Dispatching step ${dagStep.id} via capability: ${capability ?? "unknown"}; mode=${executionMode}.`,
         })),
       });
 
       await wait();
 
-      const executionMode = resolveStepExecutionMode(dagStep);
       const allowedToolNames = getAllowedToolNamesForAgent(
         dagStep.assignedAgentKind,
         availableTools,
@@ -8805,7 +9622,7 @@ export async function runCommanderDagTask({
           );
           return {
             name: td.name,
-            baseInput: mergeStepInput(dagStep, context),
+            baseInput: buildAgentReActToolBaseInput(dagStep, context, td),
             requiredInputs: td.requiredInputs,
             ...(failureFallbackAgentKind
               ? {
@@ -9166,6 +9983,13 @@ export async function runCommanderDagTask({
             signal: stepSignal,
             decisionTimeoutMs: runtimeTimeouts.modelTimeoutMs,
             toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
+            completionOutputMode: dagStep.assignedAgentKind === "page-agent" ||
+                Boolean(primaryCapability && isRoleCapabilityForAgentKind(
+                  dagStep.assignedAgentKind,
+                  primaryCapability,
+                ))
+              ? "summary"
+              : "observation",
             decideNext: async (req) => {
               const decision = await reactDecideNext({
                   agentKind: req.agent.kind,
@@ -9186,6 +10010,7 @@ export async function runCommanderDagTask({
                       name: t.name,
                       summary: td?.summary ?? "",
                       capabilityTags: td?.capabilityTags ?? [],
+                      inputSchema: td?.inputSchema,
                       requiredInputs: td?.requiredInputs,
                     };
                   }),
@@ -9195,6 +10020,9 @@ export async function runCommanderDagTask({
                       .map((key) => [key, context.get(key)] as const)
                       .filter((entry) => entry[1] !== undefined),
                   ),
+                  iteration: req.iteration,
+                  maxToolCalls: req.maxToolCalls,
+                  remainingToolCalls: req.remainingToolCalls,
                 });
               if (decision.usage) {
                 recordModelUsage(dagStep.assignedAgentKind as AgentKind, decision.usage);
@@ -9338,6 +10166,19 @@ export async function runCommanderDagTask({
             );
           }
           const publishedOutput = pageAgentTrendOutput ?? reactResult.output;
+          const verifierFailure = createVerifierFailureStepResult(dagStep, publishedOutput);
+          if (verifierFailure) {
+            return {
+              ...verifierFailure,
+              evidence: reactResult.observations
+                .filter((observation) => observation.status === "succeeded")
+                .map((observation) => ({
+                  kind: "log" as const,
+                  label: `ReAct observation: ${observation.toolName}`,
+                  reference: dagStep.outputContextKey ?? `step:${dagStep.id}`,
+                })),
+            };
+          }
           writeCommanderStepOutput(
             dagStep,
             publishedOutput,
@@ -9345,7 +10186,6 @@ export async function runCommanderDagTask({
               ? dagStep.toolName ?? "agent.react"
               : `agent.${agentRuntimeExecution?.backend ?? "runtime"}`,
           );
-          completedSteps.add(dagStep.id);
           if (agentTracker.getState(agentId)) {
             agentTracker.setState(agentId, {
               status: "completed",
@@ -9480,9 +10320,30 @@ export async function runCommanderDagTask({
             }),
           },
         );
-        const deterministicSynthesis = modelSynthesis
+        const deterministicWorkspaceSynthesis = modelSynthesis
+          ? undefined
+          : createVerifiedWorkspaceInspectionConclusion(context.snapshot(), userGoal);
+        const deterministicTrendSynthesis = modelSynthesis || deterministicWorkspaceSynthesis
           ? undefined
           : createVerifiedTrendHotListConclusion(context.snapshot(), userGoal);
+        const deterministicArtifactSynthesis = modelSynthesis || deterministicWorkspaceSynthesis ||
+          deterministicTrendSynthesis
+          ? undefined
+          : createProvenanceBoundArtifactConclusion({
+              inputContextKeys: dagStep.inputContextKeys ?? [],
+              context,
+              taskId,
+              runId,
+              userGoal,
+              verificationPassed: isCommanderVerificationUsable(
+                isVerifierCheckResult(context.get("verifierCheck"))
+                  ? context.get("verifierCheck") as VerifierCheckResult
+                  : undefined,
+                context.snapshot(),
+              ),
+            });
+        const deterministicSynthesis = deterministicWorkspaceSynthesis ??
+          deterministicTrendSynthesis ?? deterministicArtifactSynthesis;
         const synthesis = modelSynthesis ?? deterministicSynthesis;
         if (!synthesis) {
           // A plan title is model-authored metadata, not an evidence-bound
@@ -9497,9 +10358,14 @@ export async function runCommanderDagTask({
         writeCommanderStepOutput(
           dagStep,
           output,
-          deterministicSynthesis ? "commander.deterministicTrendSummary" : "commander.synthesize",
+          deterministicWorkspaceSynthesis
+            ? "commander.deterministicWorkspaceSummary"
+            : deterministicTrendSynthesis
+              ? "commander.deterministicTrendSummary"
+              : deterministicArtifactSynthesis
+                ? "commander.deterministicArtifactSummary"
+                : "commander.synthesize",
         );
-        completedSteps.add(dagStep.id);
 
         if (agentTracker.getState(agentId)) {
           agentTracker.setState(agentId, {
@@ -9516,7 +10382,7 @@ export async function runCommanderDagTask({
               taskId,
               toolName: `${dagStep.assignedAgentKind}.direct_response`,
               detail: deterministicSynthesis
-                ? `Step ${dagStep.id}: direct response used verified structured trend evidence.`
+                ? `Step ${dagStep.id}: direct response used verified structured evidence.`
                 : `Step ${dagStep.id}: direct response completed without ReAct.`,
             })),
         });
@@ -9583,7 +10449,10 @@ export async function runCommanderDagTask({
             }),
           },
         );
-        completedSteps.add(dagStep.id);
+        const verifierFailure = createVerifierFailureStepResult(dagStep, result.output);
+        if (verifierFailure) {
+          return verifierFailure;
+        }
         writeCommanderStepOutput(dagStep, result.output, result.toolName);
 
         if (agentTracker.getState(agentId)) {
@@ -9984,6 +10853,7 @@ export async function runCommanderDagTask({
           supportedApprovalGatedTools: [...SUPPORTED_APPROVAL_GATED_TOOLS],
           preloadedContextKeys: [...DEFAULT_PRELOADED_CONTEXT_KEYS],
           existingSteps: recoveryExistingSteps,
+          planIntents: commanderPlanIntents,
         });
 
         if (!recoveryCompile.ok) {
@@ -10055,6 +10925,9 @@ export async function runCommanderDagTask({
           input: s.instruction ?? s.title,
           output: (s.acceptanceCriteria ?? [s.successCriteria]).join("\n"),
           permissionLevel: getDagStepPermissionLevel(s, availableTools, agentRegistry),
+          ...(isApprovalManagedDagStep(s)
+            ? { executionTimeoutMode: "approval_managed" as const }
+            : {}),
           dependsOn: (s.dependsOn ?? []).filter((depId) => depId !== failedId),
           canRunInParallel: s.assignedAgentKind !== "page-agent",
           requiredCapabilities: s.requiredCapabilities as AgentCapabilityTag[] | undefined,
@@ -10213,10 +11086,7 @@ export async function runCommanderDagTask({
       },
       onStepCompleted: (_step, _output, _ctx, stepResult) => {
         const dagStep = dagPlan.steps.find((s) => s.id === _step.id);
-        const isVerifierStep =
-          dagStep?.toolName === "verifier.check" ||
-          dagStep?.requiredCapabilities?.includes("evidence_check" as AgentCapabilityTag) ||
-          dagStep?.assignedAgentKind === "verifier";
+        const isVerifierStep = dagStep ? isVerifierDagStep(dagStep) : false;
         if (isVerifierStep) {
           const result = isVerifierCheckResult(_output)
             ? _output
@@ -10313,8 +11183,25 @@ export async function runCommanderDagTask({
               })),
         });
       },
-      onStepFailed: (step, error) => {
+      onStepFailed: (step, error, _ctx, stepResult) => {
+        const dagStep = dagPlan.steps.find((candidate) => candidate.id === step.id);
+        const isVerifierStep = dagStep ? isVerifierDagStep(dagStep) : false;
         clearVerifierCheck(step.id);
+        if (isVerifierStep) {
+          const result = isVerifierCheckResult(stepResult?.output)
+            ? stepResult.output
+            : invalidVerifierCheckResult();
+          verifierChecks.set(step.id, result);
+          context.set("verifierChecks", Object.fromEntries(verifierChecks));
+          context.set("verifierCheck", result);
+        }
+        const failedAgentId = resolveAgentId(step.agentKind);
+        if (agentTracker.getState(failedAgentId)) {
+          agentTracker.setState(failedAgentId, {
+            status: "failed",
+            task: `Failed: ${redactImageDataUrlsForSummary(error)}`,
+          });
+        }
         const currentSnapshot = getSnapshot();
         const nextPlan = markStep(currentSnapshot.plan, step.id, "failed");
         const progressItemId = taskProgressStepAliases.get(step.id) ?? step.id;
@@ -10337,6 +11224,7 @@ export async function runCommanderDagTask({
           commanderMessage: formatCommanderStepProgressMessage(userGoal, step, nextPlan, "failed"),
           ...(taskProgress ? { taskProgress } : {}),
           plan: nextPlan,
+          agents: agentTracker.getSnapshots(),
           logs: appendLog(currentSnapshot, emitEvent({
             kind: "step.failed",
             taskId,
@@ -10481,16 +11369,12 @@ export async function runCommanderDagTask({
       },
     });
 
-    if (execution.status === "failed" && completedSteps.size === 0) {
+    if (execution.status === "failed" && execution.completedStepIds.length === 0) {
       throw new Error(execution.error ?? "Commander DAG execution failed.");
     }
 
     const allCompleted = execution.status === "completed";
-    const verifierSteps = dagPlan.steps.filter((step) =>
-      step.toolName === "verifier.check" ||
-      step.requiredCapabilities?.includes("evidence_check" as AgentCapabilityTag) ||
-      step.assignedAgentKind === "verifier",
-    );
+    const verifierSteps = dagPlan.steps.filter(isVerifierDagStep);
     const implicitSynthesisRequiresVerifier = Boolean(commanderTool?.synthesize) &&
       dagPlan.steps.some((step) =>
         isCommanderEvidenceProducingStep(step) && !execution.abandonedStepIds?.includes(step.id),
@@ -10520,10 +11404,10 @@ export async function runCommanderDagTask({
       context.set("verifierChecks", { "implicit-provenance-verifier": verifierCheck });
       context.set("verifierCheck", verifierCheck);
     }
-    const verificationPassed = !verifierRequired ||
-      verifierCheck?.status === "pass" ||
-      verifierCheck?.status === "warn" &&
-        Object.values(context.snapshot()).some(isBlockedSourceCollectionResult);
+    const verificationPassed = !verifierRequired || isCommanderVerificationUsable(
+      verifierCheck,
+      context.snapshot(),
+    );
     const executionAssessment = buildCommanderExecutionAssessment({
       plan: dagPlan,
       completedStepIds: execution.completedStepIds,
@@ -10540,10 +11424,10 @@ export async function runCommanderDagTask({
     context.set("executionAssessment", executionAssessment);
     // Do not ask Commander to synthesize an answer from evidence that a
     // required verifier has rejected or failed to produce.
-    let synthesis = verificationPassed
+    let synthesis = allCompleted && verificationPassed
       ? getCompletedDirectResponseConclusion(dagPlan, execution.completedStepIds, context)
       : undefined;
-    if (verificationPassed && !synthesis) {
+    if (allCompleted && verificationPassed && !synthesis) {
       emitWaitingLog({
         taskId,
         phase: "waiting_model",
@@ -10590,11 +11474,29 @@ export async function runCommanderDagTask({
         },
       );
     }
+    if (allCompleted && verificationPassed && !synthesis) {
+      const completedStepIds = new Set(execution.completedStepIds);
+      synthesis = createProvenanceBoundArtifactConclusion({
+        inputContextKeys: dagPlan.steps
+          .filter((step) => completedStepIds.has(step.id))
+          .map((step) => step.outputContextKey ?? `step:${step.id}`),
+        context,
+        taskId,
+        runId,
+        userGoal,
+        verificationPassed,
+      });
+    }
     const finalCompleted = allCompleted && verificationPassed;
-    const baseConclusion = synthesis?.message
-      ?? (verificationPassed
-        ? `Task completed: ${completedSteps.size}/${dagPlan.steps.length} step(s) executed.`
-        : `Task failed verification: ${verifierCheck?.summary ?? "Verifier reported failed evidence."}`);
+    const primaryFailure = execution.error
+      ? redactImageDataUrlsForSummary(execution.error)
+      : verifierCheck?.summary ?? "Verifier reported failed evidence.";
+    const baseConclusion = finalCompleted
+      ? synthesis?.message ??
+        `Task completed: ${execution.completedStepIds.length}/${dagPlan.steps.length} step(s) executed.`
+      : /[\u3400-\u9fff]/u.test(userGoal)
+        ? `任务失败：${primaryFailure}`
+        : `Task failed: ${primaryFailure}`;
     const assessedConclusion = dagPlan.steps.length > 1 || recoveryAttempts.length > 0 || stepRetryCount > 0
       ? appendCommanderExecutionAssessment(baseConclusion, executionAssessment, userGoal)
       : baseConclusion;
@@ -10662,7 +11564,7 @@ export async function runCommanderDagTask({
     emitSnapshot({
       ...getSnapshot(),
       ...(deriveGenericWorkflowSnapshotData(context.snapshot(), context.envelopeSnapshot())),
-      title: dagPlan.title || "Task completed",
+      title: dagPlan.title || (finalCompleted ? "Task completed" : "Task failed"),
       status: finalCompleted ? "completed" : "failed",
       commanderMessage: conclusion,
       ...(finalizedTaskProgress
@@ -11691,6 +12593,346 @@ function createVerifiedTrendHotListConclusion(
   const hotList = getTrendHotListFromContext(contextSnapshot);
   if (!hotList) return undefined;
   return { message: formatVerifiedTrendHotListConclusion(hotList, userGoal) };
+}
+
+function createVerifiedWorkspaceInspectionConclusion(
+  contextSnapshot: Record<string, unknown>,
+  userGoal: string,
+): CommanderSynthesizeResult | undefined {
+  const verification = isVerifierCheckResult(contextSnapshot.verifierCheck)
+    ? contextSnapshot.verifierCheck
+    : Object.values(contextSnapshot).find(isVerifierCheckResult);
+  const inspection = Object.values(contextSnapshot).find(isCodeWorkspaceInspectionResult);
+  if (!inspection) return undefined;
+  if (
+    verification?.status !== "pass" &&
+    !(verification?.status === "warn" && isBoundedPartialWorkspaceInspection(inspection))
+  ) {
+    return undefined;
+  }
+  return { message: formatVerifiedWorkspaceInspectionConclusion(inspection, userGoal) };
+}
+
+interface ProvenanceBoundArtifactConclusionOptions {
+  inputContextKeys: readonly string[];
+  context: SharedTaskContext;
+  taskId: string;
+  runId: string;
+  userGoal: string;
+  verificationPassed: boolean;
+}
+
+interface ProvenanceBoundArtifact {
+  key: string;
+  toolName?: string;
+  payload: unknown;
+}
+
+const MAX_DETERMINISTIC_ARTIFACT_CONCLUSION_CHARS = 12_000;
+
+function createProvenanceBoundArtifactConclusion(
+  options: ProvenanceBoundArtifactConclusionOptions,
+): CommanderSynthesizeResult | undefined {
+  if (!options.verificationPassed) return undefined;
+  const artifacts: ProvenanceBoundArtifact[] = [];
+  const seenArtifactIds = new Set<string>();
+  for (const key of options.inputContextKeys) {
+    const envelope = options.context.getEnvelope(key);
+    if (
+      !envelope ||
+      seenArtifactIds.has(envelope.artifactId) ||
+      envelope.sensitivity === "secret" ||
+      !validateArtifactEnvelope(envelope, { taskId: options.taskId, runId: options.runId }) ||
+      envelope.producer.toolName === "verifier.check" ||
+      envelope.producer.toolName?.startsWith("commander.") ||
+      envelope.producer.agentKind === "verifier" ||
+      isVerifierCheckResult(envelope.payload)
+    ) {
+      continue;
+    }
+    seenArtifactIds.add(envelope.artifactId);
+    artifacts.push({
+      key,
+      toolName: envelope.producer.toolName,
+      payload: sanitizeArtifactForPersistence(envelope).payload,
+    });
+  }
+  if (artifacts.length === 0) return undefined;
+
+  const perArtifactLimit = Math.max(
+    1_000,
+    Math.floor(MAX_DETERMINISTIC_ARTIFACT_CONCLUSION_CHARS / artifacts.length) - 120,
+  );
+  const sections = artifacts.map((artifact) =>
+    formatProvenanceBoundArtifact(artifact, options.userGoal, perArtifactLimit)
+  );
+  const message = sections.join("\n\n").slice(0, MAX_DETERMINISTIC_ARTIFACT_CONCLUSION_CHARS).trim();
+  return message ? { message } : undefined;
+}
+
+function formatProvenanceBoundArtifact(
+  artifact: ProvenanceBoundArtifact,
+  userGoal: string,
+  maxChars: number,
+): string {
+  const isZh = /[\u3400-\u9fff]/u.test(userGoal);
+  const payload = artifact.payload;
+  if (isWorkspaceTextReadResult(payload)) {
+    const language = payload.path.split(".").pop()?.replace(/[^a-z0-9_-]/giu, "") ?? "text";
+    const content = truncateDeterministicArtifactText(payload.content, maxChars);
+    const suffix = payload.truncated
+      ? isZh ? "\n\n（读取结果已截断）" : "\n\n(Read result was truncated.)"
+      : "";
+    return `## ${payload.path}\n\n${createMarkdownCodeFence(content, language)}${suffix}`;
+  }
+  if (artifact.toolName === "memory.search" && isMemorySearchResultList(payload)) {
+    const body = payload.length > 0
+      ? payload.map((item) => `- ${redactImageDataUrlsForSummary(item.fact)}`).join("\n")
+      : isZh ? "没有找到匹配的记忆。" : "No matching memory was found.";
+    return `## ${isZh ? "记忆" : "Memory"}\n\n${truncateDeterministicArtifactText(body, maxChars)}`;
+  }
+  if (
+    (artifact.toolName === "computer.searchLocalDocuments" ||
+      artifact.toolName === "computer.listDirectory") &&
+    isComputerFileCandidateList(payload)
+  ) {
+    const body = payload.length > 0
+      ? payload.map((item) => `- ${item.path}${item.isDir ? "/" : ""}`).join("\n")
+      : isZh ? "没有找到匹配的本地文件。" : "No matching local files were found.";
+    return `## ${isZh ? "本地文件" : "Local files"}\n\n${truncateDeterministicArtifactText(body, maxChars)}`;
+  }
+  if (isBrowserContentResult(payload)) {
+    const title = payload.title.trim() || payload.url;
+    const sourceLabel = isZh ? "来源" : "Source";
+    const content = truncateDeterministicArtifactText(payload.content, maxChars);
+    return `## ${title}\n\n${sourceLabel}: ${payload.url}\n\n${content}`;
+  }
+  if (isBrowserNavigationResult(payload)) {
+    const title = payload.title.trim() || payload.url;
+    const details = isZh
+      ? `来源: ${payload.url}\n\n状态: HTTP ${payload.status}, ${payload.loadState}`
+      : `Source: ${payload.url}\n\nStatus: HTTP ${payload.status}, ${payload.loadState}`;
+    return `## ${title}\n\n${details}`;
+  }
+  if (typeof payload === "string") {
+    return `## ${artifact.key}\n\n${truncateDeterministicArtifactText(payload, maxChars)}`;
+  }
+
+  const serialized = stringifyDeterministicArtifact(payload);
+  return `## ${artifact.key}\n\n${createMarkdownCodeFence(
+    truncateDeterministicArtifactText(serialized, maxChars),
+    "json",
+  )}`;
+}
+
+function isWorkspaceTextReadResult(value: unknown): value is {
+  path: string;
+  content: string;
+  truncated: boolean;
+} {
+  return isPlainRecord(value) &&
+    typeof value.path === "string" &&
+    typeof value.content === "string" &&
+    typeof value.truncated === "boolean";
+}
+
+function isMemorySearchResultList(value: unknown): value is Array<{ fact: string }> {
+  return Array.isArray(value) && value.every((item) =>
+    isPlainRecord(item) &&
+    typeof item.fact === "string" &&
+    typeof item.confidence === "number" &&
+    Array.isArray(item.tags)
+  );
+}
+
+function isComputerFileCandidateList(value: unknown): value is ComputerFileCandidate[] {
+  return Array.isArray(value) && value.every((item) =>
+    isPlainRecord(item) &&
+    typeof item.name === "string" &&
+    typeof item.path === "string" &&
+    typeof item.isDir === "boolean"
+  );
+}
+
+function isBrowserContentResult(value: unknown): value is {
+  content: string;
+  url: string;
+  title: string;
+} {
+  return isPlainRecord(value) &&
+    typeof value.content === "string" &&
+    typeof value.url === "string" &&
+    typeof value.title === "string";
+}
+
+function isBrowserNavigationResult(value: unknown): value is {
+  url: string;
+  title: string;
+  status: number;
+  loadState: string;
+} {
+  return isPlainRecord(value) &&
+    typeof value.url === "string" &&
+    typeof value.title === "string" &&
+    typeof value.status === "number" &&
+    typeof value.loadState === "string";
+}
+
+function stringifyDeterministicArtifact(value: unknown): string {
+  try {
+    return redactImageDataUrlsForSummary(JSON.stringify(value, null, 2));
+  } catch {
+    return redactImageDataUrlsForSummary(String(value));
+  }
+}
+
+function truncateDeterministicArtifactText(value: string, maxChars: number): string {
+  const redacted = redactImageDataUrlsForSummary(value).trim();
+  if (redacted.length <= maxChars) return redacted;
+  return `${redacted.slice(0, Math.max(0, maxChars - 16)).trimEnd()}\n[truncated]`;
+}
+
+function createMarkdownCodeFence(content: string, language: string): string {
+  const longestFence = Math.max(0, ...[...content.matchAll(/`+/gu)].map((match) => match[0].length));
+  const fence = "`".repeat(Math.max(3, longestFence + 1));
+  return `${fence}${language}\n${content}\n${fence}`;
+}
+
+function isCommanderVerificationUsable(
+  verification: VerifierCheckResult | undefined,
+  contextSnapshot: Record<string, unknown>,
+): boolean {
+  if (verification?.status === "pass") return true;
+  if (verification?.status !== "warn") return false;
+  if (Object.values(contextSnapshot).some(isBlockedSourceCollectionResult)) return true;
+  return Object.values(contextSnapshot).some(
+    (value) => isCodeWorkspaceInspectionResult(value) && isBoundedPartialWorkspaceInspection(value),
+  );
+}
+
+function isBoundedPartialWorkspaceInspection(
+  inspection: CodeWorkspaceInspectionResult,
+): boolean {
+  return inspection.truncated && inspection.riskIndicators.some(
+    (risk) => risk.code === "inspection_truncated",
+  );
+}
+
+function formatVerifiedWorkspaceInspectionConclusion(
+  inspection: CodeWorkspaceInspectionResult,
+  userGoal: string,
+): string {
+  const isZh = /\p{Script=Han}/u.test(userGoal);
+  const topLevel = inspection.topLevelDirectories.length > 0
+    ? inspection.topLevelDirectories.join(isZh ? "、" : ", ")
+    : isZh ? "未发现一级目录" : "No top-level directories found";
+  const modules = inspection.moduleCandidates.length > 0
+    ? inspection.moduleCandidates.join(isZh ? "、" : ", ")
+    : isZh ? "未识别出常规模块候选" : "No conventional module candidates identified";
+  const manifests = inspection.manifests.length > 0
+    ? inspection.manifests.join(isZh ? "、" : ", ")
+    : isZh ? "未发现常见项目清单" : "No common project manifests found";
+  const risks = inspection.riskIndicators.map((risk) => {
+    const path = risk.path ? ` ${risk.path}` : "";
+    if (isZh) {
+      if (risk.code === "sensitive_name") return `- 疑似敏感文件名：${risk.path ?? "路径未知"}（未读取内容）。`;
+      if (risk.code === "large_file") {
+        const entry = inspection.entries.find((candidate) => candidate.relativePath === risk.path);
+        const size = entry?.sizeBytes === undefined ? "" : `（${entry.sizeBytes.toLocaleString("zh-CN")} 字节）`;
+        return `- 大文件：${risk.path ?? "路径未知"}${size}。`;
+      }
+      if (risk.code === "manifest_missing") return "- 在本次检查深度内未发现常见项目清单，模块判断只能基于目录名。";
+      return "- 目录清单达到有界扫描上限，仍有更深层内容未检查。";
+    }
+    if (risk.code === "sensitive_name") return `- Credential- or secret-like filename:${path || " unknown path"} (contents were not read).`;
+    if (risk.code === "large_file") {
+      const entry = inspection.entries.find((candidate) => candidate.relativePath === risk.path);
+      const size = entry?.sizeBytes === undefined ? "" : ` (${entry.sizeBytes.toLocaleString("en-US")} bytes)`;
+      return `- Large file:${path || " unknown path"}${size}.`;
+    }
+    if (risk.code === "manifest_missing") return "- No common project manifest was found within the inspected depth; module identification is directory-name based.";
+    return "- The bounded inventory limit was reached, so deeper content remains uninspected.";
+  });
+  if (risks.length === 0) {
+    risks.push(isZh
+      ? "- 本次有界扫描未发现敏感文件名、大文件、清单缺失或截断风险。"
+      : "- The bounded scan found no sensitive-name, large-file, missing-manifest, or truncation indicators.");
+  }
+
+  return (isZh
+    ? [
+        "## 目录结构",
+        "",
+        `- 工作区：${inspection.workspacePath}`,
+        `- 一级目录：${topLevel}`,
+        `- 已检查条目：${inspection.entries.length}${inspection.truncated ? "（清单已截断）" : ""}`,
+        "",
+        "## 主要模块",
+        "",
+        `- 模块候选（按一级目录）：${modules}`,
+        `- 常见项目清单：${manifests}`,
+        "",
+        "## 明显风险",
+        "",
+        ...risks,
+        "",
+        "以上结论只基于目录名、文件名、文件大小和清单文件；未读取文件内容。",
+      ]
+    : [
+        "## Directory structure",
+        "",
+        `- Workspace: ${inspection.workspacePath}`,
+        `- Top-level directories: ${topLevel}`,
+        `- Inspected entries: ${inspection.entries.length}${inspection.truncated ? " (inventory truncated)" : ""}`,
+        "",
+        "## Main modules",
+        "",
+        `- Module candidates (from top-level directories): ${modules}`,
+        `- Common project manifests: ${manifests}`,
+        "",
+        "## Obvious risks",
+        "",
+        ...risks,
+        "",
+        "These conclusions use directory names, filenames, file sizes, and manifest presence only; file contents were not read.",
+      ]).join("\n");
+}
+
+function isCodeWorkspaceInspectionResult(value: unknown): value is CodeWorkspaceInspectionResult {
+  if (!isPlainRecord(value)) return false;
+  const stringArray = (candidate: unknown): candidate is string[] =>
+    Array.isArray(candidate) && candidate.every((item) => typeof item === "string");
+  if (
+    typeof value.workspacePath !== "string" || !value.workspacePath.trim() ||
+    !Array.isArray(value.entries) ||
+    !stringArray(value.topLevelDirectories) ||
+    !stringArray(value.moduleCandidates) ||
+    !stringArray(value.manifests) ||
+    !stringArray(value.ignoredDirectories) ||
+    !Array.isArray(value.riskIndicators) ||
+    typeof value.truncated !== "boolean"
+  ) {
+    return false;
+  }
+  const entriesValid = value.entries.every((entry) =>
+    isPlainRecord(entry) &&
+    typeof entry.name === "string" && entry.name.length > 0 &&
+    typeof entry.relativePath === "string" && entry.relativePath.length > 0 &&
+    typeof entry.isDir === "boolean" &&
+    typeof entry.depth === "number" && Number.isInteger(entry.depth) && entry.depth >= 1 &&
+    (entry.sizeBytes === undefined ||
+      typeof entry.sizeBytes === "number" && Number.isFinite(entry.sizeBytes) && entry.sizeBytes >= 0) &&
+    (entry.extension === undefined || typeof entry.extension === "string")
+  );
+  const risksValid = value.riskIndicators.every((risk) =>
+    isPlainRecord(risk) &&
+    (risk.code === "sensitive_name" || risk.code === "large_file" ||
+      risk.code === "inspection_truncated" || risk.code === "manifest_missing") &&
+    (risk.severity === "info" || risk.severity === "warning") &&
+    (risk.path === undefined || typeof risk.path === "string") &&
+    typeof risk.detail === "string" && risk.detail.length > 0
+  );
+  return entriesValid && risksValid;
 }
 
 function formatVerifiedTrendHotListConclusion(
@@ -13137,6 +14379,34 @@ function isVerifierCheckResult(value: unknown): value is VerifierCheckResult {
     value.summary.trim().length > 0 &&
     typeof value.detail === "string" &&
     value.detail.trim().length > 0;
+}
+
+function isVerifierDagStep(step: Pick<CommanderDagStep,
+  "assignedAgentKind" | "toolName" | "requiredCapabilities"
+>): boolean {
+  return step.toolName === "verifier.check" ||
+    step.assignedAgentKind === "verifier" ||
+    step.requiredCapabilities?.includes("evidence_check" as AgentCapabilityTag) === true;
+}
+
+function createVerifierFailureStepResult(
+  step: CommanderDagStep,
+  output: unknown,
+): StepResult | undefined {
+  if (!isVerifierDagStep(step)) return undefined;
+  const verdict = isVerifierCheckResult(output)
+    ? output
+    : invalidVerifierCheckResult();
+  if (verdict.status !== "fail") return undefined;
+  return normalizeStepResult({
+    status: "failed",
+    output: verdict,
+    evidence: [],
+    assumptions: [],
+    unresolvedQuestions: [],
+    unmetCriteria: [step.successCriteria],
+    error: `Verifier rejected step ${step.id}: ${verdict.summary} ${verdict.detail}`,
+  });
 }
 
 function aggregateVerifierChecks(

@@ -1080,6 +1080,47 @@ describe("executeWorkflow", () => {
       "fallback-weather",
     ]);
   });
+
+  it("lets an approval-managed step own its active and user-wait timeouts", async () => {
+    const onStepTimeout = vi.fn();
+    const approvalStep = {
+      ...step("approved-write", [], false),
+      permissionLevel: "confirmed_write" as const,
+      executionTimeoutMode: "approval_managed" as const,
+    };
+
+    const result = await executeWorkflow({
+      workflow: createWorkflow([approvalStep]),
+      executionPolicy: { stepTimeoutMs: 10, maxStepRetries: 1 },
+      onStepTimeout,
+      executeStep: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return { output: "approved" };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(onStepTimeout).not.toHaveBeenCalled();
+  });
+
+  it("does not automatically retry an approval-managed failure", async () => {
+    const executeStep = vi.fn(async () => {
+      throw new Error("Approval wait timed out.");
+    });
+
+    const result = await executeWorkflow({
+      workflow: createWorkflow([{
+        ...step("approved-write", [], false),
+        permissionLevel: "confirmed_write" as const,
+        executionTimeoutMode: "approval_managed" as const,
+      }]),
+      executionPolicy: { maxStepRetries: 2 },
+      executeStep,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(executeStep).toHaveBeenCalledOnce();
+  });
 });
 
 function createWorkflow(steps: WorkbenchWorkflow["steps"]): WorkbenchWorkflow {

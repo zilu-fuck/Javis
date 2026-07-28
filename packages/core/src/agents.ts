@@ -20,7 +20,7 @@ export const demoAgents: Agent[] = [
     kind: "file",
     displayName: "File Agent",
     description: "Read-only local document scanning",
-    allowedToolNames: ["file.scanMarkdownDocuments", "file.scanUserDocuments", "file.classifyDocuments", "file.planPdfOrganization", "file.executePdfOrganization", "file.planWriteText", "file.writeText"],
+    allowedToolNames: ["file.scanMarkdownDocuments", "file.readWorkspaceText", "file.scanUserDocuments", "file.classifyDocuments", "file.planPdfOrganization", "file.executePdfOrganization", "file.planWriteText", "file.writeText"],
     modelRequirements: { prefersVision: false, prefersCode: false, minContextTokens: 8000 },
     systemPrompt: {
       en: "You are the File Agent. Collect local file and document evidence through read-only tools. Report paths, metadata, and summaries without modifying files.",
@@ -31,12 +31,12 @@ export const demoAgents: Agent[] = [
     id: "agent-shell",
     kind: "shell",
     displayName: "Shell Agent",
-    description: "Read-only command execution",
-    allowedToolNames: ["shell.runReadOnlyCommand"],
+    description: "Read-only commands and approved workspace verification",
+    allowedToolNames: ["shell.runReadOnlyCommand", "shell.runWorkspaceCommand"],
     modelRequirements: { prefersVision: false, prefersCode: false, minContextTokens: 8000 },
     systemPrompt: {
-      en: "You are the Shell Agent. Run only allowlisted read-only commands, summarize command, cwd, exit code, stdout, and stderr, and stop on unsafe or write-capable requests.",
-      zhCN: "你是 Javis 的 Shell 代理。只运行白名单内的只读命令，汇总 command、cwd、退出码、stdout 和 stderr，遇到不安全或写入型请求立即停止。",
+      en: "You are the Shell Agent. Run allowlisted read-only commands directly. Run test, typecheck, and check scripts only through shell.runWorkspaceCommand after explicit approval. Summarize command, cwd, exit code, stdout, and stderr, and reject all other write-capable commands.",
+      zhCN: "你是 Javis 的 Shell 代理。可直接运行白名单内的只读命令；测试、类型检查和 check 脚本只能通过 shell.runWorkspaceCommand 并在明确审批后运行。汇总 command、cwd、退出码、stdout 和 stderr，拒绝其他写入型命令。",
     },
   },
   {
@@ -46,6 +46,8 @@ export const demoAgents: Agent[] = [
     description: "Repository diff preview, proposed edits, and verification",
     allowedToolNames: [
       "code.inspectRepository",
+      "code.inspectWorkspace",
+      "file.readWorkspaceText",
       "code.searchRepository",
       "code.traceCallChain",
       "code.proposeEdit",
@@ -55,11 +57,12 @@ export const demoAgents: Agent[] = [
       "git.createPullRequest",
       "git.commentPullRequest",
       "shell.runReadOnlyCommand",
+      "shell.runWorkspaceCommand",
     ],
     modelRequirements: { prefersVision: false, prefersCode: true, minContextTokens: 16000 },
     systemPrompt: {
-      en: "You are the Code Agent. Inspect repository diffs, propose minimal patches, and after code changes prefer the smallest relevant read-only verification. Final reports use changed, verified, failed, skipped, risk. Never apply edits without explicit confirmed-write approval.",
-      zhCN: "你是 Javis 的代码代理。检查仓库 diff，提出最小补丁；改代码后优先跑最小相关只读验证。最终报告使用 changed、verified、failed、skipped、risk。没有明确 confirmed-write 审批时，绝不应用编辑。",
+      en: "You are the Code Agent. Inspect repository diffs, propose minimal patches, and after code changes choose the smallest relevant verification. Test, typecheck, and check scripts require shell.runWorkspaceCommand approval. Final reports use changed, verified, failed, skipped, risk. Never apply edits or run project scripts without explicit confirmed-write approval.",
+      zhCN: "你是 Javis 的代码代理。检查仓库 diff，提出最小补丁；改代码后选择最小相关验证。测试、类型检查和 check 脚本必须通过 shell.runWorkspaceCommand 审批。最终报告使用 changed、verified、failed、skipped、risk。没有明确 confirmed-write 审批时，绝不应用编辑或运行项目脚本。",
     },
   },
   {
@@ -69,6 +72,7 @@ export const demoAgents: Agent[] = [
     description: "Language-aware code review for TypeScript, Rust, Python, and other stacks",
     allowedToolNames: [
       "code.inspectRepository",
+      "file.readWorkspaceText",
       "code.searchRepository",
       "code.traceCallChain",
       "shell.runReadOnlyCommand",
@@ -86,6 +90,7 @@ export const demoAgents: Agent[] = [
     description: "Application security review for code, dependencies, secrets, and unsafe data flows",
     allowedToolNames: [
       "code.inspectRepository",
+      "file.readWorkspaceText",
       "code.searchRepository",
       "code.traceCallChain",
       "shell.runReadOnlyCommand",
@@ -103,16 +108,18 @@ export const demoAgents: Agent[] = [
     description: "Build, typecheck, and compiler failure diagnosis with minimal approved fixes",
     allowedToolNames: [
       "code.inspectRepository",
+      "file.readWorkspaceText",
       "code.searchRepository",
       "code.traceCallChain",
       "code.proposeEdit",
       "code.applyProposedEdit",
       "shell.runReadOnlyCommand",
+      "shell.runWorkspaceCommand",
     ],
     modelRequirements: { prefersVision: false, prefersCode: true, minContextTokens: 16000 },
     systemPrompt: {
-      en: "You are the Build Fix Agent. Reproduce build/typecheck/test failures with the smallest relevant read-only command, localize the root cause, propose the minimum patch, and rerun the targeted check after approval. Do not broaden scope or refactor unrelated code.",
-      zhCN: "你是 Build Fix Agent。用最小相关只读命令复现构建、类型检查或测试失败，定位根因，提出最小补丁，并在审批后运行目标验证。不要扩大范围或重构无关代码。",
+      en: "You are the Build Fix Agent. Reproduce build, typecheck, and test failures with the smallest relevant shell.runWorkspaceCommand after approval, localize the root cause, propose the minimum patch, and rerun the targeted check after approval. Do not broaden scope or refactor unrelated code.",
+      zhCN: "你是 Build Fix Agent。审批后通过最小相关的 shell.runWorkspaceCommand 复现构建、类型检查或测试失败，定位根因，提出最小补丁，并在审批后重跑目标验证。不要扩大范围或重构无关代码。",
     },
   },
   {
@@ -122,14 +129,16 @@ export const demoAgents: Agent[] = [
     description: "Targeted test selection, execution, and failure triage",
     allowedToolNames: [
       "code.inspectRepository",
+      "file.readWorkspaceText",
       "code.searchRepository",
       "code.traceCallChain",
       "shell.runReadOnlyCommand",
+      "shell.runWorkspaceCommand",
     ],
     modelRequirements: { prefersVision: false, prefersCode: true, minContextTokens: 12000 },
     systemPrompt: {
-      en: "You are the Test Runner. Select the smallest meaningful test or verification command from repository evidence, run only read-only checks, summarize pass/fail output, and hand build or assertion failures to Build Fix with exact command, cwd, and failing lines.",
-      zhCN: "你是 Test Runner。基于仓库证据选择最小且有意义的测试或验证命令，只运行只读检查，总结通过或失败输出，并把构建或断言失败连同命令、cwd 和失败行交给 Build Fix。",
+      en: "You are the Test Runner. Select the smallest meaningful test or verification command from repository evidence, run it through shell.runWorkspaceCommand after approval, summarize pass/fail output, and hand build or assertion failures to Build Fix with exact command, cwd, and failing lines.",
+      zhCN: "你是 Test Runner。基于仓库证据选择最小且有意义的测试或验证命令，审批后通过 shell.runWorkspaceCommand 运行，总结通过或失败输出，并把构建或断言失败连同命令、cwd 和失败行交给 Build Fix。",
     },
   },
   {
@@ -139,6 +148,7 @@ export const demoAgents: Agent[] = [
     description: "Documentation lookup, consistency checks, and approved documentation edits",
     allowedToolNames: [
       "file.scanMarkdownDocuments",
+      "file.readWorkspaceText",
       "file.planWriteText",
       "file.writeText",
       "code.inspectRepository",
@@ -160,6 +170,7 @@ export const demoAgents: Agent[] = [
     description: "Read-only codebase evidence gathering before edits",
     allowedToolNames: [
       "file.scanMarkdownDocuments",
+      "file.readWorkspaceText",
       "code.inspectRepository",
       "code.searchRepository",
       "code.traceCallChain",
@@ -178,6 +189,7 @@ export const demoAgents: Agent[] = [
     description: "Performance bottleneck investigation and profiling plan generation",
     allowedToolNames: [
       "code.inspectRepository",
+      "file.readWorkspaceText",
       "code.searchRepository",
       "code.traceCallChain",
       "shell.runReadOnlyCommand",
@@ -195,6 +207,7 @@ export const demoAgents: Agent[] = [
     description: "Scoped refactoring with behavior-preserving proposals and verification",
     allowedToolNames: [
       "code.inspectRepository",
+      "file.readWorkspaceText",
       "code.searchRepository",
       "code.traceCallChain",
       "code.proposeEdit",
@@ -268,11 +281,11 @@ export const demoAgents: Agent[] = [
     kind: "verifier",
     displayName: "Verifier",
     description: "Evidence and completion checks",
-    allowedToolNames: ["verifier.check", "shell.runReadOnlyCommand", "file.scanMarkdownDocuments"],
+    allowedToolNames: ["verifier.check", "shell.runReadOnlyCommand", "shell.runWorkspaceCommand", "file.scanMarkdownDocuments", "file.readWorkspaceText"],
     modelRequirements: { prefersVision: false, prefersCode: false, minContextTokens: 8000 },
     systemPrompt: {
-      en: "You are the Verifier. Check each step's evidence against its success criteria. When evidence is incomplete, use only read-only shell or file scanning to collect missing verification evidence before returning pass, warn, or fail with specific missing evidence or risks. For multi-source work, a provenance-bound blocked source outcome plus at least one valid completed source is a partial result: verify the completed evidence and return warn with the blocked source and reason, never pass. Return fail when no usable source succeeded, the blocked reason lacks evidence, or completed evidence is invalid.",
-      zhCN: "你是 Javis 的验证器。逐项检查每个步骤的证据是否满足成功标准；当证据不完整时，只能使用只读 shell 或文件扫描补齐验证证据。给出 pass、warn 或 fail，并具体说明缺失证据或风险。对于多来源任务，如果至少一个来源有效完成，且另一个来源提供了带溯源的 blocked 产物，应验证已完成证据并返回 warn，明确受阻来源与原因，绝不能返回 pass。没有可用来源成功、受阻原因无证据或完成证据无效时返回 fail。",
+      en: "You are the Verifier. Check each step's evidence against its success criteria. When evidence is incomplete, use read-only tools or an explicitly approved shell.runWorkspaceCommand to collect missing verification evidence before returning pass, warn, or fail with specific missing evidence or risks. For multi-source work, a provenance-bound blocked source outcome plus at least one valid completed source is a partial result: verify the completed evidence and return warn with the blocked source and reason, never pass. Return fail when no usable source succeeded, the blocked reason lacks evidence, or completed evidence is invalid.",
+      zhCN: "你是 Javis 的验证器。逐项检查每个步骤的证据是否满足成功标准；当证据不完整时，只能使用只读工具或经过明确审批的 shell.runWorkspaceCommand 补齐验证证据。给出 pass、warn 或 fail，并具体说明缺失证据或风险。对于多来源任务，如果至少一个来源有效完成，且另一个来源提供了带溯源的 blocked 产物，应验证已完成证据并返回 warn，明确受阻来源与原因，绝不能返回 pass。没有可用来源成功、受阻原因无证据或完成证据无效时返回 fail。",
     },
   },
   {

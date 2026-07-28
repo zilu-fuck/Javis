@@ -5680,6 +5680,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(Mutex::new(pdf::PdfOrganizationApprovalState::default()))
         .manage(Mutex::new(file_write::WriteTextApprovalState::default()))
+        .manage(Mutex::new(
+            workspace::WorkspaceMutationApprovalState::default(),
+        ))
+        .manage(Mutex::new(shell::WorkspaceCommandApprovalState::default()))
         .manage(Mutex::new(code::CodePatchApprovalState::default()))
         .manage(Mutex::new(git::GitPushApprovalState::default()))
         .manage(Mutex::new(git::GitStageApprovalState::default()))
@@ -5698,6 +5702,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             pdf::scan_markdown_documents,
             shell::run_read_only_command,
+            shell::plan_workspace_command,
+            shell::approve_workspace_command,
+            shell::run_approved_workspace_command,
             web::fetch_web_source,
             web::search_web_sources,
             inspect::inspect_project,
@@ -5760,8 +5767,11 @@ pub fn run() {
             database::db_debug_path,
             database::db_close,
             workspace::load_workspace_definitions,
-            workspace::save_workspace_definition,
-            workspace::delete_workspace_definition,
+            workspace::plan_workspace_create,
+            workspace::plan_workspace_delete,
+            workspace::approve_workspace_mutation,
+            workspace::execute_workspace_create,
+            workspace::execute_workspace_delete,
             scan::get_user_home,
             scan::scan_all_user_files,
             scan::scan_resource_files,

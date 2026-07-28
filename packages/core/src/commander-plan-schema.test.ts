@@ -182,13 +182,13 @@ describe("buildCommanderPlanPrompt", () => {
       workflowId: "commander-dag",
       availableAgents: [
         { kind: "commander", allowedToolNames: ["commander.synthesize"], capabilities: ["planning"] },
-        { kind: "code", allowedToolNames: ["code.searchRepository", "code.traceCallChain"], capabilities: ["code_search", "code_trace"] },
+        { kind: "code", allowedToolNames: ["code.inspectWorkspace", "code.searchRepository", "code.traceCallChain"], capabilities: ["workspace_inspect", "code_search", "code_trace"] },
       ],
     });
 
     expect(prompt).toContain("Local project understanding");
     expect(prompt).toContain("assignedAgentKind=\"code\"");
-    expect(prompt).toContain("toolName=\"code.searchRepository\"");
+    expect(prompt).toContain("toolName=\"code.inspectWorkspace\"");
     expect(prompt).toContain("most relevant available reviewer");
     expect(prompt).toContain("language-reviewer");
     expect(prompt).toContain("security-reviewer");
@@ -213,6 +213,43 @@ describe("buildCommanderPlanPrompt", () => {
     expect(prompt).toContain("language-reviewer");
     expect(prompt).toContain("test-runner");
     expect(prompt).toContain("outputContextKey");
+  });
+
+  it("routes read-only README consistency checks to the documentation specialist", () => {
+    const prompt = buildCommanderPlanSystemPrompt({
+      userGoal: "README 和现在的代码对得上吗？",
+      workflowId: "commander-dag",
+      availableAgents: [
+        { kind: "commander", allowedToolNames: ["commander.synthesize"], capabilities: ["synthesis"] },
+        { kind: "doc-updater", allowedToolNames: ["file.scanMarkdownDocuments", "code.searchRepository"], capabilities: ["doc_update"] },
+        { kind: "language-reviewer", allowedToolNames: ["code.searchRepository"], capabilities: ["language_review"] },
+      ],
+    });
+
+    expect(prompt).toContain("Required agent route: doc-updater (doc_update_intent)");
+  });
+
+  it("routes a short attached-image OCR request to Vision instead of Computer", () => {
+    const prompt = buildCommanderPlanSystemPrompt({
+      userGoal: "看看这张图写了什么 data:image/png;base64,AA==",
+      workflowId: "commander-dag",
+      availableAgents: [
+        { kind: "commander", allowedToolNames: ["commander.synthesize"], capabilities: ["synthesis"] },
+        { kind: "vision", allowedToolNames: ["vision.extractText"], capabilities: ["image_ocr"] },
+        { kind: "computer", allowedToolNames: ["computer.screenshot"], capabilities: ["desktop_screenshot"] },
+      ],
+      availableTools: [{
+        name: "vision.extractText",
+        permissionLevel: "read",
+        summary: "Extract text from an image.",
+        capabilityTags: ["image_ocr"],
+        ownerAgentKinds: ["vision"],
+      }],
+    });
+
+    expect(prompt).toContain("Required agent route: vision (image_ocr_intent)");
+    expect(prompt).toContain("Required tool steps: vision.extractText");
+    expect(prompt).toContain("do not use Computer Agent");
   });
 
   it("includes current date context for date-based planning", () => {
@@ -460,5 +497,92 @@ describe("buildCommanderPlanPrompt", () => {
     expect(prompt).toContain("{title:string, reasoning:string, executionPolicy?:ExecutionPolicy, steps:Step[1..12]}");
     expect(prompt).not.toContain("spec-first chain");
     expect(prompt).not.toContain("Computer -> Code handoff");
+  });
+
+  it("states the compile-enforced conditional output rules (Layer 1/3)", () => {
+    const prompt = buildCommanderPlanSystemPrompt({
+      userGoal: "Review the project",
+      workflowId: "commander-dag",
+      availableAgents: [{ kind: "commander", allowedToolNames: [], capabilities: [] }],
+    });
+
+    expect(prompt).toContain("Conditional rules (compile-enforced)");
+    expect(prompt).toContain("\"react\" steps must declare primaryCapability");
+    expect(prompt).toContain("\"direct_tool_call\" steps must declare toolName");
+    expect(prompt).toContain("unless the goal asks to persist, export, or produce a document");
+  });
+
+  it("localizes the conditional output rules", () => {
+    const prompt = buildCommanderPlanSystemPrompt({
+      userGoal: "总结一下这个项目",
+      locale: "zh-CN",
+      workflowId: "commander-dag",
+      availableAgents: [{ kind: "commander", allowedToolNames: [], capabilities: [] }],
+    });
+
+    expect(prompt).toContain("条件规则（编译期强制）");
+    expect(prompt).toContain("必须声明 primaryCapability");
+    expect(prompt).toContain("必须声明 toolName");
+    expect(prompt).toContain("本次任务无落盘意图");
+  });
+
+  it("routes selected-workspace understanding through repository evidence unless desktop interaction is explicit", () => {
+    const projectPrompt = buildCommanderPlanSystemPrompt({
+      userGoal: "检查当前项目的目录结构，并向我报告主要模块和明显风险。只在聊天中回答，不要保存或创建任何文件。",
+      locale: "zh-CN",
+      workflowId: "commander-dag",
+      availableAgents: [{ kind: "commander", allowedToolNames: [], capabilities: [] }],
+    });
+
+    expect(projectPrompt).toContain("code.inspectWorkspace");
+    expect(projectPrompt).toContain("code.inspectWorkspace + direct_tool_call");
+    expect(projectPrompt).toContain("code.searchRepository 与 Explorer/code_explore 只能在此证据之后补充追踪");
+    expect(projectPrompt).toContain("禁止用 Computer Agent 的本地浏览工具代替项目检查");
+
+    const fileExplorerPrompt = buildCommanderPlanSystemPrompt({
+      userGoal: "请使用文件资源管理器查看当前项目的目录结构。",
+      locale: "zh-CN",
+      workflowId: "commander-dag",
+      availableAgents: [{ kind: "commander", allowedToolNames: [], capabilities: [] }],
+    });
+
+    expect(fileExplorerPrompt).not.toContain("禁止用 Computer Agent 的本地浏览工具代替项目检查");
+  });
+
+  it("warns the planner away from write steps when the goal has no persistence intent (Layer 5)", () => {
+    const prompt = buildCommanderPlanSystemPrompt({
+      userGoal: "Summarize the repository structure",
+      workflowId: "commander-dag",
+      availableAgents: [{ kind: "commander", allowedToolNames: [], capabilities: [] }],
+    });
+
+    expect(prompt).toContain("This task has no file-output intent");
+    expect(prompt).toContain("do NOT plan file.writeText");
+  });
+
+  it("omits the no-write warning when the goal asks to persist a document", () => {
+    const prompt = buildCommanderPlanSystemPrompt({
+      userGoal: "Save today's hot list as a markdown file named with the date",
+      workflowId: "commander-dag",
+      availableAgents: [{ kind: "commander", allowedToolNames: [], capabilities: [] }],
+    });
+
+    expect(prompt).not.toContain("This task has no file-output intent");
+  });
+
+  it("embeds the preset JSON template skeleton for the model to fill in (Layer 4)", () => {
+    const prompt = buildCommanderPlanSystemPrompt({
+      userGoal: "Review the project",
+      workflowId: "commander-dag",
+      availableAgents: [{ kind: "commander", allowedToolNames: [], capabilities: [] }],
+    });
+
+    expect(prompt).toContain("Fill this JSON skeleton");
+    expect(prompt).toContain("duplicate the step object per step");
+    expect(prompt).toContain('"requiredCapabilities":[]');
+    expect(prompt).toContain('"dependsOn":[]');
+    expect(prompt).toContain('"inputContextKeys":[]');
+    expect(prompt).toContain('"outputContextKey":""');
+    expect(prompt).toContain('"toolInput":{}');
   });
 });

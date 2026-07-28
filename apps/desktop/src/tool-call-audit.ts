@@ -554,6 +554,8 @@ function inferToolNameFromLog(log: TaskSnapshot["logs"][number]): string | null 
     "file.writeText",
     "project.inspect",
     "code.inspectRepository",
+    "code.inspectWorkspace",
+    "code.searchRepository",
     "code.proposeEdit",
     "code.applyProposedEdit",
     "code.analyzeProject",
@@ -566,11 +568,15 @@ function inferToolNameFromLog(log: TaskSnapshot["logs"][number]): string | null 
     "computer.invokeUi",
     "computer.setUiValue",
     "shell.runReadOnlyCommand",
+    "shell.runWorkspaceCommand",
   ].find((name) => text.includes(name));
   if (knownTool) {
     return knownTool;
   }
-  if (/^(node|pnpm|git)\b/.test(log.title)) {
+  if (/^(pnpm|cargo)\s+(?:--filter\s+\S+\s+)?(?:run\s+)?(?:test|typecheck|check)\b/i.test(log.title)) {
+    return "shell.runWorkspaceCommand";
+  }
+  if (/^(node|pnpm|cargo|git)\b/i.test(log.title)) {
     return "shell.runReadOnlyCommand";
   }
   return null;
@@ -600,6 +606,7 @@ function inferPermissionLevel(toolName: string): ToolCallAuditRecord["permission
     toolName === "code.applyProposedEdit" ||
     toolName === "file.executePdfOrganization" ||
     toolName === "file.writeText" ||
+    toolName === "shell.runWorkspaceCommand" ||
     toolName === "computer.click" ||
     toolName === "computer.invokeUi" ||
     toolName === "computer.setUiValue"

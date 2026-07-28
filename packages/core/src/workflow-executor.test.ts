@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { encodeMcpToolServerName, initialToolDescriptors, type BrowserTool, type CodeTool, type CommanderTool, type ComputerTool, type FileTool, type GitTool, type McpTool, type MemoryTool, type ProjectTool, type SchedulerTool, type ShellTool, type ToolDescriptor, type TrendHotListResult, type TrendTool, type VerifierTool, type WebTool, type WorkspaceTool } from "@javis/tools";
+import { encodeMcpToolServerName, initialToolDescriptors, type BrowserTool, type CodeTool, type CommanderTool, type ComputerTool, type FileTool, type GitTool, type McpTool, type MemoryTool, type ProjectTool, type SchedulerTool, type ShellTool, type ToolDescriptor, type TrendHotListResult, type TrendTool, type VerifierTool, type VisionTool, type WebTool, type WorkspaceTool } from "@javis/tools";
 import { createArtifactEnvelope, computePlanHash, createAgentRegistry, createDefaultAgentRegistry, createInitialTaskSnapshot, demoAgents, type Agent, type AgentEvent, type AgentRuntimeFactory, type RuntimeEventEnvelope, type TaskSnapshot, type WorkflowCheckpoint } from "./index";
 import { createSharedTaskContext } from "./shared-context";
 import { createWorkflowRegistry } from "./workflow-registry";
@@ -152,6 +152,137 @@ function createRuntimeEventEnvelopeForTest(
 }
 
 describe("runCommanderDagTask observability", () => {
+  it("routes a short desktop-window request to Computer without write approval", async () => {
+    const listWindows = vi.fn<ComputerTool["listWindows"]>(async () => ({
+      windows: [{
+        handle: 42,
+        title: "Javis",
+        className: "JavisWindow",
+        rect: { x: 0, y: 0, width: 1280, height: 720 },
+        isVisible: true,
+        isForeground: true,
+      }],
+    }));
+    const computerTool: ComputerTool = {
+      searchLocalDocuments: vi.fn(async () => []),
+      listDirectory: vi.fn(async () => []),
+      screenshot: vi.fn(async () => ({
+        dataUrl: "data:image/png;base64,AA==",
+        width: 1,
+        height: 1,
+        capturedAt: "2026-07-26T00:00:00.000Z",
+      })),
+      listWindows,
+      inspectUi: vi.fn(async () => ({ tree: "", nodeCount: 0 })),
+      focusWindow: vi.fn(),
+      moveMouse: vi.fn(),
+      click: vi.fn(),
+      type: vi.fn(),
+      keyCombo: vi.fn(),
+      scroll: vi.fn(),
+      invokeUi: vi.fn(),
+      setUiValue: vi.fn(),
+      wait: vi.fn(async () => ({ waited: 1 })),
+      openPath: vi.fn(async () => ({ opened: true })),
+    };
+    const computerUseLoopRunner = vi.fn(async () => []);
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool: {
+        plan: vi.fn(async () => ({
+          title: "列出窗口",
+          reasoning: "使用 Computer Agent 读取桌面窗口列表。",
+          steps: [{
+            id: "list-windows",
+            title: "列出窗口",
+            assignedAgentKind: "computer",
+            toolName: "computer.listWindows",
+            toolInput: {},
+            requiredCapabilities: ["desktop_list_windows"],
+            executionMode: "direct_tool_call" as const,
+            dependsOn: [],
+            outputContextKey: "openWindows",
+            successCriteria: "返回当前可见窗口。",
+          }],
+        })),
+      },
+      computerTool,
+      computerUseLoopRunner,
+      taskId: "task-list-windows",
+      userGoal: "列出现在打开的窗口。",
+    });
+
+    expect(
+      emitted[emitted.length - 1]?.status,
+      JSON.stringify(emitted[emitted.length - 1]?.logs),
+    ).toBe("completed");
+    expect(listWindows).toHaveBeenCalledWith({});
+    expect(computerUseLoopRunner).not.toHaveBeenCalled();
+    expect(emitted.some((snapshot) => snapshot.permissionRequest !== undefined)).toBe(false);
+  });
+
+  it("dispatches computer.listDirectory as a direct read without entering Computer Use", async () => {
+    const listDirectory = vi.fn<ComputerTool["listDirectory"]>(async () => []);
+    const computerUseLoopRunner = vi.fn(async () => []);
+    const computerTool: ComputerTool = {
+      searchLocalDocuments: vi.fn(async () => []),
+      listDirectory,
+      screenshot: vi.fn(async () => ({
+        dataUrl: "data:image/png;base64,AA==",
+        width: 1,
+        height: 1,
+        capturedAt: "2026-07-25T00:00:00.000Z",
+      })),
+      listWindows: vi.fn(async () => ({ windows: [] })),
+      inspectUi: vi.fn(async () => ({ tree: "", nodeCount: 0 })),
+      focusWindow: vi.fn(),
+      moveMouse: vi.fn(),
+      click: vi.fn(),
+      type: vi.fn(),
+      keyCombo: vi.fn(),
+      scroll: vi.fn(),
+      invokeUi: vi.fn(),
+      setUiValue: vi.fn(),
+      wait: vi.fn(async () => ({ waited: 1 })),
+      openPath: vi.fn(async () => ({ opened: true })),
+    };
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool: {
+        plan: vi.fn<CommanderTool["plan"]>(async () => ({
+          title: "List a local directory",
+          reasoning: "Use the governed read-only directory tool.",
+          steps: [{
+            id: "list-directory",
+            title: "List direct children",
+            assignedAgentKind: "computer",
+            toolName: "computer.listDirectory",
+            executionMode: "direct_tool_call",
+            requiredCapabilities: ["directory_list"],
+            dependsOn: [],
+            toolInput: { path: "E:/browse" },
+            outputContextKey: "directoryEntries",
+            successCriteria: "Return the direct directory children.",
+          }],
+        })),
+      },
+      computerTool,
+      computerUseLoopRunner,
+      taskId: "task-direct-directory-list",
+      userGoal: "List the direct entries under E:/browse.",
+    });
+
+    expect(listDirectory).toHaveBeenCalledTimes(1);
+    expect(listDirectory).toHaveBeenCalledWith({ path: "E:/browse" });
+    expect(computerUseLoopRunner).not.toHaveBeenCalled();
+    expect(emitted.some((snapshot) => snapshot.permissionRequest !== undefined)).toBe(false);
+    expect(emitted[emitted.length - 1]?.status).toBe("completed");
+  });
+
   it("includes dynamically registered agents in Commander runtime snapshots", async () => {
     const registry = createDefaultAgentRegistry();
     const customAgent: Agent = {
@@ -194,7 +325,7 @@ describe("runCommanderDagTask observability", () => {
           })),
         },
         taskId: "task-dynamic-agent-snapshot",
-        userGoal: "inspect the project",
+        userGoal: "perform the requested custom code review",
       });
 
       const customSnapshots = emitted
@@ -979,7 +1110,7 @@ describe("runCommanderDagTask observability", () => {
         steps: [{
           id: "trace-repo",
           title: "Trace repository call chain",
-          assignedAgentKind: "code",
+          assignedAgentKind: "explorer",
           toolName: "code.traceCallChain",
           toolInput: { goal: "trace task launch", target: "runTask", entrypoints: ["TaskPanel"] },
           requiredCapabilities: ["code_trace"],
@@ -1712,6 +1843,199 @@ describe("runCommanderDagTask observability", () => {
       summary: "Verifier returned an invalid result.",
     });
     expect(synthesize).not.toHaveBeenCalled();
+  });
+
+  it("treats an explicit verifier rejection as a failed workflow step", async () => {
+    const synthesize = vi.fn<NonNullable<CommanderTool["synthesize"]>>(async () => ({
+      message: "This conclusion must not be published.",
+    }));
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "Reject incomplete evidence",
+        reasoning: "Collect evidence, verify it, and only then answer.",
+        executionPolicy: {
+          maxConcurrency: 1,
+          maxRetries: 0,
+          degradationStrategy: "fail_fast" as const,
+        },
+        steps: [{
+          id: "collect-evidence",
+          title: "Collect evidence",
+          assignedAgentKind: "code",
+          toolName: "code.searchRepository",
+          toolInput: { goal: "find the requested symbol" },
+          requiredCapabilities: ["code_search"],
+          executionMode: "direct_tool_call" as const,
+          dependsOn: [],
+          outputContextKey: "repoEvidence",
+          successCriteria: "Repository evidence is collected.",
+        }, {
+          id: "verify-evidence",
+          title: "Verify evidence",
+          assignedAgentKind: "verifier",
+          toolName: "verifier.check",
+          requiredCapabilities: ["evidence_check"],
+          executionMode: "direct_tool_call" as const,
+          dependsOn: ["collect-evidence"],
+          inputContextKeys: ["repoEvidence"],
+          outputContextKey: "verificationResult",
+          successCriteria: "The requested symbol is present in the evidence.",
+        }, {
+          id: "answer",
+          title: "Answer from verified evidence",
+          assignedAgentKind: "commander",
+          requiredCapabilities: ["synthesis"],
+          executionMode: "direct_response" as const,
+          dependsOn: ["verify-evidence"],
+          inputContextKeys: ["repoEvidence", "verificationResult"],
+          outputContextKey: "answer",
+          successCriteria: "Only verified facts are returned.",
+        }],
+      })),
+      synthesize,
+    };
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      codeTool: {
+        inspectRepository: vi.fn(async () => ({
+          workspacePath: "E:/Javis",
+          changedFiles: [],
+          diffStat: "0 files changed",
+          diff: "",
+        })),
+        searchRepository: vi.fn(async () => ({
+          actualFound: [],
+          inferred: [],
+          needsConfirmation: ["The requested symbol was not found."],
+          keyFiles: [],
+          relatedTestFiles: [],
+          testFileCandidates: [],
+          clusters: [],
+          attempts: [],
+        })),
+      },
+      verifierTool: {
+        check: vi.fn(async () => ({
+          status: "fail" as const,
+          summary: "The requested symbol is missing.",
+          detail: "The repository evidence contains no matching definition.",
+        })),
+      },
+      taskId: "task-explicit-verifier-rejection",
+      userGoal: "find the requested symbol",
+      runtimeConfig: { failureRecoveryEnabled: false, maxStepRetries: 0 },
+    });
+
+    const finalSnapshot = emitted[emitted.length - 1];
+    expect(finalSnapshot?.status).toBe("failed");
+    expect(finalSnapshot?.plan.find((step) => step.id === "verify-evidence")?.status).toBe("failed");
+    expect(finalSnapshot?.plan.find((step) => step.id === "answer")?.status).toBe("skipped");
+    expect(finalSnapshot?.verificationResult).toMatchObject({
+      status: "fail",
+      summary: "The requested symbol is missing.",
+    });
+    expect(finalSnapshot?.commanderMessage).toContain("The requested symbol is missing.");
+    expect(finalSnapshot?.commanderMessage).not.toContain("Task completed:");
+    expect(synthesize).not.toHaveBeenCalled();
+  });
+
+  it("keeps the upstream tool error as the primary failure when verification cannot run", async () => {
+    const searchRepository = vi.fn<NonNullable<CodeTool["searchRepository"]>>(async ({ goal }) => {
+      if (goal === "collect stable evidence") {
+        return {
+          actualFound: [],
+          inferred: [],
+          needsConfirmation: [],
+          keyFiles: ["README.md"],
+          relatedTestFiles: [],
+          testFileCandidates: [],
+          clusters: [],
+          attempts: [],
+        };
+      }
+      throw new Error("Repository index failed while reading packages/core/src/missing.ts");
+    });
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "Collect two evidence sets",
+        reasoning: "Verification depends on both repository searches.",
+        executionPolicy: {
+          maxConcurrency: 1,
+          maxRetries: 0,
+          degradationStrategy: "fail_fast" as const,
+        },
+        steps: [{
+          id: "collect-stable",
+          title: "Collect stable evidence",
+          assignedAgentKind: "code",
+          toolName: "code.searchRepository",
+          toolInput: { goal: "collect stable evidence" },
+          requiredCapabilities: ["code_search"],
+          executionMode: "direct_tool_call" as const,
+          dependsOn: [],
+          outputContextKey: "stableEvidence",
+          successCriteria: "Stable evidence is collected.",
+        }, {
+          id: "collect-failing",
+          title: "Collect failing evidence",
+          assignedAgentKind: "code",
+          toolName: "code.searchRepository",
+          toolInput: { goal: "collect failing evidence" },
+          requiredCapabilities: ["code_search"],
+          executionMode: "direct_tool_call" as const,
+          dependsOn: ["collect-stable"],
+          outputContextKey: "failingEvidence",
+          successCriteria: "The requested file is inspected.",
+        }, {
+          id: "verify-both",
+          title: "Verify both evidence sets",
+          assignedAgentKind: "verifier",
+          toolName: "verifier.check",
+          requiredCapabilities: ["evidence_check"],
+          executionMode: "direct_tool_call" as const,
+          dependsOn: ["collect-stable", "collect-failing"],
+          inputContextKeys: ["stableEvidence", "failingEvidence"],
+          outputContextKey: "verificationResult",
+          successCriteria: "Both evidence sets are available.",
+        }],
+      })),
+    };
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      codeTool: {
+        inspectRepository: vi.fn(async () => ({
+          workspacePath: "E:/Javis",
+          changedFiles: [],
+          diffStat: "0 files changed",
+          diff: "",
+        })),
+        searchRepository,
+      },
+      verifierTool: {
+        check: vi.fn(async () => ({
+          status: "pass" as const,
+          summary: "Both evidence sets are present.",
+          detail: "Both handoffs were checked.",
+        })),
+      },
+      taskId: "task-upstream-error-precedence",
+      userGoal: "compare two symbol lookups",
+      runtimeConfig: { failureRecoveryEnabled: false, maxStepRetries: 0 },
+    });
+
+    const finalSnapshot = emitted[emitted.length - 1];
+    expect(finalSnapshot?.status).toBe("failed");
+    expect(finalSnapshot?.commanderMessage).toContain(
+      "Repository index failed while reading packages/core/src/missing.ts",
+    );
+    expect(finalSnapshot?.commanderMessage).not.toMatch(/^Task failed verification:/u);
+    expect(finalSnapshot?.commanderMessage).not.toContain("Task completed:");
   });
 
   it("aggregates multiple verifier results without allowing a later pass to hide a failure", async () => {
@@ -2546,7 +2870,7 @@ describe("runCommanderDagTask observability", () => {
           title: "Initial scan",
           assignedAgentKind: "file",
           toolName: "file.scanMarkdownDocuments",
-          requiredCapabilities: ["file_scan"],
+          requiredCapabilities: ["workspace_text_read"],
           dependsOn: [],
           successCriteria: "Documents are scanned.",
         }],
@@ -3021,6 +3345,356 @@ describe("Commander direct_response evidence boundary", () => {
     expect(finalSnapshot?.commanderMessage).not.toContain(ungroundedConclusion);
     expect(synthesize).toHaveBeenCalledTimes(1);
   });
+
+  it("uses verified workspace inventory when free-text project synthesis is rejected", async () => {
+    const ungroundedConclusion = "该项目使用 PostgreSQL。";
+    const inspectWorkspace = vi.fn<NonNullable<CodeTool["inspectWorkspace"]>>(async () => ({
+      workspacePath: "E:/workspace",
+      entries: [
+        { name: "apps", relativePath: "apps", isDir: true, depth: 1 },
+        { name: "package.json", relativePath: "package.json", isDir: false, depth: 1, sizeBytes: 1200, extension: "json" },
+        { name: "bundle.zip", relativePath: "bundle.zip", isDir: false, depth: 1, sizeBytes: 30_000_000, extension: "zip" },
+      ],
+      topLevelDirectories: ["apps"],
+      moduleCandidates: ["apps"],
+      manifests: ["package.json"],
+      ignoredDirectories: [],
+      riskIndicators: [{
+        code: "large_file",
+        severity: "warning",
+        path: "bundle.zip",
+        detail: "Large file detected.",
+      }],
+      truncated: false,
+    }));
+    const synthesize = vi.fn<NonNullable<CommanderTool["synthesize"]>>(async () => ({
+      message: ungroundedConclusion,
+    }));
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "检查项目目录结构与风险",
+        reasoning: "先检查工作区，再验证证据，最后回答。",
+        steps: [{
+          id: "inspect-workspace",
+          title: "收集工作区目录结构",
+          assignedAgentKind: "code",
+          toolName: "code.inspectWorkspace",
+          requiredCapabilities: ["workspace_inspect"],
+          dependsOn: [],
+          outputContextKey: "workspaceInventory",
+          executionMode: "direct_tool_call" as const,
+          successCriteria: "获得有界目录、模块和风险证据。",
+        }, {
+          id: "verify-workspace",
+          title: "验证工作区证据",
+          assignedAgentKind: "verifier",
+          toolName: "verifier.check",
+          requiredCapabilities: ["evidence_check"],
+          dependsOn: ["inspect-workspace"],
+          inputContextKeys: ["workspaceInventory"],
+          outputContextKey: "verificationResult",
+          executionMode: "direct_tool_call" as const,
+          successCriteria: "目录证据完整且结构有效。",
+        }, {
+          id: "synthesize-workspace",
+          title: "报告项目结构与风险",
+          assignedAgentKind: "commander",
+          requiredCapabilities: ["synthesis"],
+          dependsOn: ["inspect-workspace", "verify-workspace"],
+          inputContextKeys: ["workspaceInventory", "verificationResult"],
+          executionMode: "direct_response" as const,
+          successCriteria: "只根据已验证证据在聊天中回答。",
+        }],
+      })),
+      synthesize,
+    };
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      codeTool: {
+        inspectRepository: vi.fn(async () => ({
+          workspacePath: "E:/workspace",
+          changedFiles: [],
+          diffStat: "0 files changed",
+          diff: "",
+        })),
+        inspectWorkspace,
+      },
+      verifierTool: {
+        check: vi.fn(async () => ({
+          status: "pass" as const,
+          summary: "目录证据有效。",
+          detail: "结构化输出通过检查。",
+        })),
+      },
+      taskId: "task-verified-workspace-fallback",
+      userGoal: "检查当前项目的目录结构，并报告主要模块和明显风险。只在聊天中回答。",
+    });
+
+    const finalSnapshot = emitted[emitted.length - 1];
+    expect(finalSnapshot?.status).toBe("completed");
+    expect(finalSnapshot?.commanderMessage).toContain("## 目录结构");
+    expect(finalSnapshot?.commanderMessage).toContain("apps");
+    expect(finalSnapshot?.commanderMessage).toContain("package.json");
+    expect(finalSnapshot?.commanderMessage).toContain("bundle.zip");
+    expect(finalSnapshot?.commanderMessage).not.toContain("PostgreSQL");
+    expect(inspectWorkspace).toHaveBeenCalledTimes(1);
+    expect(synthesize).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns a bounded workspace summary when verification warns about truncation", async () => {
+    const synthesize = vi.fn<NonNullable<CommanderTool["synthesize"]>>(async () => ({
+      message: "The project uses PostgreSQL.",
+    }));
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "Inspect project modules and risks",
+        reasoning: "Collect bounded workspace evidence, verify it, and summarize the result.",
+        steps: [{
+          id: "inspect-workspace",
+          title: "Inspect workspace",
+          assignedAgentKind: "code",
+          toolName: "code.inspectWorkspace",
+          requiredCapabilities: ["workspace_inspect"],
+          dependsOn: [],
+          outputContextKey: "workspaceEvidence",
+          executionMode: "direct_tool_call" as const,
+          successCriteria: "Return bounded workspace evidence.",
+        }, {
+          id: "verify-workspace",
+          title: "Verify workspace evidence",
+          assignedAgentKind: "verifier",
+          toolName: "verifier.check",
+          requiredCapabilities: ["evidence_check"],
+          dependsOn: ["inspect-workspace"],
+          inputContextKeys: ["workspaceEvidence"],
+          outputContextKey: "verificationResult",
+          executionMode: "direct_tool_call" as const,
+          successCriteria: "Report whether the bounded evidence is usable.",
+        }, {
+          id: "synthesize-workspace",
+          title: "Summarize workspace",
+          assignedAgentKind: "commander",
+          requiredCapabilities: ["synthesis"],
+          dependsOn: ["inspect-workspace", "verify-workspace"],
+          inputContextKeys: ["workspaceEvidence", "verificationResult"],
+          executionMode: "direct_response" as const,
+          successCriteria: "Return the verified modules and risks with limitations.",
+        }],
+      })),
+      synthesize,
+    };
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      codeTool: {
+        inspectRepository: vi.fn(async () => ({
+          workspacePath: "E:/workspace",
+          changedFiles: [],
+          diffStat: "0 files changed",
+          diff: "",
+        })),
+        inspectWorkspace: vi.fn(async () => ({
+          workspacePath: "E:/workspace",
+          entries: [
+            { name: "apps", relativePath: "apps", isDir: true, depth: 1 },
+            { name: "package.json", relativePath: "package.json", isDir: false, depth: 1, extension: "json" },
+          ],
+          topLevelDirectories: ["apps"],
+          moduleCandidates: ["apps"],
+          manifests: ["package.json"],
+          ignoredDirectories: ["node_modules"],
+          riskIndicators: [{
+            code: "inspection_truncated" as const,
+            severity: "warning" as const,
+            detail: "The bounded inventory reached its entry limit.",
+          }],
+          truncated: true,
+        })),
+      },
+      verifierTool: {
+        check: vi.fn(async () => ({
+          status: "warn" as const,
+          summary: "The evidence is usable but truncated.",
+          detail: "Top-level modules are verified; deeper entries remain uninspected.",
+        })),
+      },
+      taskId: "task-truncated-workspace-summary",
+      userGoal: "Inspect the project modules and obvious risks.",
+    });
+
+    const finalSnapshot = emitted[emitted.length - 1];
+    expect(finalSnapshot?.status).toBe("completed");
+    expect(finalSnapshot?.commanderMessage).toContain("inventory truncated");
+    expect(finalSnapshot?.commanderMessage).toContain("deeper content remains uninspected");
+    expect(finalSnapshot?.commanderMessage).not.toContain("PostgreSQL");
+    expect(synthesize).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to provenance-bound artifacts across file, memory, computer, and page agents", async () => {
+    const ungroundedConclusion = "四项内容都存放在 PostgreSQL 中。";
+    const synthesize = vi.fn<NonNullable<CommanderTool["synthesize"]>>(async () => ({
+      message: ungroundedConclusion,
+    }));
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "汇总四项现有信息",
+        reasoning: "分别读取明确目标，统一验证后在聊天中回答。",
+        steps: [{
+          id: "read-package",
+          title: "读取 package.json",
+          assignedAgentKind: "file",
+          toolName: "file.readWorkspaceText",
+          toolInput: { path: "package.json", maxLines: 80 },
+          requiredCapabilities: ["file_scan"],
+          executionMode: "direct_tool_call" as const,
+          dependsOn: [],
+          outputContextKey: "packageText",
+          successCriteria: "读取 package.json 文本。",
+        }, {
+          id: "search-memory",
+          title: "查找发布规则",
+          assignedAgentKind: "workspace",
+          toolName: "memory.search",
+          toolInput: { query: "发布规则", limit: 5 },
+          requiredCapabilities: ["memory_search"],
+          executionMode: "direct_tool_call" as const,
+          dependsOn: [],
+          outputContextKey: "releaseMemory",
+          successCriteria: "返回相关记忆事实。",
+        }, {
+          id: "find-budget",
+          title: "查找预算表",
+          assignedAgentKind: "computer",
+          toolName: "computer.searchLocalDocuments",
+          toolInput: { query: "预算表", maxResults: 5 },
+          requiredCapabilities: ["local_search"],
+          executionMode: "direct_tool_call" as const,
+          dependsOn: [],
+          outputContextKey: "budgetFiles",
+          successCriteria: "返回本地预算表候选。",
+        }, {
+          id: "open-page",
+          title: "打开网页",
+          assignedAgentKind: "page-agent",
+          toolName: "browser.navigate",
+          toolInput: { url: "https://example.test" },
+          requiredCapabilities: ["browser_navigate"],
+          executionMode: "direct_tool_call" as const,
+          dependsOn: [],
+          outputContextKey: "pageNavigation",
+          successCriteria: "网页加载完成。",
+        }, {
+          id: "read-page",
+          title: "读取网页",
+          assignedAgentKind: "page-agent",
+          toolName: "browser.getContent",
+          requiredCapabilities: ["browser_navigate"],
+          executionMode: "direct_tool_call" as const,
+          dependsOn: ["open-page"],
+          outputContextKey: "pageContent",
+          successCriteria: "返回网页正文和来源 URL。",
+        }, {
+          id: "verify-all",
+          title: "核验四项结果",
+          assignedAgentKind: "verifier",
+          toolName: "verifier.check",
+          requiredCapabilities: ["evidence_check"],
+          executionMode: "direct_tool_call" as const,
+          dependsOn: ["read-package", "search-memory", "find-budget", "read-page"],
+          inputContextKeys: ["packageText", "releaseMemory", "budgetFiles", "pageContent"],
+          outputContextKey: "verificationResult",
+          successCriteria: "四项结果都与各自来源绑定。",
+        }, {
+          id: "answer",
+          title: "汇总结果",
+          assignedAgentKind: "commander",
+          requiredCapabilities: ["synthesis"],
+          executionMode: "direct_response" as const,
+          dependsOn: ["verify-all"],
+          inputContextKeys: [
+            "packageText",
+            "releaseMemory",
+            "budgetFiles",
+            "pageContent",
+            "verificationResult",
+          ],
+          outputContextKey: "answer",
+          successCriteria: "只展示已验证的四项结果。",
+        }],
+      })),
+      synthesize,
+    };
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => []),
+        readWorkspaceText: vi.fn(async () => ({
+          path: "package.json",
+          content: "{\n  \"scripts\": { \"test\": \"vitest run\" }\n}",
+          truncated: false,
+        })),
+      },
+      memoryTool: {
+        search: vi.fn(async () => [{
+          id: "memory-1",
+          fact: "发布前必须通过定向测试。",
+          kind: "decision",
+          tags: ["release"],
+          confidence: 0.95,
+          importance: 0.8,
+          updatedAt: 1_785_000_000_000,
+        }]),
+      },
+      computerTool: {
+        searchLocalDocuments: vi.fn(async () => [{
+          name: "预算表.xlsx",
+          path: "C:/Users/test/Documents/预算表.xlsx",
+          isDir: false,
+          extension: "xlsx",
+        }]),
+      } as unknown as ComputerTool,
+      browserTool: createBrowserTool({
+        navigate: vi.fn(async () => ({
+          url: "https://example.test/",
+          title: "Example",
+          status: 200,
+          loadState: "load",
+        })),
+        getContent: vi.fn(async () => ({
+          url: "https://example.test/",
+          title: "Example",
+          content: "Example page body.",
+        })),
+      }),
+      verifierTool: {
+        check: vi.fn(async () => ({
+          status: "pass" as const,
+          summary: "四项结果均通过来源检查。",
+          detail: "每项结果都有对应的工具 artifact。",
+        })),
+      },
+      taskId: "task-generic-artifact-fallback",
+      userGoal: "把 package.json、上次的发布规则、本地预算表和 https://example.test 放一起给我看看",
+    });
+
+    const finalSnapshot = emitted[emitted.length - 1];
+    expect(finalSnapshot?.status).toBe("completed");
+    expect(finalSnapshot?.commanderMessage).toContain("vitest run");
+    expect(finalSnapshot?.commanderMessage).toContain("发布前必须通过定向测试");
+    expect(finalSnapshot?.commanderMessage).toContain("预算表.xlsx");
+    expect(finalSnapshot?.commanderMessage).toContain("https://example.test/");
+    expect(finalSnapshot?.commanderMessage).toContain("Example page body");
+    expect(finalSnapshot?.commanderMessage).not.toContain("PostgreSQL");
+    expect(synthesize).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("Commander Page Agent scheduling", () => {
@@ -3146,6 +3820,80 @@ describe("Commander Page Agent scheduling", () => {
 });
 
 describe("executeCapabilityStep repository search dispatch", () => {
+  it("keeps direct-call handoff artifacts out of strict tool arguments", async () => {
+    const context = createSharedTaskContext({ workspaceEvidence: { entries: ["package.json"] } });
+    const searchRepository = vi.fn<NonNullable<CodeTool["searchRepository"]>>(async () => ({
+      actualFound: [],
+      inferred: [],
+      needsConfirmation: [],
+      keyFiles: [],
+      relatedTestFiles: [],
+      testFileCandidates: [],
+      clusters: [],
+      attempts: [],
+    }));
+
+    await executeCapabilityStep({
+      id: "search-with-handoff",
+      title: "Search repository",
+      assignedAgentKind: "code",
+      toolName: "code.searchRepository",
+      executionMode: "direct_tool_call",
+      requiredCapabilities: ["code_search"],
+      dependsOn: [],
+      inputContextKeys: ["workspaceEvidence"],
+      toolInput: { goal: "find package scripts" },
+      successCriteria: "Search evidence is collected.",
+    }, context, {
+      codeTool: {
+        inspectRepository: vi.fn(async () => ({
+          workspacePath: "E:/Javis",
+          changedFiles: [],
+          diffStat: "0 files changed",
+          diff: "",
+        })),
+        searchRepository,
+      },
+    });
+
+    expect(searchRepository).toHaveBeenCalledWith({
+      goal: "find package scripts",
+      knownTerms: undefined,
+      entryFile: undefined,
+      priorityPaths: undefined,
+      maxAttempts: undefined,
+      maxKeyFiles: undefined,
+    });
+  });
+
+  it("dispatches an exact workspace text read through the governed registry", async () => {
+    const readWorkspaceText = vi.fn<NonNullable<FileTool["readWorkspaceText"]>>(async () => ({
+      path: "package.json",
+      content: '{"scripts":{"typecheck":"pnpm -r typecheck"}}',
+      truncated: false,
+    }));
+
+    const result = await executeCapabilityStep({
+      id: "read-package-json",
+      title: "Read package scripts",
+      assignedAgentKind: "code",
+      toolName: "file.readWorkspaceText",
+      executionMode: "direct_tool_call",
+      requiredCapabilities: ["workspace_text_read"],
+      dependsOn: [],
+      toolInput: { path: "package.json", maxLines: 80 },
+      successCriteria: "package.json scripts are available.",
+    }, createSharedTaskContext({}), {
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => []),
+        readWorkspaceText,
+      },
+    });
+
+    expect(result.toolName).toBe("file.readWorkspaceText");
+    expect(readWorkspaceText).toHaveBeenCalledWith({ path: "package.json", maxLines: 80 });
+  });
+
   it("dispatches code.searchRepository when the code tool implements it", async () => {
     const context = createSharedTaskContext({
       userGoal: "find memory implementation",
@@ -4396,7 +5144,7 @@ describe("executeCapabilityStep trend dispatch", () => {
       verifierTool: { check: verify },
       reactDecideNext,
       taskId: "task-generic-trend-partial-success",
-      userGoal: "采集三个通用来源的 Top20 趋势，其中单个来源受阻时交付其余可验证结果",
+      userGoal: "采集三个通用来源的 Top20 趋势并保存为 Markdown 报告，其中单个来源受阻时交付其余可验证结果",
       workspacePath: "E:/workspace",
       availableToolDescriptors: initialToolDescriptors,
     });
@@ -4553,7 +5301,7 @@ describe("runCommanderDagTask plan repair loop", () => {
       commanderTool,
       codeTool,
       taskId: "task-repair-1",
-      userGoal: "Analyze the repository",
+      userGoal: "Run the requested analysis step",
     });
 
     // First call is the normal plan, second call is the repair attempt.
@@ -4576,6 +5324,240 @@ describe("runCommanderDagTask plan repair loop", () => {
     expect(repairOkLog).toBeDefined();
   });
 
+  it("repairs a project-understanding DAG from Computer to Code, Verifier, and Commander before execution", async () => {
+    const planCalls: Array<{ diagnostics: string[] }> = [];
+    const initialWorker = {
+      id: "inspect-project",
+      title: "Inspect project structure",
+      assignedAgentKind: "computer",
+      toolName: "computer.listDirectory",
+      executionMode: "direct_tool_call" as const,
+      requiredCapabilities: ["directory_list"],
+      dependsOn: [] as string[],
+      toolInput: { path: "E:/Javis" },
+      outputContextKey: "projectEvidence",
+      successCriteria: "Collect evidence about modules and obvious risks.",
+    };
+    const downstreamSteps = [{
+      id: "verify-project",
+      title: "Verify project evidence",
+      assignedAgentKind: "verifier",
+      toolName: "verifier.check",
+      executionMode: "direct_tool_call" as const,
+      requiredCapabilities: ["evidence_check"],
+      dependsOn: ["inspect-project"],
+      inputContextKeys: ["projectEvidence"],
+      outputContextKey: "verifiedProjectEvidence",
+      successCriteria: "Verify the repository evidence.",
+    }, {
+      id: "answer-project",
+      title: "Answer with verified findings",
+      assignedAgentKind: "commander",
+      executionMode: "direct_response" as const,
+      requiredCapabilities: ["synthesis"],
+      dependsOn: ["verify-project"],
+      inputContextKeys: ["projectEvidence", "verifiedProjectEvidence"],
+      outputContextKey: "finalAnswer",
+      successCriteria: "Return the verified module and risk summary in chat.",
+    }];
+    const synthesize = vi.fn<NonNullable<CommanderTool["synthesize"]>>(async () => ({
+      message: "Here is the summary.",
+    }));
+    const commanderTool: CommanderTool = {
+      plan: vi.fn<CommanderTool["plan"]>(async (request) => {
+        planCalls.push({
+          diagnostics: request.repairContext?.diagnostics.map((entry) => entry.code) ?? [],
+        });
+        return {
+          title: "Inspect current project",
+          reasoning: request.repairContext
+            ? "Repair the evidence worker before execution."
+            : "Inspect, verify, and summarize the selected workspace.",
+          steps: [
+            request.repairContext
+              ? {
+                  ...initialWorker,
+                  assignedAgentKind: "code",
+                  toolName: "code.inspectWorkspace",
+                  requiredCapabilities: ["workspace_inspect"],
+                  toolInput: { maxDepth: 3, maxEntries: 400 },
+                }
+              : initialWorker,
+            ...downstreamSteps,
+          ],
+        };
+      }),
+      synthesize,
+    };
+    const inspectWorkspace = vi.fn<NonNullable<CodeTool["inspectWorkspace"]>>(async () => ({
+      workspacePath: "E:/Javis",
+      entries: [
+        { name: "apps", relativePath: "apps", isDir: true, depth: 1 },
+        { name: "packages", relativePath: "packages", isDir: true, depth: 1 },
+        { name: "package.json", relativePath: "package.json", isDir: false, depth: 1 },
+      ],
+      topLevelDirectories: ["apps", "packages"],
+      moduleCandidates: ["apps", "packages"],
+      manifests: ["package.json"],
+      ignoredDirectories: [],
+      riskIndicators: [],
+      truncated: false,
+    }));
+    const codeTool: CodeTool = {
+      inspectRepository: vi.fn(async () => ({
+        workspacePath: "E:/Javis",
+        changedFiles: [],
+        diffStat: "0 files changed",
+        diff: "",
+      })),
+      inspectWorkspace,
+    };
+    const verify = vi.fn<VerifierTool["check"]>(async () => ({
+      status: "pass",
+      summary: "Repository evidence supports the response.",
+      detail: "The evidence identifies the planning/execution module and its tests.",
+    }));
+    const listDirectory = vi.fn<ComputerTool["listDirectory"]>(async () => []);
+    const computerTool: ComputerTool = {
+      searchLocalDocuments: vi.fn(async () => []),
+      listDirectory,
+      screenshot: vi.fn(async () => ({
+        dataUrl: "data:image/png;base64,AA==",
+        width: 1,
+        height: 1,
+        capturedAt: "2026-07-25T00:00:00.000Z",
+      })),
+      listWindows: vi.fn(async () => ({ windows: [] })),
+      inspectUi: vi.fn(async () => ({ tree: "", nodeCount: 0 })),
+      focusWindow: vi.fn(),
+      moveMouse: vi.fn(),
+      click: vi.fn(),
+      type: vi.fn(),
+      keyCombo: vi.fn(),
+      scroll: vi.fn(),
+      invokeUi: vi.fn(),
+      setUiValue: vi.fn(),
+      wait: vi.fn(async () => ({ waited: 1 })),
+      openPath: vi.fn(async () => ({ opened: true })),
+    };
+    const computerUseLoopRunner = vi.fn(async () => []);
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      codeTool,
+      verifierTool: { check: verify },
+      computerTool,
+      computerUseLoopRunner,
+      workspacePath: "E:/Javis",
+      taskId: "task-repair-project-routing",
+      userGoal: "检查当前项目的目录结构，并向我报告主要模块和明显风险。只在聊天中回答，不要保存或创建任何文件。",
+    });
+
+    expect(planCalls).toHaveLength(2);
+    expect(planCalls[0].diagnostics).toEqual([]);
+    expect(planCalls[1].diagnostics).toEqual(expect.arrayContaining([
+      "MISROUTED_PROJECT_INSPECTION",
+      "MISSING_PROJECT_EVIDENCE_STEP",
+    ]));
+    expect(inspectWorkspace).toHaveBeenCalledTimes(1);
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(synthesize).toHaveBeenCalledTimes(1);
+    expect(listDirectory).not.toHaveBeenCalled();
+    expect(computerUseLoopRunner).not.toHaveBeenCalled();
+    expect(emitted.some((snapshot) => snapshot.permissionRequest !== undefined)).toBe(false);
+    expect(emitted.some((snapshot) => snapshot.logs.some((log) =>
+      log.detail.includes("Repair attempt 1 compiled")
+    ))).toBe(true);
+    expect(emitted[emitted.length - 1]?.status).toBe("completed");
+  });
+
+  it("rejects a file.writeText step when the user goal has no persistence intent (Layer 5)", async () => {
+    const planCalls: Array<{ repairContext?: unknown }> = [];
+    const commanderTool: CommanderTool = {
+      plan: vi.fn<CommanderTool["plan"]>(async (request) => {
+        planCalls.push({ repairContext: request.repairContext });
+        if (request.repairContext) {
+          // Repaired plan drops the unsolicited write step.
+          return {
+            title: "Repaired",
+            reasoning: "Removed the write step; the user only asked for an answer.",
+            steps: [{
+              id: "collect",
+              title: "Collect evidence",
+              assignedAgentKind: "code",
+              toolName: "code.inspectRepository",
+              requiredCapabilities: [],
+              dependsOn: [],
+              successCriteria: "Evidence collected.",
+            }],
+          };
+        }
+        return {
+          title: "Summarize and write",
+          reasoning: "Collect evidence, then write a file the user never asked for.",
+          steps: [{
+            id: "collect",
+            title: "Collect evidence",
+            assignedAgentKind: "code",
+            toolName: "code.inspectRepository",
+            requiredCapabilities: [],
+            dependsOn: [],
+            outputContextKey: "repoEvidence",
+            successCriteria: "Evidence collected.",
+          }, {
+            id: "write",
+            title: "Write report",
+            assignedAgentKind: "file",
+            toolName: "file.writeText",
+            requiredCapabilities: [],
+            dependsOn: ["collect"],
+            inputContextKeys: ["repoEvidence"],
+            toolInput: { targetPath: "summary.md" },
+            successCriteria: "Report written.",
+          }],
+        };
+      }),
+    };
+    const codeTool: CodeTool = {
+      inspectRepository: vi.fn(async () => ({
+        workspacePath: "E:/Javis",
+        changedFiles: [],
+        diffStat: "0",
+        diff: "",
+      })),
+    };
+    const planWriteText = vi.fn();
+    const writeText = vi.fn();
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      codeTool,
+      fileTool: {
+        scanMarkdownDocuments: vi.fn(async () => []),
+        planWriteText,
+        writeText,
+      },
+      taskId: "task-write-without-intent",
+      userGoal: "Summarize the repository",
+    });
+
+    // The initial plan was rejected by the intent gate; the repair context
+    // carries the precise diagnostic and the repaired plan drops the write.
+    expect(planCalls).toHaveLength(2);
+    const diagnostics = (planCalls[1].repairContext as { diagnostics: Array<{ code: string; stepId?: string }> }).diagnostics;
+    expect(diagnostics.some((diagnostic) =>
+      diagnostic.code === "WRITE_WITHOUT_USER_INTENT" && diagnostic.stepId === "write",
+    )).toBe(true);
+    expect(planWriteText).not.toHaveBeenCalled();
+    expect(writeText).not.toHaveBeenCalled();
+    expect(emitted[emitted.length - 1]?.status).toBe("completed");
+  });
+
+
   it("repairs the observed Chinese file-output plan instead of treating role capabilities as unavailable", async () => {
     const planCalls: Array<{ repairContext?: unknown; workspacePath?: string }> = [];
     const commanderTool: CommanderTool = {
@@ -4586,7 +5568,8 @@ describe("runCommanderDagTask plan repair loop", () => {
         });
         if (request.repairContext) {
           const diagnosticCodes = request.repairContext.diagnostics.map((diagnostic) => diagnostic.code);
-          expect(diagnosticCodes).toContain("MISSING_APPROVAL_TOOL_SELECTION");
+          expect(diagnosticCodes).toContain("MISSING_REQUIRED_AGENT_ROUTE");
+          expect(diagnosticCodes).toContain("MISSING_REQUIRED_ROUTE_TOOL");
           expect(diagnosticCodes).not.toContain("CAPABILITY_NOT_AVAILABLE");
           return {
             title: "已修复的计划",
@@ -4614,7 +5597,7 @@ describe("runCommanderDagTask plan repair loop", () => {
             }, {
               id: "write-file",
               title: "写入文件",
-              assignedAgentKind: "doc-updater",
+              assignedAgentKind: "file",
               toolName: "file.writeText",
               toolInput: { targetPath: "E:/测试/微博热搜.md" },
               executionMode: "direct_tool_call" as const,
@@ -6128,6 +7111,8 @@ describe("executeCapabilityStep permissions", () => {
     }));
     const list = vi.fn<WorkspaceTool["list"]>(async () => []);
     const scaffold = vi.fn<NonNullable<WorkspaceTool["scaffold"]>>(async () => ({ id: "demo-workspace" }));
+    const planCreate = vi.fn<WorkspaceTool["planCreate"]>();
+    const planDelete = vi.fn<WorkspaceTool["planDelete"]>();
 
     await executeCapabilityStep(
       {
@@ -6195,7 +7180,7 @@ describe("executeCapabilityStep permissions", () => {
       },
       createSharedTaskContext({}),
       {
-        workspaceTool: { list, scaffold, create: vi.fn(), delete: vi.fn() },
+        workspaceTool: { list, scaffold, planCreate, create: vi.fn(), planDelete, delete: vi.fn() },
       },
     );
 
@@ -6212,7 +7197,7 @@ describe("executeCapabilityStep permissions", () => {
       },
       createSharedTaskContext({ description: "knowledge workspace" }),
       {
-        workspaceTool: { list, scaffold, create: vi.fn(), delete: vi.fn() },
+        workspaceTool: { list, scaffold, planCreate, create: vi.fn(), planDelete, delete: vi.fn() },
       },
     );
 
@@ -6293,6 +7278,159 @@ describe("executeCapabilityStep permissions", () => {
     expect(scanUserImages).toHaveBeenCalledWith({ maxResults: 3 });
     expect(result.toolName).toBe("file.scanUserImages");
     expect(context.get("images")).toEqual(result.output);
+  });
+
+  it("dispatches document classification through the FileTool contract", async () => {
+    const files = [{ name: "report.pdf", path: "C:/Users/example/Documents/report.pdf", extension: "pdf" }];
+    const classified = [{
+      ...files[0],
+      tags: ["report"],
+      category: "work",
+      confidence: 0.96,
+    }];
+    const classifyDocuments = vi.fn<NonNullable<FileTool["classifyDocuments"]>>(async () => classified);
+    const context = createSharedTaskContext({ files });
+
+    const result = await executeCapabilityStep(
+      {
+        id: "classify-documents",
+        title: "Classify documents",
+        assignedAgentKind: "file",
+        toolName: "file.classifyDocuments",
+        requiredCapabilities: ["document_classify"],
+        dependsOn: [],
+        inputContextKeys: ["files"],
+        outputContextKey: "classifiedDocuments",
+        successCriteria: "Documents classified.",
+      },
+      context,
+      {
+        fileTool: {
+          scanMarkdownDocuments: vi.fn(async () => []),
+          classifyDocuments,
+        },
+      },
+    );
+
+    expect(classifyDocuments).toHaveBeenCalledWith(files);
+    expect(result.output).toEqual(classified);
+    expect(context.get("classifiedDocuments")).toEqual(classified);
+  });
+
+  it("dispatches local document search through the ComputerTool contract", async () => {
+    const matches = [{
+      name: "notes.md",
+      path: "C:/Users/example/Documents/notes.md",
+      isDir: false,
+      extension: "md",
+    }];
+    const searchLocalDocuments = vi.fn<ComputerTool["searchLocalDocuments"]>(async () => matches);
+    const context = createSharedTaskContext({ query: "release notes", maxResults: 7 });
+
+    const result = await executeCapabilityStep(
+      {
+        id: "search-local-documents",
+        title: "Search local documents",
+        assignedAgentKind: "computer",
+        toolName: "computer.searchLocalDocuments",
+        requiredCapabilities: ["local_search"],
+        dependsOn: [],
+        inputContextKeys: ["query", "maxResults"],
+        outputContextKey: "localMatches",
+        successCriteria: "Local documents searched.",
+      },
+      context,
+      { computerTool: { searchLocalDocuments } as unknown as ComputerTool },
+    );
+
+    expect(searchLocalDocuments).toHaveBeenCalledWith({ query: "release notes", maxResults: 7 });
+    expect(result.output).toEqual(matches);
+    expect(context.get("localMatches")).toEqual(matches);
+  });
+
+  it("dispatches link extraction through the BrowserTool contract", async () => {
+    const extracted = {
+      links: [{ href: "https://example.test/docs", text: "Documentation" }],
+      count: 1,
+    };
+    const extractLinks = vi.fn<NonNullable<BrowserTool["extractLinks"]>>(async () => extracted);
+    const context = createSharedTaskContext({ selector: "main a", maxResults: 12 });
+
+    const result = await executeCapabilityStep(
+      {
+        id: "extract-links",
+        title: "Extract links",
+        assignedAgentKind: "page-agent",
+        toolName: "browser.extractLinks",
+        requiredCapabilities: ["browser_navigate"],
+        dependsOn: [],
+        inputContextKeys: ["selector", "maxResults"],
+        outputContextKey: "links",
+        successCriteria: "Links extracted.",
+      },
+      context,
+      { browserTool: createBrowserTool({ extractLinks }) },
+    );
+
+    expect(extractLinks).toHaveBeenCalledWith({ selector: "main a", maxResults: 12 });
+    expect(result.output).toEqual(extracted);
+    expect(context.get("links")).toEqual(extracted);
+  });
+
+  it("dispatches image analysis and OCR through the VisionTool contract", async () => {
+    const analyze = vi.fn<VisionTool["analyze"]>(async () => ({
+      description: "A settings dialog",
+      objects: ["dialog", "button"],
+      answer: "The save button is enabled.",
+    }));
+    const extractText = vi.fn<VisionTool["extractText"]>(async () => ({
+      text: "Save changes",
+      confidence: 0.98,
+    }));
+    const visionTool: VisionTool = {
+      analyze,
+      describe: vi.fn(async () => ({ description: "A settings dialog" })),
+      extractText,
+    };
+
+    await executeCapabilityStep(
+      {
+        id: "analyze-image",
+        title: "Analyze image",
+        assignedAgentKind: "vision",
+        toolName: "vision.analyze",
+        requiredCapabilities: ["image_analyze"],
+        dependsOn: [],
+        inputContextKeys: ["imagePath", "question"],
+        successCriteria: "Image analyzed.",
+      },
+      createSharedTaskContext({ imagePath: "E:/fixtures/settings.png", question: "Is Save enabled?" }),
+      { visionTool },
+    );
+
+    await executeCapabilityStep(
+      {
+        id: "extract-image-text",
+        title: "Extract image text",
+        assignedAgentKind: "vision",
+        toolName: "vision.extractText",
+        requiredCapabilities: ["image_ocr"],
+        dependsOn: [],
+        inputContextKeys: ["imagePath", "language"],
+        successCriteria: "Image text extracted.",
+      },
+      createSharedTaskContext({ imagePath: "E:/fixtures/settings.png", language: "en" }),
+      { visionTool },
+    );
+
+    expect(analyze).toHaveBeenCalledWith({
+      imagePath: "E:/fixtures/settings.png",
+      question: "Is Save enabled?",
+    });
+    expect(extractText).toHaveBeenCalledWith({
+      imagePath: "E:/fixtures/settings.png",
+      language: "en",
+    });
   });
 
   it("dispatches local memory search through the MemoryTool contract", async () => {
@@ -7673,9 +8811,10 @@ describe("executeCapabilityStep permissions", () => {
           id: "review-docs",
           title: "Review documentation",
           assignedAgentKind: "doc-updater",
-          capability: "doc_update",
-          requiredCapabilities: ["doc_update"],
+          primaryCapability: "doc_update",
+          requiredCapabilities: [],
           dependsOn: [],
+          executionMode: "react" as const,
           successCriteria: "Documentation findings are reported.",
         }],
       })),
@@ -7702,6 +8841,10 @@ describe("executeCapabilityStep permissions", () => {
       heading: "Javis",
       excerpt: "Project documentation evidence for the role-capability ReAct test.",
     }]);
+    const getAgentRuntimeRoutingDecision = vi.fn(() => ({
+      backend: "legacy" as const,
+      rolloutTargeted: false,
+    }));
     const { controller, emitted } = createTestController();
 
     await runCommanderDagTask({
@@ -7735,6 +8878,7 @@ describe("executeCapabilityStep permissions", () => {
         })),
       },
       reactDecideNext,
+      getAgentRuntimeRoutingDecision,
       taskId: "task-role-capability-react",
       userGoal: "review project documentation",
       availableToolDescriptors: initialToolDescriptors,
@@ -7746,6 +8890,93 @@ describe("executeCapabilityStep permissions", () => {
     expect(toolNames).toContain("file.planWriteText");
     expect(toolNames).not.toContain("file.writeText");
     expect(scanMarkdownDocuments).toHaveBeenCalledTimes(1);
+    expect(getAgentRuntimeRoutingDecision).toHaveBeenCalledWith(
+      "doc-updater",
+      "task-role-capability-react",
+      "preview",
+      undefined,
+      "doc_update",
+    );
+    expect(emitted[emitted.length - 1]?.status).toBe("completed");
+  });
+
+  it("keeps handoff context out of strict ReAct tool arguments", async () => {
+    const inspectWorkspace = vi.fn<NonNullable<CodeTool["inspectWorkspace"]>>(async () => ({
+      workspacePath: "E:/Javis",
+      entries: [],
+      topLevelDirectories: [],
+      moduleCandidates: [],
+      manifests: [],
+      ignoredDirectories: [],
+      riskIndicators: [],
+      truncated: false,
+    }));
+    const inspectRepository = vi.fn<CodeTool["inspectRepository"]>(async () => ({
+      workspacePath: "E:/Javis",
+      changedFiles: [],
+      diffStat: "0 files changed",
+      diff: "",
+    }));
+    const reactRequests: ReActDecisionRequest[] = [];
+    const reactDecideNext = vi.fn(async (request: ReActDecisionRequest) => {
+      reactRequests.push(request);
+      return request.observations.length === 0
+        ? {
+            status: "continue" as const,
+            toolName: "code.inspectRepository",
+            reason: "Inspect repository changes without copying handoff evidence into tool input.",
+          }
+        : {
+            status: "completed" as const,
+            reason: "Repository evidence is available.",
+          };
+    });
+    const { controller, emitted } = createTestController();
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool: {
+        plan: vi.fn(async () => ({
+          title: "Security review",
+          reasoning: "Collect workspace evidence before a specialist review.",
+          steps: [{
+            id: "collect-workspace",
+            title: "Collect workspace evidence",
+            assignedAgentKind: "code",
+            toolName: "code.inspectWorkspace",
+            executionMode: "direct_tool_call" as const,
+            requiredCapabilities: ["workspace_inspect"],
+            dependsOn: [],
+            toolInput: { maxDepth: 2, maxEntries: 100 },
+            outputContextKey: "workspaceEvidence",
+            successCriteria: "Workspace evidence collected.",
+          }, {
+            id: "security-review",
+            title: "Review security",
+            assignedAgentKind: "security-reviewer",
+            primaryCapability: "security_review",
+            executionMode: "react" as const,
+            requiredCapabilities: [],
+            dependsOn: ["collect-workspace"],
+            inputContextKeys: ["workspaceEvidence"],
+            outputContextKey: "securityFindings",
+            successCriteria: "Security findings are grounded in repository evidence.",
+          }],
+        })),
+      },
+      codeTool: { inspectWorkspace, inspectRepository },
+      reactDecideNext,
+      getAgentRuntimeRoutingDecision: () => ({ backend: "legacy", rolloutTargeted: false }),
+      taskId: "task-react-handoff-argument-boundary",
+      userGoal: "Review the project security without modifying files.",
+    });
+
+    expect(inspectWorkspace).toHaveBeenCalledTimes(1);
+    expect(inspectRepository).toHaveBeenCalledWith();
+    expect(reactRequests[0]?.handoffContext).toHaveProperty("workspaceEvidence");
+    expect(reactRequests[0]?.availableTools.find((tool) =>
+      tool.name === "code.inspectRepository"
+    )?.inputSchema).toMatchObject({ additionalProperties: false });
     expect(emitted[emitted.length - 1]?.status).toBe("completed");
   });
 
@@ -9700,6 +10931,372 @@ describe("executeCapabilityStep permissions", () => {
 });
 
 describe("SUPPORTED_APPROVAL_GATED_TOOLS allowlist", () => {
+  it("creates a workspace only after approving the native-bound preview", async () => {
+    const definition = {
+      id: "knowledge-base",
+      title: "Knowledge Base",
+      icon: "book",
+      description: "Local knowledge workspace",
+      enabled: true,
+      version: "0.1.0",
+    };
+    const planCreate = vi.fn<WorkspaceTool["planCreate"]>(async () => ({
+      approvalId: "approval-workspace-create",
+      workspaceId: "knowledge-base",
+      action: "create",
+      payloadHash: "definition-hash",
+      dryRun: {
+        operation: "workspace.create",
+        affectedPaths: [{ source: "knowledge-base", target: "knowledge-base.workspace.json", action: "create" }],
+        riskSummary: "Creates a local workspace definition.",
+        reversible: true,
+      },
+    }));
+    const create = vi.fn<WorkspaceTool["create"]>(async () => undefined);
+    const workspaceTool: WorkspaceTool = {
+      list: vi.fn(async () => []),
+      scaffold: vi.fn(async () => definition),
+      planCreate,
+      create,
+      planDelete: vi.fn(),
+      delete: vi.fn(),
+    };
+    const { controller, emitted, permissionHandlers } = createTestController({ withPermissionHandler: true });
+    const runPromise = runCommanderDagTask({
+      controller,
+      commanderTool: {
+        plan: vi.fn(async () => ({
+          title: "创建知识库工作区",
+          reasoning: "交给 Workspace Agent 保存已确认的工作区定义。",
+          steps: [{
+            id: "create-workspace",
+            title: "创建知识库工作区",
+            assignedAgentKind: "workspace",
+            toolName: "workspace.create",
+            toolInput: { definition },
+            requiredCapabilities: ["workspace_create"],
+            executionMode: "direct_tool_call" as const,
+            dependsOn: [],
+            outputContextKey: "workspaceCreated",
+            successCriteria: "知识库工作区已创建。",
+          }],
+        })),
+      },
+      workspaceTool,
+      taskId: "task-workspace-create",
+      userGoal: "创建刚才那个知识库工作区。",
+    });
+
+    const [requestId, permissionHandler] = await waitForPermissionHandler(permissionHandlers);
+    expect(requestId).toBe("approval-workspace-create");
+    expect(create).not.toHaveBeenCalled();
+    await permissionHandler("approved");
+    await runPromise;
+
+    expect(planCreate).toHaveBeenCalledWith(definition, "task-workspace-create");
+    expect(create).toHaveBeenCalledWith(
+      definition,
+      "approval-workspace-create",
+      "task-workspace-create",
+    );
+    expect(emitted[emitted.length - 1]?.status).toBe("completed");
+  });
+
+  it("deletes a workspace only after approving the risky preview", async () => {
+    const planDelete = vi.fn<WorkspaceTool["planDelete"]>(async () => ({
+      approvalId: "approval-workspace-delete",
+      workspaceId: "test-workspace",
+      action: "delete",
+      payloadHash: "existing-file-hash",
+      dryRun: {
+        operation: "workspace.delete",
+        affectedPaths: [{ source: "test-workspace", target: "test-workspace.workspace.json", action: "delete" }],
+        riskSummary: "Deletes a local workspace definition.",
+        reversible: false,
+      },
+    }));
+    const deleteWorkspace = vi.fn<WorkspaceTool["delete"]>(async () => undefined);
+    const workspaceTool: WorkspaceTool = {
+      list: vi.fn(async () => []),
+      scaffold: vi.fn(async () => ({})),
+      planCreate: vi.fn(),
+      create: vi.fn(),
+      planDelete,
+      delete: deleteWorkspace,
+    };
+    const { controller, emitted, permissionHandlers } = createTestController({ withPermissionHandler: true });
+    const runPromise = runCommanderDagTask({
+      controller,
+      commanderTool: {
+        plan: vi.fn(async () => ({
+          title: "删除测试工作区",
+          reasoning: "交给 Workspace Agent 删除指定定义。",
+          steps: [{
+            id: "delete-workspace",
+            title: "删除测试工作区",
+            assignedAgentKind: "workspace",
+            toolName: "workspace.delete",
+            toolInput: { workspaceId: "test-workspace" },
+            requiredCapabilities: ["workspace_delete"],
+            executionMode: "direct_tool_call" as const,
+            dependsOn: [],
+            outputContextKey: "workspaceDeleted",
+            successCriteria: "测试工作区已删除。",
+          }],
+        })),
+      },
+      workspaceTool,
+      taskId: "task-workspace-delete",
+      userGoal: "删掉测试工作区。",
+    });
+
+    const [requestId, permissionHandler] = await waitForPermissionHandler(permissionHandlers);
+    expect(requestId).toBe("approval-workspace-delete");
+    expect(deleteWorkspace).not.toHaveBeenCalled();
+    expect(emitted.find((snapshot) => snapshot.permissionRequest)?.permissionRequest)
+      .toMatchObject({ writeRiskLevel: "risky", allowAlways: false });
+    await permissionHandler("approved");
+    await runPromise;
+
+    expect(planDelete).toHaveBeenCalledWith("test-workspace", "task-workspace-delete");
+    expect(deleteWorkspace).toHaveBeenCalledWith(
+      "test-workspace",
+      "approval-workspace-delete",
+      "task-workspace-delete",
+    );
+    expect(emitted[emitted.length - 1]?.status).toBe("completed");
+  });
+
+  it("runs a targeted core test only after the user approves its bound command", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "Run core tests",
+        reasoning: "Delegate the requested test to Test Runner.",
+        steps: [{
+          id: "run-core-tests",
+          title: "Run core tests",
+          assignedAgentKind: "test-runner",
+          toolName: "shell.runWorkspaceCommand",
+          toolInput: { program: "pnpm", args: ["--filter", "@javis/core", "test"] },
+          requiredCapabilities: ["shell_execute"],
+          executionMode: "direct_tool_call" as const,
+          dependsOn: [],
+          outputContextKey: "testResult",
+          successCriteria: "Core tests exit successfully.",
+        }],
+      })),
+    };
+    const planWorkspaceCommand = vi.fn<NonNullable<ShellTool["planWorkspaceCommand"]>>(async (_request, taskId) => ({
+      approvalId: "approval-core-test",
+      taskId,
+      toolName: "shell.runWorkspaceCommand",
+      previewHash: "command-hash",
+      command: "pnpm --filter @javis/core test",
+      cwd: "E:/Javis",
+      dryRun: {
+        operation: "shell.runWorkspaceCommand",
+        affectedPaths: [{ source: "pnpm --filter @javis/core test", target: "E:/Javis", action: "modify" }],
+        riskSummary: "Runs repository test code inside the workspace sandbox.",
+        reversible: false,
+      },
+    }));
+    const runWorkspaceCommand = vi.fn<NonNullable<ShellTool["runWorkspaceCommand"]>>(async () => ({
+      command: "pnpm --filter @javis/core test",
+      cwd: "E:/Javis",
+      exitCode: 0,
+      stdout: "12 tests passed",
+      stderr: "",
+    }));
+    const { controller, emitted, permissionHandlers } = createTestController({ withPermissionHandler: true });
+    const runtimePayloads: Array<Record<string, unknown>> = [];
+
+    const runPromise = runCommanderDagTask({
+      controller,
+      commanderTool,
+      shellTool: { runReadOnlyCommand: vi.fn(), planWorkspaceCommand, runWorkspaceCommand },
+      taskId: "task-core-test",
+      userGoal: "测试现在能过吗？",
+      runtimeEventSink: {
+        append: async (envelope) => {
+          runtimePayloads.push(envelope.payload as Record<string, unknown>);
+        },
+      },
+    });
+
+    const [requestId, permissionHandler] = await waitForPermissionHandler(permissionHandlers);
+    expect(requestId).toBe("approval-core-test");
+    expect(runWorkspaceCommand).not.toHaveBeenCalled();
+    expect(emitted.find((snapshot) => snapshot.permissionRequest)?.permissionRequest).toMatchObject({
+      level: "confirmed_write",
+      writeRiskLevel: "risky",
+      allowAlways: false,
+      dryRun: { operation: "shell.runWorkspaceCommand" },
+    });
+
+    await permissionHandler("approved");
+    await runPromise;
+
+    expect(planWorkspaceCommand).toHaveBeenCalledWith({
+      program: "pnpm",
+      args: ["--filter", "@javis/core", "test"],
+    }, "task-core-test");
+    expect(runWorkspaceCommand).toHaveBeenCalledWith({
+      program: "pnpm",
+      args: ["--filter", "@javis/core", "test"],
+    }, {
+      approvalId: "approval-core-test",
+      taskId: "task-core-test",
+      previewHash: "command-hash",
+    });
+    const permissionEvents = runtimePayloads.filter((event) =>
+      event.kind === "permission.requested" || event.kind === "permission.resolved"
+    );
+    expect(permissionEvents).toEqual([
+      expect.objectContaining({
+        kind: "permission.requested",
+        stepId: "run-core-tests",
+        toolName: "shell.runWorkspaceCommand",
+        previewHash: expect.stringMatching(/^dryrun-fnv1a-[a-f0-9]{8}$/),
+      }),
+      expect.objectContaining({
+        kind: "permission.resolved",
+        stepId: "run-core-tests",
+        toolName: "shell.runWorkspaceCommand",
+        previewHash: permissionEvents[0]?.previewHash,
+      }),
+    ]);
+    expect((permissionEvents[0]?.request as Record<string, unknown>)?.bindingHash)
+      .toBe(permissionEvents[0]?.previewHash);
+    expect(emitted[emitted.length - 1]?.status).toBe("completed");
+    expect(JSON.stringify(emitted)).toContain("12 tests passed");
+  });
+
+  it("fails the Test Runner step on a non-zero command exit and retains evidence", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "Run core tests",
+        reasoning: "Delegate the requested test to Test Runner.",
+        executionPolicy: {
+          maxConcurrency: 1,
+          maxRetries: 0,
+          degradationStrategy: "fail_fast" as const,
+        },
+        steps: [{
+          id: "run-core-tests",
+          title: "Run core tests",
+          assignedAgentKind: "test-runner",
+          toolName: "shell.runWorkspaceCommand",
+          toolInput: { program: "pnpm", args: ["--filter", "@javis/core", "test"] },
+          requiredCapabilities: ["shell_execute"],
+          executionMode: "direct_tool_call" as const,
+          dependsOn: [],
+          outputContextKey: "testResult",
+          successCriteria: "Core tests exit successfully.",
+        }],
+      })),
+    };
+    const planWorkspaceCommand = vi.fn<NonNullable<ShellTool["planWorkspaceCommand"]>>(async (_request, taskId) => ({
+      approvalId: "approval-core-test-failure",
+      taskId,
+      toolName: "shell.runWorkspaceCommand",
+      previewHash: "failure-command-hash",
+      command: "pnpm --filter @javis/core test",
+      cwd: "E:/Javis",
+      dryRun: {
+        operation: "shell.runWorkspaceCommand",
+        affectedPaths: [{ source: "pnpm --filter @javis/core test", target: "E:/Javis", action: "modify" }],
+        riskSummary: "Runs repository test code inside the workspace sandbox.",
+        reversible: false,
+      },
+    }));
+    const runWorkspaceCommand = vi.fn<NonNullable<ShellTool["runWorkspaceCommand"]>>(async () => ({
+      command: "pnpm --filter @javis/core test",
+      cwd: "E:/Javis",
+      exitCode: 1,
+      stdout: "11 tests passed",
+      stderr: "1 test failed: expected test-runner, received computer",
+    }));
+    const { controller, emitted, permissionHandlers } = createTestController({ withPermissionHandler: true });
+
+    const runPromise = runCommanderDagTask({
+      controller,
+      commanderTool,
+      shellTool: { runReadOnlyCommand: vi.fn(), planWorkspaceCommand, runWorkspaceCommand },
+      taskId: "task-core-test-failure",
+      userGoal: "跑一下 core 的测试",
+    });
+
+    const [, permissionHandler] = await waitForPermissionHandler(permissionHandlers);
+    await permissionHandler("approved");
+    await runPromise;
+
+    expect(runWorkspaceCommand).toHaveBeenCalledOnce();
+    expect(emitted[emitted.length - 1]?.status).toBe("failed");
+    const serialized = JSON.stringify(emitted);
+    expect(serialized).toContain("pnpm --filter @javis/core test");
+    expect(serialized).toContain("expected test-runner, received computer");
+    expect(serialized).not.toContain("Task completed");
+  });
+
+  it("creates a scheduled task only after the user approves its bound preview", async () => {
+    const createTask = vi.fn<NonNullable<SchedulerTool["createTask"]>>(async (draft) => ({
+      ...draft,
+      id: "scheduled-1",
+      enabled: true,
+    }));
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "创建提醒",
+        reasoning: "将用户指定的时间和事项保存为本地提醒。",
+        steps: [{
+          id: "create-reminder",
+          title: "创建明天下午会议提醒",
+          assignedAgentKind: "scheduler",
+          toolName: "scheduler.createTask",
+          toolInput: {
+            name: "会议提醒",
+            goal: "提醒我开会",
+            schedule: { type: "once", value: "2026-07-27T15:00:00+08:00" },
+            nextRunAt: "2026-07-27T15:00:00+08:00",
+          },
+          requiredCapabilities: ["schedule_create"],
+          executionMode: "direct_tool_call" as const,
+          dependsOn: [],
+          outputContextKey: "scheduledTask",
+          successCriteria: "提醒已持久化并启用。",
+        }],
+      })),
+    };
+    const { controller, emitted, permissionHandlers } = createTestController({ withPermissionHandler: true });
+
+    const runPromise = runCommanderDagTask({
+      controller,
+      commanderTool,
+      schedulerTool: { createTask },
+      taskId: "task-create-reminder",
+      userGoal: "明天下午三点提醒我开会。",
+    });
+
+    const [, permissionHandler] = await waitForPermissionHandler(permissionHandlers);
+    expect(createTask).not.toHaveBeenCalled();
+    expect(emitted.find((snapshot) => snapshot.permissionRequest)?.permissionRequest).toMatchObject({
+      level: "confirmed_write",
+      dryRun: { operation: "scheduler.createTask" },
+    });
+    await permissionHandler("approved");
+    await runPromise;
+
+    expect(createTask).toHaveBeenCalledOnce();
+    expect(createTask).toHaveBeenCalledWith(expect.objectContaining({
+      name: "会议提醒",
+      schedule: { type: "once", value: "2026-07-27T15:00:00+08:00" },
+    }));
+    expect(emitted[emitted.length - 1]?.status).toBe("completed");
+    expect(emitted[emitted.length - 1]?.logs.some((log) =>
+      log.detail.includes("Created scheduled task scheduled-1")
+    )).toBe(true);
+  });
+
   it("contains the four Git tools with explicit preflight handlers", () => {
     const allowed = new Set<string>(SUPPORTED_APPROVAL_GATED_TOOLS);
     for (const name of [
@@ -9713,13 +11310,26 @@ describe("SUPPORTED_APPROVAL_GATED_TOOLS allowlist", () => {
     // The set MUST be closed — every member is either a Git tool with a
     // dedicated plan/preview handler, or a computer-use tool routed through
     // computerUseLoopRunner. No generic confirmed_write tools allowed.
-    expect(SUPPORTED_APPROVAL_GATED_TOOLS).toHaveLength(5 + 8);
+    expect(SUPPORTED_APPROVAL_GATED_TOOLS).toHaveLength(9 + 8);
   });
 
   it("lists file.writeText because Commander has an explicit preflight handler", () => {
     // file.writeText is routed through runCommanderDagTask() where it
     // first creates a preview and waits for confirmed_write approval.
     expect(SUPPORTED_APPROVAL_GATED_TOOLS).toContain("file.writeText");
+  });
+
+  it("lists scheduler.createTask because Commander has an explicit approval handler", () => {
+    expect(SUPPORTED_APPROVAL_GATED_TOOLS).toContain("scheduler.createTask");
+  });
+
+  it("lists shell.runWorkspaceCommand because Commander has an explicit approval handler", () => {
+    expect(SUPPORTED_APPROVAL_GATED_TOOLS).toContain("shell.runWorkspaceCommand");
+  });
+
+  it("lists workspace mutations because Commander has native-bound approval handlers", () => {
+    expect(SUPPORTED_APPROVAL_GATED_TOOLS).toContain("workspace.create");
+    expect(SUPPORTED_APPROVAL_GATED_TOOLS).toContain("workspace.delete");
   });
 
   it("does not list browser confirmed-write tools that lack Commander preflight", () => {

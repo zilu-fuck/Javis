@@ -19,14 +19,17 @@ export type AgentCapabilityTag =
   | "planning"
   | "synthesis"
   | "file_scan"
+  | "workspace_text_read"
   | "file_execute"
   | "document_classify"
   | "shell_readonly"
+  | "shell_execute"
   | "git_inspect"
   | "git_stage"
   | "git_commit"
   | "git_pr_create"
   | "git_pr_comment"
+  | "workspace_inspect"
   | "code_search"
   | "code_trace"
   | "code_propose"
@@ -68,8 +71,8 @@ export type AgentCapabilityTag =
 
 /** All valid capability tags — single source of truth for validation. */
 export const ALL_CAPABILITY_TAGS: ReadonlyArray<AgentCapabilityTag> = [
-  "planning", "synthesis", "file_scan", "file_execute", "document_classify",
-  "shell_readonly", "git_inspect", "git_stage", "git_commit", "git_pr_create", "git_pr_comment", "code_search", "code_trace", "code_propose", "code_apply",
+  "planning", "synthesis", "file_scan", "workspace_text_read", "file_execute", "document_classify",
+  "shell_readonly", "shell_execute", "git_inspect", "git_stage", "git_commit", "git_pr_create", "git_pr_comment", "workspace_inspect", "code_search", "code_trace", "code_propose", "code_apply",
   "language_review", "security_review", "build_fix", "test_run", "doc_update", "code_explore", "performance_analysis", "refactor",
   "web_search", "web_fetch", "trend_fetch", "memory_search", "local_search", "image_scan", "directory_list",
   "schedule_create", "evidence_check",

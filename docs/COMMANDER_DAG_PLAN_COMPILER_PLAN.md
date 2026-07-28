@@ -51,6 +51,35 @@ raw model output
 
 The executor should eventually accept only compiled plans, not raw or loosely normalized model output. The first implementation should keep the existing executor APIs intact and add the compiler as a gate in front of them.
 
+## Five-Layer Legality Guarantee (Implemented)
+
+The compile gate is now wrapped in a five-layer legality pipeline:
+
+```text
+local intent recognition
+  -> prompt guidance (conditional rules + no-write-intent rule)
+  -> preset JSON template skeleton
+  -> schema constraint (Zod strict/LLM-raw shapes + compact schema text)
+  -> regex & deterministic rule filter (raw text scan + field lint)
+  -> DAG semantic compile
+  -> bounded repair loop (deterministic first, then model)
+  -> execute only when compilation passes
+```
+
+1. **Prompt guidance** — `getCommanderPlanConditionalRules` in `commander-plan-schema.ts` states the compile-enforced conditional rules (react ⇒ `primaryCapability`; direct_tool_call ⇒ `toolName`; `file.writeText` ⇒ `direct_tool_call` + workspace-relative `targetPath`; no write steps without a persistence intent) and adds a task-specific no-write line when intent detection finds no file-output intent. Project-understanding goals require a Code `code.inspectWorkspace` direct call before Verifier and Commander; semantic repository search/Explorer may supplement that inventory, while Computer remains available only for explicit GUI/File Explorer intent. `commander-route-contract.ts` derives required Agent and exact/any-of tool routes from the same short user goal for both prompt construction and compilation; this rejects Commander-only completion and unrelated-Agent substitution while treating genuinely unavailable routes as warnings with explicit user-facing guidance.
+2. **Intercept & repair loop** — `attemptPlanRepair` in `commander-plan-repair.ts` runs Stage A deterministic repair (`applyDeterministicPlanRepairs`) before any model call; if the locally-fixed plan compiles, no model round is spent. Otherwise the model gets precise diagnostics for up to 2 attempts; plans that still fail never reach the executor.
+3. **Schema constraint** — `CommanderPlanResultShape` (LLM-raw) + `CommanderDagPlanShape` (strict) in Zod, with the validator enforcing the conditional rules as diagnostics (`UNSAFE_WRITE_PATH`, `WRITE_WITHOUT_USER_INTENT`, `INVALID_EXECUTION_MODE`).
+4. **Preset JSON template** — `COMMANDER_PLAN_TEMPLATE_SKELETON` / `buildCommanderPlanTemplateSkeleton` in `plan-legality.ts`; embedded in the planner system prompt so the model fills task content only.
+5. **Regex & deterministic filter** — `detectCommanderPlanIntents` (write/export/statistics/retrieval), `scanRawPlanOutputText` (markdown fences, prose outside JSON, control characters, absolute/traversal target paths, secret-looking values) feeding the desktop JSON-repair prompt, plus lexical field lint in the validator (`INVALID_CONTEXT_KEY_FORMAT`, `SENSITIVE_DATA_IN_TOOL_INPUT` warnings).
+
+Deterministic repair (`applyDeterministicPlanRepairs`) also coerces step ids to unique kebab-case (rewriting `dependsOn`), normalizes `executionMode` synonyms, pins `file.writeText` to `direct_tool_call`, and relativizes absolute in-workspace write targets — applied in both the executor's `normalizeCommanderDagPlan` and the repair loop's `normalizeResultToDagPlan`.
+
+Regexes are lexical pre-checks only: JSON always goes through a real parser, and path safety stays with path resolution, workspace containment, and symlink checks at the native write boundary.
+
+`code.inspectWorkspace` is intentionally separate from `code.searchRepository`: the former produces deterministic, bounded, non-Git directory/module/manifest/risk evidence through native workspace containment; the latter performs semantic content search and cannot substitute for a directory inventory.
+
+Confirmed Workspace mutations are now executable through the same safety model: Core requests a `workspace.create` / `workspace.delete` preview, waits for UI approval, and Desktop performs native approve + one-shot execute. The Rust binding checks approval id, exact tool, task id, payload hash, stale delete hash, and symlink/target constraints. Explicit direct reads for desktop screenshot/window/UI-tree evidence bypass the Computer Use model loop; focus, pointer, keyboard, and UI mutation remain inside that approval loop.
+
 ## Non-Goals
 
 - Do not replace the whole planner in one patch.

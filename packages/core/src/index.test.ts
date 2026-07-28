@@ -294,7 +294,7 @@ describe("createFileScanTaskRuntime", () => {
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
-    runtime.start("分析一下这个项目", {
+    runtime.start("扫描工作区中的 Markdown 文档", {
       mode: "project",
       workspacePath: "E:/MAIMAI_BOT",
     });
@@ -401,24 +401,37 @@ describe("createFileScanTaskRuntime", () => {
   });
 
   it("routes source-backed project understanding through Commander-selected evidence and review agents", async () => {
-    const goal = "\u544a\u8bc9\u6211\u8fd9\u4e2a\u9879\u76ee\u662f\u5e72\u561b\u7684, \u4e0d\u8981\u5149\u770breadme, \u8981\u7ed3\u5408\u5b9e\u9645\u4ee3\u7801\u60c5\u51b5";
+    const goal = "帮我看看这个项目有哪些模块，有没有明显风险。";
     const commanderPlan = vi.fn<CommanderTool["plan"]>(async (request) => {
       const codeAgent = request.availableAgents.find((agent) => agent.kind === "code");
       const verifierAgent = request.availableAgents.find((agent) => agent.kind === "verifier");
 
+      expect(codeAgent?.allowedToolNames).toContain("code.inspectWorkspace");
       expect(codeAgent?.allowedToolNames).toContain("code.searchRepository");
       expect(verifierAgent?.allowedToolNames).toContain("verifier.check");
       return {
         title: "理解项目",
         reasoning: "Commander 决定先让 Code Agent 收集实际代码证据，再让 Verifier 审查证据，最后自然总结。",
         steps: [{
+          id: "inspect-workspace",
+          title: "盘点工作区目录与模块线索",
+          assignedAgentKind: "code",
+          toolName: "code.inspectWorkspace",
+          executionMode: "direct_tool_call" as const,
+          toolInput: { maxDepth: 3, maxEntries: 400 },
+          requiredCapabilities: ["workspace_inspect"],
+          dependsOn: [] as string[],
+          outputContextKey: "workspaceEvidence",
+          successCriteria: "Code Agent 收集到有界目录、模块候选、清单文件和风险指示。",
+        }, {
           id: "search-repository",
           title: "检索实际代码结构",
           assignedAgentKind: "code",
           toolName: "code.searchRepository",
+          executionMode: "direct_tool_call" as const,
           toolInput: { goal, knownTerms: ["main", "src", "config"] },
           requiredCapabilities: ["code_search"],
-          dependsOn: [] as string[],
+          dependsOn: ["inspect-workspace"] as string[],
           outputContextKey: "repoEvidence",
           successCriteria: "Code Agent 收集到入口、模块和配置证据。",
         }, {
@@ -426,18 +439,9 @@ describe("createFileScanTaskRuntime", () => {
           title: "审查代码证据是否足够支撑结论",
           assignedAgentKind: "verifier",
           toolName: "verifier.check",
-          toolInput: {
-            stepId: "review-repository-evidence",
-            successCriteria: "代码证据足够支撑项目功能结论。",
-            evidence: [{
-              kind: "log",
-              label: "repoEvidence",
-              data: "Code Agent repository evidence is available through inputContextKeys.",
-            }],
-          },
           requiredCapabilities: ["evidence_check"],
-          dependsOn: ["search-repository"] as string[],
-          inputContextKeys: ["repoEvidence"],
+          dependsOn: ["inspect-workspace", "search-repository"] as string[],
+          inputContextKeys: ["workspaceEvidence", "repoEvidence"],
           outputContextKey: "reviewReport",
           successCriteria: "Verifier 给出 pass/warn/fail 和缺失证据说明。",
         }, {
@@ -446,13 +450,27 @@ describe("createFileScanTaskRuntime", () => {
           assignedAgentKind: "commander",
           executionMode: "direct_response" as const,
           requiredCapabilities: ["synthesis"],
-          dependsOn: ["search-repository", "review-repository-evidence"] as string[],
-          inputContextKeys: ["repoEvidence", "reviewReport"],
+          dependsOn: ["inspect-workspace", "search-repository", "review-repository-evidence"] as string[],
+          inputContextKeys: ["workspaceEvidence", "repoEvidence", "reviewReport"],
           outputContextKey: "finalAnswer",
           successCriteria: "Commander 只向用户展示自然语言结论和风险提示。",
         }],
       };
     });
+    const inspectWorkspaceForSourceUnderstanding = vi.fn<NonNullable<CodeTool["inspectWorkspace"]>>(async () => ({
+      workspacePath: "E:/Javis",
+      entries: [
+        { name: "apps", relativePath: "apps", isDir: true, depth: 1 },
+        { name: "packages", relativePath: "packages", isDir: true, depth: 1 },
+        { name: "package.json", relativePath: "package.json", isDir: false, depth: 1 },
+      ],
+      topLevelDirectories: ["apps", "packages"],
+      moduleCandidates: ["apps", "packages"],
+      manifests: ["package.json"],
+      ignoredDirectories: [],
+      riskIndicators: [],
+      truncated: false,
+    }));
     const searchRepository = vi.fn<NonNullable<CodeTool["searchRepository"]>>(async () => ({
       actualFound: [{
         path: "src/main.ts",
@@ -494,6 +512,7 @@ describe("createFileScanTaskRuntime", () => {
           diffStat: "0 files changed",
           diff: "",
         })),
+        inspectWorkspace: inspectWorkspaceForSourceUnderstanding,
         searchRepository,
       },
       verifierTool: {
@@ -508,6 +527,10 @@ describe("createFileScanTaskRuntime", () => {
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(commanderPlan).toHaveBeenCalledTimes(1);
+    expect(inspectWorkspaceForSourceUnderstanding).toHaveBeenCalledWith({
+      maxDepth: 3,
+      maxEntries: 400,
+    });
     expect(searchRepository).toHaveBeenCalledWith({
       goal,
       knownTerms: ["main", "src", "config"],
@@ -521,16 +544,26 @@ describe("createFileScanTaskRuntime", () => {
     expect(finalSnapshot.repoSearchReport?.keyFiles).toEqual(["src/main.ts"]);
     expect(verifierCheck).toHaveBeenCalledWith(expect.objectContaining({
       stepId: "review-repository-evidence",
-      successCriteria: "代码证据足够支撑项目功能结论。",
+      successCriteria: "Verifier 给出 pass/warn/fail 和缺失证据说明。",
+      evidence: expect.arrayContaining([
+        expect.objectContaining({ label: "Handoff artifact: workspaceEvidence" }),
+        expect.objectContaining({ label: "Handoff artifact: repoEvidence" }),
+      ]),
     }), expect.objectContaining({ onUsage: expect.any(Function) }));
     expect(finalSnapshot.commanderMessage).toContain("这个项目的主入口在 src/main.ts");
     expect(finalSnapshot.commanderMessage).not.toContain("assignedAgentKind");
     expect(finalSnapshot.plan.map((step) => step.id)).toEqual([
+      "inspect-workspace",
       "search-repository",
       "review-repository-evidence",
       "summarize-project-understanding",
     ]);
     expect(finalSnapshot.handoffReport?.handoffs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        contextKey: "workspaceEvidence",
+        producedByStepId: "inspect-workspace",
+        consumedByStepIds: ["review-repository-evidence", "summarize-project-understanding"],
+      }),
       expect.objectContaining({
         contextKey: "repoEvidence",
         producedByStepId: "search-repository",
@@ -651,6 +684,7 @@ describe("createFileScanTaskRuntime", () => {
         id: "scan-files",
         title: "Scan files",
         assignedAgentKind: "file",
+        toolName: "file.scanMarkdownDocuments",
         capability: "file_scan" as const,
         requiredCapabilities: ["file_scan"],
         dependsOn: [] as string[],
@@ -671,7 +705,7 @@ describe("createFileScanTaskRuntime", () => {
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
-    runtime.start("inspect this project", { mode: "project" });
+    runtime.start("scan markdown documents", { mode: "project" });
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(finalSnapshot.status).toBe("completed");
@@ -726,7 +760,7 @@ describe("createFileScanTaskRuntime", () => {
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
-    runtime.start("inspect this project", { mode: "project" });
+    runtime.start("scan markdown documents", { mode: "project" });
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(finalSnapshot.status).toBe("completed");
@@ -782,7 +816,7 @@ describe("createFileScanTaskRuntime", () => {
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
-    runtime.start("inspect this project with more rounds", { mode: "project" });
+    runtime.start("scan markdown documents with more rounds", { mode: "project" });
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(finalSnapshot.status).toBe("completed");
@@ -1022,38 +1056,79 @@ describe("createFileScanTaskRuntime", () => {
   });
 
   it("executes the read-current-project workflow from the workflow blueprint", async () => {
-    const documents: MarkdownDocument[] = [
-      {
-        path: "E:/Javis/docs/README.md",
-        modifiedAt: "2026-05-25T00:00:00.000Z",
-        sizeBytes: 100,
-        heading: "Javis",
-        excerpt: "Project documentation",
-      },
-    ];
-    const commanderPlan = vi.fn(async () => ({
+    const commanderPlan = vi.fn<CommanderTool["plan"]>(async () => ({
       title: "Model planned project read",
-      reasoning: "Use File Agent to scan documents for a read-only project pass.",
+      reasoning: "Collect repository evidence, verify it, and synthesize the result.",
       steps: [
         {
-          id: "scan-files",
-          title: "Scan files",
-          assignedAgentKind: "file",
-          capability: "file_scan" as const,
-          requiredCapabilities: ["file_scan"] as string[],
+          id: "inspect-project",
+          title: "Inspect project structure",
+          assignedAgentKind: "code",
+          toolName: "code.inspectWorkspace",
+          executionMode: "direct_tool_call" as const,
+          toolInput: { maxDepth: 3, maxEntries: 400 },
+          requiredCapabilities: ["workspace_inspect"],
           dependsOn: [] as string[],
-          successCriteria: "Markdown documents are scanned.",
+          outputContextKey: "projectEvidence",
+          successCriteria: "Repository-backed project evidence is collected.",
+        },
+        {
+          id: "verify-project",
+          title: "Verify project evidence",
+          assignedAgentKind: "verifier",
+          toolName: "verifier.check",
+          executionMode: "direct_tool_call" as const,
+          requiredCapabilities: ["evidence_check"],
+          dependsOn: ["inspect-project"],
+          inputContextKeys: ["projectEvidence"],
+          outputContextKey: "verifiedProjectEvidence",
+          successCriteria: "Repository evidence is independently verified.",
+        },
+        {
+          id: "answer-project",
+          title: "Answer with verified findings",
+          assignedAgentKind: "commander",
+          executionMode: "direct_response" as const,
+          requiredCapabilities: ["synthesis"],
+          dependsOn: ["verify-project"],
+          inputContextKeys: ["projectEvidence", "verifiedProjectEvidence"],
+          outputContextKey: "finalAnswer",
+          successCriteria: "The verified project summary is returned in chat.",
         },
       ],
     }));
+    const inspectWorkspace = vi.fn<NonNullable<CodeTool["inspectWorkspace"]>>(async () => ({
+      workspacePath: "E:/Javis",
+      entries: [
+        { name: "apps", relativePath: "apps", isDir: true, depth: 1 },
+        { name: "packages", relativePath: "packages", isDir: true, depth: 1 },
+        { name: "package.json", relativePath: "package.json", isDir: false, depth: 1 },
+      ],
+      topLevelDirectories: ["apps", "packages"],
+      moduleCandidates: ["apps", "packages"],
+      manifests: ["package.json"],
+      ignoredDirectories: [],
+      riskIndicators: [],
+      truncated: false,
+    }));
+    const scanMarkdownDocuments = vi.fn(async () => []);
     const runtime = createFileScanTaskRuntime({
       delayMs: 0,
       commanderTool: {
         plan: commanderPlan,
+        synthesize: vi.fn(async () => ({ message: "Here is the summary." })),
       },
-      fileTool: {
-        scanMarkdownDocuments: vi.fn(async () => documents),
+      codeTool: {
+        inspectRepository: vi.fn(async () => ({
+          workspacePath: "E:/Javis",
+          changedFiles: [],
+          diffStat: "0 files changed",
+          diff: "",
+        })),
+        inspectWorkspace,
       },
+      fileTool: { scanMarkdownDocuments },
+      verifierTool: createPassingVerifierTool(),
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
@@ -1063,9 +1138,13 @@ describe("createFileScanTaskRuntime", () => {
 
     expect(finalSnapshot.title).toBe("Model planned project read");
     expect(finalSnapshot.plan.map((step) => step.id)).toEqual([
-      "scan-files",
+      "inspect-project",
+      "verify-project",
+      "answer-project",
     ]);
     expect(finalSnapshot.plan.every((step) => step.status === "completed")).toBe(true);
+    expect(inspectWorkspace).toHaveBeenCalledOnce();
+    expect(scanMarkdownDocuments).not.toHaveBeenCalled();
     expect(commanderPlan).toHaveBeenCalledWith(expect.objectContaining({
       workflowId: "commander-dag",
       userGoal: "inspect this project",
@@ -1181,7 +1260,7 @@ describe("createFileScanTaskRuntime", () => {
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
-    runtime.start("click the desktop button");
+    runtime.start("点击桌面上的按钮。");
     const permissionSnapshot = await waitForStatus(snapshots, "waiting_permission");
     expect(permissionSnapshot.conversationMessages?.some((message) =>
       message.kind === "permission_request" &&
@@ -1454,19 +1533,27 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
-  it("routes supported workflow blueprints through concrete generic workflow tools", async () => {
+  it("routes reminder goals through the approved Scheduler tool", async () => {
     const commanderPlan = vi.fn(async () => ({
       title: "Model planned reminder",
       reasoning: "Use the Scheduler to create a durable daily reminder.",
       steps: [
         {
-          id: "parse-schedule",
-          title: "Parse schedule",
-          assignedAgentKind: "commander",
-          capability: "planning" as const,
-          requiredCapabilities: ["planning"] as string[],
+          id: "create-reminder",
+          title: "Create daily reminder",
+          assignedAgentKind: "scheduler",
+          toolName: "scheduler.createTask",
+          toolInput: {
+            name: "Daily reminder",
+            goal: "test",
+            schedule: { type: "daily", value: "08:00" },
+            nextRunAt: "2026-07-29T08:00:00+08:00",
+          },
+          capability: "schedule_create" as const,
+          requiredCapabilities: ["schedule_create"] as string[],
+          executionMode: "direct_tool_call" as const,
           dependsOn: [] as string[],
-          successCriteria: "Reminder intent is parsed.",
+          successCriteria: "Reminder is persisted.",
         },
       ],
     }));
@@ -1496,13 +1583,22 @@ describe("createFileScanTaskRuntime", () => {
 
     runtime.start("remind me every day at 8");
 
+    await vi.waitFor(() => {
+      expect(snapshots.some((snapshot) => snapshot.permissionRequest?.status === "pending")).toBe(true);
+    });
+    const permissionSnapshot = snapshots.find((snapshot) =>
+      snapshot.permissionRequest?.status === "pending"
+    );
+    runtime.resolvePermission("approved", permissionSnapshot?.permissionRequest?.id);
+
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(finalSnapshot.title).toBe("Model planned reminder");
     expect(finalSnapshot.plan.map((step) => step.id)).toEqual([
-      "parse-schedule",
+      "create-reminder",
     ]);
     expect(finalSnapshot.plan.every((step) => step.status === "completed")).toBe(true);
+    expect(createTask).toHaveBeenCalledOnce();
     expect(commanderPlan).toHaveBeenCalledWith(expect.objectContaining({
       workflowId: "commander-dag",
       userGoal: "remind me every day at 8",
@@ -2546,7 +2642,7 @@ describe("createFileScanTaskRuntime", () => {
   });
 
   it("writes exactly the approved text content", async () => {
-    const plan = createTextWritePlan("reports/search.md");
+    const plan = createTextWritePlan("summary.md");
     const generatedContent = "# AI news summary\n\nGenerated by the configured model.\n";
     const writeText = vi.fn(async (request: { targetPath: string; content: string }) =>
       createTextWriteResult(request.targetPath, request.content.length),
@@ -2562,7 +2658,7 @@ describe("createFileScanTaskRuntime", () => {
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
-    runtime.start("write the AI news summary to reports/search.md");
+    runtime.start("把这份总结保存成 summary.md。");
     await waitForStatus(snapshots, "waiting_permission");
     runtime.resolvePermission("approved");
 
@@ -2570,16 +2666,16 @@ describe("createFileScanTaskRuntime", () => {
 
     expect(writeText).toHaveBeenCalledWith(
       expect.objectContaining({
-        targetPath: "reports/search.md",
+        targetPath: "summary.md",
         content: generatedContent,
       }),
       plan.approvalId,
       expect.stringMatching(/^task-/),
     );
     expect(finalSnapshot.permissionRequest?.status).toBe("approved");
-    expect(finalSnapshot.verificationSummary).toContain("was written");
+    expect(finalSnapshot.verificationSummary).toContain("完成写入");
     expect(finalSnapshot.documents).toContainEqual(expect.objectContaining({
-      path: "reports/search.md",
+      path: "summary.md",
       heading: "AI news summary",
       sizeBytes: generatedContent.length,
     }));
@@ -3990,7 +4086,7 @@ describe("createFileScanTaskRuntime", () => {
 
     expect(complete).not.toHaveBeenCalled();
     expect(searchWeb).toHaveBeenCalledWith({
-      query: "用浏览器查信息：Javis 最新资料",
+      query: "Javis 最新资料",
       maxResults: 3,
     });
     expect(fetchWebSource).toHaveBeenCalledWith({ url: "https://example.test/source" });
@@ -4038,6 +4134,67 @@ describe("createFileScanTaskRuntime", () => {
       { role: "user", content: "second question" },
       { role: "assistant", content: "Second answer" },
     ]);
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("fetches the most recent conversational URL for a short current-page question", async () => {
+    const searchWeb = vi.fn(async () => []);
+    const fetchWebSource = vi.fn(async ({ url }: { url: string }) => ({
+      url,
+      title: "Current page",
+      excerpt: "The current page explains a source-backed research workflow in enough detail.",
+      fetchedAt: "2026-07-26T00:00:00.000Z",
+      provider: "fixture",
+    }));
+    const complete = vi.fn(async () => ({ text: "chat fallback" }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      chatTool: { complete },
+      webTool: { searchWeb, fetchWebSource },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("这个网页讲啥", {
+      mode: "chat",
+      priorMessages: [
+        { role: "user", content: "先看 https://example.test/older" },
+        { role: "assistant", content: "当前页面：https://example.test/current" },
+      ],
+    });
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+    expect(searchWeb).not.toHaveBeenCalled();
+    expect(fetchWebSource).toHaveBeenCalledWith({ url: "https://example.test/current" });
+    expect(complete).not.toHaveBeenCalled();
+    expect(finalSnapshot.researchReport?.rows[0]?.sourceUrl).toBe("https://example.test/current");
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("asks for a URL instead of searching an unresolved current-page reference", async () => {
+    const searchWeb = vi.fn(async () => []);
+    const fetchWebSource = vi.fn();
+    const complete = vi.fn(async () => ({ text: "chat fallback" }));
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      chatTool: { complete },
+      webTool: { searchWeb, fetchWebSource },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("这个网页讲啥", { mode: "chat" });
+
+    const finalSnapshot = await waitForStatus(snapshots, "completed");
+    expect(searchWeb).not.toHaveBeenCalled();
+    expect(fetchWebSource).not.toHaveBeenCalled();
+    expect(complete).not.toHaveBeenCalled();
+    expect(finalSnapshot.title).toBe("需要网页链接");
+    expect(finalSnapshot.commanderMessage).toContain("网页链接");
 
     unsubscribe();
     runtime.dispose();
@@ -5120,9 +5277,11 @@ describe("createFileScanTaskRuntime", () => {
         id: "scan-files",
         title: "Scan project documents",
         assignedAgentKind: "file",
+        toolName: "file.scanMarkdownDocuments",
         capability: "file_scan" as const,
         requiredCapabilities: ["file_scan"] as string[],
         dependsOn: [] as string[],
+        executionMode: "direct_tool_call" as const,
         successCriteria: "Documents are scanned.",
       }],
     }));

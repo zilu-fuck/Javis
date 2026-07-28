@@ -1417,35 +1417,22 @@ function TerminalPanel({ locale, session, terminalService, onQuickActionTerminal
     return terminalIdRef.current;
   }
 
-  useEffect(() => {
-    if (!terminalService?.planCreate || terminalCreateApproved || terminalCreatePlan || terminalCreatePlanning) {
+  async function prepareOrStartTerminal() {
+    if (!terminalService?.planCreate || terminalCreatePlan) {
+      setTerminalCreateApproved(true);
       return;
     }
-    let disposed = false;
-    const requestedTerminalId = ensureTerminalId();
     setTerminalCreatePlanning(true);
     setTerminalError(null);
-    terminalService
-      .planCreate(session, requestedTerminalId)
-      .then((plan) => {
-        if (!disposed) setTerminalCreatePlan(plan);
-      })
-      .catch((err) => {
-        if (!disposed) setTerminalError(err instanceof Error ? err.message : String(err));
-      })
-      .finally(() => {
-        if (!disposed) setTerminalCreatePlanning(false);
-      });
-    return () => {
-      disposed = true;
-    };
-  }, [
-    session.sessionId,
-    session.workspaceRoot,
-    terminalCreateApproved,
-    terminalCreatePlan,
-    terminalService,
-  ]);
+    try {
+      const plan = await terminalService.planCreate(session, ensureTerminalId());
+      setTerminalCreatePlan(plan);
+    } catch (err) {
+      setTerminalError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setTerminalCreatePlanning(false);
+    }
+  }
 
   useEffect(() => {
     if (!terminalCreateApproved || !terminalService || !terminalHostRef.current || terminalRef.current) {
@@ -1600,15 +1587,17 @@ function TerminalPanel({ locale, session, terminalService, onQuickActionTerminal
                 <span>approval {terminalCreatePlan.approvalId}</span>
                 <span>hash {terminalCreatePlan.previewHash}</span>
               </>
-            ) : terminalService.planCreate ? (
-              <span>{terminalCreatePlanning ? (isChinese ? "\u751f\u6210\u5ba1\u6279\u9884\u89c8..." : "Preparing approval preview...") : (isChinese ? "\u5ba1\u6279\u9884\u89c8\u4e0d\u53ef\u7528" : "Approval preview unavailable")}</span>
             ) : null}
             <button
-              disabled={Boolean(terminalService.planCreate && !terminalCreatePlan)}
-              onClick={() => setTerminalCreateApproved(true)}
+              disabled={terminalCreatePlanning}
+              onClick={() => void prepareOrStartTerminal()}
               type="button"
             >
-              {isChinese ? "\u5ba1\u6279\u5e76\u542f\u52a8" : "Approve and start"}
+              {terminalCreatePlanning
+                ? (isChinese ? "\u751f\u6210\u5ba1\u6279\u9884\u89c8..." : "Preparing approval preview...")
+                : terminalService.planCreate && !terminalCreatePlan
+                  ? (isChinese ? "\u51c6\u5907\u5ba1\u6279" : "Prepare approval")
+                  : (isChinese ? "\u5ba1\u6279\u5e76\u542f\u52a8" : "Approve and start")}
             </button>
           </div>
         ) : null}

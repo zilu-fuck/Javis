@@ -9,6 +9,7 @@ import {
   type AgentReActObservation,
 } from "./agent-react-loop";
 import { createSharedTaskContext } from "./shared-context";
+import type { AgentKind } from "./index";
 import type { WorkbenchWorkflowStep } from "./workflows";
 
 describe("runAgentReActLoop", () => {
@@ -215,6 +216,39 @@ describe("runAgentReActLoop", () => {
         { rank: 1, title: "First topic" },
         { rank: 2, title: "Second topic" },
       ],
+    });
+  });
+
+  it("publishes an evidence-grounded specialist summary instead of the raw tool payload", async () => {
+    const result = await runAgentReActLoop({
+      agent: mustAgent("language-reviewer"),
+      step: step("language-reviewer"),
+      context: createSharedTaskContext(),
+      completionOutputMode: "summary",
+      tools: [{
+        name: "code.searchRepository",
+        execute: async () => ({ matches: [{ path: "README.md", line: 20, excerpt: "Uses Tauri." }] }),
+      }],
+      decideNext: ({ observations }) => observations.length === 0
+        ? {
+            status: "continue",
+            toolName: "code.searchRepository",
+            reason: "collect evidence",
+          }
+        : {
+            status: "completed",
+            reason: "review complete",
+            output: {
+              findings: [{ severity: "P2", path: "README.md", line: 20, detail: "Claim needs updating." }],
+              limitations: [],
+            },
+          },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.output).toEqual({
+      findings: [{ severity: "P2", path: "README.md", line: 20, detail: "Claim needs updating." }],
+      limitations: [],
     });
   });
 
@@ -596,6 +630,43 @@ describe("runAgentReActLoop", () => {
     expect(result.reason).toContain("iteration limit");
   });
 
+  it("offers one terminal decision after the last allowed tool call", async () => {
+    const decideNext = vi.fn(({ remainingToolCalls }: { remainingToolCalls: number }) =>
+      remainingToolCalls > 0
+        ? {
+            status: "continue" as const,
+            toolName: "file.scanMarkdownDocuments",
+            reason: "collect the final evidence",
+          }
+        : {
+            status: "completed" as const,
+            reason: "the final observation satisfies the step",
+            output: { summary: "README found." },
+          });
+
+    const result = await runAgentReActLoop({
+      agent: mustAgent("file"),
+      step: step("file"),
+      context: createSharedTaskContext(),
+      maxIterations: 1,
+      completionOutputMode: "summary",
+      tools: [{
+        name: "file.scanMarkdownDocuments",
+        execute: async () => ({ matches: ["README.md"] }),
+      }],
+      decideNext,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.output).toEqual({ summary: "README found." });
+    expect(decideNext).toHaveBeenCalledTimes(2);
+    expect(decideNext.mock.calls[1]?.[0]).toMatchObject({
+      iteration: 2,
+      maxToolCalls: 1,
+      remainingToolCalls: 0,
+    });
+  });
+
   it("defaults to six iterations for multi-step reasoning", async () => {
     const result = await runAgentReActLoop({
       agent: mustAgent("file"),
@@ -649,6 +720,108 @@ describe("runAgentReActLoop", () => {
     ]);
   });
 
+  it("can complete from earlier usable evidence after an optional follow-up fails", async () => {
+    const result = await runAgentReActLoop({
+      agent: mustAgent("language-reviewer"),
+      step: step("language-reviewer"),
+      context: createSharedTaskContext(),
+      completionOutputMode: "summary",
+      tools: [
+        {
+          name: "code.searchRepository",
+          execute: async () => ({ matches: [{ path: "README.md", line: 10, excerpt: "Current claim" }] }),
+        },
+        {
+          name: "shell.runReadOnlyCommand",
+          execute: async () => {
+            throw new Error("Command is not in the first-version read-only allowlist.");
+          },
+        },
+      ],
+      decideNext: ({ observations }) => {
+        if (observations.length === 0) {
+          return { status: "continue", toolName: "code.searchRepository", reason: "search" };
+        }
+        if (observations.length === 1) {
+          return { status: "continue", toolName: "shell.runReadOnlyCommand", reason: "optional check" };
+        }
+        return {
+          status: "completed",
+          reason: "report grounded findings and the unavailable optional check",
+          output: { findings: [], limitations: ["The optional shell check was not allowlisted."] },
+        };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.output).toEqual({
+      findings: [],
+      limitations: ["The optional shell check was not allowlisted."],
+    });
+    expect(result.observations.map((observation) => observation.status)).toEqual(["succeeded", "failed"]);
+  });
+
+  it("stops after the same tool failure repeats instead of exhausting the iteration budget", async () => {
+    const inspectRepository = vi.fn(async () => {
+      throw new Error("Tool input contains an undeclared field: workspaceEvidence.");
+    });
+
+    const result = await runAgentReActLoop({
+      agent: mustAgent("code"),
+      step: step("code"),
+      context: createSharedTaskContext(),
+      maxIterations: 8,
+      tools: [{ name: "code.inspectRepository", execute: inspectRepository }],
+      decideNext: () => ({
+        status: "continue",
+        toolName: "code.inspectRepository",
+        reason: "retry repository inspection",
+      }),
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.observations).toHaveLength(2);
+    expect(result.reason).toContain("repeated the same failure");
+    expect(inspectRepository).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops when the same failure recurs after another tool succeeds", async () => {
+    const searchRepository = vi.fn(async () => {
+      throw new Error("Command is not in the read-only allowlist.");
+    });
+    const inspectRepository = vi.fn(async () => ({ diff: "clean" }));
+    const decisions = [
+      { status: "continue" as const, toolName: "code.searchRepository", reason: "search" },
+      { status: "continue" as const, toolName: "code.inspectRepository", reason: "inspect" },
+      { status: "continue" as const, toolName: "code.searchRepository", reason: "retry search" },
+    ];
+
+    const result = await runAgentReActLoop({
+      agent: mustAgent("code"),
+      step: step("code"),
+      context: createSharedTaskContext(),
+      maxIterations: 8,
+      tools: [
+        { name: "code.searchRepository", execute: searchRepository },
+        { name: "code.inspectRepository", execute: inspectRepository },
+      ],
+      decideNext: () => decisions.shift() ?? {
+        status: "failed",
+        reason: "unexpected extra iteration",
+      },
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.reason).toContain("repeated the same failure");
+    expect(result.observations.map((observation) => observation.status)).toEqual([
+      "failed",
+      "succeeded",
+      "failed",
+    ]);
+    expect(searchRepository).toHaveBeenCalledTimes(2);
+    expect(inspectRepository).toHaveBeenCalledTimes(1);
+  });
+
   it("fails when a ReAct decision times out", async () => {
     await expect(
       runAgentReActLoop({
@@ -695,7 +868,7 @@ describe("runAgentReActLoop", () => {
     });
 
     expect(result.status).toBe("failed");
-    expect(result.reason).toContain("latest tool observation succeeds");
+    expect(result.reason).toContain("successful usable evidence observation");
   });
 
   it.each([[], {}])("rejects an empty observation container as completion evidence", async (output) => {
@@ -1037,7 +1210,7 @@ describe("runAgentReActLoop", () => {
     });
 
     expect(result.status).toBe("failed");
-    expect(result.reason).toContain("latest tool observation succeeds");
+    expect(result.reason).toContain("successful usable evidence observation");
   });
 
   it("does not complete on a cyclic observation object", async () => {
@@ -1057,18 +1230,18 @@ describe("runAgentReActLoop", () => {
     });
 
     expect(result.status).toBe("failed");
-    expect(result.reason).toContain("latest tool observation succeeds");
+    expect(result.reason).toContain("successful usable evidence observation");
     expect(result.observations[0]?.output).toBeUndefined();
   });
 });
 
-function mustAgent(kind: "code" | "file" | "research" | "page-agent") {
+function mustAgent(kind: AgentKind) {
   const agent = demoAgents.find((item) => item.kind === kind);
   if (!agent) throw new Error(`Missing test agent ${kind}`);
   return agent;
 }
 
-function step(agentKind: "code" | "file" | "research" | "page-agent"): WorkbenchWorkflowStep {
+function step(agentKind: AgentKind): WorkbenchWorkflowStep {
   return {
     id: "react-step",
     title: "React step",

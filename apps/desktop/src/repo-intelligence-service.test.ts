@@ -8,6 +8,28 @@ import {
 } from "./repo-intelligence-service";
 
 describe("searchRepositoryWithFileSearch", () => {
+  it("omits null and non-integer native line values from search evidence", async () => {
+    const searchFiles = vi.fn(async () => [{
+      path: "packages/core/src/workflow-executor.ts",
+      line: null,
+      preview: "runCommanderDagTask",
+      provider: "native-search",
+    }, {
+      path: "packages/core/src/agent-intent.ts",
+      line: 12.5,
+      preview: "inferSpecialistAgentHints",
+      provider: "native-search",
+    }]);
+
+    const report = await searchRepositoryWithFileSearch({
+      goal: "commander routing",
+      maxAttempts: 1,
+    }, { searchFiles });
+
+    expect(report.actualFound).toHaveLength(2);
+    expect(report.actualFound.every((item) => !("line" in item))).toBe(true);
+  });
+
   it("runs planned fallback searches and returns structured evidence", async () => {
     const searchFiles = vi.fn(async ({ query }: { query: string }) => {
       if (query === "agent") {

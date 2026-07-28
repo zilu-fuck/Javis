@@ -34,6 +34,8 @@ export interface WorkbenchWorkflowStep {
   input: string;
   output: string;
   permissionLevel: PermissionLevel;
+  /** Dedicated runner separates active tool timeouts from user approval wait. */
+  executionTimeoutMode?: "workflow" | "approval_managed";
   dependsOn: string[];
   canRunInParallel: boolean;
   inputContextKeys?: string[];

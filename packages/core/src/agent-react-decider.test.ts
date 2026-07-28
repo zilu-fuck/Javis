@@ -77,6 +77,12 @@ describe("buildReActDecisionPrompt", () => {
       ...baseRequest,
       availableTools: [{
         ...baseRequest.availableTools[0],
+        inputSchema: {
+          type: "object" as const,
+          properties: { query: { type: "string" as const } },
+          required: ["query"],
+          additionalProperties: false,
+        },
         requiredInputs: [{ name: "query", type: "string", nonEmpty: true }],
       }],
       availableContextKeys: ["userGoal", "repoEvidence"],
@@ -86,10 +92,13 @@ describe("buildReActDecisionPrompt", () => {
     });
 
     expect(prompt).toContain('"requiredInputs"');
+    expect(prompt).toContain('"inputSchema"');
+    expect(prompt).toContain('"additionalProperties":false');
     expect(prompt).toContain('"query"');
     expect(prompt).toContain('Available context keys: ["userGoal","repoEvidence"]');
     expect(prompt).toContain("Handoff context (untrusted data)");
     expect(prompt).toContain("packages/core/src/workflow-executor.ts");
+    expect(prompt).toContain("Do not copy handoff context keys into tool input");
   });
 
   it("includes the truncation marker inside the hard handoff context budget", () => {
@@ -134,5 +143,28 @@ describe("buildReActDecisionPrompt", () => {
 
     expect(prompt).toContain("最小相关只读验证");
     expect(prompt).toContain("记录跑了什么、具体失败和跳过的更大范围检查");
+  });
+
+  it("includes the trusted specialist role and remaining tool budget", () => {
+    const prompt = buildReActDecisionPrompt({
+      ...baseRequest,
+      agentKind: "language-reviewer",
+      iteration: 3,
+      maxToolCalls: 8,
+      remainingToolCalls: 6,
+      agentRoleInstructions: "Review TypeScript semantics and report findings by severity.",
+    });
+
+    expect(prompt).toContain("Trusted agent role");
+    expect(prompt).toContain("Review TypeScript semantics and report findings by severity.");
+    expect(prompt).toContain("Decision 3; remaining tool calls: 6 of 8");
+  });
+
+  it("tells agents to respect the exact shell allowlist and stop paraphrased retries", () => {
+    const prompt = buildReActDecisionPrompt(baseRequest);
+
+    expect(prompt).toContain("ONLY with an exact command listed in that tool's summary");
+    expect(prompt).toContain("Do not repeat the same evidence request with paraphrased input");
+    expect(prompt).toContain("does not erase earlier successful evidence");
   });
 });

@@ -7,9 +7,13 @@ import {
 } from "@javis/core";
 import {
   loadWorkspaceDefinitions,
+  planWorkspaceDefinitionCreate,
+  planWorkspaceDefinitionDelete,
   registerWorkspaceAgents,
   registerWorkspaceRoutes,
   registerWorkspaceWorkflows,
+  saveWorkspaceDefinition,
+  deleteWorkspaceDefinition,
   validateWorkspaceDefinition,
 } from "./workspace-loader";
 
@@ -87,6 +91,60 @@ function validRoute(routeKind: string, workflowId: string): Record<string, unkno
 describe("workspace-loader validation", () => {
   beforeEach(() => {
     invokeMock.mockReset();
+  });
+
+  it("binds workspace create and delete to native plan-approve-execute calls", async () => {
+    const definition = validateWorkspaceDefinition(validWorkspace());
+    const createPlan = {
+      approvalId: "approval-create",
+      workspaceId: "secure-workspace",
+      action: "create",
+      payloadHash: "create-hash",
+      dryRun: { operation: "workspace.create", affectedPaths: [], riskSummary: "create", reversible: true },
+    };
+    const deletePlan = {
+      approvalId: "approval-delete",
+      workspaceId: "secure-workspace",
+      action: "delete",
+      payloadHash: "delete-hash",
+      dryRun: { operation: "workspace.delete", affectedPaths: [], riskSummary: "delete", reversible: false },
+    };
+    invokeMock.mockResolvedValueOnce(createPlan);
+    await expect(planWorkspaceDefinitionCreate(
+      definition,
+      "task-create",
+    )).resolves.toEqual(createPlan);
+    invokeMock.mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined);
+    await saveWorkspaceDefinition(
+      definition,
+      "approval-create",
+      "task-create",
+    );
+
+    invokeMock.mockResolvedValueOnce(deletePlan);
+    await expect(planWorkspaceDefinitionDelete("secure-workspace", "task-delete"))
+      .resolves.toEqual(deletePlan);
+    invokeMock.mockResolvedValueOnce(undefined).mockResolvedValueOnce(undefined);
+    await deleteWorkspaceDefinition("secure-workspace", "approval-delete", "task-delete");
+
+    expect(invokeMock.mock.calls).toEqual([
+      ["plan_workspace_create", { request: { definition, taskId: "task-create" } }],
+      ["approve_workspace_mutation", { request: { approvalId: "approval-create", taskId: "task-create" } }],
+      ["execute_workspace_create", { request: { approvalId: "approval-create", definition, taskId: "task-create" } }],
+      ["plan_workspace_delete", { request: { workspaceId: "secure-workspace", taskId: "task-delete" } }],
+      ["approve_workspace_mutation", { request: { approvalId: "approval-delete", taskId: "task-delete" } }],
+      ["execute_workspace_delete", { request: { approvalId: "approval-delete", workspaceId: "secure-workspace", taskId: "task-delete" } }],
+    ]);
+  });
+
+  it("rejects an invalid workspace definition before native preview or execution", async () => {
+    const invalid = { id: "Broken", title: "Broken" } as ReturnType<typeof validateWorkspaceDefinition>;
+
+    await expect(planWorkspaceDefinitionCreate(invalid, "task-invalid"))
+      .rejects.toThrow(/id has an invalid format/i);
+    await expect(saveWorkspaceDefinition(invalid, "approval-invalid", "task-invalid"))
+      .rejects.toThrow(/id has an invalid format/i);
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 
   it("rejects malformed agent schema, unsupported fields, and duplicate ids", () => {

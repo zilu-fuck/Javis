@@ -82,6 +82,22 @@ Never bypass this for convenience. See `CONTRIBUTING.md` for the full safety che
 
 Commander outputs a `CommanderDagPlan` — steps with `assignedAgentKind`, `dependsOn`, `inputContextKeys`, `outputContextKey`, `successCriteria`. `workflow-dag-executor.ts` runs independent steps in parallel (`Promise.allSettled`), serial steps sequentially.
 
+### DAG Legality Five-Layer Guarantee
+
+Every model-produced plan passes a five-layer legality pipeline before execution (`planning/plan-legality.ts`, `planning/commander-plan-*.ts`):
+
+1. **Prompt guidance** — compile-enforced conditional rules in `getCommanderPlanConditionalRules` (`commander-plan-schema.ts`): react ⇒ `primaryCapability`; direct_tool_call ⇒ `toolName`; `file.writeText` ⇒ `direct_tool_call` + workspace-relative `targetPath`; no write steps when the goal lacks persistence intent; selected-workspace project understanding ⇒ Code `code.inspectWorkspace` direct call → Verifier → Commander, with `code.searchRepository`/Explorer only as supplemental evidence and Computer reserved for explicit GUI/File Explorer requests. `commander-route-contract.ts` is shared by the prompt and compiler so short goals that require Research, Test Runner, Workspace, Computer, Vision, Git, or another specialist cannot collapse into a Commander-only response; unavailable routes produce explicit guidance instead of substitution.
+2. **Intercept & repair loop** — `attemptPlanRepair` runs deterministic repair first (`applyDeterministicPlanRepairs`: kebab-case id coercion + `dependsOn` rewrite, executionMode synonyms, `file.writeText`→direct_tool_call pin, in-workspace target relativization); only residual diagnostics go to the model, max 2 attempts; unrecovered plans never reach the executor.
+3. **Schema constraint** — Zod LLM-raw + strict shapes; validator diagnostics: `UNSAFE_WRITE_PATH`, `WRITE_WITHOUT_USER_INTENT`, `INVALID_EXECUTION_MODE`.
+4. **Preset JSON template** — `COMMANDER_PLAN_TEMPLATE_SKELETON` embedded in the planner system prompt; the model fills task content only.
+5. **Regex & deterministic filter** — `detectCommanderPlanIntents` (write/export/statistics/retrieval) gates `file.writeText` at compile time; `scanRawPlanOutputText` (fences, prose, control chars, unsafe paths, secrets) feeds the desktop JSON-repair prompt; field lint adds `INVALID_CONTEXT_KEY_FORMAT` / `SENSITIVE_DATA_IN_TOOL_INPUT` warnings.
+
+Regexes are lexical pre-checks only — JSON goes through a real parser; path safety stays with path resolution, workspace containment, and symlink checks at the native write boundary.
+
+`workspace.create` and `workspace.delete` use a dedicated plan → UI approval → native approve → one-shot execute chain. Native bindings include approval id, exact tool, task id, and payload/previous-file hashes. Explicit `direct_tool_call` reads for `computer.screenshot`, `computer.listWindows`, and `computer.inspectUi` execute directly; desktop input tools continue through the Computer Use approval loop.
+
+`code.inspectWorkspace` is the deterministic, non-Git project inventory primitive. It recursively reads only inside the selected workspace through the native directory guard, skips symlinks and heavy generated/dependency directories, and returns bounded entries, top-level/module candidates, manifests, ignored directories, truncation state, and filename/size risk indicators. Do not replace it with semantic search when the user asks for directory or module structure.
+
 ### SharedContext & Handoff
 
 Agents communicate through `SharedTaskContext` (typed key-value store). Producer steps write via `outputContextKey`, consumers read via `inputContextKeys`.
@@ -116,7 +132,7 @@ Commander reads live agents from `registry.list()` (not hardcoded `demoAgents`),
 ## Domain Vocabulary
 
 - **Commander**: Main planning agent, coordinates all sub-agents.
-- **Agent kinds**: `commander | file | shell | code | research | computer | scheduler | verifier | vision | workspace | browser | language-reviewer | security-reviewer | build-fix | test-runner | doc-updater | explorer | perf-analyzer | refactor`
+- **Agent kinds**: `commander | file | shell | code | research | computer | scheduler | verifier | vision | workspace | page-agent | language-reviewer | security-reviewer | build-fix | test-runner | doc-updater | explorer | perf-analyzer | refactor`; persisted `browser` plans are a legacy alias normalized to `page-agent`.
 - **Permission levels**: `read | preview | confirmed_write | dangerous`
 - **Task statuses**: `created → planning → running → waiting_permission → running → verifying → completed`
 - **Tool names**: `{category}.{action}` pattern (e.g., `code.inspectRepository`, `file.scanMarkdownDocuments`)

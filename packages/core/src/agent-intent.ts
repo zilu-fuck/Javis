@@ -1,3 +1,5 @@
+import { inferVisionMode, isImageContentAnalysisRequest } from "./vision-utils";
+
 export interface AgentRoutingHint {
   agentKind: string;
   displayName: string;
@@ -14,22 +16,38 @@ export function isCodebaseUnderstandingRequest(text: string): boolean {
 export function inferSpecialistAgentHints(text: string): AgentRoutingHint[] {
   const hints: AgentRoutingHint[] = [];
 
+  const visionMode = inferVisionMode(text);
+  addHintIf(hints, isImageContentAnalysisRequest(text), {
+    agentKind: "vision",
+    displayName: "Vision Agent",
+    capabilities: visionMode === "ocr"
+      ? ["image_ocr", "vision.extractText"]
+      : visionMode === "describe"
+        ? ["image_describe", "vision.describe"]
+        : ["image_analyze", "vision.analyze"],
+    reason: visionMode === "ocr"
+      ? "image_ocr_intent"
+      : visionMode === "describe"
+        ? "image_description_intent"
+        : "image_analysis_intent",
+  });
+
   addHintIf(hints, /\u5b89\u5168|\u6f0f\u6d1e|\u6743\u9650|\u8ba4\u8bc1|\u6388\u6743|security|vulnerab|auth|csrf|xss|ssrf|injection/i.test(text), {
     agentKind: "security-reviewer",
     displayName: "Security Reviewer",
     capabilities: ["security_review", "code.searchRepository", "code.traceCallChain"],
     reason: "security_review_intent",
   });
-  addHintIf(hints, /\u6784\u5efa\u5931\u8d25|\u7f16\u8bd1\u9519\u8bef|\u7c7b\u578b\u9519\u8bef|build failed|build failure|typecheck|compile error|compiler error/i.test(text), {
+  addHintIf(hints, /\u6784\u5efa(?:\u5931\u8d25|\u9519\u8bef)|\u7f16\u8bd1\u9519\u8bef|\u7c7b\u578b\u9519\u8bef|build failed|build failure|build error|type[ -]?check(?: failed| failure| error)|failed type[ -]?check|compile error|compiler error/i.test(text), {
     agentKind: "build-fix",
     displayName: "Build Fix Agent",
     capabilities: ["build_fix", "shell.runReadOnlyCommand", "code.searchRepository"],
     reason: "build_fix_intent",
   });
-  addHintIf(hints, /\u6d4b\u8bd5\u5931\u8d25|\u8dd1\u6d4b\u8bd5|\u5355\u6d4b|\u96c6\u6210\u6d4b\u8bd5|test failed|failing test|run tests|unit test|integration test/i.test(text), {
+  addHintIf(hints, /\u6d4b\u8bd5\u5931\u8d25|\u8dd1(?:\u4e00\u4e0b|\u4e0b)?[^\n]{0,12}\u6d4b\u8bd5|\u5355\u6d4b|\u96c6\u6210\u6d4b\u8bd5|\u7c7b\u578b\u68c0\u67e5|\u7c7b\u578b\u6821\u9a8c|test failed|failing test|run tests?|unit tests?|integration tests?|type[ -]?check/i.test(text), {
     agentKind: "test-runner",
     displayName: "Test Runner",
-    capabilities: ["test_run", "shell.runReadOnlyCommand", "code.searchRepository"],
+    capabilities: ["test_run", "shell.runWorkspaceCommand", "code.searchRepository"],
     reason: "test_run_intent",
   });
   addHintIf(hints, shouldUseDocUpdater(text), {
@@ -50,7 +68,10 @@ export function inferSpecialistAgentHints(text: string): AgentRoutingHint[] {
     capabilities: ["refactor", "code.searchRepository", "code.proposeEdit"],
     reason: "refactor_intent",
   });
-  addHintIf(hints, /\u8bed\u8a00\u7ea7|\u4ee3\u7801\u5ba1\u67e5|typescript|javascript|rust|python|java|go|c\+\+|language review/i.test(text) && /\u5ba1\u67e5|review|\u68c0\u67e5|\u5206\u6790/i.test(text), {
+  const hasLanguageSubject = /\u8bed\u8a00\u7ea7|\u4ee3\u7801\u5ba1\u67e5|typescript|javascript|rust|python|java|go|c\+\+|language review/i.test(text);
+  const hasLanguageReviewIntent = /\u5ba1\u67e5|review|\u68c0\u67e5|\u5206\u6790|\u89c4\u8303|\u60ef\u7528|\u5730\u9053|\u5199\u5f97.{0,6}(?:\u600e\u4e48\u6837|\u5982\u4f55|\u597d\u4e0d\u597d)|\u4ee3\u7801\u8d28\u91cf|idiom|best practice/i.test(text);
+  const isLanguageCheckCommand = /\u7c7b\u578b\u68c0\u67e5|\u7c7b\u578b\u6821\u9a8c|type[ -]?check/i.test(text);
+  addHintIf(hints, hasLanguageSubject && hasLanguageReviewIntent && !isLanguageCheckCommand, {
     agentKind: "language-reviewer",
     displayName: "Language Reviewer",
     capabilities: ["language_review", "code.searchRepository", "code.traceCallChain"],
@@ -70,10 +91,29 @@ export function isSpecialistAgentRequest(text: string): boolean {
   return inferSpecialistAgentHints(text).length > 0;
 }
 
+/** The first hint is the primary specialist; later hints may assist independently. */
+export function inferPrimarySpecialistAgentHint(text: string): AgentRoutingHint | undefined {
+  return inferSpecialistAgentHints(text)[0];
+}
+
+export function requiresExplicitTargetClarification(
+  text: string,
+  context: { hasResolvedTarget?: boolean } = {},
+): boolean {
+  if (context.hasResolvedTarget) return false;
+  const hasAmbiguousCodeReference = /\u8fd9(?:\u5757|\u6bb5|\u90e8\u5206|\u5904)(?:\u4ee3\u7801|\u5b9e\u73b0)|\u8fd9\u4e2a(?:\u51fd\u6570|\u6587\u4ef6|\u6a21\u5757|\u7c7b)|\u8fd9\u91cc(?:\u7684)?(?:\u4ee3\u7801|\u5b9e\u73b0)|this (?:code|function|file|module|class|implementation)/i.test(text);
+  const hasAmbiguousFileAction = /(?:\u5904\u7406|\u4fee\u6539|\u7f16\u8f91|\u4fee\u590d|\u5220\u9664|\u79fb\u52a8|\u6574\u7406).{0,10}(?:\u90a3\u4e2a|\u8fd9\u4e2a|\u8fd9\u4efd|\u4e0a\u8ff0)\u6587\u4ef6|(?:\u90a3\u4e2a|\u8fd9\u4e2a|\u8fd9\u4efd|\u4e0a\u8ff0)\u6587\u4ef6.{0,10}(?:\u5904\u7406|\u4fee\u6539|\u7f16\u8f91|\u4fee\u590d|\u5220\u9664|\u79fb\u52a8|\u6574\u7406)|(?:process|modify|edit|fix|delete|move|organize) (?:that|this) file|(?:that|this) file.{0,20}(?:process|modify|edit|fix|delete|move|organize)/i.test(text);
+  if (!hasAmbiguousCodeReference && !hasAmbiguousFileAction) return false;
+  const hasConcretePath = /(?:^|[\s'"`(])(?:[A-Za-z]:[\\/]|\.?\.?[\\/])?[\w.@-]+(?:[\\/][\w.@-]+)+\.[A-Za-z0-9]+(?:$|[\s'"`),:;])/u.test(text) ||
+    /(?:^|[\s'"`(])[\w.@-]+\.(?:ts|tsx|js|jsx|rs|py|go|java|json|md|toml|yaml|yml)(?:$|[\s'"`),:;])/iu.test(text);
+  return !hasConcretePath;
+}
+
 function shouldUseDocUpdater(text: string): boolean {
   const hasDocTarget = /\u6587\u6863|readme|changelog|adr|documentation|\bdocs?\b/i.test(text);
   const hasUpdateAction = /\u66f4\u65b0|\u8865|\u4fee\u6539|\u7f16\u5199|\u5199|\u751f\u6210|\u6574\u7406|update|write|edit|create|generate|maintain/i.test(text);
-  return hasDocTarget && hasUpdateAction;
+  const hasReviewAction = /\u5bf9\u5f97\u4e0a|\u4e00\u81f4|\u8fc7\u65f6|\u51c6\u786e|\u68c0\u67e5|\u5ba1\u67e5|match|consistent|outdated|accurate|review/i.test(text);
+  return hasDocTarget && (hasUpdateAction || hasReviewAction);
 }
 
 function addHintIf(

@@ -141,6 +141,8 @@ function inferPrimaryCapability(toolName: string | undefined): string | undefine
       return "code_propose";
     case "code.searchRepository":
       return "code_search";
+    case "code.inspectWorkspace":
+      return "workspace_inspect";
     case "code.traceCallChain":
       return "code_trace";
     case "code.inspectRepository":

@@ -934,21 +934,25 @@ async function executeStepWithRetry({
       if (!inputValidation.valid) {
         throw new Error(formatStepInputValidationError(inputValidation));
       }
-      return await withTaskTimeout(
-        () => executeStep(step, context, attemptController.signal),
-        {
-          label: attempt === 0 ? `workflow step ${step.id}` : `workflow step ${step.id} retry ${attempt}`,
-          timeoutMs: policy.stepTimeoutMs,
-          signal,
-          onTimeout: () => {
-            attemptController.abort(new TaskTimeoutError(`workflow step ${step.id}`, policy.stepTimeoutMs));
-            onStepTimeout?.(step, policy.stepTimeoutMs, context);
-          },
-        },
-      );
+      const runStep = () => executeStep(step, context, attemptController.signal);
+      return step.executionTimeoutMode === "approval_managed"
+        ? await runStep()
+        : await withTaskTimeout(
+            runStep,
+            {
+              label: attempt === 0 ? `workflow step ${step.id}` : `workflow step ${step.id} retry ${attempt}`,
+              timeoutMs: policy.stepTimeoutMs,
+              signal,
+              onTimeout: () => {
+                attemptController.abort(new TaskTimeoutError(`workflow step ${step.id}`, policy.stepTimeoutMs));
+                onStepTimeout?.(step, policy.stepTimeoutMs, context);
+              },
+            },
+          );
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       if (
+        step.executionTimeoutMode === "approval_managed" ||
         attempt >= policy.maxStepRetries ||
         !shouldRetryStep({ step, error: errorMessage, attempt, context })
       ) {

@@ -1,0 +1,290 @@
+[
+  {
+    "id": "project-overview",
+    "prompt": "帮我看看这个项目有哪些模块，有没有明显风险。",
+    "fixture": "workspace",
+    "expectedAgentKinds": ["commander", "code", "verifier"],
+    "coveredToolNames": ["commander.plan", "commander.synthesize", "code.inspectWorkspace", "code.inspectRepository", "code.searchRepository", "file.readWorkspaceText"],
+    "writeBoundary": "none",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "clarify-file",
+    "prompt": "帮我处理一下那个文件。",
+    "fixture": "workspace",
+    "expectedAgentKinds": ["commander"],
+    "coveredToolNames": ["commander.askUser"],
+    "writeBoundary": "none",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "recall-prior-work",
+    "prompt": "上次那个性能问题后来怎么样了？",
+    "fixture": "task-memory",
+    "expectedAgentKinds": ["commander", "workspace"],
+    "coveredToolNames": ["memory.search"],
+    "writeBoundary": "none",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "runtime-versions",
+    "prompt": "帮我看看现在的 Node 和 pnpm 版本。",
+    "fixture": "workspace",
+    "expectedAgentKinds": ["commander", "shell"],
+    "coveredToolNames": ["shell.runReadOnlyCommand"],
+    "writeBoundary": "none",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "language-review",
+    "prompt": "TypeScript 这块写得规范吗？",
+    "fixture": "workspace",
+    "expectedAgentKinds": ["commander", "language-reviewer", "verifier"],
+    "coveredToolNames": ["code.inspectRepository", "code.searchRepository", "code.traceCallChain", "shell.runWorkspaceCommand", "verifier.check"],
+    "writeBoundary": "approval_only",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "security-review",
+    "prompt": "最近改的代码有没有安全问题？",
+    "fixture": "workspace",
+    "expectedAgentKinds": ["commander", "security-reviewer", "verifier"],
+    "coveredToolNames": ["code.inspectRepository", "code.searchRepository", "code.traceCallChain", "shell.runReadOnlyCommand", "verifier.check"],
+    "writeBoundary": "none",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "test-status",
+    "prompt": "测试现在能过吗？",
+    "fixture": "workspace",
+    "expectedAgentKinds": ["commander", "test-runner", "verifier"],
+    "coveredToolNames": ["code.inspectRepository", "code.searchRepository", "code.traceCallChain", "shell.runWorkspaceCommand", "verifier.check"],
+    "writeBoundary": "approval_only",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "fix-build",
+    "prompt": "把现在的构建错误修好。",
+    "fixture": "workspace-with-build-error",
+    "expectedAgentKinds": ["commander", "build-fix", "verifier"],
+    "coveredToolNames": ["code.inspectRepository", "code.searchRepository", "code.traceCallChain", "code.proposeEdit", "code.applyProposedEdit", "shell.runReadOnlyCommand", "verifier.check"],
+    "writeBoundary": "approval_only",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "docs-consistency",
+    "prompt": "README 和现在的代码对得上吗？",
+    "fixture": "workspace",
+    "expectedAgentKinds": ["commander", "doc-updater", "verifier"],
+    "coveredToolNames": ["file.scanMarkdownDocuments", "code.inspectRepository", "code.searchRepository", "shell.runReadOnlyCommand"],
+    "writeBoundary": "none",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "update-readme",
+    "prompt": "README 过时的地方帮我改一下。",
+    "fixture": "workspace",
+    "expectedAgentKinds": ["commander", "doc-updater", "file"],
+    "coveredToolNames": ["file.scanMarkdownDocuments", "file.planWriteText", "file.writeText", "code.inspectRepository", "code.searchRepository", "code.proposeEdit", "code.applyProposedEdit"],
+    "writeBoundary": "approval_only",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "classify-documents",
+    "prompt": "帮我把下载目录里的文档分分类。",
+    "fixture": "local-documents",
+    "expectedAgentKinds": ["commander", "file"],
+    "coveredToolNames": ["file.scanUserDocuments", "file.classifyDocuments"],
+    "writeBoundary": "none",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "organize-pdfs",
+    "prompt": "帮我把这些 PDF 按月份整理一下。",
+    "fixture": "local-pdfs",
+    "expectedAgentKinds": ["commander", "file"],
+    "coveredToolNames": ["file.scanUserDocuments", "file.classifyDocuments", "file.planPdfOrganization", "file.executePdfOrganization"],
+    "writeBoundary": "approval_only",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "performance-review",
+    "prompt": "这里有没有明显的性能问题？",
+    "fixture": "workspace",
+    "expectedAgentKinds": ["commander", "perf-analyzer", "verifier"],
+    "coveredToolNames": ["code.inspectRepository", "code.searchRepository", "code.traceCallChain", "shell.runReadOnlyCommand", "verifier.check"],
+    "writeBoundary": "none",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "refactor-advice",
+    "prompt": "index.ts 这块代码该重构吗？先说建议。",
+    "fixture": "workspace",
+    "expectedAgentKinds": ["commander", "refactor", "explorer"],
+    "coveredToolNames": ["code.inspectRepository", "code.searchRepository", "code.traceCallChain", "code.proposeEdit", "shell.runReadOnlyCommand"],
+    "writeBoundary": "none",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "ai-tool-news",
+    "prompt": "最近有什么值得关注的 AI 开发工具新闻？",
+    "fixture": "public-web",
+    "expectedAgentKinds": ["commander", "research", "page-agent"],
+    "coveredToolNames": ["web.search", "web.fetchSource", "trend.fetchHotList", "browser.navigate", "browser.getContent", "browser.extractLinks", "browser.followCandidateLinks", "browser.screenshot"],
+    "writeBoundary": "none",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "read-web-page",
+    "prompt": "看看这个网页讲了什么，顺便列出主要链接。",
+    "fixture": "browser-page",
+    "expectedAgentKinds": ["commander", "page-agent", "verifier"],
+    "coveredToolNames": ["browser.navigate", "browser.getContent", "browser.extractLinks", "browser.followCandidateLinks", "browser.screenshot", "verifier.check"],
+    "writeBoundary": "none",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "search-current-page",
+    "prompt": "在这个页面搜一下 Javis。",
+    "fixture": "browser-form",
+    "expectedAgentKinds": ["commander", "page-agent"],
+    "coveredToolNames": ["browser.navigate", "browser.getContent", "browser.screenshot", "browser.click", "browser.type", "browser.evaluate", "browser.runTest"],
+    "writeBoundary": "approval_only",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "list-windows",
+    "prompt": "列出现在打开的窗口。",
+    "fixture": "desktop",
+    "expectedAgentKinds": ["commander", "computer"],
+    "coveredToolNames": ["computer.screenshot", "computer.listWindows", "computer.inspectUi", "computer.wait"],
+    "writeBoundary": "none",
+    "computerAgentPolicy": "required"
+  },
+  {
+    "id": "find-local-document",
+    "prompt": "帮我找一下电脑里的报销模板。",
+    "fixture": "local-documents",
+    "expectedAgentKinds": ["commander", "computer"],
+    "coveredToolNames": ["computer.searchLocalDocuments", "computer.listDirectory"],
+    "writeBoundary": "none",
+    "computerAgentPolicy": "required"
+  },
+  {
+    "id": "find-screenshots",
+    "prompt": "帮我找一下最近的截图。",
+    "fixture": "local-images",
+    "expectedAgentKinds": ["commander", "computer"],
+    "coveredToolNames": ["file.scanUserImages", "computer.listDirectory"],
+    "writeBoundary": "none",
+    "computerAgentPolicy": "required"
+  },
+  {
+    "id": "list-dev-apps",
+    "prompt": "电脑上装了哪些开发工具？",
+    "fixture": "desktop",
+    "expectedAgentKinds": ["commander", "computer"],
+    "coveredToolNames": ["file.scanInstalledApps"],
+    "writeBoundary": "none",
+    "computerAgentPolicy": "required"
+  },
+  {
+    "id": "open-local-document",
+    "prompt": "找到报销模板后打开它。",
+    "fixture": "local-documents",
+    "expectedAgentKinds": ["commander", "computer"],
+    "coveredToolNames": ["computer.searchLocalDocuments", "computer.listDirectory", "computer.openPath"],
+    "writeBoundary": "approval_only",
+    "computerAgentPolicy": "required"
+  },
+  {
+    "id": "edit-in-notepad",
+    "prompt": "切到记事本，输入“测试完成”。",
+    "fixture": "desktop-notepad",
+    "expectedAgentKinds": ["commander", "computer"],
+    "coveredToolNames": ["computer.screenshot", "computer.listWindows", "computer.inspectUi", "computer.focusWindow", "computer.moveMouse", "computer.click", "computer.type", "computer.keyCombo", "computer.scroll", "computer.invokeUi", "computer.setUiValue", "computer.wait"],
+    "writeBoundary": "approval_only",
+    "computerAgentPolicy": "required"
+  },
+  {
+    "id": "create-reminder",
+    "prompt": "明天下午三点提醒我开会。",
+    "fixture": "clock",
+    "expectedAgentKinds": ["commander", "scheduler"],
+    "coveredToolNames": ["scheduler.createTask"],
+    "writeBoundary": "approval_only",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "draft-workspace",
+    "prompt": "有哪些工作区？再草拟一个知识库工作区。",
+    "fixture": "workspace-registry",
+    "expectedAgentKinds": ["commander", "workspace"],
+    "coveredToolNames": ["workspace.list", "workspace.scaffold", "memory.search"],
+    "writeBoundary": "none",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "create-workspace",
+    "prompt": "创建刚才那个知识库工作区。",
+    "fixture": "workspace-draft",
+    "expectedAgentKinds": ["commander", "workspace"],
+    "coveredToolNames": ["workspace.create"],
+    "writeBoundary": "approval_only",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "delete-workspace",
+    "prompt": "删掉测试工作区。",
+    "fixture": "workspace-registry",
+    "expectedAgentKinds": ["commander", "workspace"],
+    "coveredToolNames": ["workspace.delete"],
+    "writeBoundary": "approval_only",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "image-ocr",
+    "prompt": "帮我看看这张图里写了什么。",
+    "fixture": "attached-image",
+    "expectedAgentKinds": ["commander", "vision"],
+    "coveredToolNames": ["vision.analyze", "vision.extractText"],
+    "writeBoundary": "none",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "image-description",
+    "prompt": "这张图是什么内容？",
+    "fixture": "attached-image",
+    "expectedAgentKinds": ["commander", "vision"],
+    "coveredToolNames": ["vision.describe"],
+    "writeBoundary": "none",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "publish-changes",
+    "prompt": "把这些改动提交一下，再开个草稿 PR。",
+    "fixture": "dirty-git-workspace",
+    "expectedAgentKinds": ["commander", "code", "verifier"],
+    "coveredToolNames": ["code.inspectRepository", "git.stageFiles", "git.createCommit", "git.createPullRequest", "verifier.check"],
+    "writeBoundary": "approval_only",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "comment-on-pr",
+    "prompt": "在这个 PR 里留言“已经修好”。",
+    "fixture": "pull-request",
+    "expectedAgentKinds": ["commander", "code"],
+    "coveredToolNames": ["git.commentPullRequest"],
+    "writeBoundary": "approval_only",
+    "computerAgentPolicy": "forbidden"
+  },
+  {
+    "id": "save-summary",
+    "prompt": "把这份总结保存成 summary.md。",
+    "fixture": "workspace",
+    "expectedAgentKinds": ["commander", "file", "verifier"],
+    "coveredToolNames": ["file.planWriteText", "file.writeText", "verifier.check"],
+    "writeBoundary": "approval_only",
+    "computerAgentPolicy": "forbidden"
+  }
+]

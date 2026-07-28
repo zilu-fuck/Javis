@@ -20,6 +20,46 @@ interface ResearchFlowOptions {
   userGoal: string;
   webTool: WebTool;
   commanderTool?: CommanderTool;
+  sourceUrls?: string[];
+}
+
+export function buildResearchSearchQuery(userGoal: string): string {
+  let query = userGoal;
+  for (const url of extractUrls(userGoal)) {
+    query = query.replace(url, " ");
+  }
+  query = query
+    .trim()
+    .replace(/^(?:(?:请|麻烦|帮我|能不能|可以)\s*)?(?:(?:用浏览器|在网上|网上|网络上)\s*)?(?:查(?:一下|下|查|信息)?|查询|搜索(?:一下|下)?|搜(?:一下|下)?|找(?:一下|下)?|看看|了解(?:一下|下)?)(?:关于|下)?[\s：:,，]*/u, "")
+    .replace(/^(?:please\s+)?(?:search(?:\s+(?:for|the web for))?|look\s+up|find\s+(?:information\s+)?(?:about\s+)?)[\s:,-]*/iu, "")
+    .replace(/[？?]+$/u, "")
+    .trim()
+    .replace(/\s+/gu, " ");
+
+  const recentNews = /^最近\s*(.+?)\s*(?:有啥|有什么|有哪些)\s*(新闻|消息|动态)$/u.exec(query);
+  if (recentNews?.[1] && recentNews[2]) {
+    query = `${recentNews[1].trim()} 最新${recentNews[2]}`;
+  }
+  return query || userGoal.trim();
+}
+
+export function isContextualResearchPageReference(userGoal: string): boolean {
+  return /(?:这个|该|上述|刚才|前面)(?:网页|页面|链接|网址)|(?:this|that|the|previous|above)\s+(?:page|webpage|link|url)/iu.test(userGoal);
+}
+
+export function resolveResearchSourceUrls(
+  userGoal: string,
+  priorMessages: readonly { content: string }[] = [],
+): string[] {
+  const directUrls = extractUrls(userGoal);
+  if (directUrls.length > 0) return directUrls;
+  if (!isContextualResearchPageReference(userGoal)) return [];
+
+  for (let index = priorMessages.length - 1; index >= 0; index -= 1) {
+    const urls = extractUrls(priorMessages[index]?.content ?? "");
+    if (urls.length > 0) return urls;
+  }
+  return [];
 }
 
 export async function runResearchSearchTask({
@@ -84,8 +124,9 @@ export async function runResearchSearchTask({
   });
 
   try {
+    const query = buildResearchSearchQuery(userGoal);
     const searchResults = await webTool.searchWeb?.({
-      query: userGoal,
+      query,
       maxResults: 3,
     });
     if (!searchResults || searchResults.length === 0) {
@@ -286,6 +327,7 @@ export async function runResearchSourceTask({
   userGoal,
   webTool,
   commanderTool,
+  sourceUrls,
 }: ResearchFlowOptions) {
   let snapshot = controller.getSnapshot();
   function emit(nextSnapshot: TaskSnapshot) {
@@ -293,7 +335,7 @@ export async function runResearchSourceTask({
     snapshot = controller.getSnapshot();
   }
   const wait = controller.wait;
-  const urls = extractUrls(userGoal);
+  const urls = sourceUrls ?? extractUrls(userGoal);
   const plan = createResearchSourcePlan();
   const agentTracker = createScopedAgentTracker(["commander", "research", "verifier"]);
 

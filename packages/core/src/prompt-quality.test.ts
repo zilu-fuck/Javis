@@ -36,7 +36,10 @@ describe("prompt quality gates", () => {
     });
 
     // The step contract adds five explicit fields to the compact schema.
-    expect(prompt.length).toBeLessThan(4_600);
+    // The DAG legality five-layer guarantee adds ~500 chars: the
+    // compile-enforced conditional rules (Layer 1/3) and the preset JSON
+    // template skeleton (Layer 4).
+    expect(prompt.length).toBeLessThan(5_400);
     expect(prompt).toContain("{title:string, reasoning:string, executionPolicy?:ExecutionPolicy, steps:Step[1..12]}");
     expect(prompt).not.toContain('"properties"');
     expect(prompt).not.toContain("Available agents / 可用 Agent");

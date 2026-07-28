@@ -61,6 +61,17 @@ export interface MarkdownDocumentSummary extends MarkdownDocument {
   purpose: string;
 }
 
+export interface ReadWorkspaceTextRequest {
+  path: string;
+  maxLines?: number;
+}
+
+export interface ReadWorkspaceTextResult {
+  path: string;
+  content: string;
+  truncated: boolean;
+}
+
 export interface LocalFileEntry {
   name: string;
   path: string;
@@ -172,6 +183,7 @@ export interface TextFileWriteResult {
 
 export interface FileTool {
   scanMarkdownDocuments(): Promise<MarkdownDocument[]>;
+  readWorkspaceText?(request: ReadWorkspaceTextRequest): Promise<ReadWorkspaceTextResult>;
   planPdfOrganization?(taskId?: string): Promise<FileOrganizationPlan>;
   executePdfOrganization?(
     operations: PlannedPathOperation[],
@@ -214,8 +226,32 @@ export interface ShellCommandOutput {
   sandbox?: SandboxReport;
 }
 
+export interface WorkspaceCommandPlan {
+  approvalId: string;
+  taskId: string;
+  toolName: "shell.runWorkspaceCommand";
+  previewHash: string;
+  command: string;
+  cwd: string;
+  dryRun: DryRunSummary;
+}
+
+export interface WorkspaceCommandApproval {
+  approvalId: string;
+  taskId: string;
+  previewHash: string;
+}
+
 export interface ShellTool {
   runReadOnlyCommand(request: ShellCommandRequest): Promise<ShellCommandOutput>;
+  planWorkspaceCommand?(
+    request: ShellCommandRequest,
+    taskId: string,
+  ): Promise<WorkspaceCommandPlan>;
+  runWorkspaceCommand?(
+    request: ShellCommandRequest,
+    approval: WorkspaceCommandApproval,
+  ): Promise<ShellCommandOutput>;
 }
 
 export type SandboxMode = "read_only" | "workspace_write" | "full_access_manual";
@@ -505,6 +541,38 @@ export interface CodeRepositorySearchRequest {
   maxKeyFiles?: number;
 }
 
+export interface CodeWorkspaceInspectionRequest {
+  maxDepth?: number;
+  maxEntries?: number;
+}
+
+export interface CodeWorkspaceInspectionEntry {
+  name: string;
+  relativePath: string;
+  isDir: boolean;
+  depth: number;
+  sizeBytes?: number;
+  extension?: string;
+}
+
+export interface CodeWorkspaceRiskIndicator {
+  code: "sensitive_name" | "large_file" | "inspection_truncated" | "manifest_missing";
+  severity: "info" | "warning";
+  path?: string;
+  detail: string;
+}
+
+export interface CodeWorkspaceInspectionResult {
+  workspacePath: string;
+  entries: CodeWorkspaceInspectionEntry[];
+  topLevelDirectories: string[];
+  moduleCandidates: string[];
+  manifests: string[];
+  ignoredDirectories: string[];
+  riskIndicators: CodeWorkspaceRiskIndicator[];
+  truncated: boolean;
+}
+
 export interface CodeRepositorySearchResult {
   actualFound: Array<{
     path: string;
@@ -671,6 +739,7 @@ export interface CodeRepositoryTraceResult {
 
 export interface CodeTool {
   inspectRepository(): Promise<CodeReviewPreview>;
+  inspectWorkspace?(request?: CodeWorkspaceInspectionRequest): Promise<CodeWorkspaceInspectionResult>;
   searchRepository?(request: CodeRepositorySearchRequest): Promise<CodeRepositorySearchResult>;
   traceCallChain?(request: CodeRepositoryTraceRequest): Promise<CodeRepositoryTraceResult>;
   proposeEdit?(request: { userGoal: string; preview: CodeReviewPreview; taskId?: string }): Promise<CodeProposedEdit>;
@@ -1425,15 +1494,27 @@ export interface WorkspaceDefinitionSummary {
   version: string;
 }
 
+export interface WorkspaceMutationPlan {
+  approvalId: string;
+  workspaceId: string;
+  action: "create" | "delete";
+  payloadHash: string;
+  dryRun: DryRunSummary;
+}
+
 export interface WorkspaceTool {
   /** List all installed workspace definitions. */
   list(): Promise<WorkspaceDefinitionSummary[]>;
   /** Generate a workspace definition JSON from a natural language description (dry run). */
   scaffold?(description: string): Promise<Record<string, unknown>>;
-  /** Save a workspace definition to disk. */
-  create(definition: Record<string, unknown>): Promise<void>;
-  /** Remove a workspace definition by id. */
-  delete(workspaceId: string): Promise<void>;
+  /** Build a native-bound preview before saving a workspace definition. */
+  planCreate(definition: Record<string, unknown>, taskId?: string): Promise<WorkspaceMutationPlan>;
+  /** Save exactly the definition covered by the one-shot native approval. */
+  create(definition: Record<string, unknown>, approvalId: string, taskId?: string): Promise<void>;
+  /** Build a native-bound preview before removing a workspace definition. */
+  planDelete(workspaceId: string, taskId?: string): Promise<WorkspaceMutationPlan>;
+  /** Remove exactly the workspace covered by the one-shot native approval. */
+  delete(workspaceId: string, approvalId: string, taskId?: string): Promise<void>;
 }
 
 // ── Vision Tool ──────────────────────────────────────────────────────────────
@@ -1506,6 +1587,8 @@ export interface ToolDescriptor {
   capabilityTags: string[];
   /** Agent kinds that are allowed to use this tool. */
   ownerAgentKinds: string[];
+  /** User intent that must be detected before Commander may plan this tool. */
+  requiredPlanIntent?: "write";
   /** Complete input contract for tools migrated to the governed registry. */
   inputSchema?: ToolJsonSchema;
   /** Shape of the successful tool result, for model/planner/UI consumers. */

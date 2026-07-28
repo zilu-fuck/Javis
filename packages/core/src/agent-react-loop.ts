@@ -62,12 +62,17 @@ export interface AgentReActLoopOptions {
   signal?: AbortSignal;
   decisionTimeoutMs?: number;
   toolTimeoutMs?: number;
+  /** Role agents may publish a model-synthesized result after grounded tool evidence. */
+  completionOutputMode?: "observation" | "summary";
   decideNext(request: {
     agent: Agent;
     step: WorkbenchWorkflowStep;
     context: SharedTaskContext;
     observations: AgentReActObservation[];
     availableToolNames: string[];
+    iteration: number;
+    maxToolCalls: number;
+    remainingToolCalls: number;
   }): Promise<AgentReActDecision> | AgentReActDecision;
   /** Called after each ReAct iteration (tool execution) to emit progress snapshots. */
   onIteration?: (iteration: number, observation: AgentReActObservation) => void;
@@ -165,6 +170,7 @@ async function runAgentReActLoopInternal(
     signal,
     decisionTimeoutMs = DEFAULT_TASK_TIMEOUT_MS,
     toolTimeoutMs = DEFAULT_TASK_TIMEOUT_MS,
+    completionOutputMode = "observation",
     decideNext,
   } = options;
   assertAgentOwnsStep(agent, step.agentKind);
@@ -174,6 +180,7 @@ async function runAgentReActLoopInternal(
     .map((tool) => tool.name)
     .filter((toolName) => agent.allowedToolNames.includes(toolName));
   const observations: AgentReActObservation[] = [];
+  const toolFailureCounts = new Map<string, number>();
   const inputValidation = validateStepInputContext(step, context);
   if (!inputValidation.valid) {
     return {
@@ -194,6 +201,9 @@ async function runAgentReActLoopInternal(
         context,
         observations: decisionObservations,
         availableToolNames,
+        iteration,
+        maxToolCalls: maxIterations,
+        remainingToolCalls: maxIterations - iteration + 1,
       })),
       {
         label: `ReAct decision ${step.id} iteration ${iteration}`,
@@ -203,58 +213,14 @@ async function runAgentReActLoopInternal(
       },
     );
 
-    if (decision.status === "completed") {
-      const lastObservation = observations[observations.length - 1];
-      if (
-        !lastObservation ||
-        lastObservation.status !== "succeeded" ||
-        lastObservation.outputUsable === false ||
-        lastObservation.outputTruncated === true ||
-        !hasUsableObservationOutput(lastObservation.output)
-      ) {
-        return {
-          status: "failed",
-          observations: boundObservationHistory(observations),
-          reason: "Agent cannot complete before the latest tool observation succeeds with usable evidence.",
-        };
-      }
-      return {
-        status: "completed",
-        output: agent.kind === "page-agent" && hasUsableObservationOutput(decision.output)
-          ? sanitizeAgentReActOutput(decision.output)
-          : lastObservation.output,
-        observations: boundObservationHistory(observations),
-        reason: decision.reason,
-      };
-    }
-
-    if (decision.status === "failed") {
-      return {
-        status: "failed",
-        output: sanitizeAgentReActOutput(decision.output),
-        observations: boundObservationHistory(observations),
-        reason: decision.reason,
-      };
-    }
-
-    if (decision.status === "request_input") {
-      const requestInput = validateRequestInputDecision(decision, options.liveAgentKinds);
-      if (!requestInput.valid) {
-        return {
-          status: "failed",
-          observations: boundObservationHistory(observations),
-          reason: requestInput.reason,
-        };
-      }
-      return {
-        status: "request_input",
-        output: sanitizeAgentReActOutput(decision.output),
-        observations: boundObservationHistory(observations),
-        reason: decision.reason,
-        requestedContextKeys: requestInput.requestedContextKeys,
-        requestedAgentKind: requestInput.requestedAgentKind,
-      };
-    }
+    const terminalResult = resolveTerminalDecision(
+      decision,
+      observations,
+      agent.kind,
+      completionOutputMode,
+      options.liveAgentKinds,
+    );
+    if (terminalResult) return terminalResult;
 
     if (!decision.toolName) {
       return {
@@ -352,6 +318,18 @@ async function runAgentReActLoopInternal(
     });
     writeBoundedObservationContext(context, step.id, observations);
     options.onIteration?.(iteration, observation);
+    if (observation.status === "failed") {
+      const failureKey = `${observation.toolName}\u0000${observation.error ?? "unknown error"}`;
+      const failureCount = (toolFailureCounts.get(failureKey) ?? 0) + 1;
+      toolFailureCounts.set(failureKey, failureCount);
+      if (failureCount >= 2) {
+        return {
+          status: "failed",
+          observations: boundObservationHistory(observations),
+          reason: `Agent ${agent.kind} repeated the same failure for tool ${observation.toolName}: ${observation.error ?? "unknown error"}`,
+        };
+      }
+    }
     if (
       observation.status === "failed" &&
       tool.failureFallbackAgentKind &&
@@ -368,6 +346,41 @@ async function runAgentReActLoopInternal(
       };
     }
   }
+
+  const finalIteration = maxIterations + 1;
+  throwIfTaskAborted(signal, `ReAct ${step.id}`);
+  options.onWaiting?.("waiting_model", finalIteration, "Waiting for final ReAct decision.");
+  const finalDecisionObservations = boundObservationHistory(observations);
+  const finalDecision = await withTaskTimeout(
+    () => Promise.resolve(decideNext({
+      agent,
+      step,
+      context,
+      observations: finalDecisionObservations,
+      availableToolNames,
+      iteration: finalIteration,
+      maxToolCalls: maxIterations,
+      remainingToolCalls: 0,
+    })),
+    {
+      label: `Final ReAct decision ${step.id}`,
+      timeoutMs: decisionTimeoutMs,
+      signal,
+      onTimeout: () => options.onTimeout?.(
+        "waiting_model",
+        finalIteration,
+        "Final ReAct decision timed out.",
+      ),
+    },
+  );
+  const finalResult = resolveTerminalDecision(
+    finalDecision,
+    observations,
+    agent.kind,
+    completionOutputMode,
+    options.liveAgentKinds,
+  );
+  if (finalResult) return finalResult;
 
   return {
     status: "failed",
@@ -441,6 +454,77 @@ export function validateAgentRequestInput(
     requestedContextKeys: validatedKeys,
     requestedAgentKind: requestedAgentKind as AgentKind,
   };
+}
+
+function resolveTerminalDecision(
+  decision: AgentReActDecision,
+  observations: readonly AgentReActObservation[],
+  agentKind: AgentKind,
+  completionOutputMode: "observation" | "summary",
+  liveAgentKinds: ReadonlyArray<AgentKind> | undefined,
+): Omit<AgentReActLoopResult, "metrics"> | undefined {
+  if (decision.status === "continue") return undefined;
+  const boundedObservations = boundObservationHistory(observations);
+  if (decision.status === "completed") {
+    const evidence = findLatestUsableSuccessfulObservation(observations);
+    if (!evidence) {
+      return {
+        status: "failed",
+        observations: boundedObservations,
+        reason: "Agent cannot complete without a successful usable evidence observation.",
+      };
+    }
+    const mayPublishSummary = completionOutputMode === "summary" || agentKind === "page-agent";
+    return {
+      status: "completed",
+      output: mayPublishSummary && hasUsableObservationOutput(decision.output)
+        ? sanitizeAgentReActOutput(decision.output)
+        : evidence.output,
+      observations: boundedObservations,
+      reason: decision.reason,
+    };
+  }
+  if (decision.status === "failed") {
+    return {
+      status: "failed",
+      output: sanitizeAgentReActOutput(decision.output),
+      observations: boundedObservations,
+      reason: decision.reason,
+    };
+  }
+  const requestInput = validateRequestInputDecision(decision, liveAgentKinds);
+  if (!requestInput.valid) {
+    return {
+      status: "failed",
+      observations: boundedObservations,
+      reason: requestInput.reason,
+    };
+  }
+  return {
+    status: "request_input",
+    output: sanitizeAgentReActOutput(decision.output),
+    observations: boundedObservations,
+    reason: decision.reason,
+    requestedContextKeys: requestInput.requestedContextKeys,
+    requestedAgentKind: requestInput.requestedAgentKind,
+  };
+}
+
+function findLatestUsableSuccessfulObservation(
+  observations: readonly AgentReActObservation[],
+): AgentReActObservation | undefined {
+  for (let index = observations.length - 1; index >= 0; index -= 1) {
+    const observation = observations[index];
+    if (
+      observation?.status === "succeeded" &&
+      observation.outputUsable !== false &&
+      observation.outputTruncated !== true &&
+      hasUsableObservationOutput(observation.output)
+    ) {
+      return observation;
+    }
+  }
+  return undefined;
 }
 
 function validateRequestInputDecision(

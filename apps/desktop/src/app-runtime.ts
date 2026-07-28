@@ -19,11 +19,13 @@ import {
   DEFAULT_COMPUTER_USE_CONFIG,
   filterPlanningScopeForGoal,
   getAdapter,
+  getAgentSystemPrompt,
   isComputerUseGoal,
   isOutputTruncationFinishReason,
   isValidCapabilityTag,
   normalizePromptLocale,
   parseChineseReviewResult,
+  scanRawPlanOutputText,
   validateSynthesisConclusion,
 } from "@javis/core";
 import type { DesktopDatabase } from "./desktop-database";
@@ -36,6 +38,7 @@ import type {
   ComputerUseLoopConfig,
   GoalDecision,
   GoalState,
+  RawPlanLexicalIssue,
   ReActDecisionRequest,
   RuntimeEventEnvelope,
   RuntimeExecutionConfig,
@@ -122,6 +125,7 @@ import type {
   ProjectInspection,
   ShellCommandOutput,
   ShellCommandRequest,
+  WorkspaceCommandPlan,
   WebSource,
   WebSourceRequest,
   WebSearchRequest,
@@ -152,6 +156,7 @@ import {
   searchRepositoryWithFileSearch,
   traceCallChainWithFileSearch,
 } from "./repo-intelligence-service";
+import { inspectWorkspaceTree } from "./workspace-inspection-service";
 import { fetchTrendHotList } from "./trending-service";
 import {
   createConfiguredModelProvider,
@@ -192,6 +197,8 @@ import {
 import type { ScheduledTasksRepository } from "./scheduled-tasks-persistence";
 import {
   loadWorkspaceDefinitions,
+  planWorkspaceDefinitionCreate,
+  planWorkspaceDefinitionDelete,
   saveWorkspaceDefinition,
   deleteWorkspaceDefinition,
 } from "./workspace-loader";
@@ -550,35 +557,83 @@ export const DEFAULT_COMPUTER_USE_SETTINGS: ComputerUseSettings = {
 const LOCAL_VISION_PATH_INPUT_MAX_LENGTH = 1_024;
 const LOCAL_VISION_IMAGE_DATA_URL_PATTERN = /data:image(?:\/|\\\/)[a-z0-9.+-]+;base64,/i;
 
+type NativeMarkdownDocument = Omit<MarkdownDocument, "heading" | "excerpt"> & {
+  heading?: string | null;
+  excerpt?: string | null;
+};
+
+export function normalizeNativeMarkdownDocuments(
+  documents: readonly NativeMarkdownDocument[],
+): MarkdownDocument[] {
+  return documents.map((document) => ({
+    path: document.path,
+    modifiedAt: document.modifiedAt,
+    sizeBytes: document.sizeBytes,
+    ...(typeof document.heading === "string" ? { heading: document.heading } : {}),
+    ...(typeof document.excerpt === "string" ? { excerpt: document.excerpt } : {}),
+  }));
+}
+
+const FILE_CONTENT_TRUNCATION_MARKER = "[remaining file content truncated]";
+
+export function resolveWorkspaceTextReadPath(
+  workspacePath: string,
+  requestedPath: string,
+): { path: string; absolutePath: string } {
+  const workspace = workspacePath.trim().replace(/[\\/]+$/u, "");
+  if (!workspace) throw new Error("Select a workspace before reading a file.");
+  const path = requestedPath.trim().replace(/\\/gu, "/");
+  if (!path) throw new Error("file.readWorkspaceText requires a non-empty path.");
+  if (/^(?:[A-Za-z]:\/|\/|\/\/)/u.test(path)) {
+    throw new Error("file.readWorkspaceText path must be workspace-relative.");
+  }
+  if (path.split("/").some((segment) => segment === "..")) {
+    throw new Error("file.readWorkspaceText path cannot contain parent traversal.");
+  }
+  const separator = workspace.includes("\\") ? "\\" : "/";
+  return {
+    path,
+    absolutePath: `${workspace}${separator}${path.replace(/\//gu, separator)}`,
+  };
+}
+
 /**
  * Resolve the ModelProvider for a given agentKind based on ModelConfiguration.
  *
  * Resolution order:
- * 1. Explicit agent override (unchanged — user intent always wins)
+ * 1. Explicit compatible and usable agent override
  * 2. Capability-aware scoring: cross-references Agent.modelRequirements,
  *    ModelProfile.capabilities, and ProviderAdapter.capabilities
  * 3. DEFAULT_AGENT_SLOT static mapping (backward compat)
- * 4. Fallback to primary / first profile
+ * 4. Fallback to another compatible configured profile
  */
 export function resolveModelProfileForAgent(
   agentKind: string,
   config: ModelConfiguration,
   agentRegistry?: AgentRegistry,
 ): ModelProfile | undefined {
-  // Check explicit override first
+  const requirements = getDefaultAgentModelRequirements(agentKind, agentRegistry);
+
+  // An explicit override is authoritative, but it cannot waive a capability
+  // requirement or select a remote profile whose credential is known missing.
   const overrideProfileId = config.agentOverrides[agentKind];
   if (overrideProfileId) {
     const profile = config.profiles.find((p) => p.id === overrideProfileId);
-    if (profile) {
+    if (profile && isRuntimeUsableModelProfile(profile) &&
+        (!requirements || scoreProfileForAgent(profile, requirements, agentKind).penalties === 0)) {
       return profile;
     }
+    console.warn(
+      `[resolveModelForAgent] ${agentKind}: configured override ${overrideProfileId} is missing, unusable, or incompatible.`,
+    );
+    return undefined;
   }
 
-  // Capability-aware scoring: only when multiple profiles exist
-  const requirements = getDefaultAgentModelRequirements(agentKind, agentRegistry);
-  if (requirements && config.profiles.length > 1) {
-    const scored = config.profiles
-      .filter((p) => p.slot !== null)
+  const assignedProfiles = config.profiles.filter((profile) =>
+    profile.slot !== null && isRuntimeUsableModelProfile(profile)
+  );
+  if (requirements) {
+    const scored = assignedProfiles
       .map((profile) => ({
         profile,
         score: scoreProfileForAgent(profile, requirements, agentKind),
@@ -598,22 +653,42 @@ export function resolveModelProfileForAgent(
       return best.profile;
     }
 
-    // No profile satisfies requirements — warn and fall through to defaults
-    if (requirements) {
-      console.warn(
-        `[resolveModelForAgent] ${agentKind}: no profile satisfies ` +
-        `prefersVision=${requirements.prefersVision} prefersCode=${requirements.prefersCode}`,
-      );
-    }
+    console.warn(
+      `[resolveModelForAgent] ${agentKind}: no usable profile satisfies ` +
+      `prefersVision=${requirements.prefersVision} prefersCode=${requirements.prefersCode}`,
+    );
+    return undefined;
   }
 
   // DEFAULT_AGENT_SLOT mapping (backward compat)
   const defaultSlot = DEFAULT_AGENT_SLOT[agentKind] ?? "primary";
-  const slotProfile = config.profiles.find((p) => p.slot === defaultSlot);
+  const slotProfile = assignedProfiles.find((p) => p.slot === defaultSlot);
   if (slotProfile) return slotProfile;
 
-  // Fallback to primary or first profile
-  return config.profiles.find((p) => p.slot === "primary") ?? config.profiles[0];
+  return assignedProfiles.find((p) => p.slot === "primary") ?? assignedProfiles[0];
+}
+
+function isRuntimeUsableModelProfile(profile: ModelProfile): boolean {
+  if (!profile.provider.trim() || !profile.model.trim()) return false;
+  const runtimeProfile = profile as ModelProfile & {
+    apiKey?: string;
+    hasStoredApiKey?: boolean;
+  };
+  if (allowsModelProfileWithoutStoredKey(profile)) return true;
+  if (runtimeProfile.apiKey?.trim()) return true;
+  // Older callers do not carry credential status. Only an explicit false is
+  // authoritative evidence that the profile cannot be used at runtime.
+  return runtimeProfile.hasStoredApiKey !== false;
+}
+
+function allowsModelProfileWithoutStoredKey(profile: Pick<ModelProfile, "provider" | "baseUrl">): boolean {
+  const provider = profile.provider.trim().toLowerCase();
+  const baseUrl = profile.baseUrl.trim().toLowerCase();
+  return provider === "ollama" ||
+    baseUrl.startsWith("http://localhost") ||
+    baseUrl.startsWith("http://127.") ||
+    baseUrl.startsWith("http://[::1]") ||
+    baseUrl.startsWith("http://::1");
 }
 
 function resolveModelForAgent(
@@ -624,7 +699,9 @@ function resolveModelForAgent(
 ): ModelProvider {
   const profile = resolveModelProfileForAgent(agentKind, config, agentRegistry);
   if (!profile) {
-    throw new Error(`No model profile is configured for agent ${agentKind}.`);
+    throw new Error(
+      `No usable model profile satisfies the requirements for agent ${agentKind}. Configure a compatible model and credential for this agent.`,
+    );
   }
   return getOrCreateProvider(profile, providerCache);
 }
@@ -672,6 +749,7 @@ function scoreProfileForAgent(
     if (profile.capabilities.vision) {
       total += 2;
     } else {
+      penalties += 1;
       warnings.push(
         `profile ${profile.slot} lacks vision but agent ${agentKind} prefers it`,
       );
@@ -1440,6 +1518,7 @@ export function createJavisRuntime({
   const providerCache = new Map<string, ModelProvider>();
   // Pre-populate cache with fallback for backward compatibility
   providerCache.set("fallback", fallbackProvider);
+  const runtimeAgentRegistry = agentRegistry ?? createDefaultAgentRegistry();
 
   const currentModelTimeoutMs = () => runtimePreferencesToExecutionConfig(
     getRuntimePreferences?.(),
@@ -1927,16 +2006,36 @@ export function createJavisRuntime({
       },
     },
     fileTool: {
-      scanMarkdownDocuments: () => {
+      scanMarkdownDocuments: async () => {
         const workspacePath = getWorkspacePath();
         notifyWorkspaceToolActivity(
           "files",
           "file.scanMarkdownDocuments",
           `Scan Markdown documents in ${workspacePath.trim() || "(default workspace)"}.`,
         );
-        return invoke<MarkdownDocument[]>("scan_markdown_documents", {
+        const documents = await invoke<NativeMarkdownDocument[]>("scan_markdown_documents", {
           workspacePath: workspacePath.trim() || null,
         });
+        return normalizeNativeMarkdownDocuments(documents);
+      },
+      readWorkspaceText: async ({ path, maxLines }) => {
+        const resolved = resolveWorkspaceTextReadPath(getWorkspacePath(), path);
+        notifyWorkspaceToolActivity(
+          "files",
+          "file.readWorkspaceText",
+          `Read workspace text file ${resolved.path}.`,
+        );
+        const content = await invoke<string>("read_file_chunk", {
+          path: resolved.absolutePath,
+          maxLines: maxLines ?? 200,
+          workspaceRoot: getWorkspacePath().trim(),
+          allowedRootIds: null,
+        });
+        return {
+          path: resolved.path,
+          content,
+          truncated: content.endsWith(FILE_CONTENT_TRUNCATION_MARKER),
+        };
       },
       planPdfOrganization: (taskId?: string) =>
         invoke<FileOrganizationPlan>("plan_pdf_organization", { taskId }),
@@ -2190,6 +2289,47 @@ export function createJavisRuntime({
         );
         return runReadOnlyCommand(request);
       },
+      planWorkspaceCommand: async (request, taskId) => {
+        const workspacePath = getWorkspacePath().trim();
+        const plan = await invoke<Omit<WorkspaceCommandPlan, "dryRun">>("plan_workspace_command", {
+          request: {
+            taskId,
+            program: request.program,
+            args: request.args,
+            workspacePath: workspacePath || null,
+          },
+        });
+        return {
+          ...plan,
+          dryRun: {
+            operation: "shell.runWorkspaceCommand",
+            affectedPaths: [{
+              source: plan.command,
+              target: plan.cwd,
+              action: "modify" as const,
+            }],
+            riskSummary: "Runs approved project code with writes restricted to the selected workspace.",
+            reversible: false,
+          },
+        };
+      },
+      runWorkspaceCommand: async (request, approval) => {
+        const workspacePath = getWorkspacePath().trim();
+        await invoke("approve_workspace_command", { request: approval });
+        notifyWorkspaceToolActivity(
+          "terminal",
+          "shell.runWorkspaceCommand",
+          `Run approved workspace command: ${request.program} ${request.args.join(" ")}`.trim(),
+        );
+        return invoke<ShellCommandOutput>("run_approved_workspace_command", {
+          request: {
+            ...approval,
+            program: request.program,
+            args: request.args,
+            workspacePath: workspacePath || null,
+          },
+        });
+      },
     },
     codeTool: {
       inspectRepository: async (): Promise<CodeReviewPreview> => {
@@ -2216,6 +2356,17 @@ export function createJavisRuntime({
           diffStat: diffStat.stdout,
           diff: diff.stdout,
         };
+      },
+      inspectWorkspace: async (request = {}) => {
+        const workspaceRoot = getWorkspacePath().trim();
+        notifyWorkspaceToolActivity(
+          "review",
+          "code.inspectWorkspace",
+          "Inspect selected workspace structure.",
+        );
+        return inspectWorkspaceTree(workspaceRoot, request, {
+          listDirectory: (path) => listDirectory(path, { workspaceRoot }),
+        });
       },
       searchRepository: async (request): Promise<CodeRepositorySearchResult> => {
         notifyWorkspaceToolActivity(
@@ -2659,11 +2810,24 @@ export function createJavisRuntime({
         const jsonStr = result.text.slice(startIdx, endIdx + 1);
         return JSON.parse(jsonStr) as Record<string, unknown>;
       },
-      create: async (definition: Record<string, unknown>) => {
-        await saveWorkspaceDefinition(definition as unknown as WorkspaceDefinition);
+      planCreate: async (definition: Record<string, unknown>, taskId?: string) => {
+        return planWorkspaceDefinitionCreate(
+          definition as unknown as WorkspaceDefinition,
+          taskId,
+        );
       },
-      delete: async (workspaceId: string) => {
-        await deleteWorkspaceDefinition(workspaceId);
+      create: async (definition: Record<string, unknown>, approvalId: string, taskId?: string) => {
+        await saveWorkspaceDefinition(
+          definition as unknown as WorkspaceDefinition,
+          approvalId,
+          taskId,
+        );
+      },
+      planDelete: async (workspaceId: string, taskId?: string) => {
+        return planWorkspaceDefinitionDelete(workspaceId, taskId);
+      },
+      delete: async (workspaceId: string, approvalId: string, taskId?: string) => {
+        await deleteWorkspaceDefinition(workspaceId, approvalId, taskId);
       },
     } satisfies WorkspaceTool,
     webTool: {
@@ -2812,6 +2976,14 @@ export function createJavisRuntime({
     reactDecideNext: async (request: ReActDecisionRequest): Promise<AgentReActDecision> => {
       const localizedRequest = { ...request, locale: "zh-CN" };
       const prompt = buildReActDecisionUserPrompt(localizedRequest);
+      const reactAgent = runtimeAgentRegistry.findByKind(request.agentKind)?.agent;
+      const reactAgentInstructions = reactAgent
+        ? getAgentSystemPrompt(reactAgent, "zh-CN")
+        : undefined;
+      const reactSystemPrompt = buildReActDecisionSystemPrompt(
+        "zh-CN",
+        reactAgentInstructions,
+      );
       let resultText = "";
       try {
         // ReAct has an explicit trusted system contract. Do not append the
@@ -2819,7 +2991,7 @@ export function createJavisRuntime({
         // runtime observations and handoff data remain in the user payload.
         const modelProvider = providerFor(request.agentKind, false);
         const result = await modelProvider.complete(prompt, {
-          systemPrompt: buildReActDecisionSystemPrompt("zh-CN"),
+          systemPrompt: reactSystemPrompt,
           maxTokens: 1200,
           temperature: 0,
           disableThinking: true,
@@ -2839,7 +3011,7 @@ export function createJavisRuntime({
           modelProvider,
           (value) => parseAgentReActDecision(normalizeReActDecisionModelValue(value)),
           {
-            systemPrompt: buildReActDecisionSystemPrompt("zh-CN"),
+            systemPrompt: reactSystemPrompt,
             locale: "zh-CN",
             timeoutMs: currentModelTimeoutMs(),
             skipAgentMemory: true,
@@ -3414,12 +3586,19 @@ async function parseNormalizeWithRepair<T>(
     if (!isJsonParseFailure(error)) {
       throw error;
     }
+    // Layer 5 lexical pre-filter: scan the raw output with deterministic
+    // regex rules and hand the findings to the JSON repair call so the
+    // model gets precise diagnostics instead of a bare parse failure.
+    const lexicalIssues = scanRawPlanOutputText(rawText);
     const repairLocale = completionOptions.locale ?? "zh-CN";
-    const repaired = await modelProvider.complete(buildJsonRepairPrompt(originalPrompt, rawText, repairLocale), {
-      ...streamOptions,
-      ...completionOptions,
-      locale: repairLocale,
-    });
+    const repaired = await modelProvider.complete(
+      buildJsonRepairPrompt(originalPrompt, rawText, repairLocale, lexicalIssues),
+      {
+        ...streamOptions,
+        ...completionOptions,
+        locale: repairLocale,
+      },
+    );
     if (repaired.tokenUsage) onUsage?.(repaired.tokenUsage);
     assertStructuredOutputWasNotTruncated(repaired.finishReason);
     return normalize(parseJsonObject(repaired.text));
@@ -3434,8 +3613,30 @@ function assertStructuredOutputWasNotTruncated(finishReason?: string): void {
   }
 }
 
-function buildJsonRepairPrompt(originalPrompt: string, rawText: string, locale = "en"): string {
+function buildJsonRepairPrompt(
+  originalPrompt: string,
+  rawText: string,
+  locale = "en",
+  lexicalIssues: RawPlanLexicalIssue[] = [],
+): string {
   const promptLocale = normalizePromptLocale(locale);
+  const findings = [
+    promptLocale === "zhCN"
+      ? "- [json_parse_failure] JSON 解析器拒绝了该输出；内容可能被截断，或包含未闭合的对象、数组或字符串。"
+      : "- [json_parse_failure] The JSON parser rejected this output; it may be truncated or contain an unclosed object, array, or string.",
+    ...lexicalIssues.map((issue) =>
+      `- [${issue.kind}] ${issue.message}${issue.sample ? ` (${issue.sample})` : ""}`
+    ),
+  ];
+  const findingsBlock = findings.length > 0
+    ? [
+        promptLocale === "zhCN"
+          ? "本地确定性预检发现的问题（必须全部修复）:"
+          : "Findings from the deterministic local pre-check (fix all of them):",
+        ...findings,
+        "",
+      ]
+    : [];
   return (promptLocale === "zhCN"
     ? [
         "你之前的输出不是所需 schema 的有效 JSON。",
@@ -3443,6 +3644,7 @@ function buildJsonRepairPrompt(originalPrompt: string, rawText: string, locale =
         "只修复语法/结构；保留语义，不补事实，不改变决策。",
         "只返回 JSON 对象。不要使用 Markdown 代码块。不要解释。",
         "",
+        ...findingsBlock,
         "原始指令:",
         originalPrompt,
         "",
@@ -3455,6 +3657,7 @@ function buildJsonRepairPrompt(originalPrompt: string, rawText: string, locale =
         "Only repair syntax/shape; preserve semantics, do not add facts, and do not change decisions.",
         "Return ONLY the JSON object. Do not use markdown fences. Do not explain.",
         "",
+        ...findingsBlock,
         "Original instruction:",
         originalPrompt,
         "",

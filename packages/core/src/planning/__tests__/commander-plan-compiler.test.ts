@@ -29,6 +29,7 @@ function makeInput(overrides: Partial<CompileCommanderPlanInput> & { plan: Comma
         kind: "code",
         allowedToolNames: [
           "code.inspectRepository",
+          "code.inspectWorkspace",
           "code.searchRepository",
           "shell.runReadOnlyCommand",
           "git.stageFiles",
@@ -41,16 +42,27 @@ function makeInput(overrides: Partial<CompileCommanderPlanInput> & { plan: Comma
       { kind: "computer", allowedToolNames: ["computer.listDirectory", "computer.openPath", "computer.screenshot"] },
       { kind: "verifier", allowedToolNames: ["verifier.check"] },
       { kind: "research", allowedToolNames: ["web.search", "web.fetchSource"] },
+      { kind: "test-runner", allowedToolNames: ["shell.runReadOnlyCommand", "shell.runWorkspaceCommand"] },
     ],
     availableTools: [
       makeToolDescriptor("commander.plan", { capabilityTags: ["planning"], ownerAgentKinds: ["commander"] }),
       makeToolDescriptor("commander.synthesize", { capabilityTags: ["synthesis"], ownerAgentKinds: ["commander"] }),
       makeToolDescriptor("commander.askUser", { capabilityTags: ["clarification"], ownerAgentKinds: ["commander"] }),
       makeToolDescriptor("code.inspectRepository", { capabilityTags: ["git_inspect"], ownerAgentKinds: ["code", "explorer"] }),
+      makeToolDescriptor("code.inspectWorkspace", { capabilityTags: ["workspace_inspect"], ownerAgentKinds: ["code"] }),
       makeToolDescriptor("code.searchRepository", { capabilityTags: ["code_search"], ownerAgentKinds: ["code"] }),
       makeToolDescriptor("shell.runReadOnlyCommand", {
         capabilityTags: ["shell_readonly"],
         ownerAgentKinds: ["shell", "code"],
+        requiredInputs: [
+          { name: "program", type: "string", nonEmpty: true },
+          { name: "args", type: "string[]", nonEmpty: true },
+        ],
+      }),
+      makeToolDescriptor("shell.runWorkspaceCommand", {
+        permissionLevel: "confirmed_write",
+        capabilityTags: ["shell_execute"],
+        ownerAgentKinds: ["shell", "code", "verifier", "build-fix", "test-runner"],
         requiredInputs: [
           { name: "program", type: "string", nonEmpty: true },
           { name: "args", type: "string[]", nonEmpty: true },
@@ -116,8 +128,9 @@ function makeInput(overrides: Partial<CompileCommanderPlanInput> & { plan: Comma
         ],
       }),
     ],
-    supportedApprovalGatedTools: ["git.stageFiles", "git.createCommit", "git.createPullRequest", "git.commentPullRequest", "file.writeText"],
+    supportedApprovalGatedTools: ["git.stageFiles", "git.createCommit", "git.createPullRequest", "git.commentPullRequest", "file.writeText", "shell.runWorkspaceCommand"],
     preloadedContextKeys: ["userGoal", "taskId"],
+    planIntents: { write: false, export: false, statistics: false, retrieval: false },
     ...overrides,
   };
 }
@@ -314,7 +327,170 @@ describe("compileCommanderPlan", () => {
         },
       ],
     };
-    const result = compileCommanderPlan(makeInput({ plan }));
+    const result = compileCommanderPlan(makeInput({
+      plan,
+      planIntents: { write: true, export: false, statistics: false, retrieval: false },
+    }));
+    expect(result.ok).toBe(true);
+  });
+
+  it("compiles the governed test-runner route for a short real test request", () => {
+    const result = compileCommanderPlan(makeInput({
+      userGoal: "跑一下 core 的测试",
+      plan: {
+        title: "Run core tests",
+        reasoning: "Use the governed workspace command.",
+        steps: [{
+          id: "run-core-tests",
+          title: "Run core tests",
+          assignedAgentKind: "test-runner",
+          toolName: "shell.runWorkspaceCommand",
+          toolInput: { program: "pnpm", args: ["--filter", "@javis/core", "test"] },
+          requiredCapabilities: ["shell_execute"],
+          executionMode: "direct_tool_call",
+          dependsOn: [],
+          outputContextKey: "testResult",
+          successCriteria: "Core tests exit successfully.",
+        }],
+      },
+    }));
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects Computer routing for attached-image OCR and requires the matching Vision tool", () => {
+    const userGoal = "看看这张图写了什么 data:image/png;base64,AA==";
+    const misroutedPlan: CommanderDagPlan = {
+      title: "Read image",
+      reasoning: "Inspect the image.",
+      steps: [{
+        id: "inspect-screen",
+        title: "Inspect screen",
+        assignedAgentKind: "computer",
+        toolName: "computer.screenshot",
+        requiredCapabilities: ["desktop_screenshot"],
+        executionMode: "direct_tool_call",
+        dependsOn: [],
+        successCriteria: "Image text is available.",
+      }],
+    };
+    const baseInput = makeInput({ plan: misroutedPlan, userGoal });
+    const availableAgents = [
+      ...baseInput.availableAgents,
+      { kind: "vision", allowedToolNames: ["vision.analyze", "vision.extractText"], capabilities: ["image_analyze", "image_ocr"] },
+    ];
+    const availableTools = [
+      ...baseInput.availableTools,
+      makeToolDescriptor("vision.analyze", {
+        capabilityTags: ["image_analyze"],
+        ownerAgentKinds: ["vision"],
+        requiredInputs: [{ name: "imagePath", type: "string", nonEmpty: true }],
+      }),
+      makeToolDescriptor("vision.extractText", {
+        capabilityTags: ["image_ocr"],
+        ownerAgentKinds: ["vision"],
+        requiredInputs: [{ name: "imagePath", type: "string", nonEmpty: true }],
+      }),
+    ];
+
+    const misrouted = compileCommanderPlan({
+      ...baseInput,
+      availableAgents,
+      availableTools,
+      preloadedContextKeys: [...(baseInput.preloadedContextKeys ?? []), "imagePath"],
+    });
+    expect(misrouted.ok).toBe(false);
+    if (!misrouted.ok) {
+      expect(misrouted.diagnostics.map((diagnostic) => diagnostic.code)).toEqual(expect.arrayContaining([
+        "MISSING_REQUIRED_AGENT_ROUTE",
+        "MISSING_REQUIRED_ROUTE_TOOL",
+      ]));
+    }
+
+    const valid = compileCommanderPlan({
+      ...baseInput,
+      plan: {
+        title: "Read image",
+        reasoning: "Use OCR on the provided image.",
+        steps: [{
+          id: "extract-image-text",
+          title: "Extract image text",
+          assignedAgentKind: "vision",
+          toolName: "vision.extractText",
+          requiredCapabilities: ["image_ocr"],
+          executionMode: "direct_tool_call",
+          dependsOn: [],
+          inputContextKeys: ["imagePath"],
+          successCriteria: "Visible text is extracted.",
+        }],
+      },
+      availableAgents,
+      availableTools,
+      preloadedContextKeys: [...(baseInput.preloadedContextKeys ?? []), "imagePath"],
+    });
+    expect(valid.ok, valid.ok ? undefined : JSON.stringify(valid.diagnostics, null, 2)).toBe(true);
+  });
+
+  it("rejects the read-only shell tool for a short real test request", () => {
+    const result = compileCommanderPlan(makeInput({
+      userGoal: "跑一下 core 的测试",
+      plan: {
+        title: "Run core tests",
+        reasoning: "Use a shell command.",
+        steps: [{
+          id: "run-core-tests",
+          title: "Run core tests",
+          assignedAgentKind: "test-runner",
+          toolName: "shell.runReadOnlyCommand",
+          toolInput: { program: "pnpm", args: ["--filter", "@javis/core", "test"] },
+          requiredCapabilities: ["shell_readonly"],
+          executionMode: "direct_tool_call",
+          dependsOn: [],
+          successCriteria: "Core tests exit successfully.",
+        }],
+      },
+    }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.diagnostics).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "MISSING_REQUIRED_ROUTE_TOOL" }),
+      ]));
+    }
+  });
+
+  it("requires clarification before scanning an unresolved code reference", () => {
+    const result = compileCommanderPlan(makeInput({
+      plan: validPlan(),
+      userGoal: "这块代码该重构吗？",
+    }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.diagnostics).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "MISSING_REQUIRED_CLARIFICATION" }),
+      ]));
+    }
+  });
+
+  it("accepts a ready askUser step for an unresolved code reference", () => {
+    const result = compileCommanderPlan(makeInput({
+      userGoal: "这块代码该重构吗？",
+      plan: {
+        title: "Clarify refactor target",
+        reasoning: "The target is not present in the request.",
+        steps: [{
+          id: "ask-target",
+          title: "请提供文件路径、函数名或粘贴代码",
+          assignedAgentKind: "commander",
+          toolName: "commander.askUser",
+          requiredCapabilities: ["clarification"],
+          dependsOn: [],
+          successCriteria: "The refactor target is identified.",
+        }],
+      },
+    }));
+
     expect(result.ok).toBe(true);
   });
 
@@ -333,7 +509,10 @@ describe("compileCommanderPlan", () => {
         successCriteria: "The report is written.",
       }],
     };
-    const result = compileCommanderPlan(makeInput({ plan }));
+    const result = compileCommanderPlan(makeInput({
+      plan,
+      planIntents: { write: true, export: false, statistics: false, retrieval: false },
+    }));
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(result.diagnostics.some(
@@ -1015,6 +1194,72 @@ describe("compileCommanderPlan", () => {
       expect(diagnostic?.message).toContain("role capability");
       expect(diagnostic?.suggestedFix).toContain("react");
       expect(result.repairable).toBe(true);
+    }
+  });
+
+  it("infers the registered specialist role as the primary capability for a ReAct step", () => {
+    const plan: CommanderDagPlan = {
+      title: "Review documentation",
+      reasoning: "Use the documentation specialist.",
+      steps: [{
+        id: "review-docs",
+        title: "Review documentation",
+        assignedAgentKind: "doc-updater",
+        requiredCapabilities: [],
+        dependsOn: [],
+        executionMode: "react",
+        successCriteria: "Documentation findings are reported.",
+      }],
+    };
+    const result = compileCommanderPlan(makeInput({
+      plan,
+      availableAgents: [
+        ...makeInput({ plan }).availableAgents,
+        {
+          kind: "doc-updater",
+          allowedToolNames: ["file.scanMarkdownDocuments"],
+          capabilities: ["doc_update"],
+        },
+      ],
+    }));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.plan.steps[0]?.primaryCapability).toBe("doc_update");
+    }
+  });
+
+  it("does not guess a specialist primary capability that is absent from the registry", () => {
+    const plan: CommanderDagPlan = {
+      title: "Review documentation",
+      reasoning: "Use the documentation specialist.",
+      steps: [{
+        id: "review-docs",
+        title: "Review documentation",
+        assignedAgentKind: "doc-updater",
+        requiredCapabilities: [],
+        dependsOn: [],
+        executionMode: "react",
+        successCriteria: "Documentation findings are reported.",
+      }],
+    };
+    const result = compileCommanderPlan(makeInput({
+      plan,
+      availableAgents: [
+        ...makeInput({ plan }).availableAgents,
+        {
+          kind: "doc-updater",
+          allowedToolNames: ["file.scanMarkdownDocuments"],
+          capabilities: [],
+        },
+      ],
+    }));
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.diagnostics.some((diagnostic) =>
+        diagnostic.code === "MISSING_PRIMARY_CAPABILITY"
+      )).toBe(true);
     }
   });
 

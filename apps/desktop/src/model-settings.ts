@@ -15,6 +15,8 @@ export interface ModelProfile {
   provider: string;
   model: string;
   apiKeyReference: string;
+  /** Runtime credential availability; never contains the secret itself. */
+  hasStoredApiKey?: boolean;
   baseUrl: string;
   contextTokens?: number;
   capabilities: {

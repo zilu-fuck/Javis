@@ -22,9 +22,10 @@ import { cosineSimilarity, createHashedTextVector } from "./local-text-embedding
 
 export interface RepositoryFileSearchResult {
   path: string;
-  line?: number;
-  preview?: string;
-  provider?: string;
+  /** Native optional fields may arrive as null across the Tauri JSON boundary. */
+  line?: number | null;
+  preview?: string | null;
+  provider?: string | null;
 }
 
 export interface RepositoryFileSearchRequest {
@@ -1312,11 +1313,12 @@ function normalizeFileSearchResult(
   result: RepositoryFileSearchResult,
   query: string,
 ): RepositorySearchResult {
+  const line = normalizePositiveInteger(result.line);
   return {
     path: result.path,
-    line: result.line,
     excerpt: result.preview?.trim() || result.path,
     matchedTerms: [query],
+    ...(line === undefined ? {} : { line }),
   };
 }
 
@@ -1325,13 +1327,20 @@ function normalizeTraceSearchResult(
   query: string,
   target: string,
 ): RepositoryTraceEvidence {
+  const line = normalizePositiveInteger(result.line);
   return {
     path: result.path,
-    line: result.line,
     excerpt: result.preview?.trim() || result.path,
     matchedTerms: [query],
-    symbol: inferResultSymbol(result.preview, target),
+    symbol: inferResultSymbol(result.preview ?? undefined, target),
+    ...(line === undefined ? {} : { line }),
   };
+}
+
+function normalizePositiveInteger(value: number | null | undefined): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1
+    ? value
+    : undefined;
 }
 
 function inferResultSymbol(preview: string | undefined, target: string): string | undefined {

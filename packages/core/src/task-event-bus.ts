@@ -563,6 +563,7 @@ const TOOL_DISPLAY_NAMES: Record<string, string> = {
   "file.writeText": "文本写入",
   "shell.runReadOnlyCommand": "只读命令检查",
   "code.inspectRepository": "仓库变更检查",
+  "code.inspectWorkspace": "工作区结构检查",
   "code.searchRepository": "代码库检索",
   "code.traceCallChain": "调用链追踪",
   "code.proposeEdit": "代码修改预览",

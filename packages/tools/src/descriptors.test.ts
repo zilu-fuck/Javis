@@ -10,6 +10,38 @@ describe("tool descriptors", () => {
     expect(descriptor?.writeRiskLevel).toBe("risky");
   });
 
+  it("governs project scripts as approval-gated workspace commands", () => {
+    const descriptor = initialToolDescriptors.find(
+      (tool) => tool.name === "shell.runWorkspaceCommand",
+    );
+
+    expect(descriptor?.permissionLevel).toBe("confirmed_write");
+    expect(descriptor?.writeRiskLevel).toBe("risky");
+    expect(descriptor?.capabilityTags).toEqual(["shell_execute"]);
+    expect(descriptor?.ownerAgentKinds).toContain("test-runner");
+    expect(descriptor?.inputSchema).toBeDefined();
+    if (!descriptor?.inputSchema) return;
+    expect(validateToolSchema(descriptor.inputSchema, {
+      program: "pnpm",
+      args: ["--filter", "@javis/core", "test"],
+    })).toBeUndefined();
+    expect(validateToolSchema(descriptor.inputSchema, {
+      program: "pnpm",
+      args: ["test"],
+      workspacePath: "C:/outside",
+    })).toContain("undeclared field: workspacePath");
+  });
+
+  it("marks document persistence tools with a shared write-intent gate", () => {
+    for (const name of ["file.planWriteText", "file.writeText"]) {
+      const descriptor = initialToolDescriptors.find((tool) => tool.name === name);
+      expect(descriptor?.requiredPlanIntent, name).toBe("write");
+    }
+    expect(initialToolDescriptors.find(
+      (tool) => tool.name === "shell.runWorkspaceCommand",
+    )?.requiredPlanIntent).toBeUndefined();
+  });
+
   it("declares a generic Page Agent fallback for structured trend failures", () => {
     const descriptor = initialToolDescriptors.find((tool) => tool.name === "trend.fetchHotList");
 
@@ -27,6 +59,7 @@ describe("tool descriptors", () => {
       "computer.listDirectory",
       "file.scanMarkdownDocuments",
       "code.inspectRepository",
+      "code.inspectWorkspace",
       "code.searchRepository",
       "code.traceCallChain",
     ];
@@ -42,6 +75,24 @@ describe("tool descriptors", () => {
         maxOutputBytes: 262_144,
       });
     }
+  });
+
+  it("governs bounded workspace inspection without a model-supplied path", () => {
+    const descriptor = initialToolDescriptors.find(
+      (tool) => tool.name === "code.inspectWorkspace",
+    );
+    expect(descriptor?.permissionLevel).toBe("read");
+    expect(descriptor?.ownerAgentKinds).toEqual(["code"]);
+    expect(descriptor?.requiredInputs).toBeUndefined();
+    expect(descriptor?.inputSchema).toBeDefined();
+    if (!descriptor?.inputSchema) return;
+
+    expect(validateToolSchema(descriptor.inputSchema, {
+      maxDepth: 5,
+    })).toContain("less than or equal to 4");
+    expect(validateToolSchema(descriptor.inputSchema, {
+      path: "C:/Windows",
+    })).toContain("undeclared field: path");
   });
 
   it("rejects unknown and out-of-range repository search input", () => {
@@ -77,6 +128,33 @@ describe("tool descriptors", () => {
       testFileCandidates: [],
       clusters: [],
       attempts: [],
+    })).toBeUndefined();
+  });
+
+  it("governs exact workspace text reads with a strict bounded contract", () => {
+    const descriptor = initialToolDescriptors.find(
+      (tool) => tool.name === "file.readWorkspaceText",
+    );
+    expect(descriptor?.permissionLevel).toBe("read");
+    expect(descriptor?.capabilityTags).toEqual(["workspace_text_read"]);
+    expect(descriptor?.ownerAgentKinds).toContain("code");
+    expect(descriptor?.ownerAgentKinds).toContain("doc-updater");
+    expect(descriptor?.inputSchema).toBeDefined();
+    expect(descriptor?.outputSchema).toBeDefined();
+    if (!descriptor?.inputSchema || !descriptor.outputSchema) return;
+
+    expect(validateToolSchema(descriptor.inputSchema, {
+      path: "package.json",
+      maxLines: 80,
+    })).toBeUndefined();
+    expect(validateToolSchema(descriptor.inputSchema, {
+      path: "package.json",
+      workspaceEvidence: {},
+    })).toContain("undeclared field: workspaceEvidence");
+    expect(validateToolSchema(descriptor.outputSchema, {
+      path: "package.json",
+      content: "{}",
+      truncated: false,
     })).toBeUndefined();
   });
 

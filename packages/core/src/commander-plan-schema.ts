@@ -14,6 +14,14 @@
 
 import { normalizePromptLocale, type AgentPromptLocale } from "./agents/prompt/styleLoader";
 import {
+  buildCommanderPlanTemplateSkeleton,
+  detectCommanderPlanIntents,
+} from "./planning/plan-legality";
+import {
+  inferCommanderRouteRequirements,
+  resolveCommanderRouteAvailability,
+} from "./planning/commander-route-contract";
+import {
   CommanderDagStepT,
   CommanderDagPlanT,
   StepExecutionModeT,
@@ -107,6 +115,7 @@ export interface CommanderPlanPromptParams {
     summary: string;
     capabilityTags: string[];
     ownerAgentKinds: string[];
+    requiredPlanIntent?: "write";
     inputSchema?: import("@javis/tools").ToolJsonSchema;
     requiredInputs?: Array<{
       name: string;
@@ -146,16 +155,117 @@ export function buildCommanderPlanPrompt(params: CommanderPlanPromptParams): str
 
 export function buildCommanderPlanSystemPrompt(params: CommanderPlanPromptParams): string {
   const locale = normalizePromptLocale(params.locale);
+  const planIntents = detectCommanderPlanIntents(params.userGoal);
   return [
     ...getCommanderPlanIntro(locale),
     COMMANDER_PLAN_SCHEMA_PROMPT,
+    ...getCommanderPlanTemplateBlock(locale),
     ...getCommanderDelegationRules(),
     "UI handoff: Computer -> Code; Computer writes outputContextKey=\"uiEvidence\", Code consumes inputContextKeys=[\"uiEvidence\"].",
-    "Local project understanding: assignedAgentKind=\"code\" uses toolName=\"code.searchRepository\" (trace if needed); the most relevant available reviewer checks its evidence; final Commander consumes both. Do not answer with direct_response from README.",
-    "Specialist routing rule: use security-reviewer, language-reviewer, test-runner, build-fix, doc-updater, perf-analyzer, refactor, or explorer as appropriate; each writes outputContextKey.",
+    "Local project understanding: first gather a bounded workspace inventory with assignedAgentKind=\"code\", toolName=\"code.inspectWorkspace\", executionMode=\"direct_tool_call\"; code.searchRepository and Explorer/code_explore may only supplement that artifact afterward. The most relevant available reviewer checks the workspace evidence; final Commander consumes both. Do not answer with direct_response from README.",
+    "Specialist routing rule: use vision, security-reviewer, language-reviewer, test-runner, build-fix, doc-updater, perf-analyzer, refactor, or explorer as appropriate; each writes outputContextKey.",
+    ...getDetectedAgentRouteRules(params),
     "",
     ...getCommanderPlanRules(locale, Boolean(params.workspacePath?.trim())),
+    ...getCommanderPlanConditionalRules(locale, planIntents, params.availableTools),
   ].filter(Boolean).join("\n");
+}
+
+/**
+ * Layer 1/3 — conditional output rules. These state the schema's
+ * conditional constraints explicitly (the compact schema text only lists
+ * fields/types/enums); every rule here has a compile-gate counterpart in
+ * `commander-plan-validator.ts`, so a violating plan is rejected and sent
+ * to the repair loop with a precise diagnostic.
+ */
+function getCommanderPlanConditionalRules(
+  locale: AgentPromptLocale,
+  planIntents: ReturnType<typeof detectCommanderPlanIntents>,
+  availableTools: CommanderPlanPromptParams["availableTools"],
+): string[] {
+  const governedWriteIntentToolNames = availableTools
+    ?.filter((tool) => tool.requiredPlanIntent === "write")
+    .map((tool) => tool.name) ?? [];
+  const writeIntentToolNames = governedWriteIntentToolNames.length > 0
+    ? governedWriteIntentToolNames
+    : ["file.writeText"];
+  const writeIntentTools = writeIntentToolNames.join(", ");
+  const projectUnderstandingRules = planIntents.projectUnderstanding && !planIntents.desktopInteraction
+    ? [locale === "zhCN"
+        ? "- \u672c\u6b21\u662f\u5df2\u9009\u5de5\u4f5c\u533a\u7684\u9879\u76ee\u7406\u89e3\u4efb\u52a1\uff1a\u9996\u5148\u7528 Code Agent \u7684 code.inspectWorkspace + direct_tool_call \u6536\u96c6\u6709\u754c\u76ee\u5f55\u3001\u6a21\u5757\u7ebf\u7d22\u548c\u98ce\u9669\u6307\u793a\uff0c\u518d\u4ea4\u7ed9 verifier \u548c Commander\uff1bcode.searchRepository \u4e0e Explorer/code_explore \u53ea\u80fd\u5728\u6b64\u8bc1\u636e\u4e4b\u540e\u8865\u5145\u8ffd\u8e2a\uff0c\u7981\u6b62\u7528 Computer Agent \u7684\u672c\u5730\u6d4f\u89c8\u5de5\u5177\u4ee3\u66ff\u9879\u76ee\u68c0\u67e5\u3002"
+        : "- This is a selected-workspace project-understanding task: first gather a bounded directory/module/risk inventory with Code Agent code.inspectWorkspace + direct_tool_call, then hand it to verifier and Commander; code.searchRepository and Explorer/code_explore may only supplement that artifact afterward, and Computer Agent local-browsing tools must not substitute for project inspection."]
+    : [];
+  if (locale === "zhCN") {
+    return [
+      "条件规则（编译期强制）:",
+      "- react 步必须声明 primaryCapability（循环唯一归属能力）。",
+      "- direct_tool_call 步必须声明 toolName（或恰好一个可解析 capability）。",
+      `- 用户未要求落盘/导出/生成文档时禁止需要 write 意图的工具（${writeIntentTools}）；直接回答。`,
+      ...(planIntents.write
+        ? []
+        : [`- 本次任务无落盘意图：不要安排 ${writeIntentTools}。`]),
+      ...projectUnderstandingRules,
+    ];
+  }
+  return [
+    "Conditional rules (compile-enforced):",
+    "- \"react\" steps must declare primaryCapability (the single capability owning the loop).",
+    "- \"direct_tool_call\" steps must declare toolName (or exactly one resolvable capability).",
+    `- Do not plan tools requiring write intent (${writeIntentTools}) unless the goal asks to persist, export, or produce a document.`,
+    ...(planIntents.write
+      ? []
+      : [`- This task has no file-output intent: do NOT plan ${writeIntentTools}.`]),
+    ...projectUnderstandingRules,
+  ];
+}
+
+function getDetectedAgentRouteRules(params: CommanderPlanPromptParams): string[] {
+  const availability = resolveCommanderRouteAvailability(
+    inferCommanderRouteRequirements(params.userGoal),
+    params.availableAgents,
+    params.availableTools ?? [],
+  );
+  return availability.map((route) => {
+    if (!route.available) {
+      const missing = [
+        ...(route.missingAgent ? [`agent ${route.requirement.agentKind}`] : []),
+        ...route.missingToolNames.map((toolName) => `tool ${toolName}`),
+        ...(route.missingRequiredAnyToolNames.length > 0
+          ? [`one of ${route.missingRequiredAnyToolNames.join(", ")}`]
+          : []),
+        ...(route.missingAvailabilityToolNames.length > 0
+          ? [`one of ${route.missingAvailabilityToolNames.join(", ")}`]
+          : []),
+      ].join("; ");
+      return `Required route unavailable: ${route.requirement.reason} needs ${missing}. Do not substitute an unrelated agent or claim completion; state that the capability is unavailable or ask the user to enable it.`;
+    }
+    const toolRule = route.requirement.requiredToolNames.length > 0
+      ? ` Required tool steps: ${route.requirement.requiredToolNames.join(", ")}; use direct_tool_call and descriptor-required inputs.`
+      : "";
+    const anyToolRule = (route.requirement.requiredAnyToolNames?.length ?? 0) > 0
+      ? ` Required evidence tool: use at least one of ${route.requirement.requiredAnyToolNames!.join(", ")} with direct_tool_call and descriptor-required inputs.`
+      : "";
+    const routeRule = route.requirement.agentKind === "vision"
+      ? " Analyze the provided image directly; do not use Computer Agent unless the user asks to capture or operate the desktop."
+      : route.requirement.agentKind === "test-runner"
+        ? " Test, typecheck, and build commands require explicit user approval through shell.runWorkspaceCommand."
+        : "";
+    return `Required agent route: ${route.requirement.agentKind} (${route.requirement.reason}). The plan must assign this work to that agent.${toolRule}${anyToolRule}${routeRule}`;
+  });
+}
+
+/**
+ * Layer 4 — preset JSON template. The program owns the structure (field
+ * set, default arrays, fixed fields); the model fills task-specific
+ * content only. Keeps the model from inventing its own JSON shape.
+ */
+function getCommanderPlanTemplateBlock(locale: AgentPromptLocale): string[] {
+  return [
+    locale === "zhCN"
+      ? "按此 JSON 骨架填空：只填任务内容；每步复制 step 对象；不用的可选字段留空或省略。"
+      : "Fill this JSON skeleton: task content only; duplicate the step object per step; omit unused optional fields.",
+    buildCommanderPlanTemplateSkeleton(),
+  ];
 }
 
 export function buildCommanderTaskPrompt(params: {

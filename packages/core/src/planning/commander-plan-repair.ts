@@ -29,6 +29,12 @@ import { isRepairable } from "./commander-plan-diagnostics";
 import { CommanderDagPlanShape } from "./schema";
 import { CommanderPlanResultShape } from "@javis/tools";
 import { normalizeStepContract } from "../step-protocol";
+import { inferCommanderRouteRequirements } from "./commander-route-contract";
+import {
+  applyDeterministicPlanRepairs,
+  detectCommanderPlanIntents,
+  type CommanderPlanIntents,
+} from "./plan-legality";
 
 // --- Public types ------------------------------------------------------------
 
@@ -38,6 +44,14 @@ export interface RepairAttemptRecord {
   diagnostics: PlanDiagnostic[];
   /** The repaired plan returned by the model on this attempt (if any). */
   repairedPlan?: CommanderDagPlan;
+  /**
+   * "deterministic" attempts ran the local rule-based fixer (Layer 2)
+   * without a model call; "model" attempts asked the Commander to repair.
+   * Absent on records produced before the channel split — treat as "model".
+   */
+  channel?: "deterministic" | "model";
+  /** Notes from deterministic local repairs applied on this attempt. */
+  repairNotes?: string[];
 }
 
 export interface AttemptPlanRepairInput {
@@ -62,6 +76,8 @@ export interface AttemptPlanRepairInput {
   }>;
   supportedApprovalGatedTools?: string[];
   preloadedContextKeys?: string[];
+  /** Defaults to detecting intents again from `originalUserGoal`. */
+  planIntents?: CommanderPlanIntents;
   locale?: string;
   workflowId?: string;
   maxAttempts?: number;
@@ -100,7 +116,10 @@ const DEFAULT_MAX_REPAIR_ATTEMPTS = 2;
  * etc.). Callers MUST treat that as a stable INVALID_PLAN_SHAPE diagnostic
  * instead of letting the exception escape the repair loop.
  */
-function normalizeResultToDagPlan(result: CommanderPlanResult): CommanderDagPlan {
+function normalizeResultToDagPlan(
+  result: CommanderPlanResult,
+  options: { workspacePath?: string } = {},
+): CommanderDagPlan {
   // Stage 1: structural validation against the LLM-raw Zod shape.
   // `CommanderPlanResultShape` is the single source for the LLM
   // contract (see `@javis/tools/src/plan-schema.ts`); replacing
@@ -113,13 +132,20 @@ function normalizeResultToDagPlan(result: CommanderPlanResult): CommanderDagPlan
       `model returned a plan without a valid LLM-raw shape: ${issue?.path?.join(".") ?? "<root>"}: ${issue?.message ?? "unknown"}`,
     );
   }
-  // Stage 2: coerce to the strict normalized plan. The LLM is
+  // Stage 2: deterministic local repair (Layer 2). Mechanical defects
+  // (non-kebab ids, executionMode synonyms, absolute in-workspace write
+  // targets) are fixed before strict validation so they never consume a
+  // model repair round.
+  const repaired = applyDeterministicPlanRepairs(llmParse.data, {
+    workspacePath: options.workspacePath,
+  });
+  // Stage 3: coerce to the strict normalized plan. The LLM is
   // allowed to omit optional fields, so we still supply defaults
   // here (dependsOn: [], requiredCapabilities: [], toolInput
   // filtered to plain objects). This stays as a hand-rolled map
   // because the defaulting rules are normalization, not
   // structural validation.
-  const parsed = llmParse.data;
+  const parsed = repaired.plan;
   const normalizedSteps = parsed.steps.map((step) => {
     const isPlainObject =
       typeof step.toolInput === "object" &&
@@ -145,7 +171,7 @@ function normalizeResultToDagPlan(result: CommanderPlanResult): CommanderDagPlan
     executionPolicy: parsed.executionPolicy,
     steps: normalizedSteps,
   };
-  // Stage 3: final structural sanity check. The validator runs a
+  // Stage 4: final structural sanity check. The validator runs a
   // deeper semantic pass; this just makes sure we didn't construct
   // a plan that violates the Zod-derived shape (e.g. a step count
   // over the 12-step prompt limit). If it fails, treat as a shape
@@ -158,6 +184,89 @@ function normalizeResultToDagPlan(result: CommanderPlanResult): CommanderDagPlan
     );
   }
   return candidate;
+}
+
+function preserveUnaffectedRoutingContract(
+  repairedPlan: CommanderDagPlan,
+  previousPlan: CommanderDagPlan,
+  diagnostics: readonly PlanDiagnostic[],
+  requiredRoutingAgentKinds: ReadonlySet<string>,
+): CommanderDagPlan {
+  const previousSteps = new Map(previousPlan.steps.map((step) => [step.id, step]));
+  const hasPlanLevelRouteDiagnostic = diagnostics.some((diagnostic) =>
+    !diagnostic.stepId &&
+    (diagnostic.code === "MISSING_REQUIRED_AGENT_ROUTE" ||
+      diagnostic.code === "MISSING_REQUIRED_ROUTE_TOOL")
+  );
+
+  return {
+    ...repairedPlan,
+    steps: repairedPlan.steps.map((step) => {
+      const previous = previousSteps.get(step.id);
+      if (!previous) return step;
+      const stepDiagnostics = diagnostics.filter((diagnostic) => diagnostic.stepId === step.id);
+      const targets = (field: string, codes: readonly PlanDiagnostic["code"][] = []) =>
+        stepDiagnostics.some((diagnostic) =>
+          diagnostic.path?.endsWith(`.${field}`) || codes.includes(diagnostic.code)
+        );
+      const repairsRequiredRoute = hasPlanLevelRouteDiagnostic &&
+        step.assignedAgentKind !== previous.assignedAgentKind &&
+        requiredRoutingAgentKinds.has(step.assignedAgentKind);
+
+      return {
+        ...step,
+        ...(!repairsRequiredRoute && !targets("assignedAgentKind", [
+          "UNKNOWN_AGENT",
+          "CAPABILITY_NOT_AVAILABLE",
+          "TOOL_NOT_ALLOWED",
+          "MISROUTED_PROJECT_INSPECTION",
+        ])
+          ? { assignedAgentKind: previous.assignedAgentKind }
+          : {}),
+        ...(previous.primaryCapability && !repairsRequiredRoute &&
+        !targets("primaryCapability", [
+          "MISSING_PRIMARY_CAPABILITY",
+          "UNKNOWN_CAPABILITY",
+          "CAPABILITY_NOT_AVAILABLE",
+          "MISROUTED_PROJECT_INSPECTION",
+        ])
+          ? { primaryCapability: previous.primaryCapability }
+          : {}),
+        ...(previous.capability && !repairsRequiredRoute &&
+        !targets("capability", [
+          "UNKNOWN_CAPABILITY",
+          "CAPABILITY_NOT_AVAILABLE",
+          "MISROUTED_PROJECT_INSPECTION",
+        ])
+          ? { capability: previous.capability }
+          : {}),
+        ...(!repairsRequiredRoute && !targets("requiredCapabilities", [
+          "UNKNOWN_CAPABILITY",
+          "CAPABILITY_NOT_AVAILABLE",
+          "MISROUTED_PROJECT_INSPECTION",
+        ])
+          ? { requiredCapabilities: previous.requiredCapabilities }
+          : {}),
+        ...(previous.toolName && !repairsRequiredRoute &&
+        !targets("toolName", [
+          "UNKNOWN_TOOL",
+          "TOOL_NOT_ALLOWED",
+          "UNSUPPORTED_APPROVAL_GATED_TOOL",
+          "MISSING_APPROVAL_TOOL_SELECTION",
+          "INVALID_EXECUTION_MODE",
+          "MISROUTED_PROJECT_INSPECTION",
+        ])
+          ? { toolName: previous.toolName }
+          : {}),
+        ...(previous.executionMode && !repairsRequiredRoute && !targets("executionMode", [
+          "INVALID_EXECUTION_MODE",
+          "MISROUTED_PROJECT_INSPECTION",
+        ])
+          ? { executionMode: previous.executionMode }
+          : {}),
+      };
+    }),
+  };
 }
 
 class PlanShapeError extends Error {
@@ -218,11 +327,65 @@ export async function attemptPlanRepair(
     existingSteps: input.existingSteps,
     supportedApprovalGatedTools: input.supportedApprovalGatedTools,
     preloadedContextKeys: input.preloadedContextKeys,
+    planIntents: input.planIntents ?? detectCommanderPlanIntents(input.originalUserGoal),
+    userGoal: input.originalUserGoal,
   };
 
   let lastInvalidPlan: CommanderDagPlan = input.invalidPlan;
   let lastDiagnostics: PlanDiagnostic[] = input.diagnostics;
 
+  // --- Stage A: deterministic local repair (Layer 2) -----------------------
+  // Before spending a model call, run the rule-based fixer over the invalid
+  // plan. If the deterministically-repaired plan compiles, the loop exits
+  // immediately; if it strictly reduces the error count, the improved plan
+  // becomes the baseline the model is asked to finish repairing.
+  const deterministic = applyDeterministicPlanRepairs(input.invalidPlan, {
+    workspacePath: input.workspacePath,
+  });
+  if (deterministic.repairs.length > 0) {
+    let deterministicCompile: ReturnType<typeof compileCommanderPlan>;
+    try {
+      deterministicCompile = compileCommanderPlan({
+        ...compileInputBase,
+        plan: deterministic.plan,
+      });
+    } catch (compileError) {
+      deterministicCompile = {
+        ok: false,
+        diagnostics: [planShapeErrorToDiagnostic(0, compileError)],
+        repairable: false,
+      };
+    }
+    attempts.push({
+      attempt: 0,
+      channel: "deterministic",
+      status: deterministicCompile.ok ? "compiled" : "failed",
+      diagnostics: deterministicCompile.ok
+        ? deterministicCompile.warnings
+        : deterministicCompile.diagnostics,
+      repairedPlan: deterministic.plan,
+      repairNotes: deterministic.repairs,
+    });
+    if (deterministicCompile.ok) {
+      return { ok: true, plan: deterministicCompile.plan, attempts };
+    }
+    const priorErrorCount = countErrorDiagnostics(input.diagnostics);
+    const remainingErrorCount = countErrorDiagnostics(deterministicCompile.diagnostics);
+    if (remainingErrorCount < priorErrorCount) {
+      if (!deterministicCompile.repairable) {
+        return {
+          ok: false,
+          attempts,
+          finalDiagnostics: deterministicCompile.diagnostics,
+          repairable: false,
+        };
+      }
+      lastInvalidPlan = deterministic.plan;
+      lastDiagnostics = deterministicCompile.diagnostics;
+    }
+  }
+
+  // --- Stage B: bounded model repair with precise diagnostics ---------------
   for (let attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber++) {
     const repairContext: CommanderPlanRepairContext = {
       originalUserGoal: input.originalUserGoal,
@@ -258,6 +421,7 @@ export async function attemptPlanRepair(
       };
       const record: RepairAttemptRecord = {
         attempt: attemptNumber,
+        channel: "model",
         status: "failed",
         diagnostics: [parseFailureDiag],
       };
@@ -272,7 +436,15 @@ export async function attemptPlanRepair(
 
     let repairedPlan: CommanderDagPlan;
     try {
-      repairedPlan = normalizeResultToDagPlan(repairedResult);
+      repairedPlan = normalizeResultToDagPlan(repairedResult, {
+        workspacePath: input.workspacePath,
+      });
+      repairedPlan = preserveUnaffectedRoutingContract(
+        repairedPlan,
+        lastInvalidPlan,
+        lastDiagnostics,
+        new Set(inferCommanderRouteRequirements(input.originalUserGoal).map((route) => route.agentKind)),
+      );
     } catch (shapeError) {
       // Malformed model output must NOT escape the repair loop as an
       // uncaught throw - that would skip attempt recording and leave the
@@ -281,6 +453,7 @@ export async function attemptPlanRepair(
       const shapeDiag = planShapeErrorToDiagnostic(attemptNumber, shapeError);
       attempts.push({
         attempt: attemptNumber,
+        channel: "model",
         status: "failed",
         diagnostics: [shapeDiag],
       });
@@ -306,6 +479,7 @@ export async function attemptPlanRepair(
       const shapeDiag = planShapeErrorToDiagnostic(attemptNumber, compileError);
       attempts.push({
         attempt: attemptNumber,
+        channel: "model",
         status: "failed",
         diagnostics: [shapeDiag],
       });
@@ -320,6 +494,7 @@ export async function attemptPlanRepair(
     if (recompile.ok) {
       attempts.push({
         attempt: attemptNumber,
+        channel: "model",
         status: "compiled",
         diagnostics: recompile.warnings,
         repairedPlan,
@@ -333,6 +508,7 @@ export async function attemptPlanRepair(
 
     attempts.push({
       attempt: attemptNumber,
+      channel: "model",
       status: "failed",
       diagnostics: recompile.diagnostics,
       repairedPlan,
@@ -367,4 +543,8 @@ function clampMaxAttempts(value: number | undefined): number {
   if (value === undefined) return DEFAULT_MAX_REPAIR_ATTEMPTS;
   if (!Number.isFinite(value) || value < 0) return DEFAULT_MAX_REPAIR_ATTEMPTS;
   return Math.floor(value);
+}
+
+function countErrorDiagnostics(diagnostics: readonly PlanDiagnostic[]): number {
+  return diagnostics.filter((diagnostic) => diagnostic.severity === "error").length;
 }

@@ -57,6 +57,7 @@ function makeInput(overrides: Partial<CompileCommanderPlanInput> & { plan: Comma
     ],
     supportedApprovalGatedTools: [],
     preloadedContextKeys: ["userGoal", "taskId"],
+    planIntents: { write: false, export: false, statistics: false, retrieval: false },
     ...overrides,
   };
 }
