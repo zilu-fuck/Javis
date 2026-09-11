@@ -7763,21 +7763,41 @@ async function projectAgentRuntimeEvents(
     onDeltaEvent?: (event: TaskRuntimeEvent) => void;
   },
 ): Promise<void> {
-  let streamingSegment: string | undefined;
   const emitDelta = (event: TaskRuntimeEvent): void => {
     options?.onDeltaEvent?.(event);
   };
-  const closeStreamingSegment = (error?: string): void => {
-    if (streamingSegment === undefined) return;
-    emitDelta({
-      kind: "agent.chunk_end",
-      taskId,
-      agentKind,
-      fullText: streamingSegment,
-      ...(error ? { error } : {}),
-    });
-    streamingSegment = undefined;
+  // A segment opens lazily on the first delta of a model call and closes on
+  // model completion; reasoning (model thinking) and answer text are tracked
+  // separately so the UI can render them in distinct places.
+  const createStreamSegmentTracker = (reasoning: boolean) => {
+    const startKind = reasoning ? "agent.reasoning_chunk_start" as const : "agent.chunk_start" as const;
+    const chunkKind = reasoning ? "agent.reasoning_chunk" as const : "agent.chunk" as const;
+    const endKind = reasoning ? "agent.reasoning_chunk_end" as const : "agent.chunk_end" as const;
+    let text: string | undefined;
+    return {
+      push(delta: string): void {
+        if (text === undefined) {
+          text = "";
+          emitDelta({ kind: startKind, taskId, agentKind });
+        }
+        text += delta;
+        emitDelta({ kind: chunkKind, taskId, agentKind, text: delta });
+      },
+      close(error?: string): void {
+        if (text === undefined) return;
+        emitDelta({
+          kind: endKind,
+          taskId,
+          agentKind,
+          fullText: text,
+          ...(error ? { error } : {}),
+        });
+        text = undefined;
+      },
+    };
   };
+  const textSegment = createStreamSegmentTracker(false);
+  const reasoningSegment = createStreamSegmentTracker(true);
   for await (const event of events) {
     const snapshot = getSnapshot();
     switch (event.type) {
@@ -7794,19 +7814,23 @@ async function projectAgentRuntimeEvents(
         });
         break;
       case "model.delta":
-        if (event.delta.length === 0) break;
-        if (streamingSegment === undefined) {
-          streamingSegment = "";
-          emitDelta({ kind: "agent.chunk_start", taskId, agentKind });
+        if (event.delta.length > 0) {
+          // Answer text starting means the model finished thinking for this
+          // call — close the reasoning segment so the UI swaps panels.
+          reasoningSegment.close();
+          textSegment.push(event.delta);
         }
-        streamingSegment += event.delta;
-        emitDelta({ kind: "agent.chunk", taskId, agentKind, text: event.delta });
+        break;
+      case "model.reasoning_delta":
+        if (event.delta.length > 0) reasoningSegment.push(event.delta);
         break;
       case "model.completed":
-        closeStreamingSegment();
+        reasoningSegment.close();
+        textSegment.close();
         break;
       case "run.failed":
-        closeStreamingSegment(event.reason);
+        reasoningSegment.close(event.reason);
+        textSegment.close(event.reason);
         emitSnapshot({
           ...snapshot,
           logs: appendLog(snapshot, taskEventToLogEntry({
@@ -7819,7 +7843,8 @@ async function projectAgentRuntimeEvents(
         });
         break;
       case "run.cancelled":
-        closeStreamingSegment(event.reason);
+        reasoningSegment.close(event.reason);
+        textSegment.close(event.reason);
         emitSnapshot({
           ...snapshot,
           logs: appendLog(snapshot, taskEventToLogEntry({
@@ -7913,7 +7938,8 @@ async function projectAgentRuntimeEvents(
       case "run.started":
         break;
       case "run.completed":
-        closeStreamingSegment();
+        reasoningSegment.close();
+        textSegment.close();
         break;
       case "context.requested":
         emitSnapshot({

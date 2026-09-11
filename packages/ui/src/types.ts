@@ -487,6 +487,9 @@ export interface WorkbenchTask {
   conversationMessages?: WorkbenchChatMessage[];
   streamingText?: string;
   streamingAgentKind?: WorkbenchStreamingAgentKind;
+  /** Live model reasoning (thinking) text streamed by agent runtime steps. */
+  streamingReasoningText?: string;
+  streamingReasoningAgentKind?: WorkbenchStreamingAgentKind;
   isStreaming?: boolean;
   executionTrace?: WorkbenchExecutionTrace;
   handoffReport?: WorkbenchHandoffReport;

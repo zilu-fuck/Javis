@@ -87,6 +87,53 @@ describe("createDeltaReducer streaming metadata", () => {
     expect(ended.streamingAgentKind).toBeUndefined();
     expect(ended.streamingText).toBeUndefined();
   });
+
+  it("tracks reasoning segments separately from answer text", () => {
+    const reducer = createDeltaReducer(createInitialTaskSnapshot());
+
+    reducer.apply({
+      kind: "agent.reasoning_chunk_start",
+      taskId: "task-1",
+      agentKind: "research",
+    });
+    const thinking = reducer.apply({
+      kind: "agent.reasoning_chunk",
+      taskId: "task-1",
+      agentKind: "research",
+      text: "pondering",
+    });
+    expect(thinking.streamingReasoningText).toBe("pondering");
+    expect(thinking.streamingReasoningAgentKind).toBe("research");
+    expect(thinking.isStreaming).toBe(true);
+
+    const answering = reducer.apply({
+      kind: "agent.chunk",
+      taskId: "task-1",
+      agentKind: "research",
+      text: "answer",
+    });
+    expect(answering.streamingText).toBe("answer");
+    expect(answering.streamingReasoningText).toBe("pondering");
+
+    const reasoningEnded = reducer.apply({
+      kind: "agent.reasoning_chunk_end",
+      taskId: "task-1",
+      agentKind: "research",
+      fullText: "pondering",
+    });
+    expect(reasoningEnded.streamingReasoningText).toBeUndefined();
+    expect(reasoningEnded.streamingReasoningAgentKind).toBeUndefined();
+    expect(reasoningEnded.streamingText).toBe("answer");
+
+    const answerEnded = reducer.apply({
+      kind: "agent.chunk_end",
+      taskId: "task-1",
+      agentKind: "research",
+      fullText: "answer",
+    });
+    expect(answerEnded.isStreaming).toBe(false);
+    expect(answerEnded.streamingText).toBeUndefined();
+  });
 });
 
 describe("createDeltaReducer step.failed", () => {

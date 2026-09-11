@@ -8427,6 +8427,8 @@ describe("executeCapabilityStep permissions", () => {
                 ...runtimeEventIdentity,
               };
               yield { type: "model.started", callIndex: 2 };
+              yield { type: "model.reasoning_delta", delta: "thinking " };
+              yield { type: "model.reasoning_delta", delta: "hard" };
               yield { type: "model.delta", delta: "Rust " };
               yield { type: "model.delta", delta: "result" };
               yield {
@@ -8515,15 +8517,20 @@ describe("executeCapabilityStep permissions", () => {
     expect(finalSnapshot?.streamingText).toBeUndefined();
     expect(finalSnapshot?.isStreaming).toBe(false);
     expect(deltaEvents.map((event) => event.kind)).toEqual([
+      "agent.reasoning_chunk_start",
+      "agent.reasoning_chunk",
+      "agent.reasoning_chunk",
+      "agent.reasoning_chunk_end",
       "agent.chunk_start",
       "agent.chunk",
       "agent.chunk",
       "agent.chunk_end",
     ]);
     expect(deltaEvents[0]).toMatchObject({ taskId: "task-langchain-runtime", agentKind: "research" });
-    expect(deltaEvents[1]).toMatchObject({ agentKind: "research", text: "Rust " });
-    expect(deltaEvents[2]).toMatchObject({ agentKind: "research", text: "result" });
-    expect(deltaEvents[3]).toMatchObject({ agentKind: "research", fullText: "Rust result" });
+    expect(deltaEvents[1]).toMatchObject({ agentKind: "research", text: "thinking " });
+    expect(deltaEvents[3]).toMatchObject({ agentKind: "research", fullText: "thinking hard" });
+    expect(deltaEvents[5]).toMatchObject({ agentKind: "research", text: "Rust " });
+    expect(deltaEvents[7]).toMatchObject({ agentKind: "research", fullText: "Rust result" });
     expect(runtimeEvents.some((event) =>
       String((event.payload as { kind?: string }).kind ?? "").startsWith("agent.chunk"),
     )).toBe(false);

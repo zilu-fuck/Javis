@@ -95,6 +95,37 @@ describe("JavisChatModel", () => {
     expect(chunks[chunks.length - 1]?.generationInfo).toEqual({ finishReason: "tool_calls" });
   });
 
+  it("emits model.reasoning_delta events without leaking reasoning into answer text", async () => {
+    const events: import("@javis/core").AgentEvent[] = [];
+    const reasoningGateway: AgentModelGateway = {
+      ...gateway(),
+      stream: async function* () {
+        yield { type: "reasoning_delta" as const, delta: "pondering " };
+        yield { type: "reasoning_delta" as const, delta: "the question" };
+        yield { type: "text_delta" as const, delta: "Final answer" };
+        yield { type: "message_end" as const, finishReason: "stop" as const };
+      },
+    };
+    const model = new JavisChatModel({
+      gateway: reasoningGateway,
+      tools: [toolSpec],
+      onEvent: (event) => events.push(event),
+    });
+    let text = "";
+    for await (const chunk of model._streamResponseChunks([new HumanMessage("Search")], {})) {
+      text += chunk.text;
+    }
+    expect(events.map((event) => event.type)).toEqual([
+      "model.started",
+      "model.reasoning_delta",
+      "model.reasoning_delta",
+      "model.delta",
+      "model.completed",
+    ]);
+    expect(events[1]).toMatchObject({ type: "model.reasoning_delta", delta: "pondering " });
+    expect(text).toBe("Final answer");
+  });
+
   it("forwards LangChain provider strategy schema to the model gateway", async () => {
     const complete = vi.fn<AgentModelGateway["complete"]>(async () => ({
       message: {

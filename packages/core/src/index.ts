@@ -1138,6 +1138,10 @@ export interface TaskSnapshot {
   streamingText?: string;
   /** Agent currently producing streaming output. */
   streamingAgentKind?: AgentKind;
+  /** Accumulated partial reasoning (model thinking) during streaming. */
+  streamingReasoningText?: string;
+  /** Agent currently producing streaming reasoning output. */
+  streamingReasoningAgentKind?: AgentKind;
   /** Whether an agent is currently generating streaming output. */
   isStreaming?: boolean;
   /** Structured execution trace 鈥?per-step wall-clock time and token usage. */

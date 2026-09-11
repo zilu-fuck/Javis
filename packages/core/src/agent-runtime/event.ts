@@ -17,6 +17,7 @@ export type AgentEvent =
   | ({ type: "run.cancelled"; reason: string } & AgentEventIdentity)
   | ({ type: "model.started"; callIndex: number } & AgentEventIdentity)
   | ({ type: "model.delta"; delta: string } & AgentEventIdentity)
+  | ({ type: "model.reasoning_delta"; delta: string } & AgentEventIdentity)
   | ({ type: "model.completed"; callIndex: number; finishReason: string } & AgentEventIdentity)
   | ({ type: "tool.requested"; toolCallId: string; toolName: string } & AgentEventIdentity)
   | ({ type: "tool.started"; toolCallId: string; toolName: string } & AgentEventIdentity)

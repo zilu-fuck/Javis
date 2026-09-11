@@ -181,6 +181,9 @@ enum ModelChatStreamEvent {
     TextDelta {
         delta: String,
     },
+    ReasoningDelta {
+        delta: String,
+    },
     ToolCallStart {
         index: usize,
         id: String,
@@ -556,6 +559,19 @@ fn consume_openai_stream_value(
     let Some(delta) = choice.get("delta") else {
         return Ok(events);
     };
+    // Reasoning-capable providers stream model thinking separately from the
+    // answer (DeepSeek-style `reasoning_content`, some gateways use
+    // `reasoning`). Reasoning deltas must never surface as answer text.
+    if let Some(text) = delta
+        .get("reasoning_content")
+        .or_else(|| delta.get("reasoning"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.is_empty())
+    {
+        events.push(ModelChatStreamEvent::ReasoningDelta {
+            delta: text.to_string(),
+        });
+    }
     if let Some(text) = delta
         .get("content")
         .and_then(serde_json::Value::as_str)
@@ -684,6 +700,17 @@ fn consume_anthropic_stream_value(
                     {
                         state.text_seen = true;
                         events.push(ModelChatStreamEvent::TextDelta {
+                            delta: text.to_string(),
+                        });
+                    }
+                }
+                Some("thinking_delta") => {
+                    if let Some(text) = delta
+                        .get("thinking")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|text| !text.is_empty())
+                    {
+                        events.push(ModelChatStreamEvent::ReasoningDelta {
                             delta: text.to_string(),
                         });
                     }
@@ -2180,6 +2207,56 @@ fn request(protocol: &str) -> ModelChatRequest {
                 finish_reason: ModelFinishReason::Stop
             })
         ));
+    }
+
+    #[test]
+    fn openai_stream_parses_reasoning_content_separately_from_answer() {
+        let request = request("openai-compatible");
+        let mut state = OpenAiStreamState::default();
+        let events = consume_openai_stream_value(
+            &serde_json::json!({
+                "choices": [{
+                    "delta": {
+                        "reasoning_content": "The user is asking",
+                        "content": "1+1=2"
+                    }
+                }]
+            }),
+            &request,
+            &mut state,
+        )
+        .expect("reasoning stream");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ModelChatStreamEvent::ReasoningDelta { delta } if delta == "The user is asking"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ModelChatStreamEvent::TextDelta { delta } if delta == "1+1=2"
+        )));
+    }
+
+    #[test]
+    fn anthropic_stream_parses_thinking_delta_separately_from_answer() {
+        let request = request("anthropic");
+        let mut state = AnthropicStreamState::default();
+        let events = consume_anthropic_stream_value(
+            &serde_json::json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "thinking_delta",
+                    "thinking": "ponder the question"
+                }
+            }),
+            &request,
+            &mut state,
+        )
+        .expect("thinking stream");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ModelChatStreamEvent::ReasoningDelta { delta } if delta == "ponder the question"
+        )));
     }
 
     #[test]

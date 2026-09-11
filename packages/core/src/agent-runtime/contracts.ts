@@ -184,6 +184,7 @@ export interface AgentChatResponse {
 export type AgentChatStreamEvent =
   | { type: "message_start"; messageId: string }
   | { type: "text_delta"; delta: string }
+  | { type: "reasoning_delta"; delta: string }
   | { type: "tool_call_start"; index: number; id: string; name: string }
   | { type: "tool_call_arguments_delta"; index: number; delta: string }
   | { type: "tool_call_end"; index: number }

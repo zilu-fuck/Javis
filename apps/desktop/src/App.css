@@ -9373,6 +9373,29 @@ button.javis-message-detail-body:focus-visible {
   }
 }
 
+.javis-reasoning-stream {
+  border: 1px solid var(--color-border-muted, rgba(128, 128, 128, 0.25));
+  border-radius: 12px;
+  padding: 10px 14px;
+  background: var(--color-surface-muted, rgba(128, 128, 128, 0.06));
+}
+
+.javis-reasoning-head {
+  display: flex;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.javis-reasoning-text {
+  max-height: 180px;
+  overflow-y: auto;
+  color: var(--color-muted);
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 @keyframes javis-status-pulse {
   0%, 100% {
     opacity: 0.45;

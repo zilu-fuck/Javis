@@ -27,6 +27,7 @@ import { ContextRing } from "./ContextRing";
 import { ContextStats } from "./ContextStats";
 import { Markdown } from "./Markdown";
 import { StreamingMessage } from "./StreamingMessage";
+import { ThinkingIndicator } from "./ThinkingIndicator";
 import { TaskSections } from "./TaskSections";
 import { TaskProgressCard } from "./TaskProgressCard";
 
@@ -168,6 +169,16 @@ export function ThreadView({
   const taskProgressMessageIndex = task.taskProgress && lastConversationMessage?.role === "assistant"
     ? conversationMessages.length - 1
     : -1;
+  const reasoningText = task.streamingReasoningText ?? "";
+  const showReasoningPanel = showStreamingResponse && reasoningText.trim().length > 0;
+  const reasoningTextRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const node = reasoningTextRef.current;
+    if (node) {
+      node.scrollTop = node.scrollHeight;
+    }
+  }, [reasoningText]);
 
   useEffect(() => {
     setLocalConversationMessages(null);
@@ -197,7 +208,7 @@ export function ThreadView({
       behavior: "smooth",
       block: "end",
     });
-  }, [showStreamingMessage, task.commanderMessage, task.id]);
+  }, [showStreamingMessage, showReasoningPanel, task.commanderMessage, task.id]);
 
   function commitConversationMessages(messages: WorkbenchChatMessage[]) {
     setLocalConversationMessages(messages);
@@ -563,6 +574,15 @@ export function ThreadView({
         {!showStreamingMessage && lastConversationMessage?.role === "user"
           ? renderExecutionPanels()
           : null}
+
+        {showReasoningPanel ? (
+          <article className="javis-message javis-reasoning-stream" aria-live="polite">
+            <div className="javis-reasoning-head">
+              <ThinkingIndicator label={getThinkingLabel(locale)} messages={getThinkingMessages(locale)} />
+            </div>
+            <div className="javis-reasoning-text" ref={reasoningTextRef}>{reasoningText}</div>
+          </article>
+        ) : null}
 
         {showStreamingMessage ? (
           <>

@@ -204,6 +204,8 @@ export class JavisChatModel extends BaseChatModel<BaseChatModelCallOptions> {
     for await (const event of stream) {
       if (event.type === "text_delta") {
         this.onEvent?.({ type: "model.delta", delta: event.delta });
+      } else if (event.type === "reasoning_delta") {
+        this.onEvent?.({ type: "model.reasoning_delta", delta: event.delta });
       } else if (event.type === "tool_call_start") {
         this.emitAssistantEvents([{ id: event.id, name: event.name }]);
       } else if (event.type === "usage") {
@@ -382,6 +384,7 @@ function streamEventToGenerationChunk(
       generationInfo = { finishReason: event.finishReason };
       break;
     case "message_start":
+    case "reasoning_delta":
     case "tool_call_end":
       return undefined;
   }

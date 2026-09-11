@@ -101,6 +101,9 @@ export type TaskRuntimeEvent =
   | { kind: "agent.chunk_start"; taskId: ID; agentKind: AgentKind }
   | { kind: "agent.chunk"; taskId: ID; agentKind: AgentKind; text: string }
   | { kind: "agent.chunk_end"; taskId: ID; agentKind: AgentKind; fullText: string; error?: string }
+  | { kind: "agent.reasoning_chunk_start"; taskId: ID; agentKind: AgentKind }
+  | { kind: "agent.reasoning_chunk"; taskId: ID; agentKind: AgentKind; text: string }
+  | { kind: "agent.reasoning_chunk_end"; taskId: ID; agentKind: AgentKind; fullText: string; error?: string }
   // Step-level progress events
   | { kind: "step.progress"; taskId: ID; stepId: ID; percent: number; detail: string; agentKind?: AgentKind; agentId?: ID }
   | { kind: "step.started"; taskId: ID; stepId: ID; agentKind?: AgentKind; agentId?: ID }
@@ -431,6 +434,40 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         devDetail: event.error
           ? `${event.agentKind} output failed after ${event.fullText.length} chars: ${event.error}`
           : `${event.agentKind} output ended (${event.fullText.length} chars).`,
+        agentId: agentIdFromKind(event.agentKind),
+      };
+    case "agent.reasoning_chunk_start":
+      return {
+        id: `${event.taskId}-reasoning-chunk-start-${event.agentKind}`,
+        kind: "event",
+        title: "agent.reasoning_chunk_start",
+        detail: `${event.agentKind} is thinking...`,
+        userMessage: "正在思考...",
+        devDetail: `${event.agentKind} is thinking...`,
+        agentId: agentIdFromKind(event.agentKind),
+      };
+    case "agent.reasoning_chunk":
+      return {
+        id: `${event.taskId}-reasoning-chunk-${event.agentKind}-${Date.now()}`,
+        kind: "event",
+        title: "agent.reasoning_chunk",
+        detail: event.text,
+        userMessage: "",
+        devDetail: event.text,
+        agentId: agentIdFromKind(event.agentKind),
+      };
+    case "agent.reasoning_chunk_end":
+      return {
+        id: `${event.taskId}-reasoning-chunk-end-${event.agentKind}`,
+        kind: "event",
+        title: "agent.reasoning_chunk_end",
+        detail: event.error
+          ? `${event.agentKind} reasoning failed after ${event.fullText.length} chars: ${event.error}`
+          : `${event.agentKind} reasoning ended (${event.fullText.length} chars).`,
+        userMessage: event.error ? `思考过程被中断: ${toShortError(event.error)}` : "思考完成",
+        devDetail: event.error
+          ? `${event.agentKind} reasoning failed after ${event.fullText.length} chars: ${event.error}`
+          : `${event.agentKind} reasoning ended (${event.fullText.length} chars).`,
         agentId: agentIdFromKind(event.agentKind),
       };
     case "step.progress":
