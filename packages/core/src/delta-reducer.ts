@@ -33,6 +33,9 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
       return {
         ...current,
         logs: [...logs],
+        // Full snapshot emits from the executor never carry agent runtime
+        // streaming state; keep isStreaming alive while partial segments exist.
+        isStreaming: current.isStreaming || partialTexts.size > 0,
         streamingText:
           activeStreamingText ??
           partialTexts.get("commander") ??
@@ -48,7 +51,10 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
       logs.push(...compactTaskLogs(snapshot.logs));
       activeStreamingAgentKind = snapshot.isStreaming
         ? (snapshot.streamingAgentKind ?? activeStreamingAgentKind)
-        : undefined;
+        : activeStreamingAgentKind !== undefined &&
+            partialTexts.has(activeStreamingAgentKind)
+          ? activeStreamingAgentKind
+          : undefined;
       // Keep partialTexts as-is — streaming sessions may span emit boundaries
     },
     apply(event: TaskRuntimeEvent): TaskSnapshot {

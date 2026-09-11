@@ -3,6 +3,7 @@ import { encodeMcpToolServerName, initialToolDescriptors, type BrowserTool, type
 import { createArtifactEnvelope, computePlanHash, createAgentRegistry, createDefaultAgentRegistry, createInitialTaskSnapshot, demoAgents, type Agent, type AgentEvent, type AgentRuntimeFactory, type RuntimeEventEnvelope, type TaskSnapshot, type WorkflowCheckpoint } from "./index";
 import { createSharedTaskContext } from "./shared-context";
 import type { StepResult } from "./step-protocol";
+import type { TaskRuntimeEvent } from "./task-event-bus";
 import { createWorkflowRegistry } from "./workflow-registry";
 import type { WorkbenchWorkflow } from "./workflows";
 import { executeCapabilityStep, isReadCurrentProjectGoal, runCommanderDagTask, runGenericWorkbenchWorkflow, runReadCurrentProjectWorkflow, SUPPORTED_APPROVAL_GATED_TOOLS } from "./workflow-executor";
@@ -8441,6 +8442,7 @@ describe("executeCapabilityStep permissions", () => {
     }));
     const { controller, emitted } = createTestController();
     const runtimeEvents: RuntimeEventEnvelope[] = [];
+    const deltaEvents: TaskRuntimeEvent[] = [];
     const getAgentRuntimeBackend = vi.fn(() => "langchain" as const);
 
     await runCommanderDagTask({
@@ -8458,6 +8460,9 @@ describe("executeCapabilityStep permissions", () => {
       },
       getAgentRuntimeBackend,
       createAgentRuntime,
+      onDeltaEvent: (event) => {
+        deltaEvents.push(event);
+      },
       runtimeEventSink: {
         append: async (event) => {
           runtimeEvents.push(event);
@@ -8509,6 +8514,19 @@ describe("executeCapabilityStep permissions", () => {
     expect(emitted.some((snapshot) => snapshot.streamingText?.includes("Rust result"))).toBe(false);
     expect(finalSnapshot?.streamingText).toBeUndefined();
     expect(finalSnapshot?.isStreaming).toBe(false);
+    expect(deltaEvents.map((event) => event.kind)).toEqual([
+      "agent.chunk_start",
+      "agent.chunk",
+      "agent.chunk",
+      "agent.chunk_end",
+    ]);
+    expect(deltaEvents[0]).toMatchObject({ taskId: "task-langchain-runtime", agentKind: "research" });
+    expect(deltaEvents[1]).toMatchObject({ agentKind: "research", text: "Rust " });
+    expect(deltaEvents[2]).toMatchObject({ agentKind: "research", text: "result" });
+    expect(deltaEvents[3]).toMatchObject({ agentKind: "research", fullText: "Rust result" });
+    expect(runtimeEvents.some((event) =>
+      String((event.payload as { kind?: string }).kind ?? "").startsWith("agent.chunk"),
+    )).toBe(false);
     const toolCallLogs = finalSnapshot?.logs.filter((log) => log.detail.includes("call-1")) ?? [];
     expect(toolCallLogs).toHaveLength(4);
     expect(toolCallLogs.map((log) => log.title)).toEqual([
@@ -8535,6 +8553,86 @@ describe("executeCapabilityStep permissions", () => {
         agentRunId: expect.stringContaining(":langchain-search:agent-attempt-1"),
         attempt: 1,
       },
+    });
+  });
+
+  it("closes an open agent runtime stream segment with an error on run failure", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "Failing research",
+        reasoning: "The runtime stream fails mid-call.",
+        steps: [{
+          id: "failing-search",
+          title: "Search public sources",
+          assignedAgentKind: "research",
+          toolName: "web.search",
+          toolInput: { query: "rust" },
+          executionMode: "react" as const,
+          dependsOn: [],
+          successCriteria: "Return source evidence.",
+        }],
+      })),
+      synthesize: vi.fn(async () => ({ message: "Recovered." })),
+    };
+    const createAgentRuntime = vi.fn<AgentRuntimeFactory>(() => ({
+      run() {
+        return {
+          result: Promise.resolve({
+            status: "failed" as const,
+            reason: "provider empty response",
+            stepResult: {
+              status: "failed" as const,
+              evidence: [],
+              assumptions: [],
+              unresolvedQuestions: [],
+              error: "provider empty response",
+            },
+          }),
+          cancel: vi.fn(),
+          events: (async function* (): AsyncGenerator<AgentEvent> {
+            yield { type: "run.started", runId: "run-1" };
+            yield { type: "model.started", callIndex: 1 };
+            yield { type: "model.delta", delta: "Partial " };
+            yield { type: "model.delta", delta: "thought" };
+            yield { type: "run.failed", reason: "provider empty response" };
+          })(),
+        };
+      },
+    }));
+    const { controller } = createTestController();
+    const deltaEvents: TaskRuntimeEvent[] = [];
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      webTool: {
+        searchWeb: vi.fn(async () => []),
+        fetchWebSource: vi.fn(async ({ url }) => ({
+          url,
+          title: "Rust",
+          excerpt: "Rust source evidence is long enough for the workflow validator.",
+          fetchedAt: "2026-07-18T00:00:00.000Z",
+          provider: "fixture",
+        })),
+      },
+      getAgentRuntimeBackend: vi.fn(() => "langchain" as const),
+      createAgentRuntime,
+      onDeltaEvent: (event) => {
+        deltaEvents.push(event);
+      },
+      taskId: "task-runtime-stream-fail",
+      userGoal: "research rust",
+      availableToolDescriptors: initialToolDescriptors,
+    });
+
+    expect(deltaEvents[0]).toMatchObject({ kind: "agent.chunk_start", agentKind: "research" });
+    expect(deltaEvents[1]).toMatchObject({ kind: "agent.chunk", agentKind: "research", text: "Partial " });
+    expect(deltaEvents[2]).toMatchObject({ kind: "agent.chunk", agentKind: "research", text: "thought" });
+    const firstChunkEnd = deltaEvents.find((event) => event.kind === "agent.chunk_end");
+    expect(firstChunkEnd).toMatchObject({
+      agentKind: "research",
+      fullText: "Partial thought",
+      error: "provider empty response",
     });
   });
 

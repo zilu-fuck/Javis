@@ -7561,6 +7561,13 @@ interface CommanderDagTaskOptions {
   initialTokenUsage?: TokenUsageSummary;
   availableToolDescriptors?: ToolDescriptor[];
   signal?: AbortSignal;
+  /**
+   * Optional lightweight delta channel for agent runtime streams. Agent
+   * runtime `model.delta` events are projected into `agent.chunk_*` events
+   * and forwarded here without durable persistence — intermediate stream
+   * text is ephemeral observation, not workflow state (dual-kernel plan §7.2).
+   */
+  onDeltaEvent?: (event: TaskRuntimeEvent) => void;
   /** Optional durable runtime event sink. If provided, every emitted TaskRuntimeEvent is wrapped in a RuntimeEventEnvelope and forwarded. */
   runtimeEventSink?: {
     append: (envelope: RuntimeEventEnvelope) => void | Promise<void>;
@@ -7732,8 +7739,24 @@ async function projectAgentRuntimeEvents(
     backend?: WorkflowExecutionBackend;
     onUsageObservation?: (observation: UsageObservation) => void;
     onDiagnostic?: (diagnostic: NonNullable<TaskSnapshot["diagnostics"]>[number]) => void;
+    onDeltaEvent?: (event: TaskRuntimeEvent) => void;
   },
 ): Promise<void> {
+  let streamingSegment: string | undefined;
+  const emitDelta = (event: TaskRuntimeEvent): void => {
+    options?.onDeltaEvent?.(event);
+  };
+  const closeStreamingSegment = (error?: string): void => {
+    if (streamingSegment === undefined) return;
+    emitDelta({
+      kind: "agent.chunk_end",
+      taskId,
+      agentKind,
+      fullText: streamingSegment,
+      ...(error ? { error } : {}),
+    });
+    streamingSegment = undefined;
+  };
   for await (const event of events) {
     const snapshot = getSnapshot();
     switch (event.type) {
@@ -7750,9 +7773,19 @@ async function projectAgentRuntimeEvents(
         });
         break;
       case "model.delta":
+        if (event.delta.length === 0) break;
+        if (streamingSegment === undefined) {
+          streamingSegment = "";
+          emitDelta({ kind: "agent.chunk_start", taskId, agentKind });
+        }
+        streamingSegment += event.delta;
+        emitDelta({ kind: "agent.chunk", taskId, agentKind, text: event.delta });
+        break;
       case "model.completed":
+        closeStreamingSegment();
         break;
       case "run.failed":
+        closeStreamingSegment(event.reason);
         emitSnapshot({
           ...snapshot,
           logs: appendLog(snapshot, taskEventToLogEntry({
@@ -7765,6 +7798,7 @@ async function projectAgentRuntimeEvents(
         });
         break;
       case "run.cancelled":
+        closeStreamingSegment(event.reason);
         emitSnapshot({
           ...snapshot,
           logs: appendLog(snapshot, taskEventToLogEntry({
@@ -7850,7 +7884,9 @@ async function projectAgentRuntimeEvents(
         });
         break;
       case "run.started":
+        break;
       case "run.completed":
+        closeStreamingSegment();
         break;
       case "context.requested":
         emitSnapshot({
@@ -7956,6 +7992,7 @@ export async function runCommanderDagTask({
   initialTokenUsage,
   availableToolDescriptors,
   signal,
+  onDeltaEvent,
   runtimeEventSink,
   checkpointSink,
   usageObservationSink,
@@ -10094,6 +10131,7 @@ export async function runCommanderDagTask({
                 backend,
                 onUsageObservation: recordUsageObservation,
                 onDiagnostic: recordDiagnostic,
+                onDeltaEvent,
               },
             );
             const result = await handle.result;

@@ -49,6 +49,44 @@ describe("createDeltaReducer streaming metadata", () => {
     expect(result.commanderMessage).toBe("已有回复");
     expect(result.isStreaming).toBe(false);
   });
+
+  it("preserves an in-flight agent runtime stream across full snapshot emits", () => {
+    const reducer = createDeltaReducer(createInitialTaskSnapshot());
+    reducer.apply({
+      kind: "agent.chunk_start",
+      taskId: "task-1",
+      agentKind: "research",
+    });
+    reducer.apply({
+      kind: "agent.chunk",
+      taskId: "task-1",
+      agentKind: "research",
+      text: "partial ",
+    });
+
+    // Executor full snapshot emits never carry agent runtime streaming state.
+    reducer.syncFrom(createInitialTaskSnapshot());
+
+    const synced = reducer.apply({
+      kind: "agent.chunk",
+      taskId: "task-1",
+      agentKind: "research",
+      text: "thought",
+    });
+    expect(synced.isStreaming).toBe(true);
+    expect(synced.streamingAgentKind).toBe("research");
+    expect(synced.streamingText).toBe("partial thought");
+
+    const ended = reducer.apply({
+      kind: "agent.chunk_end",
+      taskId: "task-1",
+      agentKind: "research",
+      fullText: "partial thought",
+    });
+    expect(ended.isStreaming).toBe(false);
+    expect(ended.streamingAgentKind).toBeUndefined();
+    expect(ended.streamingText).toBeUndefined();
+  });
 });
 
 describe("createDeltaReducer step.failed", () => {

@@ -2760,6 +2760,9 @@ export function createFileScanTaskRuntime({
           checkpointSink,
           usageObservationSink,
           resumeFromCheckpoint: options.resumeFromCheckpoint,
+          onDeltaEvent: (event) => {
+            eventBus?.emit(event);
+          },
           getAgentRuntimeBackend,
           getAgentRuntimeRoutingDecision,
           getAgentRuntimeProviderId,
