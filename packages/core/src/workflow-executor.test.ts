@@ -8535,6 +8535,8 @@ describe("executeCapabilityStep permissions", () => {
       "waiting_tool",
       "tool_call.updated",
     ]);
+    const completedLog = toolCallLogs.find((log) => log.title === "tool_call.updated");
+    expect(completedLog?.detail).toContain(`Result: {"ok":true}`);
     const persistedToolEvents = runtimeEvents.filter((event) =>
       (event.payload as { toolCallId?: string }).toolCallId === "call-1" &&
       ["tool.planned", "tool.started", "tool.completed", "tool.failed"].includes(

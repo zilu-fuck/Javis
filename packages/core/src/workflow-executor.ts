@@ -7728,6 +7728,27 @@ function isAgentRuntimeControlTool(toolName: string): boolean {
   return toolName === "javis.requestInput" || toolName.startsWith("javis.structuredOutput.");
 }
 
+/**
+ * Bounded one-line summary of an agent runtime tool output for the activity
+ * log. Full outputs stay in evidence/artifacts (dual-kernel plan §7.2); the
+ * log only carries a redacted, truncated preview.
+ */
+function summarizeAgentToolOutput(output: unknown): string {
+  if (output === undefined || output === null) return "";
+  let text: string;
+  if (typeof output === "string") {
+    text = output;
+  } else {
+    try {
+      text = JSON.stringify(output);
+    } catch {
+      text = String(output);
+    }
+  }
+  if (!text || text === "{}" || text === "[]") return "";
+  return text;
+}
+
 async function projectAgentRuntimeEvents(
   events: AsyncIterable<AgentEvent>,
   agentKind: AgentKind,
@@ -7856,16 +7877,22 @@ async function projectAgentRuntimeEvents(
         break;
       case "tool.completed":
         if (isAgentRuntimeControlTool(event.toolName)) break;
-        emitSnapshot({
-          ...getSnapshot(),
-          logs: appendLog(getSnapshot(), emitEvent({
-            kind: "tool.completed",
-            taskId,
-            toolName: event.toolName,
-            detail: sanitizeReActReasonForLog(`Completed ${event.toolName} (${event.toolCallId}).`),
-            ...projectedToolRuntimeIdentity(event, agentKind),
-          })),
-        });
+        {
+          const outputSummary = summarizeAgentToolOutput(event.output);
+          emitSnapshot({
+            ...getSnapshot(),
+            logs: appendLog(getSnapshot(), emitEvent({
+              kind: "tool.completed",
+              taskId,
+              toolName: event.toolName,
+              detail: sanitizeReActReasonForLog(
+                `Completed ${event.toolName} (${event.toolCallId}).` +
+                  (outputSummary ? ` Result: ${outputSummary}` : ""),
+              ),
+              ...projectedToolRuntimeIdentity(event, agentKind),
+            })),
+          });
+        }
         break;
       case "tool.failed":
         if (isAgentRuntimeControlTool(event.toolName)) break;
