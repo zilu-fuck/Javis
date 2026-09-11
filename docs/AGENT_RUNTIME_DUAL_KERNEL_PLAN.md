@@ -731,8 +731,11 @@ stderr 和事件摘要必须限长、脱敏，并保留阶段信息，避免只�
 > **状态：🔄 部分完成**。LangChain adapter（`langchain/runner.ts` + `javis-chat-model.ts`）
 > 已完整实现（原生 tool call、流式、request_input、受控重试、限额、取消）；
 > `resolveCommanderStepAgentRuntimeRoutingDecision` 支持按 profile/rollout 放量。
-> live provider 流式验收、打包重启验收和产品工作流闭环（`qa:langchain-poc:live` 目前仅
-> 非流式 DeepSeek POC）留待有 API key 的环境执行。
+> live 验收（2026-09-11）：`live-poc.test.ts`（非流式 tool loop）与
+> `live-stream-poc.test.ts`（流式 + reasoning_content 不泄漏 + usage）均已对
+> OpenAI 兼容端点（本地 sub2api 网关，glm-5.3-flash / qwen3.8-flash）实测通过，
+> endpoint 经 `JAVIS_LANGCHAIN_LIVE_ENDPOINT` 参数化。剩余：打包重启验收与产品工作流闭环
+> （`qa:langchain-poc:live` 全量 QA）需在完整环境执行。
 
 ### Phase 4：删除 legacy ReAct
 

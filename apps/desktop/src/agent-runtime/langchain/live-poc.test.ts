@@ -15,7 +15,8 @@ import { createLangChainAgentRuntime } from "./runner";
 const LIVE_ENABLED = readEnvironmentVariable("JAVIS_RUN_LANGCHAIN_LIVE") === "1";
 const API_KEY = readEnvironmentVariable("DEEPSEEK_API_KEY")?.trim();
 const MODEL = readEnvironmentVariable("JAVIS_LANGCHAIN_LIVE_MODEL")?.trim() || "deepseek-chat";
-const ENDPOINT = "https://api.deepseek.com/chat/completions";
+const ENDPOINT = readEnvironmentVariable("JAVIS_LANGCHAIN_LIVE_ENDPOINT")?.trim()
+  || "https://api.deepseek.com/chat/completions";
 
 describe("DeepSeek live POC request serialization", () => {
   it("flattens text messages while retaining assistant tool calls and tool results", () => {
