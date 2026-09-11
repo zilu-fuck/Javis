@@ -14,7 +14,8 @@ const ENDPOINT = readEnvironmentVariable("JAVIS_LANGCHAIN_LIVE_ENDPOINT")?.trim(
   || "https://api.deepseek.com/chat/completions";
 
 function readEnvironmentVariable(name: string): string | undefined {
-  return typeof process !== "undefined" ? process.env?.[name] : undefined;
+  return (globalThis as { process?: { env?: Record<string, string | undefined> } })
+    .process?.env?.[name];
 }
 
 /**
