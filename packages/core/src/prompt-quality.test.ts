@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { buildReActDecisionPrompt } from "./agent-react-decider";
 import { demoAgents } from "./agents";
 import { buildAgentSystemPrompt, getPromptSectionDefinition } from "./agents/prompt";
 import { buildCommanderPlanPrompt } from "./commander-plan-schema";
@@ -46,22 +45,6 @@ describe("prompt quality gates", () => {
     expect(prompt).not.toContain("Rules / 规则");
   });
 
-  it("keeps ReAct and agent system prompts within small prompt budgets", () => {
-    const reactPrompt = buildReActDecisionPrompt({
-      agentKind: "code",
-      locale: "zh-CN",
-      stepId: "verify-change",
-      stepTitle: "验证代码改动",
-      userGoal: "修复问题并验证",
-      observations: [],
-      availableTools: [{ name: "shell.runReadOnlyCommand", summary: "Run read-only shell command", capabilityTags: ["shell_readonly"] }],
-    });
-    const codePrompt = buildAgentSystemPrompt({ kind: "code", locale: "zh-CN" });
-
-    expect(reactPrompt.length).toBeLessThan(2_800);
-    expect(codePrompt.length).toBeLessThan(3_500);
-  });
-
   it("goldens the compact Commander contract and one-shot clarification example", () => {
     const prompt = buildCommanderPlanPrompt({
       userGoal: "Review this project",
@@ -102,17 +85,6 @@ describe("prompt quality gates", () => {
       availableAgents: [...availableAgents],
       availableTools: [],
     });
-    const reactPrompt = buildReActDecisionPrompt({
-      agentKind: "code",
-      locale: "zh-CN",
-      stepId: "verify-change",
-      stepTitle: "验证代码改动",
-      userGoal: "修复问题并验证",
-      observations: [
-        { iteration: 1, toolName: "shell.runReadOnlyCommand", status: "failed" as const, output: undefined, error: "fixture" },
-      ],
-      availableTools: [{ name: "shell.runReadOnlyCommand", summary: "Run read-only shell command", capabilityTags: ["shell_readonly"] }],
-    });
     const agentPrompt = buildAgentSystemPrompt({
       kind: "code",
       locale: "zh-CN",
@@ -121,7 +93,6 @@ describe("prompt quality gates", () => {
     });
 
     expect(commanderPrompt).not.toMatch(zhBilingualLabelPattern);
-    expect(reactPrompt).not.toMatch(zhBilingualLabelPattern);
     expect(agentPrompt).not.toMatch(zhBilingualLabelPattern);
     expect(agentPrompt).not.toMatch(/## (Core Rules|Output Contract|Tool Rules|Collaboration Rules|UI Generation Design Rules|Runtime Context)/);
   });

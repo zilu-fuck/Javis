@@ -13,7 +13,8 @@ const { invokeMock, listenMock, eventHandlers } = vi.hoisted(() => ({
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 
-import { createAgentModelGateway } from "./agent-model-gateway";
+import { createAgentModelGateway, parseModelChatError } from "./agent-model-gateway";
+import { ModelChatEmptyResponseError } from "./agent-model-gateway";
 
 const request: AgentChatRequest = {
   messages: [{ role: "user", content: [{ type: "text", text: "Search" }] }],
@@ -263,5 +264,36 @@ describe("createAgentModelGateway", () => {
 
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     expect(invokeMock).toHaveBeenCalledWith("stream_model_chat_cancel", { streamId });
+  });
+});
+
+describe("parseModelChatError empty-response classification (plan §13.2)", () => {
+  it("parses the native empty-response error into a typed error with shape and usage", () => {
+    const message = "__JAVIS_EMPTY_RESPONSE__" + JSON.stringify({
+      code: "model_chat_empty_response",
+      responseShape: {
+        choicesCount: 1,
+        messageKeys: ["content", "reasoning_content"],
+        contentType: "missing",
+        contentLength: 0,
+        hasReasoningContent: false,
+        toolCallsCount: 0,
+        hasUsage: true,
+      },
+      finishReason: "stop",
+      usage: { inputTokens: 12, outputTokens: 0, totalTokens: 12 },
+    });
+    const error = parseModelChatError(message);
+    expect(error).toBeInstanceOf(ModelChatEmptyResponseError);
+    const typed = error as ModelChatEmptyResponseError;
+    expect(typed.responseShape).toMatchObject({ contentType: "missing", toolCallsCount: 0 });
+    expect(typed.finishReason).toBe("stop");
+    expect(typed.usage).toEqual({ inputTokens: 12, outputTokens: 0, totalTokens: 12 });
+  });
+
+  it("keeps non-empty-response errors as plain errors", () => {
+    const error = parseModelChatError("Model chat request failed with HTTP 500.");
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(ModelChatEmptyResponseError);
   });
 });

@@ -9,6 +9,7 @@ import type {
   AgentToolSpec,
 } from "@javis/core";
 import { validateAgentRequestInput } from "@javis/core";
+import { ModelChatEmptyResponseError } from "../agent-model-gateway";
 import {
   AIMessage,
   AIMessageChunk,
@@ -131,7 +132,7 @@ export class JavisChatModel extends BaseChatModel<BaseChatModelCallOptions> {
   ): Promise<ChatResult> {
     const callIndex = this.beginModelCall();
     const request = this.createRequest(messages, options);
-    const response = await this.gateway.complete(request);
+    const response = await this.completeWithEmptyResponseRetry(request);
     this.emitAssistantEvents(response.message.toolCalls ?? []);
     this.onEvent?.({
       type: "model.completed",
@@ -184,7 +185,23 @@ export class JavisChatModel extends BaseChatModel<BaseChatModelCallOptions> {
     options: BaseChatModelCallOptions,
   ): AsyncGenerator<ChatGenerationChunk> {
     const callIndex = this.beginModelCall();
-    for await (const event of this.gateway.stream(this.createRequest(messages, options))) {
+    const request = this.createRequest(messages, options);
+    try {
+      yield* this.iterateStreamEvents(this.gateway.stream(request), callIndex);
+    } catch (error) {
+      const empty = toEmptyResponseError(error);
+      if (!empty) throw error;
+      this.emitEmptyResponseDiagnostic(empty);
+      this.beginModelCall();
+      yield* this.iterateStreamEvents(this.gateway.stream(request), callIndex);
+    }
+  }
+
+  private async *iterateStreamEvents(
+    stream: AsyncIterable<AgentChatStreamEvent>,
+    callIndex: number,
+  ): AsyncGenerator<ChatGenerationChunk> {
+    for await (const event of stream) {
       if (event.type === "text_delta") {
         this.onEvent?.({ type: "model.delta", delta: event.delta });
       } else if (event.type === "tool_call_start") {
@@ -201,6 +218,49 @@ export class JavisChatModel extends BaseChatModel<BaseChatModelCallOptions> {
       const chunk = streamEventToGenerationChunk(event);
       if (chunk) yield chunk;
     }
+  }
+
+  /**
+   * Controlled single retry for an empty provider response (dual-kernel
+   * plan §13.2). The first call's usage and a sanitized response-shape
+   * diagnostic are emitted before the retry, which starts a fresh model
+   * call with a new call id so both calls meter and dedupe separately.
+   */
+  private async completeWithEmptyResponseRetry(
+    request: AgentChatRequest,
+  ): Promise<import("@javis/core").AgentChatResponse> {
+    try {
+      return await this.gateway.complete(request);
+    } catch (error) {
+      const empty = toEmptyResponseError(error);
+      if (!empty) throw error;
+      this.emitEmptyResponseDiagnostic(empty);
+      if (empty.usage) {
+        this.onEvent?.({ type: "usage.updated", usage: empty.usage, final: true });
+      }
+      this.beginModelCall();
+      try {
+        return await this.gateway.complete(request);
+      } catch (retryError) {
+        const retryEmpty = toEmptyResponseError(retryError);
+        if (retryEmpty) {
+          this.emitEmptyResponseDiagnostic(retryEmpty);
+          if (retryEmpty.usage) {
+            this.onEvent?.({ type: "usage.updated", usage: retryEmpty.usage, final: true });
+          }
+        }
+        throw retryError;
+      }
+    }
+  }
+
+  private emitEmptyResponseDiagnostic(error: ModelChatEmptyResponseError): void {
+    this.onEvent?.({
+      type: "backend.diagnostic",
+      code: "model_chat_empty_response",
+      message: error.message,
+      phase: "model",
+    });
   }
 
   private createRequest(
@@ -425,4 +485,8 @@ function readResponseSchema(
   if (!isRecord(responseFormat) || !isRecord(responseFormat.json_schema)) return undefined;
   const schema = responseFormat.json_schema.schema;
   return isRecord(schema) ? schema : undefined;
+}
+
+function toEmptyResponseError(error: unknown): ModelChatEmptyResponseError | undefined {
+  return error instanceof ModelChatEmptyResponseError ? error : undefined;
 }

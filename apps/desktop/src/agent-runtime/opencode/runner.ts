@@ -1,4 +1,5 @@
 import {
+  AgentEventQueue,
   validateCodeProposal,
   type AgentDefinition,
   type AgentEvent,
@@ -469,30 +470,3 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 class OpenCodeProtocolError extends Error {}
-
-class AgentEventQueue {
-  private readonly buffer: AgentEvent[] = [];
-  private readonly waiters: Array<() => void> = [];
-  private closed = false;
-
-  push(event: AgentEvent): void {
-    if (this.closed) return;
-    this.buffer.push(event);
-    this.waiters.shift()?.();
-  }
-
-  close(): void {
-    this.closed = true;
-    while (this.waiters.length > 0) this.waiters.shift()?.();
-  }
-
-  async *iterate(): AsyncGenerator<AgentEvent> {
-    while (!this.closed || this.buffer.length > 0) {
-      if (this.buffer.length > 0) {
-        yield this.buffer.shift()!;
-      } else {
-        await new Promise<void>((resolve) => this.waiters.push(resolve));
-      }
-    }
-  }
-}

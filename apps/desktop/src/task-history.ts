@@ -1225,6 +1225,9 @@ function isAgentRuntimeRoutingMetricsSnapshotArray(
     const opencodeRouteCount = metrics.opencodeRouteCount === undefined
       ? 0
       : metrics.opencodeRouteCount;
+    const javisSpecializedRouteCount = metrics.javisSpecializedRouteCount === undefined
+      ? 0
+      : metrics.javisSpecializedRouteCount;
     if (!isCanonicalBoundedString(metrics.providerId, 160) ||
       metrics.providerId !== metrics.providerId.toLowerCase() ||
       !isCanonicalBoundedString(metrics.agentKind, 160) ||
@@ -1235,10 +1238,11 @@ function isAgentRuntimeRoutingMetricsSnapshotArray(
       !isNonNegativeInteger(opencodeRouteCount) ||
       !isNonNegativeInteger(metrics.legacyRouteCount) ||
       !isNonNegativeInteger(metrics.unavailableRouteCount) ||
+      !isNonNegativeInteger(javisSpecializedRouteCount) ||
       !isNonNegativeInteger(metrics.fallbackCount) ||
       metrics.rolloutTargetCount > metrics.routeCount ||
       metrics.langchainRouteCount + opencodeRouteCount + metrics.legacyRouteCount +
-        metrics.unavailableRouteCount !== metrics.routeCount ||
+        metrics.unavailableRouteCount + javisSpecializedRouteCount !== metrics.routeCount ||
       metrics.langchainRouteCount + opencodeRouteCount + metrics.fallbackCount !==
         metrics.rolloutTargetCount ||
       !isNumber(metrics.fallbackRate) ||

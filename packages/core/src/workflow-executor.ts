@@ -204,8 +204,11 @@ import {
   writeStepOutput,
   type SharedTaskContext,
 } from "./shared-context";
-import { runAgentReActLoop, sanitizeAgentReActOutput, type AgentReActDecision, type AgentReActLoopResult, type AgentReActTool } from "./agent-react-loop";
-import type { ReActDecisionRequest } from "./agent-react-decider";
+import { sanitizeAgentReActOutput } from "./agent-runtime/legacy-helpers";
+import {
+  usageObservationFromEvent,
+  type UsageObservation,
+} from "./agent-runtime/usage-observations";
 import type {
   AgentRuntimeBackend,
   AgentRuntimeFallbackReason,
@@ -215,6 +218,7 @@ import type {
   AgentRuntimeRoutingObservation,
   AgentRuntimeRunMetrics,
   ToolExecutionGateway,
+  WorkflowExecutionBackend,
 } from "./agent-runtime/contracts";
 import type { AgentEvent } from "./agent-runtime/event";
 import {
@@ -7520,6 +7524,10 @@ interface CommanderDagTaskOptions {
       requestId: string,
       handler: ((decision: string) => void | Promise<void>) | undefined,
     ): void;
+    setPendingStepWaitHandler?(
+      stepId: string,
+      handler: (() => void | Promise<void>) | undefined,
+    ): void;
   };
   agentRegistry?: AgentRegistry;
   commanderTool?: CommanderTool;
@@ -7557,6 +7565,15 @@ interface CommanderDagTaskOptions {
   runtimeEventSink?: {
     append: (envelope: RuntimeEventEnvelope) => void | Promise<void>;
   };
+  /**
+   * Optional durable usage-observation sink. If provided, every upserted
+   * UsageObservation is forwarded so the caller can persist the per-call
+   * ledger (dual-kernel plan §12). The executor keeps the ledger itself,
+   * so the sink is a persistence mirror, not the source of truth.
+   */
+  usageObservationSink?: {
+    append: (observation: UsageObservation) => void | Promise<void>;
+  };
   /** Optional durable checkpoint sink. If provided, the executor calls save() with WorkflowCheckpoint snapshots at lifecycle transitions. */
   checkpointSink?: {
     save: (checkpoint: WorkflowCheckpoint) => void | Promise<void>;
@@ -7566,10 +7583,6 @@ interface CommanderDagTaskOptions {
     checkpoint: WorkflowCheckpoint;
     events: RuntimeEventEnvelope[];
   };
-  /** LLM-based ReAct decision maker. Called each iteration of the ReAct loop. */
-  reactDecideNext?: (
-    request: ReActDecisionRequest,
-  ) => Promise<AgentReActDecision>;
   getAgentRuntimeBackend?: (
     agentKind: AgentKind,
     taskId: string,
@@ -7715,6 +7728,11 @@ async function projectAgentRuntimeEvents(
   getSnapshot: () => TaskSnapshot,
   emitSnapshot: (snapshot: TaskSnapshot) => void,
   emitEvent: (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number],
+  options?: {
+    backend?: WorkflowExecutionBackend;
+    onUsageObservation?: (observation: UsageObservation) => void;
+    onDiagnostic?: (diagnostic: NonNullable<TaskSnapshot["diagnostics"]>[number]) => void;
+  },
 ): Promise<void> {
   for await (const event of events) {
     const snapshot = getSnapshot();
@@ -7846,15 +7864,59 @@ async function projectAgentRuntimeEvents(
           })),
         });
         break;
+      case "backend.diagnostic":
+        emitSnapshot({
+          ...snapshot,
+          logs: appendLog(snapshot, taskEventToLogEntry({
+            kind: "agent.status",
+            taskId,
+            agentKind,
+            status: "running",
+            message: sanitizeReActReasonForLog(`[${event.code}] ${event.message}`),
+          })),
+        });
+        options?.onDiagnostic?.({
+          source: "backend",
+          code: event.code,
+          message: sanitizeReActReasonForLog(event.message),
+          ...(event.stepId ? { stepId: event.stepId } : {}),
+          ...(event.callId ? { callId: event.callId } : {}),
+        });
+        break;
       case "usage.updated":
         emitSnapshot({
           ...snapshot,
           tokenUsage: addModelUsage(snapshot.tokenUsage, agentKind, event.usage),
         });
+        if (options?.onUsageObservation) {
+          options.onUsageObservation(usageObservationFromEvent({
+            callId: event.callId ?? syntheticUsageObservationCallId(agentKind, event, taskId),
+            taskId,
+            workflowRunId: event.workflowRunId,
+            stepId: event.stepId,
+            attempt: event.attempt,
+            agentKind,
+            backend: options.backend ?? "langchain",
+            usage: event.usage,
+            revision: event.revision,
+            final: event.final,
+          }));
+        }
         break;
     }
   }
 }
+
+function syntheticUsageObservationCallId(
+  agentKind: AgentKind,
+  event: Extract<AgentEvent, { type: "usage.updated" }>,
+  taskId: string,
+): string {
+  const seq = syntheticUsageObservationCounter += 1;
+  return `${agentKind}.${event.stepId ?? taskId}.usage.${seq}`;
+}
+
+let syntheticUsageObservationCounter = 0;
 
 /**
  * Execute a task via Commander-generated DAG with capability-based dispatch.
@@ -7896,8 +7958,8 @@ export async function runCommanderDagTask({
   signal,
   runtimeEventSink,
   checkpointSink,
+  usageObservationSink,
   resumeFromCheckpoint,
-  reactDecideNext,
   getAgentRuntimeBackend = () => "legacy",
   getAgentRuntimeRoutingDecision,
   getAgentRuntimeProviderId = () => "unknown-provider",
@@ -7946,7 +8008,7 @@ export async function runCommanderDagTask({
   );
   const pageAgentTrendRuntimeAvailable = Boolean(
     browserTool &&
-    (reactDecideNext ||
+    (
       createAgentRuntime ||
       agentRuntimeFactories?.langchain ||
       agentRuntimeFactories?.opencode),
@@ -8116,6 +8178,11 @@ export async function runCommanderDagTask({
   }
   function buildCheckpointFromSnapshot(
     waitingReason?: WorkflowCheckpoint["waitingReason"],
+    waitingFields?: {
+      waitingStepId?: string;
+      waitingAttempt?: number;
+      wakeCondition?: WorkflowCheckpoint["wakeCondition"];
+    },
   ): WorkflowCheckpoint {
     const plan = getSnapshot().plan;
     const completedStepIds = plan
@@ -8140,16 +8207,33 @@ export async function runCommanderDagTask({
       envelopes: context.envelopeSnapshot(),
       approvalRequestIds: permissionRequest?.id ? [permissionRequest.id] : [],
       waitingReason,
+      ...(waitingFields?.waitingStepId ? { waitingStepId: waitingFields.waitingStepId } : {}),
+      ...(waitingFields?.waitingAttempt !== undefined
+        ? { waitingAttempt: waitingFields.waitingAttempt }
+        : {}),
+      ...(waitingFields?.wakeCondition ? { wakeCondition: waitingFields.wakeCondition } : {}),
       eventSequence: currentEnvelopeSequence(runId),
       agentRuntimeMetrics: getSnapshot().agentRuntimeMetrics,
       agentRuntimeRoutingMetrics: getSnapshot().agentRuntimeRoutingMetrics,
       tokenUsage: getSnapshot().tokenUsage,
+      ...(usageObservations.length > 0 ? { usageObservations } : {}),
     });
   }
-  function saveCheckpoint(waitingReason?: WorkflowCheckpoint["waitingReason"]) {
+  function saveCheckpoint(
+    waitingReason?: WorkflowCheckpoint["waitingReason"],
+    waitingFields?: {
+      waitingStepId?: string;
+      waitingAttempt?: number;
+      wakeCondition?: WorkflowCheckpoint["wakeCondition"];
+    },
+  ) {
     if (!checkpointSink || !syntheticWorkflow) return;
-    const checkpoint = buildCheckpointFromSnapshot(waitingReason);
+    const checkpoint = buildCheckpointFromSnapshot(waitingReason, waitingFields);
     enqueueDurablePersistence("checkpoint-sink", () => checkpointSink.save(checkpoint));
+  }
+  function waitingAttemptForStep(stepId: string): number {
+    const observationId = nextAgentRuntimeRoutingObservationId(stepId);
+    return Number(/:attempt-(\d+)$/u.exec(observationId)?.[1] ?? 1);
   }
 
   function emitEvent(event: TaskRuntimeEvent) {
@@ -8256,11 +8340,59 @@ export async function runCommanderDagTask({
   const planStages: PlanGenerationStageRecord[] = [];
   const planRecoveryCompiles: PlanRecoveryCompileRecord[] = [];
   const verifierChecks = new Map<string, VerifierCheckResult>();
-  function recordModelUsage(agentKind: AgentKind, usage: ModelUsage): void {
+  // Restore the per-call ledger from a durable checkpoint so resumed runs
+  // keep idempotent call identities instead of re-basing on a fresh task.
+  // Checkpoint rows were sanitized on read, so the cast only narrows the
+  // persisted loose shape back to the runtime contract.
+  const diagnostics: NonNullable<TaskSnapshot["diagnostics"]> = [];
+  const recordDiagnostic = (diagnostic: NonNullable<TaskSnapshot["diagnostics"]>[number]): void => {
+    if (diagnostics.length >= 50) return;
+    const duplicate = diagnostics.some((item) =>
+      item.source === diagnostic.source && item.code === diagnostic.code &&
+      item.message === diagnostic.message && item.stepId === diagnostic.stepId);
+    if (duplicate) return;
+    diagnostics.push(diagnostic);
+  };
+  const usageObservations: UsageObservation[] = (
+    resumeFromCheckpoint?.checkpoint.usageObservations ?? []
+  ).flatMap((observation) => {
+    if (!observation || typeof observation.callId !== "string" ||
+      typeof observation.agentKind !== "string" ||
+      typeof observation.backend !== "string") {
+      return [];
+    }
+    return [observation as UsageObservation];
+  });
+  let legacyUsageSequence = usageObservations.length;
+  const recordUsageObservation = (observation: UsageObservation): void => {
+    const existingIndex = usageObservations.findIndex((item) => item.callId === observation.callId);
+    if (existingIndex >= 0) {
+      const existing = usageObservations[existingIndex];
+      if (existing.final && observation.revision <= existing.revision) return;
+      if (observation.revision < existing.revision) return;
+      usageObservations[existingIndex] = observation;
+    } else {
+      usageObservations.push(observation);
+    }
+    void usageObservationSink?.append(observation);
+  };
+  function recordModelUsage(agentKind: AgentKind, usage: ModelUsage, stepId?: string): void {
     emitSnapshot({
       ...getSnapshot(),
       tokenUsage: addModelUsage(getSnapshot().tokenUsage, agentKind, usage),
     });
+    legacyUsageSequence += 1;
+    recordUsageObservation(usageObservationFromEvent({
+      callId: `${stepId ?? "commander"}.legacy.${legacyUsageSequence}`,
+      taskId,
+      workflowRunId: runId,
+      ...(stepId ? { stepId } : {}),
+      agentKind,
+      backend: "legacy",
+      usage,
+      revision: 1,
+      final: true,
+    }));
   }
   function clearVerifierCheck(stepId: string): void {
     const removed = verifierChecks.delete(stepId);
@@ -8984,7 +9116,6 @@ export async function runCommanderDagTask({
           signal,
           runtimeEventSink,
           checkpointSink,
-          reactDecideNext,
           getAgentRuntimeBackend,
           getAgentRuntimeRoutingDecision,
           getAgentRuntimeProviderId,
@@ -9435,6 +9566,45 @@ export async function runCommanderDagTask({
         if (!descriptor) {
           throw new Error(`No available Computer Use tool is registered for step ${dagStep.id}.`);
         }
+        // Computer Use is an explicit migration exception (dual-kernel plan
+        // §1/§6): it is a controlled Javis-specialized backend, never direct,
+        // LangChain, or OpenCode, and it must be visible in routing metrics.
+        const computerTaskType = getDagStepPermissionLevel(dagStep, availableTools, agentRegistry);
+        const computerObservationId = nextAgentRuntimeRoutingObservationId(dagStep.id);
+        const computerRouteAttempt = Number(
+          /:attempt-(\d+)$/u.exec(computerObservationId)?.[1] ?? 1,
+        );
+        const computerAgentRunId = `${runId}:${dagStep.id}:agent-attempt-${computerRouteAttempt}`;
+        let computerProviderId = "unknown-provider";
+        let computerModel: string | undefined;
+        try {
+          const computerProfile = getAgentRuntimeModelProfile?.(
+            dagStep.assignedAgentKind as AgentKind,
+          );
+          computerProviderId = computerProfile?.provider ??
+            getAgentRuntimeProviderId(dagStep.assignedAgentKind as AgentKind);
+          computerModel = computerProfile?.model;
+        } catch {
+          // Provider identity is telemetry only.
+        }
+        recordAgentRuntimeRoutingMetrics({
+          observationId: computerObservationId,
+          providerId: computerProviderId,
+          agentKind: dagStep.assignedAgentKind as AgentKind,
+          taskType: computerTaskType,
+          backend: "javis_specialized",
+          rolloutTargeted: false,
+          taskId,
+          workflowRunId: runId,
+          agentRunId: computerAgentRunId,
+          stepId: dagStep.id,
+          attempt: computerRouteAttempt,
+          primaryCapability: dagStep.primaryCapability ?? dagStep.capability,
+          permissionLevel: computerTaskType,
+          provider: computerProviderId,
+          ...(computerModel ? { model: computerModel } : {}),
+          selectionReason: "execution_mode:desktop_input",
+        }, dagStep.id);
         if (!computerUseLoopRunner) {
           throw new Error("Computer Use loop runner is not available.");
         }
@@ -9610,8 +9780,19 @@ export async function runCommanderDagTask({
         availableTools,
       );
 
-      // Build ReAct tools from available tool descriptors filtered by agent, capability, and toolName.
-      const reactTools: AgentReActTool[] = stepToolDescriptors
+      // Build runtime tools from available tool descriptors filtered by
+      // agent, capability, and toolName.
+      const reactTools: Array<{
+        name: string;
+        baseInput?: Record<string, unknown>;
+        execute(request: {
+          agent: Agent;
+          step: WorkbenchWorkflowStep;
+          context: SharedTaskContext;
+          observations: unknown[];
+          input?: Record<string, unknown>;
+        }): Promise<unknown>;
+      }> = stepToolDescriptors
         .map((td) => {
           const failureFallbackCapability = getFailureFallbackCapability(td);
           const failureFallbackAgentKind = getFailureFallbackAgentKind(
@@ -9649,7 +9830,7 @@ export async function runCommanderDagTask({
                   adaptedInput,
                   tools,
                   availableTools,
-                  (usage) => recordModelUsage(dagStep.assignedAgentKind as AgentKind, usage),
+                  (usage) => recordModelUsage(dagStep.assignedAgentKind as AgentKind, usage, dagStep.id),
                   dagStep,
                   context,
                 ),
@@ -9668,7 +9849,15 @@ export async function runCommanderDagTask({
 
       // ReAct is opt-in. Direct response/tool-call steps skip the extra LLM decision.
       if (executionMode === "react" && reactTools.length > 0) {
-        let reactResult: AgentReActLoopResult | undefined;
+        let reactResult: {
+          status: "completed" | "failed" | "request_input";
+          output?: unknown;
+          observations: unknown[];
+          reason: string;
+          requestedContextKeys?: string[];
+          requestedAgentKind?: AgentKind;
+          metrics: AgentRuntimeRunMetrics;
+        } | undefined;
         let runtimeLabel = "ReAct";
         const taskType = getDagStepPermissionLevel(dagStep, availableTools, agentRegistry);
         const primaryCapability = dagStep.primaryCapability ?? dagStep.capability;
@@ -9728,12 +9917,10 @@ export async function runCommanderDagTask({
         const runtimeCanStart = selectedRuntimeBackend === "opencode"
           ? isCodeProposalStep(dagStep)
           : runtimeDescriptors.length > 0;
-        const canFallbackToLegacy = !isCodeProposalStep(dagStep) &&
-          selectedRuntimeBackend !== "opencode" && Boolean(reactDecideNext);
         let effectiveBackend: AgentRuntimeBackend | "unavailable" =
             selectedRuntimeBackend && runtimeFactory && runtimeCanStart
               ? selectedRuntimeBackend
-            : canFallbackToLegacy ? "legacy" : "unavailable";
+              : "unavailable";
         let fallbackReason = routingDecision.fallbackReason ??
           (selectedRuntimeBackend && !runtimeFactory
             ? "runtime_factory_unavailable"
@@ -9869,7 +10056,7 @@ export async function runCommanderDagTask({
             };
             runtimeLabel = effectiveBackend === "langchain" ? "LangChain" : "OpenCode";
           } catch {
-            effectiveBackend = canFallbackToLegacy ? "legacy" : "unavailable";
+            effectiveBackend = "unavailable";
             fallbackReason = "runtime_initialization_failed";
           }
         }
@@ -9903,6 +10090,11 @@ export async function runCommanderDagTask({
               getSnapshot,
               emitSnapshot,
               emitEvent,
+              {
+                backend,
+                onUsageObservation: recordUsageObservation,
+                onDiagnostic: recordDiagnostic,
+              },
             );
             const result = await handle.result;
             await eventProjection;
@@ -9972,144 +10164,6 @@ export async function runCommanderDagTask({
             };
         }
 
-        if (!reactResult && effectiveBackend === "legacy" && reactDecideNext) {
-          reactResult = await runAgentReActLoop({
-            agent: { kind: dagStep.assignedAgentKind, allowedToolNames } as Agent,
-            step: wfStep,
-            context,
-            tools: reactTools,
-            liveAgentKinds: getRegisteredAgentDefinitions(agentRegistry).map((agent) => agent.kind),
-            maxIterations: runtimeTimeouts.agentMaxIterations,
-            signal: stepSignal,
-            decisionTimeoutMs: runtimeTimeouts.modelTimeoutMs,
-            toolTimeoutMs: runtimeTimeouts.toolTimeoutMs,
-            completionOutputMode: dagStep.assignedAgentKind === "page-agent" ||
-                Boolean(primaryCapability && isRoleCapabilityForAgentKind(
-                  dagStep.assignedAgentKind,
-                  primaryCapability,
-                ))
-              ? "summary"
-              : "observation",
-            decideNext: async (req) => {
-              const decision = await reactDecideNext({
-                  agentKind: req.agent.kind,
-                  stepId: req.step.id,
-                  stepTitle: req.step.title,
-                  userGoal,
-                  instruction: dagStep.instruction,
-                  hardConstraints: dagStep.hardConstraints,
-                  preferences: dagStep.preferences,
-                  acceptanceCriteria: dagStep.acceptanceCriteria,
-                  outputSchemaRef: dagStep.outputSchemaRef,
-                  successCriteria: dagStep.successCriteria,
-                  capability: dagStep.capability,
-                  observations: req.observations,
-                  availableTools: reactTools.map((t) => {
-                    const td = stepToolDescriptors.find((d) => d.name === t.name);
-                    return {
-                      name: t.name,
-                      summary: td?.summary ?? "",
-                      capabilityTags: td?.capabilityTags ?? [],
-                      inputSchema: td?.inputSchema,
-                      requiredInputs: td?.requiredInputs,
-                    };
-                  }),
-                  availableContextKeys: Object.keys(context.snapshot()),
-                  handoffContext: Object.fromEntries(
-                    (dagStep.inputContextKeys ?? [])
-                      .map((key) => [key, context.get(key)] as const)
-                      .filter((entry) => entry[1] !== undefined),
-                  ),
-                  iteration: req.iteration,
-                  maxToolCalls: req.maxToolCalls,
-                  remainingToolCalls: req.remainingToolCalls,
-                });
-              if (decision.usage) {
-                recordModelUsage(dagStep.assignedAgentKind as AgentKind, decision.usage);
-              }
-              return decision;
-            },
-            onWaiting: (phase, iteration, detail) => {
-              emitWaitingLog({
-                taskId,
-                phase,
-                label: `${dagStep.id} iteration ${iteration}`,
-                detail: `Step ${dagStep.id} iteration ${iteration}: ${detail}`,
-                stepId: dagStep.id,
-                agentKind: dagStep.assignedAgentKind as AgentKind,
-                toolName: `${dagStep.assignedAgentKind}.${phase}`,
-                getSnapshot,
-                emitSnapshot,
-                emitEvent,
-              });
-            },
-            onToolEvent: (event) => {
-              const identity = {
-                toolCallId: event.toolCallId,
-                stepId: dagStep.id,
-                agentKind: dagStep.assignedAgentKind as AgentKind,
-                agentRunId,
-                attempt: routeAttempt,
-              };
-              const taskEvent: TaskRuntimeEvent = event.phase === "requested"
-                ? {
-                    kind: "tool.planned",
-                    taskId,
-                    toolName: event.toolName,
-                    detail: sanitizeReActReasonForLog(`${event.toolName} (${event.toolCallId})`),
-                    ...identity,
-                  }
-                : event.phase === "started"
-                  ? {
-                      kind: "tool.started",
-                      taskId,
-                      toolName: event.toolName,
-                      detail: sanitizeReActReasonForLog(`Started ${event.toolName} (${event.toolCallId}).`),
-                      ...identity,
-                    }
-                  : event.phase === "completed"
-                    ? {
-                        kind: "tool.completed",
-                        taskId,
-                        toolName: event.toolName,
-                        detail: sanitizeReActReasonForLog(`Completed ${event.toolName} (${event.toolCallId}).`),
-                        ...identity,
-                      }
-                    : {
-                        kind: "tool.failed",
-                        taskId,
-                        toolName: event.toolName,
-                        reason: sanitizeReActReasonForLog(event.reason ?? "Tool failed."),
-                        detail: sanitizeReActReasonForLog(
-                          `${event.toolName} (${event.toolCallId}) failed: ${event.reason ?? "Tool failed."}`,
-                        ),
-                        ...identity,
-                      };
-              const current = getSnapshot();
-              emitSnapshot({
-                ...current,
-                logs: appendLog(current, emitEvent(taskEvent)),
-              });
-            },
-            onTimeout: (phase, iteration, detail) => {
-              emitTimeoutLog({
-                taskId,
-                phase,
-                label: `${dagStep.id} iteration ${iteration}`,
-                timeoutMs: phase === "waiting_model" ? runtimeTimeouts.modelTimeoutMs : runtimeTimeouts.toolTimeoutMs,
-                detail: `Step ${dagStep.id} ${phase} iteration ${iteration}: ${detail}`,
-                stepId: dagStep.id,
-                agentKind: dagStep.assignedAgentKind as AgentKind,
-                toolName: `${dagStep.assignedAgentKind}.${phase}`,
-                getSnapshot,
-                emitSnapshot,
-                emitEvent,
-              });
-            },
-            onRunMetrics: recordAgentRuntimeMetrics,
-          });
-        }
-
         if (!reactResult) {
           throw new Error(`No Agent runtime backend is available for step ${dagStep.id}.`);
         }
@@ -10119,12 +10173,12 @@ export async function runCommanderDagTask({
           const blockedResult = createPublishedBlockedSourceStepResult(
             dagStep,
             reason,
-            reactResult.observations,
+            [],
           );
           writeCommanderStepOutput(
             dagStep,
             blockedResult.output,
-            `agent.${agentRuntimeExecution?.backend ?? "react"}.blocked`,
+            `agent.${agentRuntimeExecution?.backend ?? "runtime"}.blocked`,
           );
           return blockedResult;
         };
@@ -10158,7 +10212,7 @@ export async function runCommanderDagTask({
           const pageAgentTrendOutput = normalizePageAgentTrendHotList(
             reactResult.output,
             dagStep,
-            reactResult.observations,
+            [],
           );
           if (isPageAgentTrendFallbackStep(dagStep) && !pageAgentTrendOutput) {
             return publishBlockedSourceResult(
@@ -10168,30 +10222,17 @@ export async function runCommanderDagTask({
           const publishedOutput = pageAgentTrendOutput ?? reactResult.output;
           const verifierFailure = createVerifierFailureStepResult(dagStep, publishedOutput);
           if (verifierFailure) {
-            return {
-              ...verifierFailure,
-              evidence: reactResult.observations
-                .filter((observation) => observation.status === "succeeded")
-                .map((observation) => ({
-                  kind: "log" as const,
-                  label: `ReAct observation: ${observation.toolName}`,
-                  reference: dagStep.outputContextKey ?? `step:${dagStep.id}`,
-                })),
-            };
+            return verifierFailure;
           }
           writeCommanderStepOutput(
             dagStep,
             publishedOutput,
-            runtimeLabel === "ReAct"
-              ? dagStep.toolName ?? "agent.react"
-              : `agent.${agentRuntimeExecution?.backend ?? "runtime"}`,
+            `agent.${agentRuntimeExecution?.backend ?? "runtime"}`,
           );
           if (agentTracker.getState(agentId)) {
             agentTracker.setState(agentId, {
               status: "completed",
-              task: runtimeLabel === "ReAct"
-                ? `Completed: ${dagStep.title} (ReAct: ${reactResult.observations.length} iterations)`
-                : `Completed: ${dagStep.title} (${runtimeLabel})`,
+              task: `Completed: ${dagStep.title} (${runtimeLabel})`,
             });
           }
           emitSnapshot({
@@ -10202,9 +10243,7 @@ export async function runCommanderDagTask({
               kind: "tool.completed",
               taskId,
               toolName: `${dagStep.assignedAgentKind}.${dagStep.id}`,
-              detail: runtimeLabel === "ReAct"
-                ? `Step ${dagStep.id}: ReAct completed after ${reactResult.observations.length} iteration(s). ${reactReasonForLog}`
-                : `Step ${dagStep.id}: ${runtimeLabel} completed. ${reactReasonForLog}`,
+              detail: `Step ${dagStep.id}: ${runtimeLabel} completed. ${reactReasonForLog}`,
             })),
           });
           return runtimeStepResult
@@ -10212,13 +10251,7 @@ export async function runCommanderDagTask({
             : {
             status: "completed",
             output: publishedOutput,
-            evidence: reactResult.observations
-              .filter((observation) => observation.status === "succeeded")
-              .map((observation) => ({
-                kind: "log" as const,
-                label: `ReAct observation: ${observation.toolName}`,
-                reference: dagStep.outputContextKey ?? `step:${dagStep.id}`,
-              })),
+            evidence: [],
             assumptions: [],
             unresolvedQuestions: [],
           };
@@ -10236,11 +10269,7 @@ export async function runCommanderDagTask({
           return {
             status: "needs_clarification",
             output: reactResult.output,
-            evidence: reactResult.observations.map((observation) => ({
-              kind: "log" as const,
-              label: `ReAct observation: ${observation.toolName}`,
-              reference: dagStep.outputContextKey ?? `step:${dagStep.id}`,
-            })),
+            evidence: [],
             assumptions: [],
             unresolvedQuestions: reactResult.requestedContextKeys?.length
               ? [...reactResult.requestedContextKeys]
@@ -10260,11 +10289,7 @@ export async function runCommanderDagTask({
         return {
           status: "failed",
           output: reactResult.output,
-          evidence: reactResult.observations.map((observation) => ({
-            kind: "log" as const,
-            label: `ReAct observation: ${observation.toolName}`,
-            reference: dagStep.outputContextKey ?? `step:${dagStep.id}`,
-          })),
+          evidence: [],
           assumptions: [],
           unresolvedQuestions: [],
           error: `${runtimeLabel} loop failed for step ${dagStep.id}: ${reactReasonForLog}`,
@@ -10417,6 +10442,7 @@ export async function runCommanderDagTask({
               onModelUsage: (usage) => recordModelUsage(
                 dagStep.assignedAgentKind as AgentKind,
                 usage,
+                dagStep.id,
               ),
             },
           ),
@@ -11234,6 +11260,46 @@ export async function runCommanderDagTask({
           })),
         });
       },
+      onStepWaiting: async (step, stepResult, waitContext) => {
+        const wakeCondition = stepResult.blockedReason?.wakeCondition;
+        const waitingForClarification = stepResult.status === "needs_clarification";
+        const waitingStepId = step.id;
+        if (controller.setPendingStepWaitHandler) {
+          emitSnapshot({
+            ...getSnapshot(),
+            status: "waiting_info",
+            commanderMessage: waitingForClarification
+              ? `Step ${step.id} needs clarification before continuing.`
+              : `Step ${step.id} is blocked waiting for ${wakeCondition?.event ?? "an external event"}.`,
+            logs: appendLog(getSnapshot(), emitEvent({
+              kind: "task.waiting",
+              taskId,
+              phase: "waiting_user",
+              label: `Step ${step.id} waiting`,
+              detail: waitingForClarification
+                ? `Waiting for user-provided context: ${(stepResult.requestedContextKeys ?? []).join(", ") || "unspecified"}.`
+                : `Waiting for ${wakeCondition?.event ?? "external event"} (${wakeCondition?.ref ?? "unknown"}) before retrying step ${step.id}.`,
+              stepId: step.id,
+              agentKind: step.agentKind,
+            })),
+          });
+          saveCheckpoint(
+            waitingForClarification ? "ask_user" : "blocked_wait",
+            {
+              waitingStepId: step.id,
+              waitingAttempt: waitingAttemptForStep(step.id),
+              ...(wakeCondition ? { wakeCondition } : {}),
+            },
+          );
+          await new Promise<void>((resolve) => {
+            controller.setPendingStepWaitHandler!(waitingStepId, async () => {
+              controller.setPendingStepWaitHandler!(waitingStepId, undefined);
+              resolve();
+            });
+          });
+        }
+        void waitContext;
+      },
       onStepHeartbeat: (step, elapsedMs) => {
         const currentPlan = getSnapshot().plan;
         emitSnapshot({
@@ -11488,15 +11554,36 @@ export async function runCommanderDagTask({
       });
     }
     const finalCompleted = allCompleted && verificationPassed;
-    const primaryFailure = execution.error
+    const primaryFailureMessage = execution.error
       ? redactImageDataUrlsForSummary(execution.error)
       : verifierCheck?.summary ?? "Verifier reported failed evidence.";
+    if (verifierCheck && !finalCompleted && !execution.error) {
+      recordDiagnostic({
+        source: "verifier",
+        code: verifierCheck.status === "fail" ? "verification_failed" : "verification_warned",
+        message: verifierCheck.summary,
+      });
+    }
+    const primaryFailure: TaskSnapshot["primaryFailure"] = execution.error
+      ? {
+          code: "step_execution_failed",
+          message: primaryFailureMessage,
+          phase: "runtime",
+          ...(execution.failedStepId ? { stepId: execution.failedStepId } : {}),
+        }
+      : verifierCheck && !finalCompleted
+        ? {
+            code: "verification_failed",
+            message: primaryFailureMessage,
+            phase: "verification",
+          }
+        : undefined;
     const baseConclusion = finalCompleted
       ? synthesis?.message ??
         `Task completed: ${execution.completedStepIds.length}/${dagPlan.steps.length} step(s) executed.`
       : /[\u3400-\u9fff]/u.test(userGoal)
-        ? `任务失败：${primaryFailure}`
-        : `Task failed: ${primaryFailure}`;
+        ? `任务失败：${primaryFailureMessage}`
+        : `Task failed: ${primaryFailureMessage}`;
     const assessedConclusion = dagPlan.steps.length > 1 || recoveryAttempts.length > 0 || stepRetryCount > 0
       ? appendCommanderExecutionAssessment(baseConclusion, executionAssessment, userGoal)
       : baseConclusion;
@@ -11595,6 +11682,8 @@ export async function runCommanderDagTask({
           ? `verified: ${execution.completedStepIds.length}/${execution.completedStepIds.length + (execution.abandonedStepIds?.length ?? 0)} steps completed via Commander DAG.`
           : `warn: ${execution.completedStepIds.length}/${execution.completedStepIds.length + (execution.abandonedStepIds?.length ?? 0)} steps completed.`,
       ...(verifierCheck ? { verificationResult: verifierCheck } : {}),
+      ...(primaryFailure ? { primaryFailure } : {}),
+      ...(diagnostics.length > 0 ? { diagnostics: [...diagnostics] } : {}),
       handoffReport,
       ...(recoveryReport ? { recoveryReport } : {}),
       ...(durableResumeMetadata ? { durableResume: durableResumeMetadata } : {}),
@@ -11698,6 +11787,16 @@ export async function runCommanderDagTask({
       agents: agentTracker.getSnapshots(),
       ...(recoveryReport ? { recoveryReport } : {}),
       ...(durableResumeMetadata ? { durableResume: durableResumeMetadata } : {}),
+      ...(!cancelled
+        ? {
+            primaryFailure: {
+              code: "task_failed",
+              message: redactedErrorMsg,
+              phase: "runtime",
+            },
+          }
+        : {}),
+      ...(diagnostics.length > 0 ? { diagnostics: [...diagnostics] } : {}),
       planGenerationTrace,
       logs: appendLog(snapshot, emitEvent(completionEvent)),
     });
@@ -11973,7 +12072,7 @@ function isPageAgentTrendFallbackStep(step: CommanderDagStep): boolean {
 function normalizePageAgentTrendHotList(
   output: unknown,
   step: CommanderDagStep,
-  observations: ReadonlyArray<AgentReActLoopResult["observations"][number]>,
+  observations: readonly unknown[],
 ): TrendHotListResult | undefined {
   if (!isPageAgentTrendFallbackStep(step)) return undefined;
   const record = isPlainRecord(output) && isPlainRecord(output.data)
@@ -12002,8 +12101,10 @@ function normalizePageAgentTrendHotList(
   const sourceUrl = firstStringValue(record, ["sourceUrl", "url"]) ?? items[0]?.url;
   if (!sourceUrl) return undefined;
   const successfulObservationOutputs = observations
-    .filter((observation) => observation.status === "succeeded")
-    .map((observation) => observation.output);
+    .filter((observation) =>
+      isPlainRecord(observation) && observation.status === "succeeded")
+    .map((observation) =>
+      isPlainRecord(observation) ? observation.output : undefined);
   const observedSourceUrls = new Set(successfulObservationOutputs.flatMap((observation) => {
     if (!isPlainRecord(observation)) return [];
     const url = firstStringValue(observation, ["url", "sourceUrl"]);
@@ -12045,11 +12146,13 @@ function normalizePageAgentTrendHotList(
 function createBlockedSourceCollectionResult(
   step: CommanderDagStep,
   reason: string,
-  observations: ReadonlyArray<AgentReActLoopResult["observations"][number]>,
+  observations: readonly unknown[],
 ): BlockedSourceCollectionResult {
   const attemptedSourceUrls = [...new Set(observations.flatMap((observation) => {
-    if (!isPlainRecord(observation.output)) return [];
-    const url = firstStringValue(observation.output, ["url", "sourceUrl"]);
+    if (!isPlainRecord(observation)) return [];
+    const output = observation.output;
+    if (!isPlainRecord(output)) return [];
+    const url = firstStringValue(output, ["url", "sourceUrl"]);
     return url ? [url] : [];
   }))];
   return {
@@ -12068,20 +12171,24 @@ function createBlockedSourceCollectionResult(
 function createPublishedBlockedSourceStepResult(
   step: CommanderDagStep,
   reason: string,
-  observations: ReadonlyArray<AgentReActLoopResult["observations"][number]>,
+  observations: readonly unknown[],
 ): StepResult {
   const output = createBlockedSourceCollectionResult(step, reason, observations);
   return normalizeStepResult({
     status: "partial",
     output,
-    evidence: observations.map((observation) => ({
-      kind: "url" as const,
-      label: `Page Agent attempt: ${observation.toolName}`,
-      ...(isPlainRecord(observation.output) &&
-          firstStringValue(observation.output, ["url", "sourceUrl"])
-        ? { reference: firstStringValue(observation.output, ["url", "sourceUrl"]) }
-        : {}),
-    })),
+    evidence: observations.flatMap((observation) => {
+      if (!isPlainRecord(observation) || typeof observation.toolName !== "string") return [];
+      const output = observation.output;
+      const reference = isPlainRecord(output)
+        ? firstStringValue(output, ["url", "sourceUrl"])
+        : undefined;
+      return [{
+        kind: "url" as const,
+        label: `Page Agent attempt: ${observation.toolName}`,
+        ...(reference ? { reference } : {}),
+      }];
+    }),
     assumptions: [],
     unresolvedQuestions: [],
     unmetCriteria: [step.successCriteria],

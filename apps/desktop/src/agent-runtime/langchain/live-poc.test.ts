@@ -170,6 +170,10 @@ function createDeepSeekLiveGateway(apiKey: string): AgentModelGateway {
   return {
     capabilities: () => ({
       nativeToolCalling: true,
+      // Deliberately false: this live POC exercises the non-streaming path
+      // only (stream() throws below). The production deepseek adapter
+      // declares streamingToolCalls: true; streamed tool-call acceptance is
+      // Phase 3 scope, not part of this read-only POC.
       streamingToolCalls: false,
       structuredOutput: true,
       parallelToolCalls: true,

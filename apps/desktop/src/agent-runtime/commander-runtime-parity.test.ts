@@ -12,19 +12,13 @@ import {
   initialToolDescriptors,
   type CommanderTool,
 } from "@javis/tools";
-import type { ReActDecisionRequest } from "@javis/core";
 import { createLangChainAgentRuntime } from "./langchain/runner";
 
 describe("Commander AgentRuntime backend parity", () => {
-  it("matches durable events and result artifacts for real legacy/LangChain paths", async () => {
+  it("matches durable events and result artifacts for the LangChain backend", async () => {
     const outcomes = ["completed", "failed", "request_input", "invalid_request_input"] as const;
     for (const outcome of outcomes) {
-      const legacy = await runCase("legacy", outcome);
       const langchain = await runCase("langchain", outcome);
-
-      const { outputPayload: legacyPayload, ...legacyLifecycle } = legacy;
-      const { outputPayload: langchainPayload, ...langchainLifecycle } = langchain;
-      expect(langchainLifecycle).toEqual(legacyLifecycle);
       expect(langchain.status).toBe(outcome === "completed" ? "completed" : "failed");
       expect(langchain.eventKinds[langchain.eventKinds.length - 1]).toBe(
         outcome === "completed" ? "task.completed" : "task.failed",
@@ -32,17 +26,9 @@ describe("Commander AgentRuntime backend parity", () => {
       expect(langchain.hasOutputArtifact).toBe(outcome === "completed");
       expect(langchain.requestedInput).toBe(outcome === "request_input");
       if (outcome === "completed") {
-        expect(legacyPayload).toEqual([{
-          url: "https://example.test/rust",
-          title: "Rust",
-          excerpt: "Rust source evidence is long enough for the workflow validator.",
-          fetchedAt: "2026-07-19T00:00:00.000Z",
-          provider: "fixture",
-        }]);
-        expect(langchainPayload).toBe("Final Rust answer.");
+        expect(langchain.outputPayload).toBe("Final Rust answer.");
       } else {
-        expect(legacyPayload).toBeUndefined();
-        expect(langchainPayload).toBeUndefined();
+        expect(langchain.outputPayload).toBeUndefined();
       }
     }
   });
@@ -172,20 +158,6 @@ describe("Commander AgentRuntime backend parity", () => {
       eventSequence: routeEvent.sequence,
     };
     const incompleteResume = createController();
-    const legacyDecider = vi.fn(async (request: ReActDecisionRequest) =>
-      request.observations.length === 0
-        ? {
-            status: "continue" as const,
-            toolName: "web.search",
-            input: { query: "rust" },
-            reason: "Repeat the unfinished read attempt.",
-          }
-        : {
-            status: "completed" as const,
-            output: request.observations[0]?.output,
-            reason: "The resumed read attempt completed.",
-          }
-    );
 
     await runCommanderDagTask({
       controller: incompleteResume.controller,
@@ -194,8 +166,7 @@ describe("Commander AgentRuntime backend parity", () => {
         searchWeb,
         fetchWebSource: vi.fn(async ({ url }) => ({ ...toolOutput[0], url })),
       },
-      reactDecideNext: legacyDecider,
-      getAgentRuntimeBackend: () => "legacy",
+      getAgentRuntimeBackend: () => "langchain",
       createAgentRuntime,
       taskId,
       userGoal: "research rust",
@@ -208,13 +179,11 @@ describe("Commander AgentRuntime backend parity", () => {
 
     const incompleteFinal = incompleteResume.emitted[incompleteResume.emitted.length - 1];
     expect(incompleteFinal?.status).toBe("completed");
-    expect(legacyDecider).toHaveBeenCalled();
     expect(incompleteFinal?.agentRuntimeRoutingMetrics).toEqual([
       expect.objectContaining({
         routeCount: 2,
-        rolloutTargetCount: 1,
-        langchainRouteCount: 1,
-        legacyRouteCount: 1,
+        rolloutTargetCount: 2,
+        langchainRouteCount: 2,
         fallbackCount: 0,
         observationIds: [
           expect.stringMatching(/:research-step:attempt-1$/u),
@@ -226,7 +195,7 @@ describe("Commander AgentRuntime backend parity", () => {
 });
 
 async function runCase(
-  backend: "legacy" | "langchain",
+  backend: "langchain",
   outcome: "completed" | "failed" | "request_input" | "invalid_request_input",
 ) {
   const taskId = `desktop-parity-${backend}-${outcome}`;
@@ -255,33 +224,6 @@ async function runCase(
     provider: "fixture",
   }];
   const searchWeb = vi.fn(async () => toolOutput);
-  const reactDecideNext = vi.fn(async (request: ReActDecisionRequest) => {
-    if (outcome === "failed") {
-      return { status: "failed" as const, reason: "Parity failure." };
-    }
-    if (outcome === "request_input" || outcome === "invalid_request_input") {
-      return {
-        status: "request_input" as const,
-        reason: "Need upstream query context.",
-        requestedContextKeys: outcome === "invalid_request_input"
-          ? ["researchQuery", "researchQuery"]
-          : ["researchQuery"],
-        requestedAgentKind: "commander" as const,
-      };
-    }
-    return request.observations.length === 0
-      ? {
-          status: "continue" as const,
-          toolName: "web.search",
-          input: { query: "rust" },
-          reason: "Search before completing.",
-        }
-      : {
-          status: "completed" as const,
-          output: request.observations[0]?.output,
-          reason: "Research evidence is ready.",
-        };
-  });
   const createAgentRuntime: AgentRuntimeFactory = ({ toolGateway, toolSpecs }) =>
     createLangChainAgentRuntime({
       modelGateway: createFixtureGateway(outcome),
@@ -299,7 +241,6 @@ async function runCase(
       searchWeb,
       fetchWebSource: vi.fn(async ({ url }) => ({ ...toolOutput[0], url })),
     },
-    reactDecideNext,
     getAgentRuntimeBackend: () => backend,
     createAgentRuntime,
     runtimeConfig: {

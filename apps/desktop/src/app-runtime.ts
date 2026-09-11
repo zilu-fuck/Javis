@@ -8,8 +8,6 @@ import {
   buildCommanderReplanSystemPrompt,
   buildCommanderReplanUserPrompt,
   buildComputerUseCommanderPlanSystemPrompt,
-  buildReActDecisionSystemPrompt,
-  buildReActDecisionUserPrompt,
   CONTEXT_KEYS,
   createChineseReviewPrompt,
   createChineseRevisionPrompt,
@@ -19,7 +17,6 @@ import {
   DEFAULT_COMPUTER_USE_CONFIG,
   filterPlanningScopeForGoal,
   getAdapter,
-  getAgentSystemPrompt,
   isComputerUseGoal,
   isOutputTruncationFinishReason,
   isValidCapabilityTag,
@@ -31,15 +28,14 @@ import {
 import type { DesktopDatabase } from "./desktop-database";
 import { createRuntimeEventStore } from "./runtime-event-store";
 import { createWorkflowCheckpointStore } from "./workflow-checkpoint-store";
+import { createUsageObservationStore } from "./usage-observation-persistence";
 import type {
-  AgentReActDecision,
   AgentCapabilityVerificationInput,
   CommanderDagPlan,
   ComputerUseLoopConfig,
   GoalDecision,
   GoalState,
   RawPlanLexicalIssue,
-  ReActDecisionRequest,
   RuntimeEventEnvelope,
   RuntimeExecutionConfig,
   TaskSnapshot,
@@ -1492,6 +1488,17 @@ function createCheckpointStoreRef(getDatabase?: () => DesktopDatabase | null) {
   };
 }
 
+function createUsageObservationStoreRef(getDatabase?: () => DesktopDatabase | null) {
+  return {
+    append: async (observation: import("@javis/core").UsageObservation) => {
+      const database = getDatabase?.();
+      if (!database) return;
+      const store = createUsageObservationStore(database);
+      await store.upsert(observation);
+    },
+  };
+}
+
 export function createJavisRuntime({
   getWorkspacePath,
   modelSettings,
@@ -1518,8 +1525,6 @@ export function createJavisRuntime({
   const providerCache = new Map<string, ModelProvider>();
   // Pre-populate cache with fallback for backward compatibility
   providerCache.set("fallback", fallbackProvider);
-  const runtimeAgentRegistry = agentRegistry ?? createDefaultAgentRegistry();
-
   const currentModelTimeoutMs = () => runtimePreferencesToExecutionConfig(
     getRuntimePreferences?.(),
     getModelConfiguration?.()?.profiles.find((profile) => profile.slot === "primary")?.contextTokens,
@@ -1578,6 +1583,7 @@ export function createJavisRuntime({
   const eventBus = createTaskEventBus();
   const runtimeEventStore = createRuntimeEventStoreRef(getDatabase);
   const checkpointStore = createCheckpointStoreRef(getDatabase);
+  const usageObservationStore = createUsageObservationStoreRef(getDatabase);
   const streamingAgentRef: { current: AgentKind } = { current: "commander" };
   let activeComputerUseAbortController: AbortController | undefined;
   const preprocessingByTaskId = new Map<string, Promise<PreprocessedInput | undefined>>();
@@ -1857,6 +1863,7 @@ export function createJavisRuntime({
     getCapabilityVerification,
     runtimeEventSink: runtimeEventStore,
     checkpointSink: checkpointStore,
+    usageObservationSink: usageObservationStore,
     chatTool: {
       complete: (prompt, options) => providerForChat().complete(prompt, options),
       stream: (prompt, options) => providerForChat().stream(prompt, options),
@@ -2972,103 +2979,6 @@ export function createJavisRuntime({
         preprocessingForNextTask = undefined;
       }
     },
-    // P0-2: LLM-based ReAct decision maker for agent step execution loops
-    reactDecideNext: async (request: ReActDecisionRequest): Promise<AgentReActDecision> => {
-      const localizedRequest = { ...request, locale: "zh-CN" };
-      const prompt = buildReActDecisionUserPrompt(localizedRequest);
-      const reactAgent = runtimeAgentRegistry.findByKind(request.agentKind)?.agent;
-      const reactAgentInstructions = reactAgent
-        ? getAgentSystemPrompt(reactAgent, "zh-CN")
-        : undefined;
-      const reactSystemPrompt = buildReActDecisionSystemPrompt(
-        "zh-CN",
-        reactAgentInstructions,
-      );
-      let resultText = "";
-      try {
-        // ReAct has an explicit trusted system contract. Do not append the
-        // generic agent identity prompt or agentKind metadata to this call;
-        // runtime observations and handoff data remain in the user payload.
-        const modelProvider = providerFor(request.agentKind, false);
-        const result = await modelProvider.complete(prompt, {
-          systemPrompt: reactSystemPrompt,
-          maxTokens: 1200,
-          temperature: 0,
-          disableThinking: true,
-          locale: "zh-CN",
-          timeoutMs: currentModelTimeoutMs(),
-          skipAgentMemory: true,
-          skillContextMaxSkills: 2,
-          skillContextMaxChars: 6_000,
-        });
-        resultText = result.text;
-        assertStructuredOutputWasNotTruncated(result.finishReason);
-        let decisionUsage = result.tokenUsage;
-        const decision = await parseNormalizeWithRepair(
-          prompt,
-          result.text,
-          { maxTokens: 1200, temperature: 0, disableThinking: true },
-          modelProvider,
-          (value) => parseAgentReActDecision(normalizeReActDecisionModelValue(value)),
-          {
-            systemPrompt: reactSystemPrompt,
-            locale: "zh-CN",
-            timeoutMs: currentModelTimeoutMs(),
-            skipAgentMemory: true,
-            skillContextMaxSkills: 2,
-            skillContextMaxChars: 6_000,
-          },
-          (usage) => {
-            const inputTokens = (decisionUsage?.inputTokens ?? 0) + usage.inputTokens;
-            const outputTokens = (decisionUsage?.outputTokens ?? 0) + usage.outputTokens;
-            decisionUsage = {
-              inputTokens,
-              outputTokens,
-              totalTokens: inputTokens + outputTokens,
-              ...(usage.model ?? decisionUsage?.model ? { model: usage.model ?? decisionUsage?.model } : {}),
-              ...(usage.provider ?? decisionUsage?.provider
-                ? { provider: usage.provider ?? decisionUsage?.provider }
-                : {}),
-              ...(usage.contextWindowTokens ?? decisionUsage?.contextWindowTokens
-                ? { contextWindowTokens: Math.max(
-                    usage.contextWindowTokens ?? 0,
-                    decisionUsage?.contextWindowTokens ?? 0,
-                  ) }
-                : {}),
-            };
-          },
-        );
-        return {
-          ...decision,
-          ...(decisionUsage ? { usage: decisionUsage } : {}),
-        };
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        if (msg.includes("did not contain a JSON object") && resultText.trim().length > 0) {
-          eventBus.emit({
-            kind: "tool.planned",
-            taskId: taskIdRef.current ?? "task-unknown",
-            toolName: "reactDecideNext",
-            detail: "ReAct decision LLM returned plain text; failing decision.",
-          });
-          return {
-            status: "failed",
-            reason: "ReAct decision LLM returned plain text instead of JSON.",
-            output: resultText.trim(),
-          };
-        }
-        eventBus.emit({
-          kind: "tool.planned",
-          taskId: taskIdRef.current ?? "task-unknown",
-          toolName: "reactDecideNext",
-          detail: `ReAct decision LLM failed: ${msg}`,
-        });
-        return {
-          status: "failed",
-          reason: `ReAct decision LLM call failed: ${msg}`,
-        };
-      }
-    },
     // P0-3/P0-4: Commander replan after step failure or askUser clarification
     replanDag: async (
       userGoal: string,
@@ -4064,103 +3974,6 @@ function parseJsonObject(text: string): unknown {
   return JSON.parse(candidate.slice(start, end + 1));
 }
 
-function normalizeReActDecisionModelValue(value: unknown): unknown {
-  if (!isPlainJsonRecord(value)) return value;
-  if (value.requestedAgentKind === undefined || typeof value.requestedAgentKind === "string") {
-    return value;
-  }
-  const normalized = { ...value };
-  delete normalized.requestedAgentKind;
-  return normalized;
-}
-
-const REACT_DECISION_STATUSES = new Set<AgentReActDecision["status"]>([
-  "continue",
-  "completed",
-  "failed",
-  "request_input",
-]);
-const MAX_REACT_DECISION_REASON_CHARS = 2_000;
-const MAX_REACT_DECISION_TOOL_NAME_CHARS = 512;
-const MAX_REACT_DECISION_CONTEXT_KEYS = 16;
-const MAX_REACT_DECISION_CONTEXT_KEY_CHARS = 128;
-const MAX_REACT_DECISION_AGENT_KIND_CHARS = 128;
-
-/** Parse the model-produced ReAct JSON without relying on TypeScript casts. */
-export function parseAgentReActDecision(value: unknown): AgentReActDecision {
-  if (!isPlainJsonRecord(value)) {
-    throw invalidReActDecision("response must be a JSON object");
-  }
-  const status = value.status;
-  if (typeof status !== "string" || !REACT_DECISION_STATUSES.has(status as AgentReActDecision["status"])) {
-    throw invalidReActDecision("status is invalid");
-  }
-  const reason = validateBoundedReActString(
-    value.reason,
-    "reason",
-    MAX_REACT_DECISION_REASON_CHARS,
-  );
-  const toolName = value.toolName === undefined
-    ? undefined
-    : validateBoundedReActString(
-        value.toolName,
-        "toolName",
-        MAX_REACT_DECISION_TOOL_NAME_CHARS,
-      );
-  if (status === "continue" && !toolName) {
-    throw invalidReActDecision("toolName is required when status is continue");
-  }
-  if (value.input !== undefined && !isPlainJsonRecord(value.input)) {
-    throw invalidReActDecision("input must be a JSON object");
-  }
-  const requestedContextKeys = validateReActContextKeys(value.requestedContextKeys);
-  const requestedAgentKind = value.requestedAgentKind === undefined
-    ? undefined
-    : validateBoundedReActString(
-        value.requestedAgentKind,
-        "requestedAgentKind",
-        MAX_REACT_DECISION_AGENT_KIND_CHARS,
-      ) as AgentReActDecision["requestedAgentKind"];
-
-  return {
-    status: status as AgentReActDecision["status"],
-    reason,
-    ...(toolName ? { toolName } : {}),
-    ...(value.input !== undefined ? { input: { ...value.input } } : {}),
-    ...(value.output !== undefined ? { output: value.output } : {}),
-    ...(requestedContextKeys ? { requestedContextKeys } : {}),
-    ...(requestedAgentKind ? { requestedAgentKind } : {}),
-  };
-}
-
-function validateReActContextKeys(value: unknown): string[] | undefined {
-  if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length > MAX_REACT_DECISION_CONTEXT_KEYS) {
-    throw invalidReActDecision("requestedContextKeys must be a bounded string array");
-  }
-  return value.map((key) =>
-    validateBoundedReActString(key, "requestedContextKeys entry", MAX_REACT_DECISION_CONTEXT_KEY_CHARS)
-  );
-}
-
-function validateBoundedReActString(value: unknown, field: string, maxChars: number): string {
-  if (typeof value !== "string") {
-    throw invalidReActDecision(`${field} must be a string`);
-  }
-  const normalized = value.trim();
-  if (!normalized || [...normalized].length > maxChars) {
-    throw invalidReActDecision(`${field} must be non-empty and at most ${maxChars} characters`);
-  }
-  return normalized;
-}
-
-function invalidReActDecision(reason: string): Error {
-  return new Error(`ReAct decision JSON is invalid: ${reason}.`);
-}
-
-function isPlainJsonRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 export async function resolveImageDataUrl(imagePath: string, workspacePath?: string): Promise<string> {
   const trimmed = imagePath.trim();

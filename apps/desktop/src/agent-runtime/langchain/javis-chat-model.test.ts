@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AgentModelGateway, AgentToolSpec } from "@javis/core";
 import { AIMessage, HumanMessage, ToolMessage } from "langchain/browser";
+import { ModelChatEmptyResponseError } from "../agent-model-gateway";
 import { JavisChatModel, toAgentMessages } from "./javis-chat-model";
 
 const toolSpec: AgentToolSpec = {
@@ -138,5 +139,128 @@ describe("JavisChatModel", () => {
     await expect(model._generate([new HumanMessage("Second")], {}))
       .rejects.toThrow("model call limit (1)");
     expect(modelGateway.complete).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("JavisChatModel empty-response retry (dual-kernel plan §13.2)", () => {
+  function emptyResponseError(usage?: { inputTokens: number; outputTokens: number }): Error {
+    return new ModelChatEmptyResponseError(
+      {
+        contentType: "missing",
+        contentLength: 0,
+        hasReasoningContent: false,
+        toolCallsCount: 0,
+        hasUsage: usage !== undefined,
+      },
+      "stop",
+      usage,
+    );
+  }
+
+  it("retries once with a fresh model call, retaining both calls' usage and a diagnostic", async () => {
+    const events: Array<{ type: string; usage?: unknown; code?: string; callIndex?: number }> = [];
+    const complete = vi.fn<AgentModelGateway["complete"]>()
+      .mockRejectedValueOnce(emptyResponseError({ inputTokens: 10, outputTokens: 1 }))
+      .mockResolvedValueOnce({
+        message: {
+          role: "assistant" as const,
+          content: [{ type: "text" as const, text: "Recovered answer." }],
+        },
+        finishReason: "stop" as const,
+        usage: { inputTokens: 12, outputTokens: 5 },
+      });
+    const model = new JavisChatModel({
+      gateway: {
+        capabilities: () => ({
+          nativeToolCalling: true,
+          streamingToolCalls: false,
+          structuredOutput: false,
+          parallelToolCalls: false,
+        }),
+        complete,
+        stream: async function* () {},
+      },
+      tools: [toolSpec],
+      onEvent: (event) => {
+        if (event.type === "usage.updated" || event.type === "backend.diagnostic" ||
+          event.type === "model.started") {
+          events.push({ type: event.type, usage: event.type === "usage.updated" ? event.usage : undefined, code: event.type === "backend.diagnostic" ? event.code : undefined, callIndex: event.type === "model.started" ? event.callIndex : undefined });
+        }
+      },
+    });
+
+    const result = await model._generate([new HumanMessage("Continue")], {});
+
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(result.generations[0]?.text).toBe("Recovered answer.");
+    const usageEvents = events.filter((event) => event.type === "usage.updated");
+    expect(usageEvents).toEqual([
+      { type: "usage.updated", usage: { inputTokens: 10, outputTokens: 1 }, code: undefined, callIndex: undefined },
+      { type: "usage.updated", usage: { inputTokens: 12, outputTokens: 5 }, code: undefined, callIndex: undefined },
+    ]);
+    const started = events.filter((event) => event.type === "model.started");
+    expect(started.map((event) => event.callIndex)).toEqual([1, 2]);
+    expect(events).toContainEqual({
+      type: "backend.diagnostic",
+      usage: undefined,
+      code: "model_chat_empty_response",
+      callIndex: undefined,
+    });
+  });
+
+  it("does not retry non-empty-response failures", async () => {
+    const complete = vi.fn<AgentModelGateway["complete"]>().mockRejectedValueOnce(
+      new Error("HTTP 429"),
+    );
+    const model = new JavisChatModel({
+      gateway: {
+        capabilities: () => ({
+          nativeToolCalling: true,
+          streamingToolCalls: false,
+          structuredOutput: false,
+          parallelToolCalls: false,
+        }),
+        complete,
+        stream: async function* () {},
+      },
+      tools: [toolSpec],
+    });
+
+    await expect(model._generate([new HumanMessage("Continue")], {})).rejects.toThrow("HTTP 429");
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+
+  it("still fails when the retry is also empty, keeping the retry usage", async () => {
+    const events: Array<{ type: string; usage?: unknown }> = [];
+    const complete = vi.fn<AgentModelGateway["complete"]>()
+      .mockRejectedValueOnce(emptyResponseError({ inputTokens: 10, outputTokens: 1 }))
+      .mockRejectedValueOnce(emptyResponseError({ inputTokens: 20, outputTokens: 2 }));
+    const model = new JavisChatModel({
+      gateway: {
+        capabilities: () => ({
+          nativeToolCalling: true,
+          streamingToolCalls: false,
+          structuredOutput: false,
+          parallelToolCalls: false,
+        }),
+        complete,
+        stream: async function* () {},
+      },
+      tools: [toolSpec],
+      onEvent: (event) => {
+        if (event.type === "usage.updated") {
+          events.push({ type: event.type, usage: event.usage });
+        }
+      },
+    });
+
+    await expect(model._generate([new HumanMessage("Continue")], {})).rejects.toMatchObject({
+      name: "ModelChatEmptyResponseError",
+    });
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(events.map((event) => event.usage)).toEqual([
+      { inputTokens: 10, outputTokens: 1 },
+      { inputTokens: 20, outputTokens: 2 },
+    ]);
   });
 });

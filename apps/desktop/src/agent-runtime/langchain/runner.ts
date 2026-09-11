@@ -11,7 +11,11 @@ import type {
   AgentModelGateway,
   ToolExecutionGateway,
 } from "@javis/core";
-import { addAgentTokenUsage, normalizeStepResult } from "@javis/core";
+import {
+  AgentEventQueue,
+  addAgentTokenUsage,
+  normalizeStepResult,
+} from "@javis/core";
 import {
   AIMessage,
   HumanMessage,
@@ -305,7 +309,7 @@ async function executeLangChainAgent(
           }),
       usage: getUsage(),
     };
-    onEvent({ type: "run.failed", reason });
+    onEvent({ type: cancelled ? "run.cancelled" : "run.failed", reason });
     return result;
   }
 }
@@ -372,31 +376,4 @@ function toLangChainMessages(messages: readonly AgentMessage[]): BaseMessage[] {
         });
     }
   });
-}
-
-class AgentEventQueue {
-  private readonly buffer: AgentEvent[] = [];
-  private readonly waiters: Array<() => void> = [];
-  private closed = false;
-
-  push(event: AgentEvent): void {
-    if (this.closed) return;
-    this.buffer.push(event);
-    this.waiters.shift()?.();
-  }
-
-  close(): void {
-    this.closed = true;
-    while (this.waiters.length > 0) this.waiters.shift()?.();
-  }
-
-  async *iterate(): AsyncGenerator<AgentEvent> {
-    while (!this.closed || this.buffer.length > 0) {
-      if (this.buffer.length > 0) {
-        yield this.buffer.shift()!;
-      } else {
-        await new Promise<void>((resolve) => this.waiters.push(resolve));
-      }
-    }
-  }
 }

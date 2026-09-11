@@ -693,15 +693,10 @@ describe("createFileScanTaskRuntime", () => {
       }],
     }));
     const scanMarkdownDocuments = vi.fn(async () => []);
-    const reactDecideNext = vi.fn(async () => ({
-      status: "failed" as const,
-      reason: "should not run",
-    }));
     const runtime = createFileScanTaskRuntime({
       delayMs: 0,
       fileTool: { scanMarkdownDocuments },
       commanderTool: { plan: commanderPlan },
-      reactDecideNext,
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
@@ -710,7 +705,6 @@ describe("createFileScanTaskRuntime", () => {
 
     expect(finalSnapshot.status).toBe("completed");
     expect(scanMarkdownDocuments).toHaveBeenCalledOnce();
-    expect(reactDecideNext).not.toHaveBeenCalled();
 
     unsubscribe();
     runtime.dispose();
@@ -738,25 +732,75 @@ describe("createFileScanTaskRuntime", () => {
       heading: "Readme",
       excerpt: "Project readme.",
     }]);
-    const reactDecideNext = vi.fn(async (request) => {
-      if (request.observations.length === 0) {
+    const createAgentRuntime = vi.fn<import("./index").AgentRuntimeFactory>(({ toolGateway }) => ({
+      run(definition, request) {
+        const result = (async () => {
+          const toolResult = await toolGateway.execute({
+            taskId: request.taskId,
+            runId: request.runId,
+            agentKind: definition.kind,
+            toolName: "file.scanMarkdownDocuments",
+            input: {},
+            signal: request.signal,
+          });
+          return toolResult.status === "success"
+            ? {
+                status: "completed" as const,
+                output: toolResult.output,
+                stepResult: {
+                  status: "completed" as const,
+                  output: toolResult.output,
+                  evidence: [],
+                  assumptions: [],
+                  unresolvedQuestions: [],
+                },
+                metrics: {
+                  backend: "langchain" as const,
+                  status: "completed" as const,
+                  durationMs: 5,
+                  modelCalls: 1,
+                  toolCalls: 1,
+                },
+              }
+            : {
+                status: "failed" as const,
+                reason: toolResult.reason ?? "Tool failed.",
+                stepResult: {
+                  status: "failed" as const,
+                  evidence: [],
+                  assumptions: [],
+                  unresolvedQuestions: [],
+                  error: toolResult.reason ?? "Tool failed.",
+                },
+                metrics: {
+                  backend: "langchain" as const,
+                  status: "failed" as const,
+                  durationMs: 5,
+                  modelCalls: 1,
+                  toolCalls: 1,
+                },
+              };
+        })();
         return {
-          status: "continue" as const,
-          toolName: "file.scanMarkdownDocuments",
-          reason: "scan first",
+          result,
+          cancel: vi.fn(),
+          events: (async function* (): AsyncGenerator<import("./index").AgentEvent> {
+            yield { type: "run.started", runId: request.runId };
+            const settled = await result;
+            yield settled.status === "completed"
+              ? { type: "run.completed", result: settled }
+              : { type: "run.failed", reason: settled.reason ?? "Runtime failure." };
+          })(),
         };
-      }
-      return {
-        status: "completed" as const,
-        reason: "scan complete",
-        output: request.observations[0]?.output,
-      };
-    });
+      },
+    }));
+    const getAgentRuntimeBackend = vi.fn(() => "langchain" as const);
     const runtime = createFileScanTaskRuntime({
       delayMs: 0,
       fileTool: { scanMarkdownDocuments },
       commanderTool: { plan: commanderPlan },
-      reactDecideNext,
+      getAgentRuntimeBackend,
+      createAgentRuntime,
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
@@ -764,8 +808,8 @@ describe("createFileScanTaskRuntime", () => {
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(finalSnapshot.status).toBe("completed");
-    expect(reactDecideNext).toHaveBeenCalled();
     expect(scanMarkdownDocuments).toHaveBeenCalledOnce();
+    expect(getAgentRuntimeBackend).toHaveBeenCalled();
 
     unsubscribe();
     runtime.dispose();
@@ -793,26 +837,69 @@ describe("createFileScanTaskRuntime", () => {
       heading: "No matching documents",
       excerpt: "The scan completed and found no requested content.",
     }]);
-    let decisions = 0;
-    const reactDecideNext = vi.fn(async () => {
-      decisions += 1;
-      return decisions < 5
-        ? {
-            status: "continue" as const,
+    const createAgentRuntime = vi.fn<import("./index").AgentRuntimeFactory>(({ toolGateway }) => ({
+      run(definition, request) {
+        const result = (async () => {
+          const toolResult = await toolGateway.execute({
+            taskId: request.taskId,
+            runId: request.runId,
+            agentKind: definition.kind,
             toolName: "file.scanMarkdownDocuments",
-            reason: "need another observation",
-          }
-        : {
-            status: "completed" as const,
-            reason: "enough observations",
-          };
-    });
+            input: {},
+            signal: request.signal,
+          });
+          return toolResult.status === "success"
+            ? {
+                status: "completed" as const,
+                output: toolResult.output,
+                stepResult: {
+                  status: "completed" as const,
+                  output: toolResult.output,
+                  evidence: [],
+                  assumptions: [],
+                  unresolvedQuestions: [],
+                },
+                metrics: {
+                  backend: "langchain" as const,
+                  status: "completed" as const,
+                  durationMs: 5,
+                  modelCalls: 1,
+                  toolCalls: 1,
+                },
+              }
+            : {
+                status: "failed" as const,
+                reason: toolResult.reason ?? "Tool failed.",
+                stepResult: {
+                  status: "failed" as const,
+                  evidence: [],
+                  assumptions: [],
+                  unresolvedQuestions: [],
+                  error: toolResult.reason ?? "Tool failed.",
+                },
+              };
+        })();
+        return {
+          result,
+          cancel: vi.fn(),
+          events: (async function* (): AsyncGenerator<import("./index").AgentEvent> {
+            yield { type: "run.started", runId: request.runId };
+            const settled = await result;
+            yield settled.status === "completed"
+              ? { type: "run.completed", result: settled }
+              : { type: "run.failed", reason: settled.reason ?? "Runtime failure." };
+          })(),
+        };
+      },
+    }));
+    const getAgentRuntimeBackend = vi.fn(() => "langchain" as const);
     const runtime = createFileScanTaskRuntime({
       delayMs: 0,
       runtimeConfig: { agentMaxIterations: 8 },
       fileTool: { scanMarkdownDocuments },
       commanderTool: { plan: commanderPlan },
-      reactDecideNext,
+      getAgentRuntimeBackend,
+      createAgentRuntime,
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
@@ -820,8 +907,7 @@ describe("createFileScanTaskRuntime", () => {
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(finalSnapshot.status).toBe("completed");
-    expect(reactDecideNext).toHaveBeenCalledTimes(5);
-    expect(scanMarkdownDocuments).toHaveBeenCalledTimes(4);
+    expect(scanMarkdownDocuments).toHaveBeenCalledTimes(1);
 
     unsubscribe();
     runtime.dispose();
@@ -841,13 +927,11 @@ describe("createFileScanTaskRuntime", () => {
       }],
     }));
     const synthesize = vi.fn(async () => ({ message: "Here is the direct answer." }));
-    const reactDecideNext = vi.fn();
     const scanMarkdownDocuments = vi.fn(async () => []);
     const runtime = createFileScanTaskRuntime({
       delayMs: 0,
       fileTool: { scanMarkdownDocuments },
       commanderTool: { plan: commanderPlan, synthesize },
-      reactDecideNext,
     });
     const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
 
@@ -864,7 +948,6 @@ describe("createFileScanTaskRuntime", () => {
     expect(synthesize).toHaveBeenCalledWith(expect.objectContaining({
       images: ["data:image/png;base64,AA=="],
     }), expect.objectContaining({ onUsage: expect.any(Function) }));
-    expect(reactDecideNext).not.toHaveBeenCalled();
     expect(scanMarkdownDocuments).not.toHaveBeenCalled();
 
     unsubscribe();
@@ -5800,7 +5883,6 @@ describe("completeGeneralChat streaming pipeline", () => {
     let streamOptions: { streamMode?: "default" | "l1"; timeoutMs?: number } | undefined;
     let streamPrompt = "";
     const commanderPlan = vi.fn();
-    const reactDecideNext = vi.fn();
     const mockChatTool = {
       complete: vi.fn(async () => ({ text: "fallback", tokenUsage: undefined })),
       stream: vi.fn(async function* (
@@ -5818,7 +5900,6 @@ describe("completeGeneralChat streaming pipeline", () => {
       fileTool: undefined as any,
       chatTool: mockChatTool,
       commanderTool: { plan: commanderPlan as any },
-      reactDecideNext,
       eventBus,
     });
 
@@ -5834,7 +5915,6 @@ describe("completeGeneralChat streaming pipeline", () => {
     expect(streamOptions?.timeoutMs).toBe(90_000);
     expect(mockChatTool.complete).not.toHaveBeenCalled();
     expect(commanderPlan).not.toHaveBeenCalled();
-    expect(reactDecideNext).not.toHaveBeenCalled();
     expect(streamPrompt).not.toContain("Output must match this JSON Schema");
     expect(streamPrompt).not.toContain("Available tools:");
     expect(streamPrompt).not.toContain("ReAct");

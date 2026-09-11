@@ -474,7 +474,7 @@ describe("LangChain Agent runtime", () => {
     expect((await eventsPromise).map((event) => event.type)).toEqual([
       "run.started",
       "model.started",
-      "run.failed",
+      "run.cancelled",
     ]);
   });
 

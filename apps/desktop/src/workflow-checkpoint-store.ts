@@ -184,7 +184,30 @@ export function sanitizeWorkflowCheckpoint(value: unknown): WorkflowCheckpoint |
   if (obj.agentRuntimeRoutingMetrics !== undefined &&
     !isAgentRuntimeRoutingMetricsSnapshotArray(obj.agentRuntimeRoutingMetrics)) return undefined;
   if (obj.tokenUsage !== undefined && !isTokenUsageSummary(obj.tokenUsage)) return undefined;
+  if (obj.usageObservations !== undefined && !isUsageObservationArray(obj.usageObservations)) return undefined;
   return obj as unknown as WorkflowCheckpoint;
+}
+
+function isUsageObservationArray(value: unknown): boolean {
+  if (!Array.isArray(value) || value.length > 10_000) return false;
+  for (const item of value) {
+    if (typeof item !== "object" || item === null) return false;
+    const observation = item as Record<string, unknown>;
+    if (!isNonEmptyString(observation.callId) ||
+      !isNonEmptyString(observation.taskId) ||
+      !Number.isInteger(observation.revision) ||
+      (observation.revision as number) < 1 ||
+      typeof observation.final !== "boolean" ||
+      !isNonEmptyString(observation.agentKind) ||
+      !isNonEmptyString(observation.backend) ||
+      (observation.availability !== "reported" && observation.availability !== "unavailable")) {
+      return false;
+    }
+    for (const key of ["inputTokens", "outputTokens", "totalTokens", "contextWindowTokens", "attempt"]) {
+      if (observation[key] !== undefined && !isNonNegativeInteger(observation[key])) return false;
+    }
+  }
+  return true;
 }
 
 function isAgentRuntimeRoutingMetricsSnapshotArray(value: unknown): boolean {
@@ -196,6 +219,9 @@ function isAgentRuntimeRoutingMetricsSnapshotArray(value: unknown): boolean {
     const opencodeRouteCount = metrics.opencodeRouteCount === undefined
       ? 0
       : metrics.opencodeRouteCount;
+    const javisSpecializedRouteCount = metrics.javisSpecializedRouteCount === undefined
+      ? 0
+      : metrics.javisSpecializedRouteCount;
     if (!isCanonicalBoundedString(metrics.providerId, 160) ||
       metrics.providerId !== (metrics.providerId as string).toLowerCase() ||
       !isCanonicalBoundedString(metrics.agentKind, 160) ||
@@ -206,12 +232,14 @@ function isAgentRuntimeRoutingMetricsSnapshotArray(value: unknown): boolean {
       !isNonNegativeInteger(opencodeRouteCount) ||
       !isNonNegativeInteger(metrics.legacyRouteCount) ||
       !isNonNegativeInteger(metrics.unavailableRouteCount) ||
+      !isNonNegativeInteger(javisSpecializedRouteCount) ||
       !isNonNegativeInteger(metrics.fallbackCount) ||
       (metrics.rolloutTargetCount as number) > (metrics.routeCount as number) ||
       (metrics.langchainRouteCount as number) +
         (opencodeRouteCount as number) +
         (metrics.legacyRouteCount as number) +
-        (metrics.unavailableRouteCount as number) !== metrics.routeCount ||
+        (metrics.unavailableRouteCount as number) +
+        (javisSpecializedRouteCount as number) !== metrics.routeCount ||
       (metrics.langchainRouteCount as number) +
         (opencodeRouteCount as number) +
         (metrics.fallbackCount as number) !== metrics.rolloutTargetCount ||

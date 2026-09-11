@@ -337,6 +337,7 @@ import {
   WORKFLOW_CHECKPOINT_MIGRATIONS,
   type WorkflowCheckpointStore,
 } from "./workflow-checkpoint-store";
+import { USAGE_OBSERVATION_MIGRATIONS } from "./usage-observation-persistence";
 import {
   attachRestoredApprovalDurableResume,
   advanceRestoredApprovalResumeSeed,
@@ -2302,6 +2303,7 @@ function App() {
       await runDesktopDatabaseMigrations(database, GOAL_EVENT_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, RUNTIME_EVENT_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, WORKFLOW_CHECKPOINT_MIGRATIONS);
+      await runDesktopDatabaseMigrations(database, USAGE_OBSERVATION_MIGRATIONS);
 
       // One-time import from localStorage
       const taskHistoryRepo = createTaskHistoryRepository(database);

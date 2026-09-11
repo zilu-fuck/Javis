@@ -7,6 +7,7 @@ import {
   type AgentChatStreamEvent,
   type AgentModelCapabilities,
   type AgentModelGateway,
+  type AgentTokenUsage,
 } from "@javis/core";
 import type { ModelProviderSettings } from "../model-provider";
 
@@ -36,6 +37,8 @@ export function createAgentModelGateway(
       assertNativeToolCalling(capabilities, settings.provider);
       const completion = invoke<AgentChatResponse>("complete_model_chat", {
         request: createNativeRequest(request, settings, adapter.protocol, capabilities),
+      }).catch((error) => {
+        throw normalizeNativeModelError(error);
       });
       return waitForCompletion(completion, request.signal);
     },
@@ -62,6 +65,55 @@ interface NativeModelChatStreamErrorPayload {
   streamId?: string;
   stream_id?: string;
   error: string;
+}
+
+/**
+ * Structured empty-response failure from the native chat boundary
+ * (dual-kernel plan §13.2). Carries a sanitized response shape and the
+ * usage of the failed call so the caller can retain failed-call tokens.
+ */
+export class ModelChatEmptyResponseError extends Error {
+  readonly responseShape: Record<string, unknown>;
+  readonly finishReason?: string;
+  readonly usage?: AgentTokenUsage;
+
+  constructor(shape: Record<string, unknown>, finishReason?: string, usage?: AgentTokenUsage) {
+    super(`Model chat returned an empty response (shape ${safeShapeSummary(shape)}).`);
+    this.name = "ModelChatEmptyResponseError";
+    this.responseShape = shape;
+    this.finishReason = finishReason;
+    this.usage = usage;
+  }
+}
+
+const EMPTY_RESPONSE_ERROR_PREFIX = "__JAVIS_EMPTY_RESPONSE__";
+
+export function parseModelChatError(message: string): unknown {
+  if (!message.startsWith(EMPTY_RESPONSE_ERROR_PREFIX)) return new Error(message);
+  try {
+    const payload = JSON.parse(message.slice(EMPTY_RESPONSE_ERROR_PREFIX.length)) as {
+      code?: string;
+      responseShape?: Record<string, unknown>;
+      finishReason?: string | null;
+      usage?: AgentTokenUsage;
+    };
+    if (payload.code !== "model_chat_empty_response") return new Error(message);
+    return new ModelChatEmptyResponseError(
+      payload.responseShape ?? {},
+      payload.finishReason ?? undefined,
+      payload.usage,
+    );
+  } catch {
+    return new Error(message);
+  }
+}
+
+function safeShapeSummary(shape: Record<string, unknown>): string {
+  return [
+    typeof shape.contentType === "string" ? `content:${shape.contentType}` : "content:?",
+    typeof shape.toolCallsCount === "number" ? `toolCalls:${shape.toolCallsCount}` : "toolCalls:?",
+    typeof shape.hasUsage === "boolean" ? `usage:${shape.hasUsage ? "reported" : "missing"}` : "usage:?",
+  ].join(" ");
 }
 
 async function* streamModelChat(
@@ -107,7 +159,7 @@ async function* streamModelChat(
       "stream-model-chat-error",
       (payload) => {
         if (readStreamId(payload.payload) !== streamId) return;
-        streamError = new Error(payload.payload.error);
+        streamError = normalizeNativeModelError(payload.payload.error);
         finished = true;
         wake();
       },
@@ -185,6 +237,11 @@ function assertNativeToolCalling(
   if (!capabilities.nativeToolCalling) {
     throw new Error(`Provider ${provider} explicitly disables native tool calling.`);
   }
+}
+
+function normalizeNativeModelError(error: unknown): unknown {
+  const message = error instanceof Error ? error.message : String(error);
+  return parseModelChatError(message);
 }
 
 function waitForCompletion<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {

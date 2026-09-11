@@ -13,6 +13,8 @@ study/
 **/production/
 *apikey*.txt
 .codex-tmp/
+.mimosa/
+.zcode/
 yolo26n.pt
 .mimocode/
 .tmp/

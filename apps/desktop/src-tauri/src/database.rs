@@ -40,6 +40,7 @@ const ALLOWED_TABLES: &[&str] = &[
     "workspace_settings",
     "runtime_events",
     "workflow_checkpoints",
+    "usage_observations",
 ];
 
 #[derive(Clone, Copy)]
@@ -1499,6 +1500,7 @@ fn require_known_select_shape(tokens: &[String], sql_text: &str) -> Result<(), S
             | "select count as count from runtime_events where run_id"
             | "select checkpoint_json from workflow_checkpoints where run_id order by event_sequence desc limit 1"
             | "select checkpoint_json from workflow_checkpoints where task_id order by created_at desc rowid desc limit 1"
+            | "select call_id revision final task_id workflow_run_id step_id attempt agent_kind backend provider model context_window_tokens availability semantics input_tokens output_tokens total_tokens from usage_observations where task_id order by updated_at asc limit 10000"
             | "select checkpoint_json from workflow_checkpoints where task_id order by created_at desc rowid desc limit"
             | "select checkpoint_id from workflow_checkpoints where task_id order by created_at desc rowid desc"
     ) && has_required_select_operator_shape(&signature, sql_text)
@@ -1745,6 +1747,7 @@ fn require_known_execute_shape(tokens: &[String], sql_text: &str) -> Result<(), 
                 | "delete from runtime_events where task_id and event_kind in"
                 | "delete from runtime_events where task_id and event_id in"
                 | "delete from workflow_checkpoints where checkpoint_id"
+                | "insert into usage_observations call_id revision final task_id workflow_run_id step_id attempt agent_kind backend provider model context_window_tokens availability semantics input_tokens output_tokens total_tokens updated_at values on conflict call_id do update set revision excluded revision final excluded final task_id excluded task_id workflow_run_id excluded workflow_run_id step_id excluded step_id attempt excluded attempt agent_kind excluded agent_kind backend excluded backend provider excluded provider model excluded model context_window_tokens excluded context_window_tokens availability excluded availability semantics excluded semantics input_tokens excluded input_tokens output_tokens excluded output_tokens total_tokens excluded total_tokens updated_at excluded updated_at"
         ) && has_required_execute_operator_shape(&signature, sql_text)
     {
         Ok(())
@@ -1801,6 +1804,10 @@ fn has_required_execute_operator_shape(signature: &str, sql_text: &str) -> bool 
         }
         "insert into runtime_events event_id task_id run_id sequence event_version event_kind workflow_id step_id agent_id occurred_at recorded_at envelope_json values on conflict event_id do nothing" => {
             sql_text.contains("on conflict(event_id) do nothing")
+        }
+        "insert into usage_observations call_id revision final task_id workflow_run_id step_id attempt agent_kind backend provider model context_window_tokens availability semantics input_tokens output_tokens total_tokens updated_at values on conflict call_id do update set revision excluded revision final excluded final task_id excluded task_id workflow_run_id excluded workflow_run_id step_id excluded step_id attempt excluded attempt agent_kind excluded agent_kind backend excluded backend provider excluded provider model excluded model context_window_tokens excluded context_window_tokens availability excluded availability semantics excluded semantics input_tokens excluded input_tokens output_tokens excluded output_tokens total_tokens excluded total_tokens updated_at excluded updated_at" => {
+            sql_text.contains("on conflict(call_id) do update set")
+                && sql_text.contains("call_id TEXT PRIMARY KEY") == false
         }
         "insert or ignore into vector_index_buckets namespace bucket_key item_id values" => {
             sql_text.contains("values (?, ?, ?)")
@@ -2095,6 +2102,26 @@ fn is_known_create_shape(tokens: &[String]) -> bool {
             "workflow_json",
             "checkpoint_json",
         ],
+        "usage_observations" => &[
+            "call_id",
+            "revision",
+            "final",
+            "task_id",
+            "workflow_run_id",
+            "step_id",
+            "attempt",
+            "agent_kind",
+            "backend",
+            "provider",
+            "model",
+            "context_window_tokens",
+            "availability",
+            "semantics",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "updated_at",
+        ],
         _ => return false,
     };
     required_columns
@@ -2144,6 +2171,11 @@ fn is_known_index(index_name: &str, table_name: &str) -> bool {
                 "idx_workflow_checkpoints_run_sequence",
                 "workflow_checkpoints"
             )
+            | (
+                "idx_usage_observations_task_updated",
+                "usage_observations"
+            )
+            | ("idx_usage_observations_backend", "usage_observations")
     )
 }
 
@@ -3328,6 +3360,53 @@ mod tests {
                  workflow_json = excluded.workflow_json,
                  checkpoint_json = excluded.checkpoint_json"#,
             "DELETE FROM workflow_checkpoints WHERE checkpoint_id = ?",
+            r#"INSERT INTO usage_observations (
+                 call_id, revision, final, task_id, workflow_run_id, step_id, attempt,
+                 agent_kind, backend, provider, model, context_window_tokens,
+                 availability, semantics, input_tokens, output_tokens, total_tokens, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(call_id) DO UPDATE SET
+                 revision = excluded.revision,
+                 final = excluded.final,
+                 task_id = excluded.task_id,
+                 workflow_run_id = excluded.workflow_run_id,
+                 step_id = excluded.step_id,
+                 attempt = excluded.attempt,
+                 agent_kind = excluded.agent_kind,
+                 backend = excluded.backend,
+                 provider = excluded.provider,
+                 model = excluded.model,
+                 context_window_tokens = excluded.context_window_tokens,
+                 availability = excluded.availability,
+                 semantics = excluded.semantics,
+                 input_tokens = excluded.input_tokens,
+                 output_tokens = excluded.output_tokens,
+                 total_tokens = excluded.total_tokens,
+                 updated_at = excluded.updated_at"#,
+            r#"CREATE INDEX IF NOT EXISTS idx_usage_observations_task_updated
+               ON usage_observations (task_id, updated_at)"#,
+            r#"CREATE INDEX IF NOT EXISTS idx_usage_observations_backend
+               ON usage_observations (backend, provider, model)"#,
+            r#"CREATE TABLE IF NOT EXISTS usage_observations (
+                 call_id TEXT PRIMARY KEY,
+                 revision INTEGER NOT NULL,
+                 final INTEGER NOT NULL,
+                 task_id TEXT NOT NULL,
+                 workflow_run_id TEXT,
+                 step_id TEXT,
+                 attempt INTEGER,
+                 agent_kind TEXT NOT NULL,
+                 backend TEXT NOT NULL,
+                 provider TEXT,
+                 model TEXT,
+                 context_window_tokens INTEGER,
+                 availability TEXT NOT NULL,
+                 semantics TEXT NOT NULL,
+                 input_tokens INTEGER,
+                 output_tokens INTEGER,
+                 total_tokens INTEGER,
+                 updated_at TEXT NOT NULL
+               )"#,
         ];
 
         for sql in statements {
@@ -3458,6 +3537,13 @@ mod tests {
                FROM vector_index_items
                WHERE namespace = ? AND scope_type = ? AND scope_id = ?
                LIMIT ?"#,
+            r#"SELECT call_id, revision, final, task_id, workflow_run_id, step_id, attempt,
+                      agent_kind, backend, provider, model, context_window_tokens,
+                      availability, semantics, input_tokens, output_tokens, total_tokens
+               FROM usage_observations
+               WHERE task_id = ?
+               ORDER BY updated_at ASC
+               LIMIT 10000"#,
         ];
 
         for sql in statements {

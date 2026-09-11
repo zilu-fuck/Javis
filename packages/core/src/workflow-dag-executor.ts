@@ -126,6 +126,19 @@ export interface WorkflowExecutorOptions {
     context: SharedTaskContext,
     result?: StepResult,
   ): void;
+  /**
+   * Called when a step returns `blocked` under `completionPolicy.blocked ===
+   * "wait"` (with a wake condition) or `needs_clarification` under
+   * `needsClarification === "ask_user"`. The scheduler pauses the step
+   * (without failing it) until the returned promise resolves, then retries
+   * the step. Resolving without the condition being satisfied is the
+   * caller's responsibility (dual-kernel plan §7.2 scheduler matrix).
+   */
+  onStepWaiting?(
+    step: WorkbenchWorkflowStep,
+    result: StepResult,
+    context: SharedTaskContext,
+  ): Promise<void> | void;
   onStepFailureReplan?(request: {
     step: WorkbenchWorkflowStep;
     error: string;
@@ -180,6 +193,7 @@ export async function executeWorkflow({
   onStepHeartbeat,
   onStepTimeout,
   onStepRetry,
+  onStepWaiting,
   onBackpressure,
   onCircuitBreakerOpen,
 }: WorkflowExecutorOptions): Promise<WorkflowExecutionResult> {
@@ -301,6 +315,7 @@ export async function executeWorkflow({
         onStepHeartbeat,
         onStepTimeout,
         onStepRetry,
+        onStepWaiting,
         onCircuitBreakerOpen,
       );
       if (parallelResult) {
@@ -338,6 +353,7 @@ export async function executeWorkflow({
         onStepHeartbeat,
         onStepTimeout,
         onStepRetry,
+        onStepWaiting,
         onCircuitBreakerOpen,
       );
       if (serialResult) {
@@ -624,6 +640,7 @@ async function executeReadySteps(
   onStepHeartbeat: WorkflowExecutorOptions["onStepHeartbeat"],
   onStepTimeout: WorkflowExecutorOptions["onStepTimeout"],
   onStepRetry: WorkflowExecutorOptions["onStepRetry"],
+  onStepWaiting: WorkflowExecutorOptions["onStepWaiting"],
   onCircuitBreakerOpen: WorkflowExecutorOptions["onCircuitBreakerOpen"],
 ): Promise<WorkflowExecutionResult | undefined> {
   const queue = [...steps];
@@ -706,6 +723,25 @@ async function executeReadySteps(
         stepResult.error ?? `Step ${step.id} returned partial output under ${policy} policy.`,
         stepResult,
       );
+      continue;
+    }
+    if (stepResult.status === "blocked" &&
+        step.completionPolicy?.blocked === "wait" &&
+        stepResult.blockedReason?.wakeCondition &&
+        onStepWaiting) {
+      // Pause the step until the wake condition resolves, then retry it.
+      // No failure is recorded; the step stays out of completed/abandoned.
+      recordStepResult(context, step.id, stepResult);
+      await onStepWaiting(step, stepResult, context);
+      queue.unshift(step);
+      continue;
+    }
+    if (stepResult.status === "needs_clarification" &&
+        step.completionPolicy?.needsClarification === "ask_user" &&
+        onStepWaiting) {
+      recordStepResult(context, step.id, stepResult);
+      await onStepWaiting(step, stepResult, context);
+      queue.unshift(step);
       continue;
     }
     if (isTerminalStepResultStatus(stepResult.status)) {

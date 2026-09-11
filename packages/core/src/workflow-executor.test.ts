@@ -2,20 +2,22 @@ import { describe, expect, it, vi } from "vitest";
 import { encodeMcpToolServerName, initialToolDescriptors, type BrowserTool, type CodeTool, type CommanderTool, type ComputerTool, type FileTool, type GitTool, type McpTool, type MemoryTool, type ProjectTool, type SchedulerTool, type ShellTool, type ToolDescriptor, type TrendHotListResult, type TrendTool, type VerifierTool, type VisionTool, type WebTool, type WorkspaceTool } from "@javis/tools";
 import { createArtifactEnvelope, computePlanHash, createAgentRegistry, createDefaultAgentRegistry, createInitialTaskSnapshot, demoAgents, type Agent, type AgentEvent, type AgentRuntimeFactory, type RuntimeEventEnvelope, type TaskSnapshot, type WorkflowCheckpoint } from "./index";
 import { createSharedTaskContext } from "./shared-context";
+import type { StepResult } from "./step-protocol";
 import { createWorkflowRegistry } from "./workflow-registry";
 import type { WorkbenchWorkflow } from "./workflows";
 import { executeCapabilityStep, isReadCurrentProjectGoal, runCommanderDagTask, runGenericWorkbenchWorkflow, runReadCurrentProjectWorkflow, SUPPORTED_APPROVAL_GATED_TOOLS } from "./workflow-executor";
-import type { ReActDecisionRequest } from "./agent-react-decider";
 import type { WorkspaceRuntime } from "./workspace-runtime";
 import { createCodeProposalHash } from "./code-proposal-safety";
 
-function createTestController(options: { withPermissionHandler?: boolean } = {}) {
+function createTestController(options: { withPermissionHandler?: boolean; withStepWaitHandler?: boolean } = {}) {
   let snapshot = createInitialTaskSnapshot();
   const emitted: TaskSnapshot[] = [];
   const permissionHandlers = new Map<string, ((decision: string) => void | Promise<void>)>();
+  const stepWaitHandlers = new Map<string, (() => void | Promise<void>)>();
   return {
     emitted,
     permissionHandlers,
+    stepWaitHandlers,
     controller: {
       emit(nextSnapshot: TaskSnapshot) {
         snapshot = nextSnapshot;
@@ -32,6 +34,17 @@ function createTestController(options: { withPermissionHandler?: boolean } = {})
               permissionHandlers.set(requestId, handler);
             } else {
               permissionHandlers.delete(requestId);
+            }
+          }),
+        }
+        : {}),
+      ...(options.withStepWaitHandler
+        ? {
+          setPendingStepWaitHandler: vi.fn((stepId: string, handler: (() => void | Promise<void>) | undefined) => {
+            if (handler) {
+              stepWaitHandlers.set(stepId, handler);
+            } else {
+              stepWaitHandlers.delete(stepId);
             }
           }),
         }
@@ -2205,20 +2218,62 @@ describe("runCommanderDagTask observability", () => {
       })),
       synthesize,
     };
-    const reactDecideNext = vi.fn(async (request: ReActDecisionRequest) =>
-      request.observations.length === 0
-        ? {
-            status: "continue" as const,
+    const createAgentRuntime = vi.fn<AgentRuntimeFactory>(({ toolGateway }) => ({
+      run(definition, request) {
+        const result = (async () => {
+          const toolResult = await toolGateway.execute({
+            taskId: request.taskId,
+            runId: request.runId,
+            agentKind: definition.kind,
             toolName: "web.search",
             input: { query: "current trends" },
-            reason: "Collect public source evidence.",
-          }
-        : {
-            status: "completed" as const,
-            output: request.observations[0]?.output,
-            reason: "Source evidence is ready for Commander synthesis.",
-          }
-    );
+            signal: request.signal,
+          });
+          return toolResult.status === "success"
+            ? {
+                status: "completed" as const,
+                output: toolResult.output,
+                stepResult: {
+                  status: "completed" as const,
+                  output: toolResult.output,
+                  evidence: [],
+                  assumptions: [],
+                  unresolvedQuestions: [],
+                },
+                metrics: {
+                  backend: "langchain" as const,
+                  status: "completed" as const,
+                  durationMs: 5,
+                  modelCalls: 1,
+                  toolCalls: 1,
+                },
+              }
+            : {
+                status: "failed" as const,
+                reason: toolResult.reason ?? "Tool failed.",
+                stepResult: {
+                  status: "failed" as const,
+                  evidence: [],
+                  assumptions: [],
+                  unresolvedQuestions: [],
+                  error: toolResult.reason ?? "Tool failed.",
+                },
+              };
+        })();
+        return {
+          result,
+          cancel: vi.fn(),
+          events: (async function* (): AsyncGenerator<AgentEvent> {
+            yield { type: "run.started", runId: request.runId };
+            const settled = await result;
+            yield settled.status === "completed"
+              ? { type: "run.completed", result: settled }
+              : { type: "run.failed", reason: settled.reason ?? "Runtime failure." };
+          })(),
+        };
+      },
+    }));
+    const getAgentRuntimeBackend = vi.fn(() => "langchain" as const);
     const { controller, emitted } = createTestController();
 
     await runCommanderDagTask({
@@ -2228,13 +2283,13 @@ describe("runCommanderDagTask observability", () => {
         searchWeb: vi.fn(async () => [source]),
         fetchWebSource: vi.fn(async () => source),
       },
-      reactDecideNext,
+      getAgentRuntimeBackend,
+      createAgentRuntime,
       taskId: "task-research-synthesis-provenance",
       userGoal: "research current trends",
       availableToolDescriptors: initialToolDescriptors,
     });
 
-    expect(reactDecideNext).toHaveBeenCalledTimes(2);
     expect(synthesize).toHaveBeenCalledTimes(1);
     expect(emitted[emitted.length - 1]).toMatchObject({
       status: "completed",
@@ -4801,414 +4856,6 @@ describe("executeCapabilityStep trend dispatch", () => {
         }),
       ]),
     }));
-  });
-
-  it("routes a direct trend step straight to Page Agent", async () => {
-    const navigate = vi.fn<BrowserTool["navigate"]>(async (request) => ({
-      url: request.url,
-      title: "Search results",
-      status: 200,
-      loadState: "load",
-    }));
-    const getContent = vi.fn<BrowserTool["getContent"]>(async () => {
-      return {
-        url: "https://example.com/trending",
-        title: "Trending",
-        content: "1. First verified topic\n2. Second verified topic",
-      };
-    });
-    const fetchHotList = vi.fn<TrendTool["fetchHotList"]>(async () => {
-      throw new Error("Trend provider is unsupported.");
-    });
-    const reactDecideNext = vi.fn(async (request: ReActDecisionRequest) => {
-      expect(request.agentKind).toBe("page-agent");
-      if (request.observations.length === 0) {
-        return {
-          status: "continue" as const,
-          toolName: "browser.navigate",
-          input: { url: "https://example.com/trending" },
-          reason: "Open the discovered public ranking page.",
-        };
-      }
-      if (request.observations.length === 1) {
-        return {
-          status: "continue" as const,
-          toolName: "browser.getContent",
-          input: {},
-          reason: "Read the ranking page content.",
-        };
-      }
-      return {
-        status: "completed" as const,
-        reason: "The public ranking evidence was collected.",
-        output: {
-          sourceUrl: "https://example.com/trending",
-          items: [
-            { rank: 1, title: "First verified topic" },
-            { rank: 2, title: "Second verified topic" },
-          ],
-        },
-      };
-    });
-    const verify = vi.fn(async () => ({
-      status: "pass" as const,
-      summary: "The fallback evidence is source-backed.",
-      detail: "The Page Agent returned ranked page content and a source URL.",
-    }));
-    const replanDag = vi.fn();
-    const commanderTool: CommanderTool = {
-      plan: vi.fn(async () => ({
-        title: "Generic trend fallback",
-        reasoning: "Use Page Agent for public source discovery.",
-        steps: [{
-          id: "fetch-hot-list",
-          title: "Fetch a site hot list",
-          assignedAgentKind: "research",
-          toolName: "trend.fetchHotList",
-          capability: "trend_fetch",
-          requiredCapabilities: ["trend_fetch"],
-          toolInput: { provider: "site-without-adapter", limit: 2 },
-          executionMode: "direct_tool_call" as const,
-          dependsOn: [],
-          outputContextKey: "hotListEvidence",
-          successCriteria: "A source-backed top 2 list is collected.",
-        }, {
-          id: "verify-hot-list",
-          title: "Verify hot-list evidence",
-          assignedAgentKind: "verifier",
-          toolName: "verifier.check",
-          capability: "evidence_check",
-          requiredCapabilities: ["evidence_check"],
-          dependsOn: ["fetch-hot-list"],
-          inputContextKeys: ["hotListEvidence"],
-          outputContextKey: "verifiedHotList",
-          successCriteria: "The hot-list evidence is verified.",
-        }],
-      })),
-    };
-    const { controller, emitted } = createTestController();
-
-    await runCommanderDagTask({
-      controller,
-      commanderTool,
-      browserTool: createBrowserTool({ navigate, getContent }),
-      trendTool: { fetchHotList },
-      verifierTool: { check: verify },
-      reactDecideNext,
-      replanDag,
-      taskId: "task-generic-page-fallback",
-      userGoal: "Collect a top 20 list from site-without-adapter",
-      availableToolDescriptors: initialToolDescriptors,
-    });
-
-    expect(emitted[emitted.length - 1]?.status).toBe("completed");
-    expect(navigate).toHaveBeenCalledWith(expect.objectContaining({
-      url: "https://example.com/trending",
-    }));
-    expect(navigate).not.toHaveBeenCalledWith(expect.objectContaining({
-      url: expect.stringContaining("https://www.bing.com/search?q="),
-    }));
-    expect(getContent).toHaveBeenCalledTimes(1);
-    expect(fetchHotList).not.toHaveBeenCalled();
-    expect(reactDecideNext).toHaveBeenCalledTimes(3);
-    expect(verify).not.toHaveBeenCalled();
-    expect(replanDag).not.toHaveBeenCalled();
-    expect(emitted[emitted.length - 1]?.plan.some((step) =>
-      step.id === "fetch-hot-list" && step.assignedAgentKind === "page-agent" && step.status === "completed"
-    )).toBe(true);
-  });
-
-  it("delivers two verified generic trend sources when a Page Agent fallback is blocked", async () => {
-    const rawRestrictedPage = "RAW_BROWSER_PAGE_300012_WITHOUT_RANKED_ITEMS";
-    const publicSourceUrlsByProvider: Record<string, string[]> = {
-      "source-alpha": ["https://public.example/source-alpha/ranking"],
-      "source-beta": ["https://public.example/source-beta/ranking"],
-      "source-gamma": [
-        "https://public.example/source-gamma/official-ranking",
-        "https://public.example/source-gamma/alternate-ranking",
-      ],
-    };
-    let currentUrl = "";
-    const navigate = vi.fn<BrowserTool["navigate"]>(async (request) => {
-      currentUrl = request.url;
-      return {
-        url: request.url,
-        title: "Public page",
-        status: 200,
-        loadState: "load",
-      };
-    });
-    const getContent = vi.fn<BrowserTool["getContent"]>(async () => {
-      const provider = Object.keys(publicSourceUrlsByProvider).find((candidate) =>
-        currentUrl.includes(candidate),
-      );
-      if (provider === "source-alpha" || provider === "source-beta") {
-        const result = createCompleteTrendHotList(provider);
-        return {
-          url: currentUrl,
-          title: "Public ranking",
-          content: JSON.stringify({ sourceUrl: currentUrl, items: result.items }),
-        };
-      }
-      return {
-        url: currentUrl,
-        title: "Access restricted",
-        content: rawRestrictedPage,
-      };
-    });
-    const fetchHotList = vi.fn<TrendTool["fetchHotList"]>(async (request) => {
-      if (request.provider === "source-gamma") {
-        throw new Error("The registered trend adapter is unavailable for source-gamma.");
-      }
-      return createCompleteTrendHotList(request.provider);
-    });
-    const reactDecideNext = vi.fn(async (request: ReActDecisionRequest) => {
-      expect(request.agentKind).toBe("page-agent");
-      const provider = Object.keys(publicSourceUrlsByProvider).find((candidate) =>
-        request.stepId.includes(candidate),
-      ) ?? "source-gamma";
-      const sourceUrls = publicSourceUrlsByProvider[provider] ?? [];
-      if (request.observations.length === 0) {
-        return {
-          status: "continue" as const,
-          toolName: "browser.navigate",
-          input: { url: sourceUrls[0] },
-          reason: `Try the first public ranking page for ${provider}.`,
-        };
-      }
-      if (request.observations.length === 1) {
-        return {
-          status: "continue" as const,
-          toolName: "browser.getContent",
-          input: {},
-          reason: `Inspect the ${provider} ranking page.`,
-        };
-      }
-      if (provider !== "source-gamma") {
-        const result = createCompleteTrendHotList(provider);
-        return {
-          status: "completed" as const,
-          reason: `${provider} ranked evidence was collected.`,
-          output: {
-            sourceUrl: sourceUrls[0],
-            items: result.items,
-          },
-        };
-      }
-      if (request.observations.length === 2) {
-        return {
-          status: "continue" as const,
-          toolName: "browser.navigate",
-          input: { url: sourceUrls[1] },
-          reason: "The first page was restricted; try a different public source.",
-        };
-      }
-      if (request.observations.length === 3) {
-        return {
-          status: "continue" as const,
-          toolName: "browser.getContent",
-          input: {},
-          reason: "Inspect the alternate public ranking page.",
-        };
-      }
-      return {
-        status: "failed" as const,
-        reason: "Public alternatives returned access restriction 300012 and no structured ranked items.",
-      };
-    });
-    const verify = vi.fn<VerifierTool["check"]>(async () => {
-      throw new Error("Structured model response was truncated (length); refusing to parse or repair incomplete JSON.");
-    });
-    const synthesize = vi.fn<NonNullable<CommanderTool["synthesize"]>>(async (request) => {
-      const evidence = JSON.stringify(request.evidence);
-      expect(evidence).toContain("source-alpha topic 1");
-      expect(evidence).toContain("source-beta topic 1");
-      expect(evidence).toContain('"status":"blocked"');
-      return {
-        message: "source-alpha 和 source-beta 各成功获取并验证 20 条趋势数据；source-gamma 的公开替代来源返回 300012 访问限制，已标记为受阻，没有发布该来源的榜单数据。",
-      };
-    });
-    const commanderTool: CommanderTool = {
-      plan: vi.fn(async () => ({
-        title: "三个通用来源趋势采集",
-        reasoning: "并行采集三个通用来源，验证可用数据，并允许保留受阻来源的诊断。",
-        executionPolicy: {
-          maxConcurrency: 3,
-          maxRetries: 0,
-          degradationStrategy: "partial_results" as const,
-        },
-        steps: [{
-          id: "fetch-source-alpha",
-          title: "采集 source-alpha 热榜",
-          assignedAgentKind: "research",
-          toolName: "trend.fetchHotList",
-          capability: "trend_fetch",
-          requiredCapabilities: ["trend_fetch"],
-          toolInput: { provider: "source-alpha", limit: 20 },
-          executionMode: "direct_tool_call" as const,
-          dependsOn: [],
-          outputContextKey: "sourceAlphaHotList",
-          successCriteria: "获得 source-alpha 的 20 条结构化热榜数据。",
-        }, {
-          id: "fetch-source-beta",
-          title: "采集 source-beta 热榜",
-          assignedAgentKind: "research",
-          toolName: "trend.fetchHotList",
-          capability: "trend_fetch",
-          requiredCapabilities: ["trend_fetch"],
-          toolInput: { provider: "source-beta", limit: 20 },
-          executionMode: "direct_tool_call" as const,
-          dependsOn: [],
-          outputContextKey: "sourceBetaHotList",
-          successCriteria: "获得 source-beta 的 20 条结构化热榜数据。",
-        }, {
-          id: "fetch-source-gamma",
-          title: "采集 source-gamma 热榜",
-          assignedAgentKind: "research",
-          toolName: "trend.fetchHotList",
-          capability: "trend_fetch",
-          requiredCapabilities: ["trend_fetch"],
-          toolInput: { provider: "source-gamma", limit: 20 },
-          executionMode: "direct_tool_call" as const,
-          dependsOn: [],
-          outputContextKey: "sourceGammaHotList",
-          successCriteria: "获得 source-gamma 的 20 条结构化热榜数据，或记录可验证的受阻原因。",
-        }, {
-          id: "verify-available-sources",
-          title: "验证三个来源的采集结果",
-          assignedAgentKind: "verifier",
-          toolName: "verifier.check",
-          capability: "evidence_check",
-          requiredCapabilities: ["evidence_check"],
-          dependsOn: ["fetch-source-alpha", "fetch-source-beta", "fetch-source-gamma"],
-          inputContextKeys: ["sourceAlphaHotList", "sourceBetaHotList", "sourceGammaHotList"],
-          outputContextKey: "verificationResult",
-          successCriteria: "验证成功来源的数据完整性，并确认受阻来源没有被伪装成成功结果。",
-        }, {
-          id: "write-available-sources",
-          title: "写入可用趋势报告",
-          assignedAgentKind: "doc-updater",
-          toolName: "file.writeText",
-          toolInput: { targetPath: "reports/generic-trends.md" },
-          executionMode: "direct_tool_call" as const,
-          requiredCapabilities: ["file_execute"],
-          dependsOn: [
-            "fetch-source-alpha",
-            "fetch-source-beta",
-            "fetch-source-gamma",
-            "verify-available-sources",
-          ],
-          inputContextKeys: ["sourceAlphaHotList", "sourceBetaHotList", "sourceGammaHotList"],
-          outputContextKey: "writtenTrendReport",
-          successCriteria: "经用户批准后写入成功来源和受阻来源说明。",
-        }],
-      })),
-      synthesize,
-    };
-    let plannedMarkdown = "";
-    const planWriteText = vi.fn<NonNullable<FileTool["planWriteText"]>>(async ({ targetPath, content }) => {
-      plannedMarkdown = content;
-      return {
-        approvalId: "approval-generic-trend-report",
-        targetPath,
-        action: "create" as const,
-        byteCount: content.length,
-        contentHash: "generic-trend-report-hash",
-        dryRun: {
-          operation: "file.writeText",
-          affectedPaths: [{ source: "generated content", target: targetPath, action: "create" as const }],
-          riskSummary: "Writes the partial trend report.",
-          reversible: true,
-        },
-      };
-    });
-    const writeText = vi.fn<NonNullable<FileTool["writeText"]>>(async ({ targetPath, content }) => ({
-      targetPath,
-      action: "create" as const,
-      byteCount: content.length,
-      status: "written" as const,
-      message: "written",
-    }));
-    const { controller, emitted, permissionHandlers } = createTestController({ withPermissionHandler: true });
-
-    const runPromise = runCommanderDagTask({
-      controller,
-      commanderTool,
-      browserTool: createBrowserTool({ navigate, getContent }),
-      fileTool: {
-        scanMarkdownDocuments: vi.fn(async () => []),
-        planWriteText,
-        writeText,
-      },
-      trendTool: { fetchHotList },
-      verifierTool: { check: verify },
-      reactDecideNext,
-      taskId: "task-generic-trend-partial-success",
-      userGoal: "采集三个通用来源的 Top20 趋势并保存为 Markdown 报告，其中单个来源受阻时交付其余可验证结果",
-      workspacePath: "E:/workspace",
-      availableToolDescriptors: initialToolDescriptors,
-    });
-    await vi.waitFor(() => expect(permissionHandlers.size).toBe(1));
-    const [, permissionHandler] = [...permissionHandlers.entries()][0]!;
-    await permissionHandler("approved");
-    await runPromise;
-
-    const finalSnapshot = emitted[emitted.length - 1];
-    expect(
-      finalSnapshot?.status,
-      JSON.stringify({
-        message: finalSnapshot?.commanderMessage,
-        plan: finalSnapshot?.plan,
-        logs: finalSnapshot?.logs.map((log) => ({ title: log.title, detail: log.detail })),
-      }, null, 2),
-    ).toBe("completed");
-    expect(finalSnapshot?.verificationResult).toMatchObject({ status: "warn" });
-    expect(finalSnapshot?.taskProgress).toMatchObject({
-      status: "completed_with_warnings",
-      completedItems: 2,
-      totalItems: 3,
-      items: [
-        expect.objectContaining({ id: "fetch-source-alpha", status: "completed", completedCount: 20 }),
-        expect.objectContaining({ id: "fetch-source-beta", status: "completed", completedCount: 20 }),
-        expect.objectContaining({
-          id: "fetch-source-gamma",
-          status: "blocked",
-          completedCount: 0,
-          detail: expect.stringContaining("300012"),
-        }),
-      ],
-    });
-    expect(fetchHotList).not.toHaveBeenCalled();
-    expect(reactDecideNext).toHaveBeenCalledTimes(11);
-    for (const url of Object.values(publicSourceUrlsByProvider).flat()) {
-      expect(navigate).toHaveBeenCalledWith(expect.objectContaining({ url }));
-    }
-    expect(getContent).toHaveBeenCalledTimes(4);
-    expect(verify).not.toHaveBeenCalled();
-    expect(planWriteText).toHaveBeenCalledOnce();
-    expect(writeText).toHaveBeenCalledOnce();
-    expect(plannedMarkdown).toContain("source-alpha topic 1");
-    expect(plannedMarkdown).toContain("source-beta topic 1");
-    expect(plannedMarkdown).toContain("Status: blocked");
-    expect(plannedMarkdown).toContain("source-gamma");
-    expect(plannedMarkdown).toContain("300012");
-    expect(plannedMarkdown).not.toContain(rawRestrictedPage);
-    expect(synthesize).toHaveBeenCalledOnce();
-
-    const conversation = finalSnapshot?.conversationMessages?.map((message) => message.content).join("\n") ?? "";
-    expect(finalSnapshot?.conversationMessages?.filter((message) => message.role === "assistant")).toHaveLength(1);
-    expect(conversation).not.toContain("我正在采集");
-    expect(conversation).not.toContain("已获取并形成可验证数据");
-    expect(conversation).toContain("source-alpha");
-    expect(conversation).toContain("source-beta");
-    expect(conversation).toContain("source-gamma");
-    expect(conversation).toContain("受阻");
-    expect(conversation).not.toContain(rawRestrictedPage);
-    expect(finalSnapshot?.commanderMessage).toContain("source-alpha");
-    expect(finalSnapshot?.commanderMessage).toContain("source-beta");
-    expect(finalSnapshot?.commanderMessage).toContain("source-gamma");
-    expect(finalSnapshot?.commanderMessage).toContain("受阻");
-    expect(finalSnapshot?.commanderMessage).not.toContain(rawRestrictedPage);
   });
 
   it("does not expose trend.fetchHotList when the trend tool is missing", async () => {
@@ -8671,315 +8318,6 @@ describe("executeCapabilityStep permissions", () => {
     expect(emitted[emitted.length - 1]?.status).toBe("failed");
   });
 
-  it("caps MCP subtools exposed to ReAct decisions", async () => {
-    const encodedServer = encodeMcpToolServerName("javis:filesystem");
-    const hiddenToolName = `mcp.${encodedServer}.tool.${encodeMcpToolServerName("read_08")}`;
-    const commanderTool: CommanderTool = {
-      plan: vi.fn(async () => ({
-        title: "React with MCP",
-        reasoning: "Use a local search capability.",
-        steps: [{
-          id: "react-search",
-          title: "Search with available MCP tools",
-          assignedAgentKind: "commander",
-          capability: "local_search",
-          executionMode: "react" as const,
-          dependsOn: [],
-          successCriteria: "Search is complete.",
-        }],
-      })),
-    };
-    const reactRequests: ReActDecisionRequest[] = [];
-    const reactDecideNext = vi.fn(async (request: ReActDecisionRequest) => {
-      reactRequests.push(request);
-      if (request.observations.length === 0) {
-        return {
-          status: "continue" as const,
-          toolName: request.availableTools[0]?.name,
-          reason: "Inspect the MCP tool list before completing.",
-          usage: {
-            inputTokens: 4,
-            outputTokens: 2,
-            totalTokens: 6,
-            contextWindowTokens: 128,
-          },
-        };
-      }
-      return {
-        status: "completed" as const,
-        reason: `<think>private chain of thought must not reach logs</think> bearer sk-live-secret ${"x".repeat(400)} Tool list inspected.`,
-        output: request.observations[0]?.output,
-        usage: {
-          inputTokens: 3,
-          outputTokens: 1,
-          totalTokens: 4,
-          contextWindowTokens: 32,
-        },
-      };
-    });
-    const descriptors = Array.from({ length: 12 }, (_, index): ToolDescriptor => {
-      const tool = `read_${String(index).padStart(2, "0")}`;
-      return {
-        name: `mcp.${encodedServer}.tool.${encodeMcpToolServerName(tool)}`,
-        permissionLevel: "read",
-        summary: `Read MCP item ${index}.`,
-        capabilityTags: ["local_search"],
-        ownerAgentKinds: ["commander"],
-        metadata: {
-          mcpServerName: "filesystem",
-          mcpSource: "javis",
-          mcpAction: "callTool",
-          mcpToolName: tool,
-        },
-      };
-    });
-    const { controller, emitted } = createTestController();
-
-    await runCommanderDagTask({
-      controller,
-      commanderTool,
-      mcpTool: { call: vi.fn(async () => ({ tools: [{ name: "read_00" }] })) },
-      reactDecideNext,
-      taskId: "task-react-mcp-cap",
-      userGoal: "search with MCP",
-      availableToolDescriptors: [
-        {
-          name: `mcp.${encodedServer}.listTools`,
-          permissionLevel: "read",
-          summary: "Discovery only: list filesystem MCP tools.",
-          capabilityTags: ["local_search"],
-          ownerAgentKinds: ["commander"],
-          metadata: {
-            mcpServerName: "filesystem",
-            mcpSource: "javis",
-            mcpAction: "listTools",
-          },
-        },
-        ...descriptors,
-      ],
-    });
-
-    expect(reactRequests).toHaveLength(2);
-    expect(reactRequests[0].availableTools.map((tool) => tool.name)).toEqual([
-      `mcp.${encodedServer}.listTools`,
-      ...descriptors.slice(0, 8).map((descriptor) => descriptor.name),
-    ]);
-    expect(reactRequests[0].availableTools.some((tool) => tool.name === hiddenToolName)).toBe(false);
-    const finalSnapshot = emitted[emitted.length - 1];
-    expect(finalSnapshot?.status).toBe("completed");
-    expect(finalSnapshot?.agentRuntimeMetrics).toEqual([
-      expect.objectContaining({
-        backend: "legacy",
-        runCount: 1,
-        completedRunCount: 1,
-        successRate: 1,
-        modelCalls: 2,
-        toolCalls: 1,
-        usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 },
-      }),
-    ]);
-    expect(finalSnapshot?.tokenUsage).toMatchObject({
-      inputTokens: 7,
-      outputTokens: 3,
-      totalTokens: 10,
-      modelCalls: 2,
-      peakContextTokens: 6,
-      contextUsedTokens: 4,
-      contextWindowTokens: 32,
-      byAgentKind: [expect.objectContaining({
-        agentKind: "commander",
-        inputTokens: 7,
-        outputTokens: 3,
-        modelCalls: 2,
-      })],
-    });
-    const reactLog = finalSnapshot?.logs.find((log) => log.detail.includes("ReAct completed after"));
-    expect(reactLog?.detail).not.toContain("private chain of thought");
-    expect(reactLog?.detail).not.toContain("<think>");
-    expect(reactLog?.detail).not.toContain("sk-live-secret");
-    expect(reactLog?.detail).toContain("[redacted:secret]");
-    expect(reactLog?.detail).toContain("...[truncated]");
-    expect(reactLog?.detail.length).toBeLessThan(450);
-  });
-
-  it("runs role-capability steps through ReAct with safe read and preview tools", async () => {
-    const commanderTool: CommanderTool = {
-      plan: vi.fn(async () => ({
-        title: "Review documentation",
-        reasoning: "Use the Doc Updater role capability.",
-        steps: [{
-          id: "review-docs",
-          title: "Review documentation",
-          assignedAgentKind: "doc-updater",
-          primaryCapability: "doc_update",
-          requiredCapabilities: [],
-          dependsOn: [],
-          executionMode: "react" as const,
-          successCriteria: "Documentation findings are reported.",
-        }],
-      })),
-    };
-    const reactRequests: ReActDecisionRequest[] = [];
-    const reactDecideNext = vi.fn(async (request: ReActDecisionRequest) => {
-      reactRequests.push(request);
-      return request.observations.length === 0
-        ? {
-            status: "continue" as const,
-            toolName: "file.scanMarkdownDocuments",
-            reason: "Collect documentation evidence before completing.",
-          }
-        : {
-            status: "completed" as const,
-            reason: "The documentation evidence was reviewed.",
-            output: request.observations[0]?.output,
-          };
-    });
-    const scanMarkdownDocuments = vi.fn<FileTool["scanMarkdownDocuments"]>(async () => [{
-      path: "E:\\Javis\\README.md",
-      modifiedAt: "2026-07-19T00:00:00.000Z",
-      sizeBytes: 256,
-      heading: "Javis",
-      excerpt: "Project documentation evidence for the role-capability ReAct test.",
-    }]);
-    const getAgentRuntimeRoutingDecision = vi.fn(() => ({
-      backend: "legacy" as const,
-      rolloutTargeted: false,
-    }));
-    const { controller, emitted } = createTestController();
-
-    await runCommanderDagTask({
-      controller,
-      commanderTool,
-      fileTool: {
-        scanMarkdownDocuments,
-        planWriteText: vi.fn<NonNullable<FileTool["planWriteText"]>>(async () => ({
-          approvalId: "preview-role-docs",
-          targetPath: "E:\\Javis\\README.md",
-          action: "overwrite",
-          byteCount: 7,
-          contentHash: "preview-hash",
-          dryRun: {
-            operation: "write_text",
-            affectedPaths: [{
-              source: "E:\\Javis\\README.md",
-              target: "E:\\Javis\\README.md",
-              action: "overwrite",
-            }],
-            riskSummary: "Preview only.",
-            reversible: true,
-          },
-        })),
-        writeText: vi.fn<NonNullable<FileTool["writeText"]>>(async () => ({
-          targetPath: "E:\\Javis\\README.md",
-          action: "overwrite",
-          byteCount: 7,
-          status: "written",
-          message: "Written.",
-        })),
-      },
-      reactDecideNext,
-      getAgentRuntimeRoutingDecision,
-      taskId: "task-role-capability-react",
-      userGoal: "review project documentation",
-      availableToolDescriptors: initialToolDescriptors,
-    });
-
-    expect(reactRequests).toHaveLength(2);
-    const toolNames = reactRequests[0]!.availableTools.map((tool) => tool.name);
-    expect(toolNames).toContain("file.scanMarkdownDocuments");
-    expect(toolNames).toContain("file.planWriteText");
-    expect(toolNames).not.toContain("file.writeText");
-    expect(scanMarkdownDocuments).toHaveBeenCalledTimes(1);
-    expect(getAgentRuntimeRoutingDecision).toHaveBeenCalledWith(
-      "doc-updater",
-      "task-role-capability-react",
-      "preview",
-      undefined,
-      "doc_update",
-    );
-    expect(emitted[emitted.length - 1]?.status).toBe("completed");
-  });
-
-  it("keeps handoff context out of strict ReAct tool arguments", async () => {
-    const inspectWorkspace = vi.fn<NonNullable<CodeTool["inspectWorkspace"]>>(async () => ({
-      workspacePath: "E:/Javis",
-      entries: [],
-      topLevelDirectories: [],
-      moduleCandidates: [],
-      manifests: [],
-      ignoredDirectories: [],
-      riskIndicators: [],
-      truncated: false,
-    }));
-    const inspectRepository = vi.fn<CodeTool["inspectRepository"]>(async () => ({
-      workspacePath: "E:/Javis",
-      changedFiles: [],
-      diffStat: "0 files changed",
-      diff: "",
-    }));
-    const reactRequests: ReActDecisionRequest[] = [];
-    const reactDecideNext = vi.fn(async (request: ReActDecisionRequest) => {
-      reactRequests.push(request);
-      return request.observations.length === 0
-        ? {
-            status: "continue" as const,
-            toolName: "code.inspectRepository",
-            reason: "Inspect repository changes without copying handoff evidence into tool input.",
-          }
-        : {
-            status: "completed" as const,
-            reason: "Repository evidence is available.",
-          };
-    });
-    const { controller, emitted } = createTestController();
-
-    await runCommanderDagTask({
-      controller,
-      commanderTool: {
-        plan: vi.fn(async () => ({
-          title: "Security review",
-          reasoning: "Collect workspace evidence before a specialist review.",
-          steps: [{
-            id: "collect-workspace",
-            title: "Collect workspace evidence",
-            assignedAgentKind: "code",
-            toolName: "code.inspectWorkspace",
-            executionMode: "direct_tool_call" as const,
-            requiredCapabilities: ["workspace_inspect"],
-            dependsOn: [],
-            toolInput: { maxDepth: 2, maxEntries: 100 },
-            outputContextKey: "workspaceEvidence",
-            successCriteria: "Workspace evidence collected.",
-          }, {
-            id: "security-review",
-            title: "Review security",
-            assignedAgentKind: "security-reviewer",
-            primaryCapability: "security_review",
-            executionMode: "react" as const,
-            requiredCapabilities: [],
-            dependsOn: ["collect-workspace"],
-            inputContextKeys: ["workspaceEvidence"],
-            outputContextKey: "securityFindings",
-            successCriteria: "Security findings are grounded in repository evidence.",
-          }],
-        })),
-      },
-      codeTool: { inspectWorkspace, inspectRepository },
-      reactDecideNext,
-      getAgentRuntimeRoutingDecision: () => ({ backend: "legacy", rolloutTargeted: false }),
-      taskId: "task-react-handoff-argument-boundary",
-      userGoal: "Review the project security without modifying files.",
-    });
-
-    expect(inspectWorkspace).toHaveBeenCalledTimes(1);
-    expect(inspectRepository).toHaveBeenCalledWith();
-    expect(reactRequests[0]?.handoffContext).toHaveProperty("workspaceEvidence");
-    expect(reactRequests[0]?.availableTools.find((tool) =>
-      tool.name === "code.inspectRepository"
-    )?.inputSchema).toMatchObject({ additionalProperties: false });
-    expect(emitted[emitted.length - 1]?.status).toBe("completed");
-  });
-
   it("routes an opted-in read step through AgentRuntime without calling the JSON decider", async () => {
     const commanderTool: CommanderTool = {
       plan: vi.fn(async () => ({
@@ -9005,7 +8343,6 @@ describe("executeCapabilityStep permissions", () => {
       fetchedAt: "2026-07-18T00:00:00.000Z",
       provider: "fixture",
     }]);
-    const reactDecideNext = vi.fn();
     const createAgentRuntime = vi.fn<AgentRuntimeFactory>(({ toolGateway, toolSpecs }) => ({
       run(definition, request) {
         const result = (async () => {
@@ -9119,7 +8456,6 @@ describe("executeCapabilityStep permissions", () => {
           provider: "fixture",
         })),
       },
-      reactDecideNext,
       getAgentRuntimeBackend,
       createAgentRuntime,
       runtimeEventSink: {
@@ -9140,7 +8476,6 @@ describe("executeCapabilityStep permissions", () => {
       })],
     }));
     expect(searchWeb).toHaveBeenCalled();
-    expect(reactDecideNext).not.toHaveBeenCalled();
     expect(getAgentRuntimeBackend).toHaveBeenCalledWith(
       "research",
       "task-langchain-runtime",
@@ -9235,7 +8570,6 @@ describe("executeCapabilityStep permissions", () => {
         },
       }),
     );
-    const reactDecideNext = vi.fn();
     const getAgentRuntimeRoutingDecision = vi.fn(() => ({
       backend: "langchain" as const,
       rolloutTargeted: true,
@@ -9307,7 +8641,6 @@ describe("executeCapabilityStep permissions", () => {
         scanMarkdownDocuments: vi.fn(async () => []),
         planPdfOrganization,
       },
-      reactDecideNext,
       getAgentRuntimeRoutingDecision,
       getAgentRuntimeProviderId: () => "openai",
       createAgentRuntime,
@@ -9335,7 +8668,6 @@ describe("executeCapabilityStep permissions", () => {
       })],
     }));
     expect(planPdfOrganization).toHaveBeenCalledTimes(1);
-    expect(reactDecideNext).not.toHaveBeenCalled();
     const finalSnapshot = emitted[emitted.length - 1];
     expect(finalSnapshot?.status).toBe("completed");
     expect(finalSnapshot?.agentRuntimeRoutingMetrics).toEqual([expect.objectContaining({
@@ -9591,7 +8923,6 @@ describe("executeCapabilityStep permissions", () => {
         inspectRepository: vi.fn(async () => preview),
         proposeEdit,
       },
-      reactDecideNext: vi.fn(),
       getAgentRuntimeRoutingDecision: () => ({
         backend: "opencode",
         rolloutTargeted: true,
@@ -9628,7 +8959,6 @@ describe("executeCapabilityStep permissions", () => {
         inspectRepository: vi.fn(async () => preview),
         proposeEdit,
       },
-      reactDecideNext: legacyDecideNext,
       getAgentRuntimeRoutingDecision: () => ({
         backend: "unavailable",
         rolloutTargeted: true,
@@ -9699,24 +9029,6 @@ describe("executeCapabilityStep permissions", () => {
             provider: "fixture",
           })),
         },
-        ...(options.includeLegacy
-          ? {
-              reactDecideNext: vi.fn(async (request: ReActDecisionRequest) =>
-                request.observations.length === 0
-                  ? {
-                      status: "continue" as const,
-                      toolName: "web.search",
-                      input: { query: "rust" },
-                      reason: "Collect routing evidence.",
-                    }
-                  : {
-                      status: "completed" as const,
-                      output: request.observations[0]?.output,
-                      reason: "Legacy route completed.",
-                    }
-              ),
-            }
-          : {}),
         getAgentRuntimeRoutingDecision: () => ({
           backend: options.rolloutTargeted ? "langchain" : "legacy",
           rolloutTargeted: options.rolloutTargeted,
@@ -9741,16 +9053,20 @@ describe("executeCapabilityStep permissions", () => {
       return emitted[emitted.length - 1];
     }
 
+    // Phase 4: a legacy routing decision no longer falls back to the ReAct
+    // loop; it must resolve to `unavailable` and fail the step instead
+    // (dual-kernel plan §6 rule 5).
     const intentionalLegacy = await runRoutingCase({
       rolloutTargeted: false,
-      includeLegacy: true,
+      includeLegacy: false,
     });
+    expect(intentionalLegacy?.status).toBe("failed");
     expect(intentionalLegacy?.agentRuntimeRoutingMetrics).toEqual([
       expect.objectContaining({
         routeCount: 1,
         rolloutTargetCount: 0,
-        legacyRouteCount: 1,
-        unavailableRouteCount: 0,
+        legacyRouteCount: 0,
+        unavailableRouteCount: 1,
         fallbackCount: 0,
         fallbackRate: 0,
         fallbackReasons: [],
@@ -9759,14 +9075,15 @@ describe("executeCapabilityStep permissions", () => {
 
     const targetedFallback = await runRoutingCase({
       rolloutTargeted: true,
-      includeLegacy: true,
+      includeLegacy: false,
     });
+    expect(targetedFallback?.status).toBe("failed");
     expect(targetedFallback?.agentRuntimeRoutingMetrics).toEqual([
       expect.objectContaining({
         routeCount: 1,
         rolloutTargetCount: 1,
-        legacyRouteCount: 1,
-        unavailableRouteCount: 0,
+        legacyRouteCount: 0,
+        unavailableRouteCount: 1,
         fallbackCount: 1,
         fallbackRate: 1,
         fallbackReasons: [{ reason: "runtime_factory_unavailable", count: 1 }],
@@ -9775,17 +9092,13 @@ describe("executeCapabilityStep permissions", () => {
 
     const initializationFallback = await runRoutingCase({
       rolloutTargeted: true,
-      includeLegacy: true,
+      includeLegacy: false,
       factoryThrows: true,
     });
-    expect(
-      initializationFallback?.status,
-      JSON.stringify(initializationFallback?.logs.slice(-5), null, 2),
-    ).toBe("completed");
+    expect(initializationFallback?.status).toBe("failed");
     expect(initializationFallback?.agentRuntimeRoutingMetrics).toEqual([
       expect.objectContaining({
-        legacyRouteCount: 1,
-        unavailableRouteCount: 0,
+        unavailableRouteCount: 1,
         fallbackCount: 1,
         fallbackReasons: [{ reason: "runtime_initialization_failed", count: 1 }],
       }),
@@ -9813,7 +9126,7 @@ describe("executeCapabilityStep permissions", () => {
     type Outcome = "completed" | "failed" | "request_input";
     const outcomes: Outcome[] = ["completed", "failed", "request_input"];
 
-    async function runBackendCase(backend: "legacy" | "langchain", outcome: Outcome) {
+    async function runBackendCase(backend: "langchain", outcome: Outcome) {
       const taskId = `task-parity-${backend}-${outcome}`;
       const commanderTool: CommanderTool = {
         plan: vi.fn(async () => ({
@@ -9839,31 +9152,6 @@ describe("executeCapabilityStep permissions", () => {
         fetchedAt: "2026-07-19T00:00:00.000Z",
         provider: "fixture",
       }]);
-      const reactDecideNext = vi.fn(async (request: ReActDecisionRequest) => {
-        if (outcome === "failed") {
-          return { status: "failed" as const, reason: "Parity failure." };
-        }
-        if (outcome === "request_input") {
-          return {
-            status: "request_input" as const,
-            reason: "Need upstream query context.",
-            requestedContextKeys: ["researchQuery"],
-            requestedAgentKind: "commander" as const,
-          };
-        }
-        return request.observations.length === 0
-          ? {
-              status: "continue" as const,
-              toolName: "web.search",
-              input: { query: "rust" },
-              reason: "Search before completing.",
-            }
-          : {
-              status: "completed" as const,
-              output: request.observations[0]?.output,
-              reason: "Research evidence is available.",
-            };
-      });
       const createAgentRuntime = vi.fn<AgentRuntimeFactory>(({ toolGateway, toolSpecs }) => ({
         run(definition, request) {
           const result = (async () => {
@@ -9993,7 +9281,6 @@ describe("executeCapabilityStep permissions", () => {
             provider: "fixture",
           })),
         },
-        reactDecideNext,
         getAgentRuntimeBackend: () => backend,
         createAgentRuntime,
         replanDag,
@@ -10038,9 +9325,7 @@ describe("executeCapabilityStep permissions", () => {
     }
 
     for (const outcome of outcomes) {
-      const legacy = await runBackendCase("legacy", outcome);
       const langchain = await runBackendCase("langchain", outcome);
-      expect(langchain).toEqual(legacy);
       expect(langchain.status).toBe(outcome === "completed" ? "completed" : "failed");
       expect(langchain.terminalEventKind).toBe(
         outcome === "completed" ? "task.completed" : "task.failed",
@@ -11345,5 +10630,491 @@ describe("SUPPORTED_APPROVAL_GATED_TOOLS allowlist", () => {
     expect(SUPPORTED_APPROVAL_GATED_TOOLS).toContain("computer.type");
     expect(SUPPORTED_APPROVAL_GATED_TOOLS).toContain("computer.invokeUi");
     expect(SUPPORTED_APPROVAL_GATED_TOOLS).toContain("computer.setUiValue");
+  });
+});
+
+describe("usage observation ledger integration (plan §12)", () => {
+  it("retains failed-call usage through the usageObservationSink (regression 2)", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "LangChain research",
+        reasoning: "Use the native tool-call runtime.",
+        steps: [{
+          id: "langchain-search",
+          title: "Search public sources",
+          assignedAgentKind: "research",
+          toolName: "web.search",
+          toolInput: { query: "rust" },
+          executionMode: "react" as const,
+          dependsOn: [],
+          successCriteria: "Return source evidence.",
+        }],
+      })),
+    };
+    const searchWeb = vi.fn(async () => [{
+      url: "https://example.test/rust",
+      title: "Rust",
+      excerpt: "Rust source evidence is long enough for the workflow validator.",
+      fetchedAt: "2026-07-18T00:00:00.000Z",
+      provider: "fixture",
+    }]);
+    const createAgentRuntime = vi.fn(() => {
+      const result: import("@javis/core").AgentRunResult = {
+        status: "failed",
+        reason: "Model call failed before completing.",
+        usage: { inputTokens: 6, outputTokens: 2, totalTokens: 8 },
+        metrics: {
+          backend: "langchain" as const,
+          status: "failed" as const,
+          durationMs: 10,
+          modelCalls: 1,
+          toolCalls: 0,
+          usage: { inputTokens: 6, outputTokens: 2, totalTokens: 8 },
+        },
+      };
+      const handle: import("@javis/core").AgentRunHandle = {
+        result: Promise.resolve(result),
+        cancel: vi.fn(),
+        events: (async function* (): AsyncGenerator<import("@javis/core").AgentEvent> {
+          yield { type: "run.started", runId: "run-usage-ledger" };
+          yield { type: "model.started", callIndex: 1, stepId: "step-1", attempt: 1, runId: "run-usage-ledger" };
+          yield {
+            type: "usage.updated",
+            usage: { inputTokens: 6, outputTokens: 2, totalTokens: 8 },
+            callId: "step-1:model:1",
+            stepId: "step-1",
+            attempt: 1,
+            runId: "run-usage-ledger",
+          };
+          yield { type: "model.completed", callIndex: 1, finishReason: "error", stepId: "step-1", attempt: 1, runId: "run-usage-ledger" };
+          yield { type: "run.failed", reason: "Model call failed before completing.", stepId: "step-1", attempt: 1, runId: "run-usage-ledger" };
+        })(),
+      };
+      return { run: () => handle };
+    });
+    const { controller, emitted } = createTestController();
+    const usageObservations: import("@javis/core").UsageObservation[] = [];
+    const getAgentRuntimeBackend = vi.fn(() => "langchain" as const);
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      webTool: {
+        searchWeb,
+        fetchWebSource: vi.fn(async ({ url }) => ({
+          url,
+          title: "Rust",
+          excerpt: "Rust source evidence is long enough for the workflow validator.",
+          fetchedAt: "2026-07-18T00:00:00.000Z",
+          provider: "fixture",
+        })),
+      },
+      getAgentRuntimeBackend,
+      createAgentRuntime,
+      usageObservationSink: {
+        append: async (observation) => {
+          usageObservations.push(observation);
+        },
+      },
+      taskId: "task-usage-ledger",
+      userGoal: "research rust",
+      availableToolDescriptors: initialToolDescriptors,
+    }).catch(() => undefined);
+    expect(createAgentRuntime).toHaveBeenCalled();
+
+    // The failed call's usage must reach the durable ledger even though the
+    // task failed, so a follow-up cannot miss the tokens (plan §12).
+    expect(usageObservations).toEqual([expect.objectContaining({
+      callId: "step-1:model:1",
+      taskId: "task-usage-ledger",
+      stepId: "step-1",
+      attempt: 1,
+      agentKind: "research",
+      backend: "langchain",
+      availability: "reported",
+      inputTokens: 6,
+      outputTokens: 2,
+      totalTokens: 8,
+    })]);
+    expect(emitted.some((snapshot) => (snapshot.tokenUsage?.totalTokens ?? 0) >= 8)).toBe(true);
+  });
+});
+
+describe("backend diagnostics and primary failure (plan §13.1)", () => {
+  it("projects backend.diagnostic events and keeps primary failure authoritative", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "LangChain research",
+        reasoning: "Use the native tool-call runtime.",
+        steps: [{
+          id: "langchain-search",
+          title: "Search public sources",
+          assignedAgentKind: "research",
+          toolName: "web.search",
+          toolInput: { query: "rust" },
+          executionMode: "react" as const,
+          dependsOn: [],
+          successCriteria: "Return source evidence.",
+        }],
+      })),
+    };
+    const searchWeb = vi.fn(async () => [{
+      url: "https://example.test/rust",
+      title: "Rust",
+      excerpt: "Rust source evidence is long enough for the workflow validator.",
+      fetchedAt: "2026-07-18T00:00:00.000Z",
+      provider: "fixture",
+    }]);
+    const createAgentRuntime = vi.fn(() => {
+      const result: import("@javis/core").AgentRunResult = {
+        status: "failed",
+        reason: "Model chat returned an empty response (content:missing toolCalls:0 usage:reported).",
+        stepResult: {
+          status: "failed" as const,
+          evidence: [],
+          assumptions: [],
+          unresolvedQuestions: [],
+          error: "Model chat returned an empty response (content:missing toolCalls:0 usage:reported).",
+          errorDetail: {
+            code: "model_chat_empty_response",
+            message: "Model chat returned an empty response (content:missing toolCalls:0 usage:reported).",
+            phase: "model" as const,
+            retryable: true,
+          },
+        },
+        metrics: {
+          backend: "langchain" as const,
+          status: "failed" as const,
+          durationMs: 10,
+          modelCalls: 1,
+          toolCalls: 0,
+        },
+      };
+      const handle: import("@javis/core").AgentRunHandle = {
+        result: Promise.resolve(result),
+        cancel: vi.fn(),
+        events: (async function* (): AsyncGenerator<import("@javis/core").AgentEvent> {
+          yield { type: "run.started", runId: "run-diag" };
+          yield { type: "model.started", callIndex: 1, stepId: "langchain-search", attempt: 1, runId: "run-diag" };
+          yield {
+            type: "backend.diagnostic",
+            code: "model_chat_empty_response",
+            message: "Model chat returned an empty response (content:missing toolCalls:0 usage:reported).",
+            stepId: "langchain-search",
+            attempt: 1,
+            runId: "run-diag",
+          };
+          yield { type: "model.completed", callIndex: 1, finishReason: "error", stepId: "langchain-search", attempt: 1, runId: "run-diag" };
+          yield { type: "run.failed", reason: "Model chat returned an empty response (content:missing toolCalls:0 usage:reported).", stepId: "langchain-search", attempt: 1, runId: "run-diag" };
+        })(),
+      };
+      return { run: () => handle };
+    });
+    const { controller, emitted } = createTestController();
+    const getAgentRuntimeBackend = vi.fn(() => "langchain" as const);
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      webTool: {
+        searchWeb,
+        fetchWebSource: vi.fn(async ({ url }) => ({
+          url,
+          title: "Rust",
+          excerpt: "Rust source evidence is long enough for the workflow validator.",
+          fetchedAt: "2026-07-18T00:00:00.000Z",
+          provider: "fixture",
+        })),
+      },
+      getAgentRuntimeBackend,
+      createAgentRuntime,
+      taskId: "task-diag",
+      userGoal: "research rust",
+      availableToolDescriptors: initialToolDescriptors,
+    }).catch(() => undefined);
+
+    const finalSnapshot = emitted[emitted.length - 1];
+    expect(finalSnapshot?.diagnostics).toEqual([expect.objectContaining({
+      source: "backend",
+      code: "model_chat_empty_response",
+      stepId: "langchain-search",
+    })]);
+    // The task failed before any step completed, so the catch path owns the
+    // primary failure; the backend diagnostic stays append-only and never
+    // replaces it.
+    expect(finalSnapshot?.primaryFailure).toMatchObject({
+      code: "task_failed",
+      phase: "runtime",
+    });
+    expect(finalSnapshot?.primaryFailure?.message).toContain("empty response");
+    expect(finalSnapshot?.commanderMessage).toContain("empty response");
+  });
+});
+
+describe("Computer Use routing observation (dual-kernel plan §1/§6)", () => {
+  it("registers the computer-use loop as javis_specialized in routing metrics", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "Desktop automation",
+        reasoning: "Delegate to the Computer Agent.",
+        steps: [{
+          id: "computer-use-loop",
+          title: "Use the desktop",
+          assignedAgentKind: "computer",
+          capability: "desktop_input",
+          requiredCapabilities: ["desktop_screenshot", "desktop_input"],
+          dependsOn: [],
+          inputContextKeys: ["userGoal"],
+          successCriteria: "The desktop task is attempted.",
+        }],
+      })),
+    };
+    const computerUseLoopRunner = vi.fn(async () => []);
+    const { controller, emitted } = createTestController({ withPermissionHandler: true });
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      computerTool: {
+        screenshot: vi.fn(async () => ({ dataUrl: "", width: 0, height: 0, capturedAt: "" })),
+        click: vi.fn(async () => ({ x: 0, y: 0, clicked: true })),
+        type: vi.fn(async () => ({ typed: true, length: 0 })),
+      } as unknown as ComputerTool,
+      computerUseLoopRunner,
+      taskId: "task-computer-use-routing",
+      userGoal: "用 computerUse 操控 QQ 给联系人发送消息",
+      availableToolDescriptors: initialToolDescriptors,
+    });
+
+    expect(computerUseLoopRunner).toHaveBeenCalledTimes(1);
+    const finalSnapshot = emitted[emitted.length - 1];
+    expect(finalSnapshot?.agentRuntimeRoutingMetrics).toEqual([expect.objectContaining({
+      providerId: "unknown-provider",
+      agentKind: "computer",
+      routeCount: 1,
+      javisSpecializedRouteCount: 1,
+      langchainRouteCount: 0,
+      legacyRouteCount: 0,
+      unavailableRouteCount: 0,
+      rolloutTargetCount: 0,
+    })]);
+  });
+});
+
+describe("five-state scheduler matrix (dual-kernel plan §7.2)", () => {
+  function blockedWaitStepResult(): StepResult {
+    return {
+      status: "blocked",
+      evidence: [],
+      assumptions: [],
+      unresolvedQuestions: [],
+      blockedReason: {
+        kind: "environment",
+        resumable: true,
+        retryable: true,
+        detail: "Waiting for context key to be produced.",
+        wakeCondition: {
+          event: "context_available",
+          ref: "upstreamContext",
+        },
+      },
+    };
+  }
+
+  it("pauses a blocked: wait step and retries it after the wake condition resolves", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "LangChain research",
+        reasoning: "Use the native tool-call runtime.",
+        steps: [{
+          id: "langchain-search",
+          title: "Search public sources",
+          assignedAgentKind: "research",
+          toolName: "web.search",
+          toolInput: { query: "rust" },
+          executionMode: "react" as const,
+          dependsOn: [],
+          completionPolicy: { blocked: "wait" as const, partial: "stop" as const, needsClarification: "replan" as const },
+          successCriteria: "Return source evidence.",
+        }],
+      })),
+    };
+    const searchWeb = vi.fn(async () => [{
+      url: "https://example.test/rust",
+      title: "Rust",
+      excerpt: "Rust source evidence is long enough for the workflow validator.",
+      fetchedAt: "2026-07-18T00:00:00.000Z",
+      provider: "fixture",
+    }]);
+    let runCount = 0;
+    const createAgentRuntime = vi.fn(() => {
+      runCount += 1;
+      const blockedResult: import("@javis/core").AgentRunResult = {
+        status: "failed",
+        reason: "Blocked waiting for context.",
+        stepResult: blockedWaitStepResult(),
+        metrics: {
+          backend: "langchain" as const,
+          status: "failed" as const,
+          durationMs: 5,
+          modelCalls: 1,
+          toolCalls: 0,
+        },
+      };
+      const completedResult: import("@javis/core").AgentRunResult = {
+        status: "completed",
+        output: "Final answer after wake.",
+        stepResult: {
+          status: "completed" as const,
+          output: "Final answer after wake.",
+          evidence: [],
+          assumptions: [],
+          unresolvedQuestions: [],
+        },
+        metrics: {
+          backend: "langchain" as const,
+          status: "completed" as const,
+          durationMs: 5,
+          modelCalls: 1,
+          toolCalls: 0,
+        },
+      };
+      const handle: import("@javis/core").AgentRunHandle = {
+        result: Promise.resolve(runCount === 1 ? blockedResult : completedResult),
+        cancel: vi.fn(),
+        events: (async function* (): AsyncGenerator<import("@javis/core").AgentEvent> {
+          yield { type: "run.started", runId: `run-wait-${runCount}` };
+          yield { type: "model.started", callIndex: 1, stepId: "langchain-search", attempt: runCount, runId: `run-wait-${runCount}` };
+          yield { type: "model.completed", callIndex: 1, finishReason: "stop", stepId: "langchain-search", attempt: runCount, runId: `run-wait-${runCount}` };
+          yield runCount === 1
+            ? { type: "run.failed", reason: "Blocked waiting for context.", stepId: "langchain-search", attempt: 1, runId: "run-wait-1" }
+            : { type: "run.completed", result: completedResult, stepId: "langchain-search", attempt: 2, runId: "run-wait-2" };
+        })(),
+      };
+      return { run: () => handle };
+    });
+    const { controller, emitted, stepWaitHandlers } = createTestController({ withStepWaitHandler: true });
+    const getAgentRuntimeBackend = vi.fn(() => "langchain" as const);
+    const taskPromise = runCommanderDagTask({
+      controller,
+      commanderTool,
+      webTool: {
+        searchWeb,
+        fetchWebSource: vi.fn(async ({ url }) => ({
+          url,
+          title: "Rust",
+          excerpt: "Rust source evidence is long enough for the workflow validator.",
+          fetchedAt: "2026-07-18T00:00:00.000Z",
+          provider: "fixture",
+        })),
+      },
+      getAgentRuntimeBackend,
+      createAgentRuntime,
+      taskId: "task-blocked-wait",
+      userGoal: "research rust",
+      availableToolDescriptors: initialToolDescriptors,
+    });
+
+    await vi.waitFor(() => {
+      expect(stepWaitHandlers.has("langchain-search")).toBe(true);
+    });
+    expect(emitted.some((snapshot) => snapshot.status === "waiting_info")).toBe(true);
+    expect(createAgentRuntime).toHaveBeenCalledTimes(1);
+
+    stepWaitHandlers.get("langchain-search")?.();
+    await taskPromise;
+
+    expect(createAgentRuntime).toHaveBeenCalledTimes(2);
+    expect(emitted[emitted.length - 1]?.status).toBe("completed");
+    expect(emitted[emitted.length - 1]?.commanderMessage).toContain("Final answer after wake");
+  });
+
+  it("fails a blocked: wait step without a wake condition instead of waiting", async () => {
+    const commanderTool: CommanderTool = {
+      plan: vi.fn(async () => ({
+        title: "LangChain research",
+        reasoning: "Use the native tool-call runtime.",
+        steps: [{
+          id: "langchain-search",
+          title: "Search public sources",
+          assignedAgentKind: "research",
+          toolName: "web.search",
+          toolInput: { query: "rust" },
+          executionMode: "react" as const,
+          dependsOn: [],
+          completionPolicy: { blocked: "wait" as const, partial: "stop" as const, needsClarification: "replan" as const },
+          successCriteria: "Return source evidence.",
+        }],
+      })),
+    };
+    const searchWeb = vi.fn(async () => [{
+      url: "https://example.test/rust",
+      title: "Rust",
+      excerpt: "Rust source evidence is long enough for the workflow validator.",
+      fetchedAt: "2026-07-18T00:00:00.000Z",
+      provider: "fixture",
+    }]);
+    const createAgentRuntime = vi.fn(() => {
+      const blockedResult: import("@javis/core").AgentRunResult = {
+        status: "failed",
+        reason: "Blocked without a wake condition.",
+        stepResult: {
+          status: "blocked" as const,
+          evidence: [],
+          assumptions: [],
+          unresolvedQuestions: [],
+          blockedReason: {
+            kind: "environment",
+            resumable: false,
+            retryable: false,
+            detail: "No wake condition is available.",
+          },
+        },
+        metrics: {
+          backend: "langchain" as const,
+          status: "failed" as const,
+          durationMs: 5,
+          modelCalls: 1,
+          toolCalls: 0,
+        },
+      };
+      const handle: import("@javis/core").AgentRunHandle = {
+        result: Promise.resolve(blockedResult),
+        cancel: vi.fn(),
+        events: (async function* (): AsyncGenerator<import("@javis/core").AgentEvent> {
+          yield { type: "run.started", runId: "run-no-wake" };
+          yield { type: "model.started", callIndex: 1, stepId: "langchain-search", attempt: 1, runId: "run-no-wake" };
+          yield { type: "model.completed", callIndex: 1, finishReason: "stop", stepId: "langchain-search", attempt: 1, runId: "run-no-wake" };
+          yield { type: "run.failed", reason: "Blocked without a wake condition.", stepId: "langchain-search", attempt: 1, runId: "run-no-wake" };
+        })(),
+      };
+      return { run: () => handle };
+    });
+    const { controller, emitted, stepWaitHandlers } = createTestController({ withStepWaitHandler: true });
+    const getAgentRuntimeBackend = vi.fn(() => "langchain" as const);
+
+    await runCommanderDagTask({
+      controller,
+      commanderTool,
+      webTool: {
+        searchWeb,
+        fetchWebSource: vi.fn(async ({ url }) => ({
+          url,
+          title: "Rust",
+          excerpt: "Rust source evidence is long enough for the workflow validator.",
+          fetchedAt: "2026-07-18T00:00:00.000Z",
+          provider: "fixture",
+        })),
+      },
+      getAgentRuntimeBackend,
+      createAgentRuntime,
+      taskId: "task-no-wake",
+      userGoal: "research rust",
+      availableToolDescriptors: initialToolDescriptors,
+    }).catch(() => undefined);
+
+    expect(createAgentRuntime).toHaveBeenCalledTimes(1);
+    expect(stepWaitHandlers.has("langchain-search")).toBe(false);
+    expect(emitted[emitted.length - 1]?.status).toBe("failed");
   });
 });

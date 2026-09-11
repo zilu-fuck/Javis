@@ -30,12 +30,43 @@ export interface WorkflowCheckpoint {
   agentRuntimeMetrics?: AgentRuntimeMetricsSnapshot[];
   agentRuntimeRoutingMetrics?: AgentRuntimeRoutingMetricsSnapshot[];
   tokenUsage?: TokenUsageSummary;
+  /** Per-call usage observations ledger (dual-kernel plan §12), optional so pre-ledger checkpoints remain readable. */
+  usageObservations?: Array<{
+    callId: string;
+    revision: number;
+    final: boolean;
+    taskId: string;
+    workflowRunId?: string;
+    stepId?: string;
+    attempt?: number;
+    agentKind: string;
+    backend: string;
+    provider?: string;
+    model?: string;
+    contextWindowTokens?: number;
+    availability: "reported" | "unavailable";
+    semantics: string;
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+  }>;
 
   waitingReason?:
     | "human_approval"
     | "user_input"
     | "tool_result"
-    | "retry_delay";
+    | "retry_delay"
+    | "blocked_wait"
+    | "ask_user";
+  /** Step paused under a blocked: wait / needsClarification: ask_user policy. */
+  waitingStepId?: string;
+  waitingAttempt?: number;
+  /** Verified wake condition required before the waiting step may retry. */
+  wakeCondition?: {
+    event: "approval_resolved" | "context_available" | "retry_at" | "external_event";
+    ref: string;
+    retryAt?: string;
+  };
 
   eventSequence: number;
   createdAt: string;
@@ -164,6 +195,10 @@ export function buildCheckpointFromDagState(input: {
   agentRuntimeMetrics?: AgentRuntimeMetricsSnapshot[];
   agentRuntimeRoutingMetrics?: AgentRuntimeRoutingMetricsSnapshot[];
   tokenUsage?: TokenUsageSummary;
+  usageObservations?: WorkflowCheckpoint["usageObservations"];
+  waitingStepId?: string;
+  waitingAttempt?: number;
+  wakeCondition?: WorkflowCheckpoint["wakeCondition"];
 }): WorkflowCheckpoint {
   const allStepIds = new Set(input.workflow.steps.map((s) => s.id));
   const doneOrAbandoned = new Set([...input.completedStepIds, ...input.abandonedStepIds]);
@@ -244,7 +279,13 @@ export function buildCheckpointFromDagState(input: {
           },
         }
       : {}),
+    ...(input.usageObservations?.length
+      ? { usageObservations: input.usageObservations.map((observation) => ({ ...observation })) }
+      : {}),
     waitingReason: input.waitingReason,
+    ...(input.waitingStepId ? { waitingStepId: input.waitingStepId } : {}),
+    ...(input.waitingAttempt !== undefined ? { waitingAttempt: input.waitingAttempt } : {}),
+    ...(input.wakeCondition ? { wakeCondition: { ...input.wakeCondition } } : {}),
     eventSequence: input.eventSequence,
     createdAt: new Date().toISOString(),
   };

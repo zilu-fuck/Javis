@@ -39,8 +39,6 @@ import type {
 import { initialToolDescriptors, isDisabledBrowserWriteToolName } from "@javis/tools";
 import type { AskUserAnswerHandler } from "./ask-user";
 import type { PendingPermissionHandler } from "./confirmed-write";
-import type { AgentReActDecision } from "./agent-react-loop";
-import type { ReActDecisionRequest } from "./agent-react-decider";
 import type {
   AgentRuntimeBackend,
   AgentRuntimeFactory,
@@ -49,6 +47,7 @@ import type {
   AgentRuntimeRoutingDecision,
   AgentRuntimeRoutingMetricsSnapshot,
 } from "./agent-runtime/contracts";
+import type { UsageObservation } from "./agent-runtime/usage-observations";
 import type { CommanderDagPlan } from "./commander-plan-schema";
 import type { ComputerUseStepTrace } from "./computer-use-types";
 import type { HandoffReport } from "./shared-context";
@@ -358,20 +357,24 @@ export type {
   WorkflowStepFailureReplanAction,
   WorkflowStepExecutionResult,
 } from "./workflow-dag-executor";
-export { runAgentReActLoop } from "./agent-react-loop";
 export {
+  MAX_REACT_OBSERVATION_TOTAL_CHARS,
   MAX_REACT_REQUESTED_CONTEXT_KEYS,
   MAX_REACT_REQUESTED_CONTEXT_KEY_CHARS,
+  sanitizeAgentReActOutput,
   validateAgentRequestInput,
-} from "./agent-react-loop";
+} from "./agent-runtime/legacy-helpers";
 export { runCommanderDagTask } from "./workflow-executor";
 export type * from "./agent-runtime/contracts";
 export type * from "./agent-runtime/event";
-export { routeAgentRuntime } from "./agent-runtime/router";
-export type {
-  AgentRouteResolution,
-  AgentRuntimeAvailability,
-} from "./agent-runtime/router";
+export { AgentEventQueue } from "./agent-runtime/event-queue";
+export {
+  summarizeUsageObservations,
+  upsertUsageObservation,
+  usageObservationFromEvent,
+  type UsageObservation,
+  type UsageObservationCollection,
+} from "./agent-runtime/usage-observations";
 export {
   canonicalToolNameToModelAlias,
   createToolNameAliasMap,
@@ -392,13 +395,6 @@ export {
   type ReadOnlyToolGatewayOptions,
   type ScopedToolGatewayOptions,
 } from "./agent-runtime/read-only-tool-gateway";
-export type {
-  AgentReActDecision,
-  AgentReActLoopOptions,
-  AgentReActLoopResult,
-  AgentReActObservation,
-  AgentReActTool,
-} from "./agent-react-loop";
 export {
   compileCommanderPlan,
   formatDiagnosticSummary,
@@ -425,12 +421,6 @@ export type {
   RawPlanLexicalIssueKind,
   RepairAttemptRecord,
 } from "./planning";
-export {
-  buildReActDecisionPrompt,
-  buildReActDecisionSystemPrompt,
-  buildReActDecisionUserPrompt,
-} from "./agent-react-decider";
-export type { ReActDecisionRequest } from "./agent-react-decider";
 export { createAgentStateTracker } from "./agent-state-tracker";
 export type {
   AgentState,
@@ -1117,6 +1107,28 @@ export interface TaskSnapshot {
   taskProgress?: TaskProgress;
   /** Backend-neutral Agent loop baseline metrics, persisted for rollout comparison. */
   agentRuntimeMetrics?: AgentRuntimeMetricsSnapshot[];
+  /**
+   * Structured primary failure selected by fixed priority (dual-kernel plan
+   * §13.1). Verifier/provenance/handoff errors never replace it; they are
+   * appended to `diagnostics` instead.
+   */
+  primaryFailure?: {
+    code: string;
+    message: string;
+    phase: string;
+    stepId?: string;
+    attempt?: number;
+    backend?: string;
+    callId?: string;
+  };
+  /** Append-only diagnostics that never replace the primary failure. */
+  diagnostics?: Array<{
+    source: string;
+    code: string;
+    message: string;
+    stepId?: string;
+    callId?: string;
+  }>;
   /** Per-provider/Agent/task-type routing and legacy fallback rates. */
   agentRuntimeRoutingMetrics?: AgentRuntimeRoutingMetricsSnapshot[];
   verificationSummary?: string;
@@ -1226,6 +1238,12 @@ export interface TaskRuntime {
   ): void;
   resolvePermission(decision: "approved" | "approved_always" | "denied", requestId?: string): void;
   respondToAskUser(answer: string, requestId?: string): void;
+  /**
+   * Wakes a step paused under a `blocked: wait` / `needsClarification:
+   * ask_user` completion policy. Without `stepId`, wakes the most recent
+   * waiting step (dual-kernel plan §7.2).
+   */
+  resolveStepWait(stepId?: string): void;
   stopTask(reason?: string): void;
   dispose(): void;
 }
@@ -1283,8 +1301,10 @@ export interface FileScanRuntimeOptions {
   checkpointSink?: {
     save: (checkpoint: WorkflowCheckpoint) => void | Promise<void>;
   };
-  /** P0-2: LLM-based ReAct decision maker for step execution loops. */
-  reactDecideNext?: (request: ReActDecisionRequest) => Promise<AgentReActDecision>;
+  /** Optional durable per-call usage-observation sink (dual-kernel plan §12). */
+  usageObservationSink?: {
+    append: (observation: UsageObservation) => void | Promise<void>;
+  };
   /** Select the per-step Agent loop backend. Legacy remains the rollout default and rollback path. */
   getAgentRuntimeBackend?: (
     agentKind: AgentKind,
@@ -1874,7 +1894,7 @@ export function createFileScanTaskRuntime({
   onTaskStarted,
   runtimeEventSink,
   checkpointSink,
-  reactDecideNext,
+  usageObservationSink,
   getAgentRuntimeBackend,
   getAgentRuntimeRoutingDecision,
   getAgentRuntimeProviderId,
@@ -1905,6 +1925,7 @@ export function createFileScanTaskRuntime({
       })
     : undefined;
   const permissionHandlers = new Map<string, PendingPermissionHandler>();
+  const stepWaitHandlers = new Map<string, () => void>();
   const queuedPermissionDecisions = new Map<string, "approved" | "approved_always" | "denied">();
   const askUserHandlers = new Map<string, AskUserAnswerHandler>();
   const queuedAskUserAnswers = new Map<string, string>();
@@ -2086,6 +2107,18 @@ export function createFileScanTaskRuntime({
     }
     askUserHandlers.delete(requestId);
   }
+  function setPendingStepWaitHandler(
+    stepId: string,
+    handler: (() => void | Promise<void>) | undefined,
+  ) {
+    if (handler) {
+      stepWaitHandlers.set(stepId, () => {
+        void Promise.resolve(handler());
+      });
+      return;
+    }
+    stepWaitHandlers.delete(stepId);
+  }
   function hasUninterruptibleNativeWrite(snapshot: TaskSnapshot): boolean {
     return snapshot.status === "running" &&
       snapshot.permissionRequest?.level === "confirmed_write" &&
@@ -2116,6 +2149,7 @@ export function createFileScanTaskRuntime({
     queuedLegacyPermissionDecision = undefined;
     askUserHandlers.clear();
     queuedAskUserAnswers.clear();
+    stepWaitHandlers.clear();
 
     if (isTerminalTaskStatus(current.status)) {
       return true;
@@ -2169,6 +2203,15 @@ export function createFileScanTaskRuntime({
           return;
         }
         setPendingPermissionHandler(requestId, handler);
+      },
+      setPendingStepWaitHandler(
+        stepId: string,
+        handler: (() => void | Promise<void>) | undefined,
+      ) {
+        if (!isCurrentTask()) {
+          return;
+        }
+        setPendingStepWaitHandler(stepId, handler);
       },
     };
   }
@@ -2715,8 +2758,8 @@ export function createFileScanTaskRuntime({
           availableToolDescriptors: effectiveToolDescriptors,
           runtimeEventSink,
           checkpointSink,
+          usageObservationSink,
           resumeFromCheckpoint: options.resumeFromCheckpoint,
-          reactDecideNext,
           getAgentRuntimeBackend,
           getAgentRuntimeRoutingDecision,
           getAgentRuntimeProviderId,
@@ -2930,6 +2973,20 @@ export function createFileScanTaskRuntime({
       ];
       permissionHandlers.delete(onlyRequestId);
       invokePermissionHandler(handler, decision);
+    },
+    resolveStepWait(stepId?: string) {
+      if (stepId) {
+        const handler = stepWaitHandlers.get(stepId);
+        stepWaitHandlers.delete(stepId);
+        handler?.();
+        return;
+      }
+      if (stepWaitHandlers.size < 1) return;
+      const [onlyStepId, handler] = [...stepWaitHandlers.entries()][
+        stepWaitHandlers.size - 1
+      ];
+      stepWaitHandlers.delete(onlyStepId);
+      handler?.();
     },
     respondToAskUser(answer, requestId) {
       const resolvedId = requestId ?? (askUserHandlers.size > 0

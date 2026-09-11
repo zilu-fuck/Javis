@@ -215,6 +215,45 @@ struct ModelChatStreamErrorPayload {
     error: String,
 }
 
+/// Sanitized response-shape diagnostic for an empty model response
+/// (dual-kernel plan §13.2). Never carries the API key or the raw body.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ModelChatEmptyResponseShape {
+    choices_count: usize,
+    message_keys: Vec<String>,
+    content_type: String,
+    content_length: usize,
+    has_reasoning_content: bool,
+    tool_calls_count: usize,
+    has_usage: bool,
+}
+
+const EMPTY_RESPONSE_ERROR_PREFIX: &str = "__JAVIS_EMPTY_RESPONSE__";
+
+/// Structured, deserializable error for an empty provider response. The
+/// payload keeps the usage so the caller can retain failed-call tokens and
+/// record a controlled retry with a fresh call id.
+pub(crate) fn empty_chat_response_error(
+    shape: &ModelChatEmptyResponseShape,
+    finish_reason: Option<&str>,
+    usage: Option<&ModelUsage>,
+) -> String {
+    let mut payload = serde_json::json!({
+        "code": "model_chat_empty_response",
+        "responseShape": shape,
+        "finishReason": finish_reason,
+    });
+    if let Some(usage) = usage {
+        payload["usage"] = serde_json::json!({
+            "inputTokens": usage.input_tokens,
+            "outputTokens": usage.output_tokens,
+            "totalTokens": usage.total_tokens,
+        });
+    }
+    format!("{EMPTY_RESPONSE_ERROR_PREFIX}{}", payload)
+}
+
 #[derive(Default)]
 struct PendingToolCall {
     id: Option<String>,
@@ -228,6 +267,8 @@ struct OpenAiStreamState {
     tool_calls: Vec<PendingToolCall>,
     finish_reason: Option<String>,
     saw_done: bool,
+    text_seen: bool,
+    usage_seen: bool,
 }
 
 #[derive(Default)]
@@ -237,6 +278,7 @@ struct AnthropicStreamState {
     saw_message_stop: bool,
     input_tokens: u32,
     output_tokens: u32,
+    text_seen: bool,
 }
 
 #[tauri::command]
@@ -495,6 +537,7 @@ fn consume_openai_stream_value(
         return Err("Model chat stream returned an error.".to_string());
     }
     if let Some(usage) = crate::extract_openai_compatible_usage(value) {
+        state.usage_seen = true;
         events.push(ModelChatStreamEvent::Usage { usage });
     }
     let Some(choice) = value
@@ -518,6 +561,7 @@ fn consume_openai_stream_value(
         .and_then(serde_json::Value::as_str)
         .filter(|text| !text.is_empty())
     {
+        state.text_seen = true;
         events.push(ModelChatStreamEvent::TextDelta {
             delta: text.to_string(),
         });
@@ -599,6 +643,7 @@ fn consume_anthropic_stream_value(
                         .and_then(serde_json::Value::as_str)
                         .filter(|text| !text.is_empty())
                     {
+                        state.text_seen = true;
                         events.push(ModelChatStreamEvent::TextDelta {
                             delta: text.to_string(),
                         });
@@ -637,6 +682,7 @@ fn consume_anthropic_stream_value(
                         .and_then(serde_json::Value::as_str)
                         .filter(|text| !text.is_empty())
                     {
+                        state.text_seen = true;
                         events.push(ModelChatStreamEvent::TextDelta {
                             delta: text.to_string(),
                         });
@@ -706,6 +752,27 @@ fn finalize_openai_stream(
             "Model chat stream ended without a terminal marker or finish reason.".to_string(),
         );
     }
+    validate_tool_finish_reason(
+        "Model chat stream",
+        state.finish_reason.as_deref(),
+        !state.tool_calls.is_empty(),
+    )?;
+    if !state.text_seen && state.tool_calls.is_empty() {
+        let shape = ModelChatEmptyResponseShape {
+            choices_count: 0,
+            message_keys: Vec::new(),
+            content_type: "none".to_string(),
+            content_length: 0,
+            has_reasoning_content: false,
+            tool_calls_count: 0,
+            has_usage: state.usage_seen,
+        };
+        return Err(empty_chat_response_error(
+            &shape,
+            state.finish_reason.as_deref(),
+            None,
+        ));
+    }
     finalize_stream_tools(request, &state.tool_calls, state.finish_reason.as_deref())
 }
 
@@ -717,6 +784,32 @@ fn finalize_anthropic_stream(
         return Err(
             "Anthropic model chat stream ended without message_stop or stop_reason.".to_string(),
         );
+    }
+    validate_tool_finish_reason(
+        "Model chat stream",
+        state.finish_reason.as_deref(),
+        !state.tool_calls.is_empty(),
+    )?;
+    if !state.text_seen && state.tool_calls.is_empty() {
+        let usage = (state.input_tokens > 0 || state.output_tokens > 0).then(|| ModelUsage {
+            input_tokens: state.input_tokens,
+            output_tokens: state.output_tokens,
+            total_tokens: state.input_tokens + state.output_tokens,
+        });
+        let shape = ModelChatEmptyResponseShape {
+            choices_count: 0,
+            message_keys: Vec::new(),
+            content_type: "none".to_string(),
+            content_length: 0,
+            has_reasoning_content: false,
+            tool_calls_count: 0,
+            has_usage: usage.is_some(),
+        };
+        return Err(empty_chat_response_error(
+            &shape,
+            state.finish_reason.as_deref(),
+            usage.as_ref(),
+        ));
     }
     finalize_stream_tools(request, &state.tool_calls, state.finish_reason.as_deref())
 }
@@ -1413,6 +1506,75 @@ fn anthropic_tool_choice_value(choice: &ModelToolChoice) -> serde_json::Value {
     }
 }
 
+
+fn build_openai_empty_response_shape(
+    value: &serde_json::Value,
+    message: &serde_json::Value,
+    tool_calls_count: usize,
+    has_usage: bool,
+) -> ModelChatEmptyResponseShape {
+    let choices_count = value
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let message_keys = message
+        .as_object()
+        .map(|object| object.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let content_value = message.get("content");
+    let (content_type, content_length) = match content_value {
+        Some(serde_json::Value::String(text)) => ("string".to_string(), text.len()),
+        Some(serde_json::Value::Array(blocks)) => {
+            ("array".to_string(), blocks.len())
+        }
+        Some(serde_json::Value::Null) | None => ("missing".to_string(), 0),
+        Some(_) => ("other".to_string(), 0),
+    };
+    let has_reasoning_content = message
+        .get("reasoning_content")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|text| !text.is_empty());
+    ModelChatEmptyResponseShape {
+        choices_count,
+        message_keys,
+        content_type,
+        content_length,
+        has_reasoning_content,
+        tool_calls_count,
+        has_usage,
+    }
+}
+
+fn build_anthropic_empty_response_shape(
+    value: &serde_json::Value,
+    tool_calls_count: usize,
+    has_usage: bool,
+) -> ModelChatEmptyResponseShape {
+    let content_type = match value.get("content") {
+        Some(serde_json::Value::Array(blocks)) => format!("array:{}", blocks.len()),
+        Some(_) => "other".to_string(),
+        None => "missing".to_string(),
+    };
+    let content_length = value
+        .get("content")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    ModelChatEmptyResponseShape {
+        choices_count: 0,
+        message_keys: value
+            .as_object()
+            .map(|object| object.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default(),
+        content_type,
+        content_length,
+        has_reasoning_content: false,
+        tool_calls_count,
+        has_usage,
+    }
+}
+
 fn parse_openai_chat_response(
     value: &serde_json::Value,
     request: &ModelChatRequest,
@@ -1428,7 +1590,10 @@ fn parse_openai_chat_response(
     let content = parse_openai_text_content(message.get("content"));
     let tool_calls = parse_openai_tool_calls(message.get("tool_calls"), request)?;
     if content.is_empty() && tool_calls.is_empty() {
-        return Err("Model chat returned neither content nor tool calls.".to_string());
+        let usage = crate::extract_openai_compatible_usage(value);
+        let shape = build_openai_empty_response_shape(value, message, tool_calls.len(), usage.is_some());
+        let finish_reason = choice.get("finish_reason").and_then(serde_json::Value::as_str);
+        return Err(empty_chat_response_error(&shape, finish_reason, usage.as_ref()));
     }
     let provider_finish_reason = choice
         .get("finish_reason")
@@ -1572,7 +1737,10 @@ fn parse_anthropic_chat_response(
         }
     }
     if content.is_empty() && tool_calls.is_empty() {
-        return Err("Anthropic model chat returned neither text nor tool use.".to_string());
+        let usage = parse_anthropic_usage(value);
+        let shape = build_anthropic_empty_response_shape(value, tool_calls.len(), usage.is_some());
+        let stop_reason = value.get("stop_reason").and_then(serde_json::Value::as_str);
+        return Err(empty_chat_response_error(&shape, stop_reason, usage.as_ref()));
     }
     let stop_reason = value.get("stop_reason").and_then(serde_json::Value::as_str);
     validate_tool_finish_reason(
@@ -1704,7 +1872,90 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
-    fn request(protocol: &str) -> ModelChatRequest {
+        #[test]
+    fn empty_openai_response_returns_structured_shape_error_with_usage() {
+        let request = request("openai-compatible");
+        let value = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "reasoning_content": "",
+                    "tool_calls": []
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 12, "completion_tokens": 0, "total_tokens": 12 }
+        });
+        let error = parse_openai_chat_response(&value, &request).expect_err("must fail");
+        assert!(error.starts_with("__JAVIS_EMPTY_RESPONSE__"), "unexpected prefix: {error}");
+        let payload: serde_json::Value =
+            serde_json::from_str(&error[EMPTY_RESPONSE_ERROR_PREFIX.len()..]).expect("payload json");
+        assert_eq!(payload["code"], "model_chat_empty_response");
+        assert_eq!(payload["responseShape"]["choicesCount"], 1);
+        assert_eq!(payload["responseShape"]["contentType"], "missing");
+        assert_eq!(payload["responseShape"]["hasReasoningContent"], false);
+        assert_eq!(payload["responseShape"]["toolCallsCount"], 0);
+        assert_eq!(payload["responseShape"]["hasUsage"], true);
+        assert_eq!(payload["finishReason"], "stop");
+        assert_eq!(payload["usage"]["inputTokens"], 12);
+        assert_eq!(payload["usage"]["totalTokens"], 12);
+    }
+
+    #[test]
+    fn empty_anthropic_response_returns_structured_shape_error() {
+        let request = request("anthropic");
+        let value = serde_json::json!({
+            "content": [],
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 3, "output_tokens": 0 }
+        });
+        let error = parse_anthropic_chat_response(&value, &request).expect_err("must fail");
+        assert!(error.starts_with("__JAVIS_EMPTY_RESPONSE__"), "unexpected prefix: {error}");
+        let payload: serde_json::Value =
+            serde_json::from_str(&error[EMPTY_RESPONSE_ERROR_PREFIX.len()..]).expect("payload json");
+        assert_eq!(payload["code"], "model_chat_empty_response");
+        assert_eq!(payload["responseShape"]["contentType"], "array:0");
+        assert_eq!(payload["responseShape"]["hasUsage"], true);
+        assert_eq!(payload["usage"]["inputTokens"], 3);
+    }
+
+    #[test]
+    fn empty_openai_stream_detects_missing_text_and_tools() {
+        let request = request("openai-compatible");
+        let state = OpenAiStreamState {
+            tool_calls: Vec::new(),
+            finish_reason: Some("stop".to_string()),
+            saw_done: true,
+            text_seen: false,
+            usage_seen: true,
+        };
+        let error = finalize_openai_stream(&request, &state).expect_err("must fail");
+        assert!(error.starts_with("__JAVIS_EMPTY_RESPONSE__"), "unexpected prefix: {error}");
+        let payload: serde_json::Value =
+            serde_json::from_str(&error[EMPTY_RESPONSE_ERROR_PREFIX.len()..]).expect("payload json");
+        assert_eq!(payload["responseShape"]["hasUsage"], true);
+        assert_eq!(payload["responseShape"]["toolCallsCount"], 0);
+    }
+
+    #[test]
+    fn non_empty_stream_response_is_not_classified_as_empty() {
+        let request = request("openai-compatible");
+        let state = OpenAiStreamState {
+            tool_calls: Vec::new(),
+            finish_reason: Some("stop".to_string()),
+            saw_done: true,
+            text_seen: true,
+            usage_seen: true,
+        };
+        let events = finalize_openai_stream(&request, &state).expect("must succeed");
+        assert!(matches!(
+            events.as_slice(),
+            [ModelChatStreamEvent::MessageEnd { finish_reason: ModelFinishReason::Stop }]
+        ));
+    }
+
+
+fn request(protocol: &str) -> ModelChatRequest {
         ModelChatRequest {
             messages: vec![ModelChatMessage::User {
                 content: vec![ModelContentBlock::Text {
@@ -2498,7 +2749,12 @@ mod tests {
                 .contains("without tool calls")
         );
         stream.finish_reason = Some("stop".to_string());
-        assert!(finalize_openai_stream(&request("openai-compatible"), &stream).is_ok());
+        let empty_error = finalize_openai_stream(&request("openai-compatible"), &stream)
+            .expect_err("empty stream must fail as empty response");
+        assert!(
+            empty_error.starts_with("__JAVIS_EMPTY_RESPONSE__"),
+            "unexpected empty-stream error: {empty_error}"
+        );
     }
 
     #[test]

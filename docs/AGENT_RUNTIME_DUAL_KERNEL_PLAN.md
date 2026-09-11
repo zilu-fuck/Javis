@@ -1,6 +1,6 @@
 # Javis Agent Runtime 双内核方案
 
-> 状态：修订版，实施前置条件已冻结，待代码实现
+> 状态：实施完成（Phase 0-4 代码部分），live provider 放量（Phase 3 验收）与 OpenCode 会话 adapter（Phase 1/2 目标形态）为后续工作
 > 决策日期：2026-07-19
 > 决策：Javis 保持唯一控制面；LangChain 负责通用 Agent 步骤；OpenCode 负责代码专项 Agent 步骤。
 
@@ -689,6 +689,8 @@ stderr 和事件摘要必须限长、脱敏，并保留阶段信息，避免只�
 
 验收：三条用量回归、空响应根因和 provenance 错误优先级测试全部通过。
 
+> **状态：✅ 已完成（2026-08-13）**。Usage Observation Ledger（`usage-observations.ts` + `usage_observations` 表 + executor 按 callId/revision/final upsert + 失败调用保留）、DeepSeek 空响应（Rust 结构化 response-shape 错误 + gateway/javis-chat-model 受控重试 + 双 usage）、`backend.diagnostic` 消费与 `primaryFailure`/`diagnostics` 结构化状态、五态调度矩阵（`blocked: wait` 与 `needsClarification: ask_user` 的等待/唤醒 + checkpoint 等待字段）、路由契约收敛（删除死代码 `routeAgentRuntime`，desktop resolver 为唯一实现）、Computer Use 显式注册 `javis_specialized` 路由观察均已落地并有测试覆盖。三条用量回归测试在 `usage-observations.test.ts` 与 `workflow-executor.test.ts`。
+
 ### Phase 1：OpenCode runtime POC
 
 - 在 `code_search` 或 `code_explore` 只读步骤接入 `OpenCodeAgentRuntime`。
@@ -697,6 +699,12 @@ stderr 和事件摘要必须限长、脱敏，并保留阶段信息，避免只�
 - 与当前 Code Agent 同输入对比结果、事件、用量和错误。
 
 验收：真实仓库只读步骤通过，取消后无遗留进程，工作区无修改。
+
+> **状态：🔄 前置探索完成（2026-08-13），会话 adapter 待实施**。
+> 可行性结论见 `docs/OPENCODE_SERVE_EXPLORATION.md`：`opencode serve` + `run --attach`
+> 提供 NDJSON 流式事件（step_start/text/step_finish，含 usage/cost）、kill 客户端可中止
+> serve 侧生成（取消传播已验证）。当前 `code_propose` 已通过 one-shot transport 路由到
+> OpenCode adapter（`opencode/runner.ts`），会话级 adapter 为下一阶段工作。
 
 ### Phase 2：代码专项迁移
 
@@ -707,6 +715,11 @@ stderr 和事件摘要必须限长、脱敏，并保留阶段信息，避免只�
 
 验收：proposal deny 不改文件；approve 只应用绑定 patch；测试/构建证据可追踪。
 
+> **状态：✅ 已完成（路由层）**。`code_propose` + preview 确定性路由到 OpenCode；
+> runner 禁止 `code.proposeEdit`/`code.applyProposedEdit`（防嵌套 opencode）；proposal 输出
+> 统一为 StepResult + ArtifactEnvelope。`build_fix`/`test_run`/`refactor` 实际执行保持
+> proposal-only（受控 command/sandbox tool 验收前不放开）。
+
 ### Phase 3：LangChain 通用 Agent 放量
 
 - 按已验证 provider/model profile 扩大通用 `read` / `preview` 路由。
@@ -714,6 +727,12 @@ stderr 和事件摘要必须限长、脱敏，并保留阶段信息，避免只�
 - 保持写操作在 Javis 专用路径。
 
 验收：通用产品工作流、流式 Tool Call、request_input、restart/resume 全部通过。
+
+> **状态：🔄 部分完成**。LangChain adapter（`langchain/runner.ts` + `javis-chat-model.ts`）
+> 已完整实现（原生 tool call、流式、request_input、受控重试、限额、取消）；
+> `resolveCommanderStepAgentRuntimeRoutingDecision` 支持按 profile/rollout 放量。
+> live provider 流式验收、打包重启验收和产品工作流闭环（`qa:langchain-poc:live` 目前仅
+> 非流式 DeepSeek POC）留待有 API key 的环境执行。
 
 ### Phase 4：删除 legacy ReAct
 
@@ -724,6 +743,21 @@ stderr 和事件摘要必须限长、脱敏，并保留阶段信息，避免只�
   明确标记为 `javis_specialized`，不能隐式保留第三套循环。
 
 验收：完整 `pnpm check`、产品 QA、Computer Use QA、打包重启 QA 和 live provider QA 通过。
+
+> **状态：✅ 已完成（代码部分，2026-08-13）**。
+> - 删除 `agent-react-loop.ts`（`runAgentReActLoop`）、`agent-react-decider.ts`（decision
+>   prompt/parser）及专项测试；共享 helper（`sanitizeAgentReActOutput`、
+>   `validateAgentRequestInput`、`MAX_REACT_REQUESTED_CONTEXT_KEYS/CHARS`）迁移至
+>   `agent-runtime/legacy-helpers.ts` 供 LangChain runtime 继续使用。
+> - `reactDecideNext` 选项、app-runtime 注入与本地 parser 全部删除；legacy 路由决策现在
+>   解析为 `unavailable`（不跨 backend 自动回退，§6 规则 5）。
+> - 保留 legacy backend 枚举、`legacyRouteCount`、checkpoint/task-history 历史 reader
+>   （旧任务可读）。
+> - Computer Use 通过路由观察显式标记为 `javis_specialized`（此前隐式存在）。
+> - 生产代码静态引用清零（grep `runAgentReActLoop|buildReActDecision|parseAgentReActDecision|
+>   reactDecideNext` 无命中）。
+> - 验收中 `pnpm check` 全绿；产品/Computer Use/打包重启 QA 证据检查与 live provider QA
+>   需在完整环境执行。
 
 ## 16. 必须通过的验收矩阵
 
