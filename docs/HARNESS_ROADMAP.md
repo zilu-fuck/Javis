@@ -342,9 +342,36 @@
 
 ---
 
+## `pnpm check` 全链实测记录（2026-09-13，逐项单独运行）
+
+`pnpm check` 是 CI 门禁，但串起来会超时（历史记录 124 秒无输出）。本轮把**它的每一项**单独跑了一遍并记录实际结果——
+这是"真实运行验证"的证据，也说明各部件确实能组合：
+
+| 门禁项 | 结果 |
+|---|---|
+| `pnpm typecheck` | ✅ 0 错误 |
+| `pnpm package-boundaries` | ✅ `Package boundary check passed.` |
+| `pnpm package-boundaries:test` | ✅ `Package boundary check tests passed.` |
+| `pnpm test`（全仓） | ✅ core **1652** / desktop 1002 / ui 219 / tools 53 / sidecar 6 |
+| `pnpm eval` | ✅ **29/29 golden tasks (100.0%)** → `docs/qa/eval/2026-09-12/` |
+| `pnpm eval:test` | ✅ 6 pass / 0 fail |
+| `pnpm docs:check` | ✅ no drift (0 error / 0 warning) |
+| `pnpm docs:test` | ✅ 16 pass / 0 fail |
+| `pnpm local-vision-worker:test` | ✅ 通过 |
+| `pnpm --filter @javis/desktop build` | ✅ built in 20.9s（有一条 chunk >500 kB 的**既有**告警，与本轮无关） |
+| `pnpm rust:check` | ✅ `Finished dev profile` |
+| `pnpm rust:test` | ✅ 599 passed / 0 failed |
+| `pnpm metrics` | ✅ 写出报告（读到真实 DB：2 tasks / 9575 tokens） |
+| `pnpm diagnostics` | ✅ 脱敏包写出 `docs/qa/diagnostics/…` |
+
+**结论**：全部门禁项通过。**唯一未实测的是串起来的 `pnpm check` 本身**（历史超时问题仍在），
+以及 `desktop:build`（完整 NSIS 安装包，需要更长时间与签名配置）。
+
+---
+
 ## 交接说明（给接手的下一个会话）
 
-**当前状态**：`pnpm typecheck` / `pnpm docs:check` 与全部 **1527 core + 1002 desktop + 219 ui + 53 tools + 6 sidecar + 599 Rust** 测试全绿；
+**当前状态**：`pnpm typecheck` / `pnpm docs:check` 与全部 **1652 core + 1002 desktop + 219 ui + 53 tools + 6 sidecar + 599 Rust** 测试全绿；
 工作树干净；最近提交见 `git log --oneline`。
 
 **每轮必须跑的验证**：
@@ -466,6 +493,9 @@ $env:PATH="$env:USERPROFILE\.cargo\bin;C:\Program Files\Git\cmd;$env:PATH"; core
 
 ## 变更记录
 
+- 2026-09-13（第 34 轮，**真实运行验证**）：把 `pnpm check` 的**每一项单独跑通并记录实际结果**（见上方"全链实测记录"表）——
+  package-boundaries 通过（本轮首次运行）、golden eval **29/29 (100%)**、docs 检查 0 漂移、desktop 前端构建 20.9s、
+  rust:check Finished、metrics/diagnostics 均写出真实报告。唯一未实测的是**串起来的 `pnpm check` 本身**（历史超时问题仍在），已如实记录。
 - 2026-09-13（第 33 轮，接线切片）：E2d——失败动作解析成可渲染按钮（14 测试）。核心判断：**动作不等于按钮**，
   给一个点了没反应的按钮比不给更糟，所以跑不了的动作**禁用并给原因但仍渲染**（隐藏会让失败看起来无解）；
   `retry` 真的需要原始目标；恰好一个 primary 且取第一个可用者（自然首选不可用时自动顺延）。

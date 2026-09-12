@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-12T16:33:22.034Z",
+  "generatedAt": "2026-09-12T18:47:48.354Z",
   "suite": "golden-tasks",
   "node": "v24.14.0",
   "platform": "win32-x64",
@@ -8,7 +8,7 @@
     "passed": 29,
     "failed": 0,
     "successRate": 1,
-    "durationMs": 38,
+    "durationMs": 23,
     "coverageSelfCheck": "passed"
   },
   "byCategory": {
