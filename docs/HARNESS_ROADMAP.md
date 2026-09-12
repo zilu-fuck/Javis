@@ -144,7 +144,13 @@
   新增/覆盖/禁用三类结果分类。**关键不变量：配置层只能收紧权限，绝不能放宽**——`confirmed_write → read` 直接报错拒绝
   （否则一份签入仓库的配置文件就能绕开原生审批边界）。**已接线**：`.javis` 声明 `disabled: true` 的工具会真正从可用描述符里消失
 - [ ] **B3b** 把"新增/覆盖"的工具描述符接进运行时描述符源（目前 `disabled` 已生效，added/overridden 仅校验与合并）
-- [ ] **B4** **拆巨石**：`packages/core/src/workflow-executor.ts` **14,316 行**（文档里还写着 6,821）、`apps/desktop/src/App.tsx` 6,247 行、`computer-use-loop.test.ts` 8,480 行
+- [~] **B4** **拆巨石（第一刀已落）**：`packages/core/src/workflow-executor.ts` **15,054 → 14,847 行**，
+  抽出 `packages/core/src/tool-dispatch-guards.ts`（234 行，22 个新测试）——这是**每次工具调用都要过的边界**：
+  输入校验（schema、必填字段各类型、payload 体积、shell/computer 专用守卫）与输出校验（**可修复的机械错误就地修复并上报**、
+  不可修复才抛错、体积限制）、以及超时取小。抽出的理由不只是行数：一个"失败即关闭"的守卫不该埋在 15,000 行文件里找不到、也不好测。
+  **这只是一刀，不是解决方案**：还剩 `App.tsx` 6,597 行、`computer-use-loop.test.ts` 8,480 行，以及 `workflow-executor.ts` 内
+  仍然混着的大量职责（能力派发、验证/综合、PDF/研究等流程）需要继续按接缝切分
+- [ ] **B4b** 继续切分：`App.tsx`（UI 状态与运行时装配混在一个组件）与 `workflow-executor.ts` 的流程族（research / pdf / vision / code-review）
 - [ ] **B5** `RuntimeEvent` / `ArtifactEnvelope` / `SharedContext` / `WorkflowCheckpoint` 收敛成一份与代码对齐的对外契约（`docs/CORE_CONTRACTS.md`）
 - [ ] **B6** preset 提升为一等公民（agents + tools + 权限策略 + 模型槽 + 提示词版本，可导入导出 / A-B）
 
@@ -316,6 +322,9 @@
 
 ## 变更记录
 
+- 2026-09-13（第 20 轮，批次⑥收尾开局）：B4 第一刀——抽出 `tool-dispatch-guards.ts`（工具调用边界，22 测试），
+  `workflow-executor.ts` 15,054 → 14,847 行。抽取后全量测试无变化（行为保持），中途靠 `noUnusedLocals` 清掉被孤立的导入。
+  **明确这只是一刀**：`App.tsx` 6,597 行与流程族仍未拆。下一批：⑦ 剩余（C2/C5/C7/C8、D1/D6、E3/E6/E7）。
 - 2026-09-13（第 19 轮，批次⑥）：G5 更新决策 + 制品校验（24 测试 + manifest 生成/校验脚本；**核查发现 Tauri updater 插件根本没配置**，
   所以只交付"更新器存在前必须正确"的部分：决策、失败即关闭的哈希校验、降级阻断并给出卸载步骤；实测篡改安装包会被拒）。
   修掉自己脚本里一处不诚实：原本动态 import 一个 `.ts` 校验器会静默失败，等于假装校验过——改为显式结构检查并说明理由。
