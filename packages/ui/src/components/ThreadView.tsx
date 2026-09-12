@@ -1093,12 +1093,19 @@ function buildToolActivities(task: WorkbenchTask, locale: WorkbenchLocale): Thre
   if ((task.tokenUsage?.modelCalls ?? 0) > 0) {
     const callCount = task.tokenUsage?.modelCalls ?? 0;
     const totalTokens = task.tokenUsage?.totalTokens ?? 0;
+    const cacheReadTokens = task.tokenUsage?.cacheReadTokens;
+    const inputTokens = task.tokenUsage?.inputTokens ?? 0;
+    const cacheSuffix = typeof cacheReadTokens === "number" && inputTokens > 0
+      ? isChinese
+        ? ` · 缓存命中 ${Math.round((cacheReadTokens / inputTokens) * 100)}%`
+        : ` · ${Math.round((cacheReadTokens / inputTokens) * 100)}% cached`
+      : "";
     activities.set("model-generation", {
       id: "model-generation",
       name: isChinese ? "文本生成模型" : "Text generation model",
       description: isChinese
-        ? `${callCount} 次调用 · ${totalTokens.toLocaleString()} tokens`
-        : `${callCount} call${callCount === 1 ? "" : "s"} · ${totalTokens.toLocaleString()} tokens`,
+        ? `${callCount} 次调用 · ${totalTokens.toLocaleString()} tokens${cacheSuffix}`
+        : `${callCount} call${callCount === 1 ? "" : "s"} · ${totalTokens.toLocaleString()} tokens${cacheSuffix}`,
       status: task.status === "failed" ? "failed" : task.status === "completed" ? "completed" : "running",
     });
   }

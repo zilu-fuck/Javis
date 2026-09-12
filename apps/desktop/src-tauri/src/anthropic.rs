@@ -163,11 +163,34 @@ fn extract_anthropic_usage(value: &serde_json::Value) -> Option<ModelUsage> {
     let usage = value.get("usage")?;
     let input_tokens = usage.get("input_tokens")?.as_u64()? as u32;
     let output_tokens = usage.get("output_tokens")?.as_u64()? as u32;
-    Some(ModelUsage {
+    Some(anthropic_usage_with_cache(usage, input_tokens, output_tokens))
+}
+
+/// Anthropic reports `input_tokens` as the UNCACHED tail only; cache reads
+/// and writes arrive as separate fields. Normalize `input_tokens` to the
+/// total so cache-hit ratios stay comparable with OpenAI-compatible
+/// dialects (where `prompt_tokens` already includes cached tokens).
+pub(crate) fn anthropic_usage_with_cache(
+    usage: &serde_json::Value,
+    uncached_input_tokens: u32,
+    output_tokens: u32,
+) -> ModelUsage {
+    let read = usage
+        .get("cache_read_input_tokens")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0) as u32;
+    let write = usage
+        .get("cache_creation_input_tokens")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0) as u32;
+    let input_tokens = uncached_input_tokens.saturating_add(read).saturating_add(write);
+    ModelUsage {
         input_tokens,
         output_tokens,
-        total_tokens: input_tokens + output_tokens,
-    })
+        total_tokens: input_tokens.saturating_add(output_tokens),
+        cache_read_tokens: (read > 0).then_some(read),
+        cache_write_tokens: (write > 0).then_some(write),
+    }
 }
 
 fn extract_anthropic_response_text(value: &serde_json::Value) -> Option<String> {
@@ -317,6 +340,8 @@ pub(crate) fn execute_anthropic_streaming_request(
     let mut token_usage: Option<ModelUsage> = None;
     let mut input_tokens: u32 = 0;
     let mut output_tokens: u32 = 0;
+    let mut cache_read_tokens: u32 = 0;
+    let mut cache_write_tokens: u32 = 0;
     let mut finish_reason: Option<String> = None;
     let mut saw_message_stop = false;
 
@@ -352,10 +377,14 @@ pub(crate) fn execute_anthropic_streaming_request(
         if let Some(usage) = extract_anthropic_stream_usage(&value) {
             input_tokens = input_tokens.max(usage.input_tokens);
             output_tokens = output_tokens.max(usage.output_tokens);
+            cache_read_tokens = cache_read_tokens.max(usage.cache_read_tokens.unwrap_or(0));
+            cache_write_tokens = cache_write_tokens.max(usage.cache_write_tokens.unwrap_or(0));
             token_usage = Some(ModelUsage {
                 input_tokens,
                 output_tokens,
                 total_tokens: input_tokens.saturating_add(output_tokens),
+                cache_read_tokens: (cache_read_tokens > 0).then_some(cache_read_tokens),
+                cache_write_tokens: (cache_write_tokens > 0).then_some(cache_write_tokens),
             });
         }
 
@@ -488,11 +517,7 @@ fn extract_anthropic_stream_usage(value: &serde_json::Value) -> Option<ModelUsag
     if input_tokens == 0 && output_tokens == 0 {
         return None;
     }
-    Some(ModelUsage {
-        input_tokens,
-        output_tokens,
-        total_tokens: input_tokens.saturating_add(output_tokens),
-    })
+    Some(anthropic_usage_with_cache(usage, input_tokens, output_tokens))
 }
 
 #[cfg(test)]
@@ -501,6 +526,44 @@ mod tests {
         extract_anthropic_stream_usage, format_anthropic_stream_error,
         validate_anthropic_stream_completion,
     };
+    use super::extract_anthropic_usage;
+
+    #[test]
+    fn normalizes_anthropic_usage_to_total_input_with_cache_fields() {
+        let value = serde_json::json!({
+            "usage": {
+                "input_tokens": 25,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 900,
+                "cache_creation_input_tokens": 75,
+            }
+        });
+        let usage = extract_anthropic_usage(&value).expect("usage");
+        // Wire input (25) is the uncached tail; the harness total includes
+        // cache reads and writes so hit ratios stay comparable with the
+        // OpenAI-compatible dialects where prompt_tokens already includes
+        // cached tokens.
+        assert_eq!(usage.input_tokens, 1000);
+        assert_eq!(usage.cache_read_tokens, Some(900));
+        assert_eq!(usage.cache_write_tokens, Some(75));
+        assert_eq!(usage.total_tokens, 1005);
+    }
+
+    #[test]
+    fn stream_message_start_usage_carries_cache_fields() {
+        let value = serde_json::json!({
+            "type": "message_start",
+            "message": { "usage": {
+                "input_tokens": 10,
+                "output_tokens": 1,
+                "cache_read_input_tokens": 200,
+            }}
+        });
+        let usage = extract_anthropic_stream_usage(&value).expect("usage");
+        assert_eq!(usage.input_tokens, 210);
+        assert_eq!(usage.cache_read_tokens, Some(200));
+        assert_eq!(usage.cache_write_tokens, None);
+    }
 
     #[test]
     fn provider_stream_errors_do_not_echo_provider_text() {

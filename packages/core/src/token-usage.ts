@@ -30,6 +30,8 @@ export function addModelUsage(
   const inputTokens = normalizeTokenCount(usage.inputTokens);
   const outputTokens = normalizeTokenCount(usage.outputTokens);
   const totalTokens = normalizeTokenCount(usage.totalTokens ?? inputTokens + outputTokens);
+  const cacheReadTokens = normalizeOptionalTokenCount(usage.cacheReadTokens);
+  const cacheWriteTokens = normalizeOptionalTokenCount(usage.cacheWriteTokens);
   const contextWindowTokens = normalizeOptionalPositiveTokenCount(usage.contextWindowTokens);
   const current = summary ?? createEmptyTokenUsageSummary();
   const existingAgent = current.byAgentKind.find((entry) => entry.agentKind === agentKind);
@@ -42,12 +44,22 @@ export function addModelUsage(
   };
 
   const nextContextPair = selectMostUtilizedContextPair(current, totalTokens, contextWindowTokens);
+  // Keep the sums undefined while no provider has reported cache fields so
+  // persisted summaries don't fill with zero-noise.
+  const nextCacheRead = cacheReadTokens !== undefined || current.cacheReadTokens !== undefined
+    ? (current.cacheReadTokens ?? 0) + (cacheReadTokens ?? 0)
+    : undefined;
+  const nextCacheWrite = cacheWriteTokens !== undefined || current.cacheWriteTokens !== undefined
+    ? (current.cacheWriteTokens ?? 0) + (cacheWriteTokens ?? 0)
+    : undefined;
   return {
     inputTokens: current.inputTokens + inputTokens,
     outputTokens: current.outputTokens + outputTokens,
     totalTokens: current.totalTokens + totalTokens,
     peakContextTokens: Math.max(current.peakContextTokens ?? 0, totalTokens),
     ...nextContextPair,
+    ...(nextCacheRead !== undefined ? { cacheReadTokens: nextCacheRead } : {}),
+    ...(nextCacheWrite !== undefined ? { cacheWriteTokens: nextCacheWrite } : {}),
     modelCalls: current.modelCalls + 1,
     byAgentKind: [
       ...current.byAgentKind.filter((entry) => entry.agentKind !== agentKind),

@@ -1074,6 +1074,32 @@ describe("createFileScanTaskRuntime", () => {
     });
   });
 
+  it("sums prefix-cache reads and writes only once a provider reports them", () => {
+    const withoutCache = addModelUsage(undefined, "commander", {
+      inputTokens: 100,
+      outputTokens: 10,
+    });
+    expect(withoutCache.cacheReadTokens).toBeUndefined();
+    expect(withoutCache.cacheWriteTokens).toBeUndefined();
+
+    const withCache = addModelUsage(withoutCache, "commander", {
+      inputTokens: 200,
+      outputTokens: 20,
+      cacheReadTokens: 150,
+    });
+    expect(withCache.cacheReadTokens).toBe(150);
+    expect(withCache.cacheWriteTokens).toBeUndefined();
+
+    const anthropicWrite = addModelUsage(withCache, "commander", {
+      inputTokens: 300,
+      outputTokens: 30,
+      cacheReadTokens: 50,
+      cacheWriteTokens: 120,
+    });
+    expect(anthropicWrite.cacheReadTokens).toBe(200);
+    expect(anthropicWrite.cacheWriteTokens).toBe(120);
+  });
+
   it("keeps the measured usage paired with its actual model window", () => {
     const mostUtilized = addModelUsage(undefined, "commander", {
       inputTokens: 50,

@@ -185,6 +185,15 @@ pub(crate) struct ModelUsage {
     input_tokens: u32,
     output_tokens: u32,
     total_tokens: u32,
+    /// Input tokens served from the provider prefix cache. `input_tokens`
+    /// is normalized to the TOTAL input across dialects, so the cache hit
+    /// ratio is `cache_read_tokens / input_tokens` for every provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_read_tokens: Option<u32>,
+    /// Input tokens written to the provider cache (Anthropic reports this;
+    /// OpenAI-compatible chat dialects do not).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_write_tokens: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -1618,10 +1627,23 @@ pub(crate) fn extract_openai_compatible_usage(value: &serde_json::Value) -> Opti
     if input_tokens == 0 && output_tokens == 0 && total_tokens == 0 {
         return None;
     }
+    // OpenAI-compatible cache dialects: `prompt_tokens_details.cached_tokens`
+    // (OpenAI / Qwen gateways) takes priority over DeepSeek's
+    // `prompt_cache_hit_tokens`. `prompt_tokens` already INCLUDES cached
+    // tokens, so the hit ratio is cached / prompt_tokens. Chat-completions
+    // dialects never report cache writes.
+    let cache_read_tokens = usage
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(|value| value.as_u64())
+        .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(|value| value.as_u64()))
+        .map(|value| value.min(u32::MAX as u64) as u32)
+        .filter(|cached| *cached > 0);
     Some(ModelUsage {
         input_tokens,
         output_tokens,
         total_tokens,
+        cache_read_tokens,
+        cache_write_tokens: None,
     })
 }
 
@@ -4461,6 +4483,50 @@ mod tests {
             extract_openai_compatible_finish_reason(&value).as_deref(),
             Some("length")
         );
+    }
+
+    #[test]
+    fn extracts_openai_compatible_cache_hit_from_details() {
+        let value: serde_json::Value = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 10,
+                "total_tokens": 110,
+                "prompt_tokens_details": { "cached_tokens": 80 }
+            }
+        });
+        let usage = extract_openai_compatible_usage(&value).expect("usage");
+        assert_eq!(usage.cache_read_tokens, Some(80));
+        // prompt_tokens already includes cached tokens; keep it as the total.
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.cache_write_tokens, None);
+    }
+
+    #[test]
+    fn extracts_deepseek_cache_hit_tokens_fallback() {
+        let value: serde_json::Value = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 10,
+                "prompt_cache_hit_tokens": 64,
+                "prompt_cache_miss_tokens": 36
+            }
+        });
+        let usage = extract_openai_compatible_usage(&value).expect("usage");
+        assert_eq!(usage.cache_read_tokens, Some(64));
+    }
+
+    #[test]
+    fn omits_zero_openai_compatible_cache_reads() {
+        let value: serde_json::Value = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 4,
+                "prompt_tokens_details": { "cached_tokens": 0 }
+            }
+        });
+        let usage = extract_openai_compatible_usage(&value).expect("usage");
+        assert_eq!(usage.cache_read_tokens, None);
     }
 
     #[test]

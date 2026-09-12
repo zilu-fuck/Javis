@@ -354,6 +354,14 @@ export interface ModelUsage {
   provider?: string;
   /** Context window of the model that produced this usage, when known. */
   contextWindowTokens?: number;
+  /**
+   * Input tokens served from the provider prefix cache. `inputTokens` is the
+   * TOTAL input across dialects, so the hit ratio is
+   * `cacheReadTokens / inputTokens` for every provider.
+   */
+  cacheReadTokens?: number;
+  /** Input tokens written to the provider cache (Anthropic only). */
+  cacheWriteTokens?: number;
 }
 
 export interface TokenUsageByAgent {
@@ -374,6 +382,10 @@ export interface TokenUsageSummary {
   contextUsedTokens?: number;
   /** Context window paired with contextUsedTokens. */
   contextWindowTokens?: number;
+  /** Sum of provider prefix-cache reads across recorded model calls. */
+  cacheReadTokens?: number;
+  /** Sum of provider prefix-cache writes across recorded model calls. */
+  cacheWriteTokens?: number;
   modelCalls: number;
   byAgentKind: TokenUsageByAgent[];
 }

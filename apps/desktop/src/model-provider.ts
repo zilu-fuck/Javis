@@ -93,6 +93,10 @@ export interface ModelUsage {
   model?: string;
   provider?: string;
   contextWindowTokens?: number;
+  /** Prefix-cache reads; `inputTokens` is the total so hit ratio = read/input. */
+  cacheReadTokens?: number;
+  /** Prefix-cache writes (Anthropic only). */
+  cacheWriteTokens?: number;
 }
 
 export class ModelProviderError extends Error {

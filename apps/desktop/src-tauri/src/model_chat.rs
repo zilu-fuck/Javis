@@ -281,6 +281,8 @@ struct AnthropicStreamState {
     saw_message_stop: bool,
     input_tokens: u32,
     output_tokens: u32,
+    cache_read_tokens: u32,
+    cache_creation_tokens: u32,
     text_seen: bool,
 }
 
@@ -646,6 +648,20 @@ fn consume_anthropic_stream_value(
             {
                 state.input_tokens = tokens;
             }
+            if let Some(tokens) = value
+                .pointer("/message/usage/cache_read_input_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+            {
+                state.cache_read_tokens = tokens;
+            }
+            if let Some(tokens) = value
+                .pointer("/message/usage/cache_creation_input_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+            {
+                state.cache_creation_tokens = tokens;
+            }
         }
         Some("content_block_start") => {
             let index = stream_index(value)?;
@@ -752,11 +768,21 @@ fn consume_anthropic_stream_value(
                 .and_then(|value| u32::try_from(value).ok())
             {
                 state.output_tokens = tokens;
+                // Wire `input_tokens` is the uncached tail; normalize to the
+                // total so hit ratios stay comparable with OpenAI dialects.
+                let input_total = state
+                    .input_tokens
+                    .saturating_add(state.cache_read_tokens)
+                    .saturating_add(state.cache_creation_tokens);
                 events.push(ModelChatStreamEvent::Usage {
                     usage: ModelUsage {
-                        input_tokens: state.input_tokens,
+                        input_tokens: input_total,
                         output_tokens: state.output_tokens,
-                        total_tokens: state.input_tokens + state.output_tokens,
+                        total_tokens: input_total + state.output_tokens,
+                        cache_read_tokens: (state.cache_read_tokens > 0)
+                            .then_some(state.cache_read_tokens),
+                        cache_write_tokens: (state.cache_creation_tokens > 0)
+                            .then_some(state.cache_creation_tokens),
                     },
                 });
             }
@@ -818,10 +844,17 @@ fn finalize_anthropic_stream(
         !state.tool_calls.is_empty(),
     )?;
     if !state.text_seen && state.tool_calls.is_empty() {
-        let usage = (state.input_tokens > 0 || state.output_tokens > 0).then(|| ModelUsage {
-            input_tokens: state.input_tokens,
+        let input_total = state
+            .input_tokens
+            .saturating_add(state.cache_read_tokens)
+            .saturating_add(state.cache_creation_tokens);
+        let usage = (input_total > 0 || state.output_tokens > 0).then(|| ModelUsage {
+            input_tokens: input_total,
             output_tokens: state.output_tokens,
-            total_tokens: state.input_tokens + state.output_tokens,
+            total_tokens: input_total + state.output_tokens,
+            cache_read_tokens: (state.cache_read_tokens > 0).then_some(state.cache_read_tokens),
+            cache_write_tokens: (state.cache_creation_tokens > 0)
+                .then_some(state.cache_creation_tokens),
         });
         let shape = ModelChatEmptyResponseShape {
             choices_count: 0,
@@ -1815,11 +1848,11 @@ fn parse_anthropic_usage(value: &serde_json::Value) -> Option<ModelUsage> {
     let usage = value.get("usage")?;
     let input_tokens = u32::try_from(usage.get("input_tokens")?.as_u64()?).ok()?;
     let output_tokens = u32::try_from(usage.get("output_tokens")?.as_u64()?).ok()?;
-    Some(ModelUsage {
+    Some(crate::anthropic::anthropic_usage_with_cache(
+        usage,
         input_tokens,
         output_tokens,
-        total_tokens: input_tokens + output_tokens,
-    })
+    ))
 }
 
 fn normalize_finish_reason(reason: Option<&str>) -> ModelFinishReason {
@@ -2882,6 +2915,8 @@ fn request(protocol: &str) -> ModelChatRequest {
                 input_tokens: 7,
                 output_tokens: 3,
                 total_tokens: 10,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
             }),
         })
         .expect("serialize");

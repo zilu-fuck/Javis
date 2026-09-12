@@ -189,6 +189,10 @@ export interface WorkbenchTokenUsageSummary {
   peakContextTokens?: number;
   contextUsedTokens?: number;
   contextWindowTokens?: number;
+  /** Sum of provider prefix-cache reads; hit ratio = cacheReadTokens / inputTokens. */
+  cacheReadTokens?: number;
+  /** Sum of provider prefix-cache writes (Anthropic only). */
+  cacheWriteTokens?: number;
   modelCalls: number;
   byAgentKind: Array<{
     agentKind: string;

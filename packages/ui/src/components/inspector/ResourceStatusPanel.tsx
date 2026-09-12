@@ -87,6 +87,12 @@ function TokenUsageCard({
         <span>{isChinese ? "输入" : "In"}: {tokenUsage.inputTokens}</span>
         <span>{isChinese ? "输出" : "Out"}: {tokenUsage.outputTokens}</span>
         <span>{isChinese ? "调用" : "Calls"}: {tokenUsage.modelCalls}</span>
+        {typeof tokenUsage.cacheReadTokens === "number" && tokenUsage.inputTokens > 0 ? (
+          <span>
+            {isChinese ? "缓存命中" : "Cache hit"}:{" "}
+            {Math.round((tokenUsage.cacheReadTokens / tokenUsage.inputTokens) * 100)}%
+          </span>
+        ) : null}
       </div>
     </article>
   );
