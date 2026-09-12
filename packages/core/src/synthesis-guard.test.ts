@@ -170,6 +170,101 @@ describe("safeSynthesizeConclusion evidence guard", () => {
     )).resolves.toBeUndefined();
   });
 
+  it("accepts a direct_response capability overview with no evidence", async () => {
+    // Reproduction for the "你能干些什么" failure: a direct_response step
+    // answers from model knowledge; the evidence-free gate used to reject
+    // every positive informational answer.
+    const synthesize = vi.fn<NonNullable<CommanderTool["synthesize"]>>(async (_request) => {
+      expect(_request.directResponse).toBe(true);
+      return {
+        message: "我可以帮你检查和分析项目代码、整理文档、搜索本地文件和网页内容，也能操作桌面应用和安排定时任务。你想从哪一类开始？",
+      };
+    });
+
+    await expect(safeSynthesizeConclusion(
+      commanderWithSynthesis(synthesize),
+      "你能干些什么",
+      "能力概览",
+      {},
+      undefined,
+      undefined,
+      { directResponse: true },
+    )).resolves.toEqual({
+      message: "我可以帮你检查和分析项目代码、整理文档、搜索本地文件和网页内容，也能操作桌面应用和安排定时任务。你想从哪一类开始？",
+    });
+  });
+
+  it("still rejects evidence-free factual claims when the step is not direct_response", async () => {
+    const synthesize = vi.fn<NonNullable<CommanderTool["synthesize"]>>(async () => ({
+      message: "我可以帮你检查和分析项目代码、整理文档、搜索本地文件和网页内容。",
+    }));
+
+    await expect(safeSynthesizeConclusion(
+      commanderWithSynthesis(synthesize),
+      "你能干些什么",
+      "能力概览",
+      {},
+    )).resolves.toBeUndefined();
+  });
+
+  it("reports rejection reasons and the draft excerpt through onDiagnostic", async () => {
+    const synthesize = vi.fn<NonNullable<CommanderTool["synthesize"]>>(async () => ({
+      message: "The project uses React and PostgreSQL.",
+    }));
+    const diagnostics: string[] = [];
+
+    await expect(safeSynthesizeConclusion(
+      commanderWithSynthesis(synthesize),
+      "Summarize the project",
+      "Project summary",
+      {},
+      undefined,
+      undefined,
+      { onDiagnostic: (detail) => diagnostics.push(detail) },
+    )).resolves.toBeUndefined();
+
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toContain("no evidence was collected");
+    expect(diagnostics[0]).toContain("The project uses React and PostgreSQL.");
+  });
+
+  it("reports failed model calls through onDiagnostic", async () => {
+    const synthesize = vi.fn<NonNullable<CommanderTool["synthesize"]>>(async () => {
+      throw new Error("provider offline");
+    });
+    const diagnostics: string[] = [];
+
+    await expect(safeSynthesizeConclusion(
+      commanderWithSynthesis(synthesize),
+      "Summarize the project",
+      "Project summary",
+      { scan: { count: 3 } },
+      undefined,
+      undefined,
+      { onDiagnostic: (detail) => diagnostics.push(detail) },
+    )).resolves.toBeUndefined();
+
+    expect(diagnostics).toEqual(["Commander synthesis model call failed: provider offline"]);
+  });
+
+  it("accepts uncertainty answers that mention counts even with no evidence", async () => {
+    // The anchor gate used to run before the uncertainty gate, so any
+    // uncertainty answer containing a number ("2 个候选路径") was rejected
+    // as an unsupported claim even though there was nothing to compare.
+    const synthesize = vi.fn<NonNullable<CommanderTool["synthesize"]>>(async () => ({
+      message: "目前缺少相关证据，无法确定项目使用的框架；你可以提供 2 个候选路径让我检查。",
+    }));
+
+    await expect(safeSynthesizeConclusion(
+      commanderWithSynthesis(synthesize),
+      "这个项目用什么框架",
+      "框架确认",
+      {},
+    )).resolves.toEqual({
+      message: "目前缺少相关证据，无法确定项目使用的框架；你可以提供 2 个候选路径让我检查。",
+    });
+  });
+
   it("does not treat completion acknowledgements as evidence when no tools ran", async () => {
     for (const message of ["Done.", "Javis completed the database migration task."]) {
       const synthesize = vi.fn<NonNullable<CommanderTool["synthesize"]>>(async () => ({ message }));

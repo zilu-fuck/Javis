@@ -112,6 +112,31 @@ export function emitWaitingLog(options: {
   });
 }
 
+export function emitDiagnosticLog(options: {
+  taskId: ID;
+  code: string;
+  label: string;
+  detail: string;
+  getSnapshot: () => TaskSnapshot;
+  emitSnapshot: (snapshot: TaskSnapshot) => void;
+  emitEvent: (event: TaskRuntimeEvent) => TaskSnapshot["logs"][number];
+  agentKind?: AgentKind;
+}): void {
+  emitStructuredLog({
+    getSnapshot: options.getSnapshot,
+    emitSnapshot: options.emitSnapshot,
+    emitEvent: options.emitEvent,
+    event: {
+      kind: "task.diagnostic",
+      taskId: options.taskId,
+      code: options.code,
+      label: options.label,
+      detail: options.detail,
+      agentKind: options.agentKind,
+    },
+  });
+}
+
 export function emitTimeoutLog(options: {
   taskId: ID;
   phase: WaitLogPhase;

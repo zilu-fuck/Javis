@@ -475,6 +475,13 @@ export interface CommanderSynthesizeRequest {
   evidence: Record<string, unknown>;
   /** Transport-only image data for a vision-capable synthesis provider. */
   images?: string[];
+  /**
+   * Set for direct_response steps: the plan decided no evidence collection
+   * was needed, so the model answers from its own knowledge and the
+   * evidence guard accepts a direct answer instead of demanding uncertainty
+   * phrasing for every evidence-free message.
+   */
+  directResponse?: boolean;
 }
 
 export interface CommanderSynthesizeResult {

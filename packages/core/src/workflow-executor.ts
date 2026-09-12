@@ -228,6 +228,7 @@ import {
 import { createScopedToolExecutionGateway } from "./agent-runtime/read-only-tool-gateway";
 import { toolDescriptorsToAgentToolSpecs } from "./agent-runtime/tool-schema";
 import { compareStringsByCodePoint } from "./agent-runtime/prompt-determinism";
+import { emitDiagnosticLog } from "./workflow-runtime";
 import { isTaskCancelledError, TaskTimeoutError, throwIfTaskAborted, withTaskTimeout } from "./task-wait";
 import { createAskUserRequest } from "./ask-user";
 import {
@@ -10415,6 +10416,28 @@ export async function runCommanderDagTask({
             context.snapshot(),
             modelImages,
             (usage) => recordModelUsage("commander", usage),
+            {
+              // A direct_response step promises no evidence collection; the
+              // model answers from its own knowledge (capability questions,
+              // greetings). Do not hold that answer to the evidence-bound
+              // contract the plan deliberately skipped.
+              directResponse: true,
+              onDiagnostic: (detail) => {
+                const isChinese = /[\u3400-\u9fff]/u.test(userGoal);
+                emitDiagnosticLog({
+                  taskId,
+                  code: "synthesis.unavailable",
+                  label: isChinese
+                    ? "指挥官综合回答未通过质量守卫"
+                    : "Commander synthesis rejected by the quality guard",
+                  detail,
+                  getSnapshot,
+                  emitSnapshot,
+                  emitEvent,
+                  agentKind: "commander",
+                });
+              },
+            },
           ),
           {
             label: `commander.synthesize ${dagStep.id}`,
@@ -13997,6 +14020,18 @@ async function runCommanderSynthesisStep({
   return result;
 }
 
+export interface SafeSynthesisOptions {
+  /**
+   * direct_response steps promise no evidence collection: the model answers
+   * from its own knowledge (capability questions, greetings, general
+   * knowledge). The evidence guard accepts that direct answer instead of
+   * demanding uncertainty phrasing for every evidence-free message.
+   */
+  directResponse?: boolean;
+  /** Receives rejection/failed-call diagnostics for task-log surfacing. */
+  onDiagnostic?: (detail: string) => void;
+}
+
 export async function safeSynthesizeConclusion(
   commanderTool: CommanderTool | undefined,
   userGoal: string,
@@ -14004,6 +14039,7 @@ export async function safeSynthesizeConclusion(
   contextSnapshot: Record<string, unknown>,
   modelImages?: string[],
   onUsage?: (usage: ModelUsage) => void,
+  options?: SafeSynthesisOptions,
 ): Promise<CommanderSynthesizeResult | undefined> {
   if (!commanderTool?.synthesize) return undefined;
   try {
@@ -14012,17 +14048,23 @@ export async function safeSynthesizeConclusion(
       workflowTitle,
       evidence: contextSnapshot,
       ...(modelImages?.length ? { images: modelImages } : {}),
+      ...(options?.directResponse ? { directResponse: true } : {}),
     }, { onUsage });
-    const validated = validateSynthesisResult(result, contextSnapshot);
-    if (!validated) {
-      console.warn(
-        "[synthesis] rejected a model conclusion that was not evidence-bound.",
-      );
+    const evaluation = evaluateSynthesisResult(result, contextSnapshot, {
+      allowEvidenceFreeDirectAnswer: options?.directResponse === true,
+    });
+    if (!evaluation.ok) {
+      const excerpt = evaluation.message.slice(0, 300);
+      const diagnostic = `Commander synthesis rejected (${evaluation.reason}). Draft excerpt: ${excerpt}`;
+      console.warn(`[synthesis] ${diagnostic}`);
+      options?.onDiagnostic?.(diagnostic);
       return undefined;
     }
-    return validated;
+    return { message: evaluation.message };
   } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
     console.error("Commander synthesis failed, falling back to rule-based conclusion:", error);
+    options?.onDiagnostic?.(`Commander synthesis model call failed: ${detail}`);
     return undefined;
   }
 }
@@ -14038,8 +14080,10 @@ export async function safeSynthesizeConclusion(
 export function validateSynthesisConclusion(
   value: unknown,
   evidence: Record<string, unknown>,
+  options?: { allowEvidenceFreeDirectAnswer?: boolean },
 ): CommanderSynthesizeResult | undefined {
-  return validateSynthesisResult(value, evidence);
+  const evaluation = evaluateSynthesisResult(value, evidence, options);
+  return evaluation.ok ? { message: evaluation.message } : undefined;
 }
 
 const MAX_SYNTHESIS_MESSAGE_CHARS = 12_000;
@@ -14117,27 +14161,33 @@ interface SynthesisAnchor {
   value: string;
 }
 
-/** Keep model-written conclusions bounded and reject concrete facts absent from evidence. */
-function validateSynthesisResult(
+/**
+ * Keep model-written conclusions bounded and reject concrete facts absent
+ * from evidence. Evaluation reports WHY a draft was rejected so callers can
+ * surface the reason (and a bounded excerpt) in task logs instead of failing
+ * with a bare "unavailable".
+ */
+function evaluateSynthesisResult(
   value: unknown,
   evidence: Record<string, unknown>,
-): CommanderSynthesizeResult | undefined {
-  if (!isPlainRecord(value) || typeof value.message !== "string") return undefined;
-  const message = redactImageDataUrlsForSummary(value.message).trim();
-  if (
-    !message ||
-    message.length > MAX_SYNTHESIS_MESSAGE_CHARS ||
-    /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/u.test(message)
-  ) {
-    return undefined;
+  options?: { allowEvidenceFreeDirectAnswer?: boolean },
+): { ok: true; message: string } | { ok: false; reason: string; message: string } {
+  const rawMessage = isPlainRecord(value) && typeof value.message === "string"
+    ? value.message
+    : "";
+  if (!isPlainRecord(value) || typeof value.message !== "string") {
+    return { ok: false, reason: "draft was not a text message", message: rawMessage };
   }
-
-  const evidenceText = serializeSynthesisEvidence(evidence);
-  const anchors = extractSynthesisAnchors(message);
-  const unsupportedAnchors = anchors.filter(
-    (anchor) => !synthesisEvidenceContainsAnchor(evidenceText, anchor),
-  );
-  if (unsupportedAnchors.length > 0) return undefined;
+  const message = redactImageDataUrlsForSummary(value.message).trim();
+  if (!message) {
+    return { ok: false, reason: "draft was empty", message };
+  }
+  if (message.length > MAX_SYNTHESIS_MESSAGE_CHARS) {
+    return { ok: false, reason: "draft exceeded the length bound", message };
+  }
+  if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/u.test(message)) {
+    return { ok: false, reason: "draft contained control characters", message };
+  }
 
   const isGenericMessage = SYNTHESIS_GENERIC_MESSAGE_PATTERN.test(message) ||
     SYNTHESIS_DIRECT_GENERIC_PATTERN.test(message) ||
@@ -14146,32 +14196,54 @@ function validateSynthesisResult(
   const isUncertaintyLedMessage = SYNTHESIS_UNCERTAINTY_LEAD_MARKERS.some((marker) =>
     marker.test(message.slice(0, SYNTHESIS_UNCERTAINTY_LEAD_WINDOW_CHARS))
   );
-  // With no trusted evidence there is nothing from which to derive a factual
-  // claim. An acknowledgement or an explicit uncertainty result is safe; a
-  // message that leads with the uncertainty statement is the compliant
-  // explanatory form of the same result.
-  if (
-    !evidenceText &&
-    !SYNTHESIS_EMPTY_EVIDENCE_ACK_PATTERN.test(message) &&
-    !isUncertaintyMessage &&
-    !isUncertaintyLedMessage
-  ) {
-    return undefined;
+
+  const evidenceText = serializeSynthesisEvidence(evidence);
+  if (!evidenceText) {
+    // With no trusted evidence there is nothing from which to derive a
+    // factual claim. An acknowledgement, an explicit uncertainty result, or a
+    // direct_response answer (the plan decided the question needs no
+    // evidence) is in-contract; anything else is rejected.
+    if (
+      options?.allowEvidenceFreeDirectAnswer ||
+      SYNTHESIS_EMPTY_EVIDENCE_ACK_PATTERN.test(message) ||
+      isUncertaintyMessage ||
+      isUncertaintyLedMessage
+    ) {
+      // Anchor checks compare against evidence; with none, every concrete
+      // detail in an in-contract answer would be "unsupported" by
+      // construction, so the gate stops here.
+      return { ok: true, message };
+    }
+    return {
+      ok: false,
+      reason: "no evidence was collected and the draft was neither an acknowledgement, an uncertainty statement, nor a direct_response answer",
+      message,
+    };
   }
 
+  const anchors = extractSynthesisAnchors(message);
+  const unsupportedAnchors = anchors.filter(
+    (anchor) => !synthesisEvidenceContainsAnchor(evidenceText, anchor),
+  );
+  if (unsupportedAnchors.length > 0) {
+    return {
+      ok: false,
+      reason: `draft asserted details absent from evidence (${unsupportedAnchors.slice(0, 3).map((anchor) => anchor.value).join(", ")})`,
+      message,
+    };
+  }
   // A short acknowledgement is not a factual claim. Each unanchored clause
   // must share at least two substantive terms with the evidence; a supported
   // anchor in one clause must not excuse an unrelated claim in another.
   if (
-    evidenceText &&
     !isGenericMessage &&
     !isUncertaintyMessage &&
     hasUnsupportedSynthesisClause(message, evidenceText)
   ) {
-    return undefined;
+    return { ok: false, reason: "draft contained a clause unsupported by the collected evidence", message };
   }
 
-  return { message };
+  return { ok: true, message };
 }
 
 function serializeSynthesisEvidence(value: unknown): string {
