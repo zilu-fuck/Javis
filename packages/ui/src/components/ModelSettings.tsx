@@ -502,6 +502,9 @@ export function ModelSettings({
         apiKey: option.apiKey ?? "",
         hasStoredApiKey: option.hasStoredApiKey,
         contextTokens: option.contextTokens,
+        // A different model has a different output budget; reset the cap so
+        // the provider default applies until the user sets a new one.
+        maxOutputTokens: undefined,
       };
       const inferredProfile = withInferredContextTokens(nextProfile);
       if (!existingProfile) {
@@ -602,6 +605,22 @@ export function ModelSettings({
 
   function selectProvider(provider: string) {
     setSelectedProvider(provider);
+  }
+
+  function updateSlotProfileMaxOutputTokens(slot: WorkbenchModelSlot, raw: string) {
+    setSlotProfiles((current) => {
+      const trimmed = raw.trim();
+      const parsed = trimmed ? Number(trimmed) : undefined;
+      const maxOutputTokens = parsed !== undefined && Number.isFinite(parsed) && parsed > 0
+        ? Math.round(parsed)
+        : undefined;
+      if (!trimmed && !current.some((profile) => profile.slot === slot)) {
+        return current;
+      }
+      return current.map((profile) =>
+        profile.slot === slot ? { ...profile, maxOutputTokens } : profile,
+      );
+    });
   }
 
   function openCustomProviderForm() {
@@ -1915,6 +1934,18 @@ export function ModelSettings({
                                     </div>
                                   ) : null}
                                 </div>
+                              </label>
+                              <label>
+                                <span>{isZh ? "最大输出 tokens（可选）" : "Max output tokens (optional)"}</span>
+                                <input
+                                  aria-label={`${slotLabel} max output tokens`}
+                                  min={64}
+                                  onChange={(event) =>
+                                    updateSlotProfileMaxOutputTokens(slot, event.currentTarget.value)}
+                                  placeholder={isZh ? "留空使用模型默认" : "Blank = provider default"}
+                                  type="number"
+                                  value={profile.maxOutputTokens ?? ""}
+                                />
                               </label>
                               <p className="javis-ai-model-card-meta">
                                 {selectedModel

@@ -123,6 +123,13 @@ export interface ModelProviderSettings {
   apiKeyReference: string;
   baseUrl: string;
   contextWindowTokens?: number;
+  /**
+   * Per-model output cap (max_tokens). DeepSeek-style providers default to a
+   * generous budget (8K non-thinking / 64K thinking) when the request omits
+   * the cap; this setting lets users raise or lower it without touching
+   * call sites. Requests still clamp it to the context window.
+   */
+  maxOutputTokens?: number;
 }
 
 export function createConfiguredModelProvider(settings: ModelSettings): ModelProvider {
@@ -163,6 +170,7 @@ export function createModelProviderFromProfile(
     apiKeyReference: string;
     baseUrl: string;
     contextTokens?: number;
+    maxOutputTokens?: number;
   },
 ): ModelProvider {
   const provider = normalizeProviderForRequest(profile.provider, profile.apiKeyReference);
@@ -174,6 +182,7 @@ export function createModelProviderFromProfile(
     contextWindowTokens: normalizeContextWindowTokens(
       profile.contextTokens ?? inferContextTokensFromModelName(profile.model, provider),
     ),
+    maxOutputTokens: normalizeMaxOutputTokensSetting(profile.maxOutputTokens),
   };
   const adapter = getAdapter(provider);
   return {
@@ -894,7 +903,7 @@ async function createModelRequest(
     stopSequences,
     requestedMaxTokens: options?.useMaxOutputTokens
       ? Number.MAX_SAFE_INTEGER
-      : options?.maxTokens,
+      : options?.maxTokens ?? providerSettings.maxOutputTokens,
     contextWindowTokens: providerSettings.contextWindowTokens,
     imageCount: countUniqueModelImages(options),
   });
@@ -1189,6 +1198,12 @@ function normalizeRequestedOutputTokens(value: number | undefined): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0
     ? Math.floor(value)
     : DEFAULT_MODEL_OUTPUT_TOKENS;
+}
+
+function normalizeMaxOutputTokensSetting(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : undefined;
 }
 
 function normalizeContextWindowTokens(value: number | undefined): number {

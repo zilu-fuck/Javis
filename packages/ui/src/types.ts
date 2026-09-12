@@ -385,6 +385,8 @@ export interface WorkbenchModelProfile {
   hasStoredApiKey?: boolean;
   /** Explicit model context window in tokens when known. */
   contextTokens?: number;
+  /** Optional per-model output cap (max_tokens); unset uses the provider default. */
+  maxOutputTokens?: number;
   capabilities: {
     vision: boolean;
     code: boolean;

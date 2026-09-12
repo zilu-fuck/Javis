@@ -19,6 +19,12 @@ export interface ModelProfile {
   hasStoredApiKey?: boolean;
   baseUrl: string;
   contextTokens?: number;
+  /**
+   * Optional per-model output cap (max_tokens) set in the model editor.
+   * Persisted inside the capabilities JSON column; undefined means the
+   * provider default (for example DeepSeek defaults to 8K non-thinking).
+   */
+  maxOutputTokens?: number;
   capabilities: {
     vision: boolean;
     code: boolean;

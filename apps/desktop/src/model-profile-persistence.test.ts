@@ -140,3 +140,38 @@ function createMemoryProfileDatabase(initialRows: ProfileRow[]) {
   };
   return database;
 }
+
+describe("model profile max output tokens persistence", () => {
+  it("loads and saves the configured max output tokens", async () => {
+    const database = createMemoryProfileDatabase([
+      createProfileRow("deepseek", "deepseek", "deepseek-chat", JSON.stringify({ maxOutputTokens: 16_384 })),
+      createProfileRow("mimo", "mimo", "mimo-v2.5-pro", "{}"),
+    ]);
+
+    const loaded = await createModelProfileRepository(database).load();
+
+    expect(loaded.profiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "deepseek", maxOutputTokens: 16_384 }),
+      expect.objectContaining({ id: "mimo", maxOutputTokens: undefined }),
+    ]));
+
+    const repository = createModelProfileRepository(database);
+    await repository.save([
+      { ...createProfile("deepseek", "deepseek", "deepseek-chat"), maxOutputTokens: 32_768 },
+      createProfile("mimo", "mimo", "mimo-v2.5-pro"),
+    ], {});
+
+    const profileWrites = database.executed.filter((entry) =>
+      entry.sql.includes("INSERT INTO model_profiles"),
+    );
+    const serializedCaps = profileWrites.map((entry) => JSON.parse(String(entry.values[7])));
+    expect(serializedCaps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ maxOutputTokens: 32_768 }),
+      ]),
+    );
+    expect(serializedCaps.find((caps) => caps.maxOutputTokens !== undefined))
+      .toEqual(expect.objectContaining({ maxOutputTokens: 32_768 }));
+    expect(serializedCaps.filter((caps) => caps.maxOutputTokens === undefined)).toHaveLength(1);
+  });
+});

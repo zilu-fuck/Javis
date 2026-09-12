@@ -3165,8 +3165,10 @@ export function createFileScanTaskRuntime({
     };
 
     try {
+      // No per-call maxTokens here: the output budget is governed by the
+      // model profile's maxOutputTokens setting (or the provider default),
+      // not a hardcoded cap that reasoning models would truncate against.
       const chatOptions = {
-        maxTokens: 1200,
         temperature: 0.7,
         locale: isChinese ? "zh-CN" : "en",
         ...(modelImages?.length ? { images: modelImages } : {}),

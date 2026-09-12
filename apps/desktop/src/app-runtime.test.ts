@@ -2371,7 +2371,7 @@ describe("createJavisRuntime", () => {
 
     expect(complete).toHaveBeenCalledWith(
       expect.stringContaining("Previous invalid output:"),
-      expect.objectContaining({ maxTokens: 8192, temperature: 0, locale: "en" }),
+      expect.objectContaining({ useMaxOutputTokens: true, temperature: 0, locale: "en" }),
     );
     const repairPrompt = complete.mock.calls
       .map(([prompt]) => prompt)

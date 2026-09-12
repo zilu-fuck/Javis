@@ -111,6 +111,7 @@ async function loadModelConfiguration(
       apiKeyReference: row.api_key_reference,
       baseUrl: row.base_url,
       contextTokens: parseContextTokens(row.capabilities),
+      maxOutputTokens: parseMaxOutputTokens(row.capabilities),
       capabilities: parseCapabilities(row.capabilities),
     }),
   );
@@ -245,10 +246,23 @@ function parseContextTokens(raw: string): number | undefined {
   }
 }
 
+function parseMaxOutputTokens(raw: string): number | undefined {
+  try {
+    const parsed = JSON.parse(raw);
+    const value = parsed.maxOutputTokens;
+    return typeof value === "number" && Number.isFinite(value) && value > 0
+      ? Math.round(value)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function serializeCapabilities(profile: ModelProfile): string {
   return JSON.stringify({
     ...profile.capabilities,
     ...(profile.contextTokens ? { contextTokens: profile.contextTokens } : {}),
+    ...(profile.maxOutputTokens ? { maxOutputTokens: profile.maxOutputTokens } : {}),
   });
 }
 

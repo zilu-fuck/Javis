@@ -1941,7 +1941,7 @@ export function createJavisRuntime({
             const modelProvider = providerFor("commander", false);
             let fullText = "";
             for await (const chunk of modelProvider.stream(prompt, {
-              maxTokens: 800,
+              useMaxOutputTokens: true,
               temperature: 0.3,
               locale: "zh-CN",
               systemPrompt,
@@ -1968,7 +1968,7 @@ export function createJavisRuntime({
             const result = await completeWithChineseReview(
               prompt,
               {
-                maxTokens: 800,
+                useMaxOutputTokens: true,
                 temperature: 0.3,
                 locale: "zh-CN",
                 systemPrompt,
@@ -3016,7 +3016,7 @@ export function createJavisRuntime({
 
       try {
         const result = await providerFor("commander").complete(prompt, {
-          maxTokens: 1200,
+          useMaxOutputTokens: true,
           temperature: 0,
           locale: replanParams.locale,
           systemPrompt,
@@ -3425,7 +3425,11 @@ type StructuredReviewCompletionOptions = Pick<
 
 async function streamOrCompleteWithReview<T>(
   prompt: string,
-  streamOptions: { maxTokens: number; temperature: number },
+  streamOptions: {
+    maxTokens?: number;
+    useMaxOutputTokens?: boolean;
+    temperature: number;
+  },
   modelProvider: ModelProvider,
   onChunk: (chunk: { text: string }) => void,
   normalize: (value: unknown) => T,
@@ -3484,7 +3488,12 @@ async function streamOrCompleteWithReview<T>(
 async function parseNormalizeWithRepair<T>(
   originalPrompt: string,
   rawText: string,
-  streamOptions: { maxTokens: number; temperature: number; disableThinking?: boolean },
+  streamOptions: {
+    maxTokens?: number;
+    useMaxOutputTokens?: boolean;
+    temperature: number;
+    disableThinking?: boolean;
+  },
   modelProvider: ModelProvider,
   normalize: (value: unknown) => T,
   completionOptions: StructuredReviewCompletionOptions = {},
@@ -3677,7 +3686,7 @@ async function planWithModelProviderStreaming(
 
   return streamOrCompleteWithReview(
     prompt,
-    { maxTokens: 8192, temperature: 0 },
+    { useMaxOutputTokens: true, temperature: 0 },
     modelProvider,
     onChunk,
     (value) => normalizeCommanderPlan(value, validationRequest),

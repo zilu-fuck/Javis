@@ -388,6 +388,38 @@ describe("model provider", () => {
     });
   });
 
+  it("applies the profile max output tokens unless the call overrides the budget", async () => {
+    const provider = createModelProviderFromProfile({
+      id: "profile-budget",
+      provider: "openai",
+      model: "gpt-test",
+      apiKeyReference: "default",
+      baseUrl: "https://api.example.test/v1",
+      contextTokens: 32_000,
+      maxOutputTokens: 9_000,
+    });
+
+    invokeMock.mockResolvedValueOnce({ text: "done", model: "gpt-test", provider: "openai" });
+    await provider.complete("hi");
+    expect(invokeMock).toHaveBeenLastCalledWith("complete_model_prompt", {
+      request: expect.objectContaining({ maxTokens: 9_000 }),
+    });
+
+    invokeMock.mockResolvedValueOnce({ text: "done", model: "gpt-test", provider: "openai" });
+    await provider.complete("hi", { maxTokens: 100 });
+    expect(invokeMock).toHaveBeenLastCalledWith("complete_model_prompt", {
+      request: expect.objectContaining({ maxTokens: 100 }),
+    });
+
+    // useMaxOutputTokens wins and expands to the largest budget that fits
+    // the context window (32_000 - 32 overhead - 1_024 input allowance).
+    invokeMock.mockResolvedValueOnce({ text: "done", model: "gpt-test", provider: "openai" });
+    await provider.complete("hi", { useMaxOutputTokens: true });
+    expect(invokeMock).toHaveBeenLastCalledWith("complete_model_prompt", {
+      request: expect.objectContaining({ maxTokens: 30_944 }),
+    });
+  });
+
   it("keeps explicit memory context in an untrusted user message", async () => {
     invokeMock.mockResolvedValueOnce({
       text: "done",
