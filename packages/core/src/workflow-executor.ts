@@ -14048,6 +14048,34 @@ const SYNTHESIS_UNCERTAINTY_ONLY_PATTERN = /^(?:(?:the|this)\s+(?:answer|result|
 const SYNTHESIS_DIRECT_GENERIC_PATTERN = /^here(?:'s| is) the direct answer[.!。！]?$/iu;
 const SYNTHESIS_STATUS_ACK_PATTERN = /^(?:commander|javis|the assistant)\s+(?:handled|completed|finished|answered)\s+(?:the\s+)?[\p{L}\p{N}_ -]{1,80}(?:task|request|question)[.!。！]?$/iu;
 const SYNTHESIS_EMPTY_EVIDENCE_ACK_PATTERN = /^(?:ok(?:ay)?|here(?:'s| is) (?:(?:the )?(?:direct )?(?:answer|summary))|(?:the )?answer is ready)[.!。！]?$/iu;
+/**
+ * Evidence-free synthesis is only safe when the model reports missing
+ * evidence instead of producing task claims. The synthesis prompt instructs
+ * compliant models to "say what is unknown", so a safe uncertainty answer
+ * LEADS with the uncertainty statement and may then explain or ask for more
+ * input ("目前缺少…证据，因此无法确定…；你可以提供…" / "I don't have enough
+ * evidence to determine X; please provide…"). Detect the lead instead of
+ * matching the whole message: the previous full-match canned phrases
+ * rejected every explanatory uncertainty answer and failed all no-evidence
+ * direct_response steps. Residual risk: a message that leads with
+ * uncertainty and then asserts facts would pass; with evidence present the
+ * clause checks below still apply, and empty evidence only accepts this
+ * because there is nothing to anchor claims against anyway.
+ */
+const SYNTHESIS_UNCERTAINTY_LEAD_MARKERS: readonly RegExp[] = [
+  /(?:缺少|没有|不足|无)(?:相关|任何)?(?:的)?(?:证据|信息|资料|上下文|细节|依据)/u,
+  /证据(?:不足|有限|缺失|尚未)/u,
+  /(?:无法|不能|难以|没法)(?:确定|判断|验证|确认|回答|得出)/u,
+  /(?:不知道|不清楚|不确定)/u,
+  /insufficient\s+(?:evidence|information|context)/iu,
+  /(?:no|not\s+enough|lack(?:ing)?)\s+(?:the\s+)?(?:evidence|information|context|data)/iu,
+  /(?:don't|do\s+not|doesn't|does\s+not|haven't|have\s+not)\s+have\s+(?:enough|any|sufficient|the)\s+(?:evidence|information|context|data)/iu,
+  /unable\s+to\s+(?:determine|verify|answer|confirm)/iu,
+  /cannot\s+(?:determine|verify|confirm)/iu,
+  /(?:i\s+)?(?:don't|do\s+not)\s+know/iu,
+  /not\s+sure/iu,
+];
+const SYNTHESIS_UNCERTAINTY_LEAD_WINDOW_CHARS = 120;
 const SYNTHESIS_NEGATION_WORDS = new Set([
   "not", "no", "never", "none", "neither", "without", "disabled", "failed",
   "rejected", "denied", "unapproved", "missing", "unavailable", "cannot", "can't",
@@ -14107,9 +14135,19 @@ function validateSynthesisResult(
     SYNTHESIS_DIRECT_GENERIC_PATTERN.test(message) ||
     SYNTHESIS_STATUS_ACK_PATTERN.test(message);
   const isUncertaintyMessage = SYNTHESIS_UNCERTAINTY_ONLY_PATTERN.test(message);
+  const isUncertaintyLedMessage = SYNTHESIS_UNCERTAINTY_LEAD_MARKERS.some((marker) =>
+    marker.test(message.slice(0, SYNTHESIS_UNCERTAINTY_LEAD_WINDOW_CHARS))
+  );
   // With no trusted evidence there is nothing from which to derive a factual
-  // claim. Only an acknowledgement or an explicit uncertainty result is safe.
-  if (!evidenceText && !SYNTHESIS_EMPTY_EVIDENCE_ACK_PATTERN.test(message) && !isUncertaintyMessage) {
+  // claim. An acknowledgement or an explicit uncertainty result is safe; a
+  // message that leads with the uncertainty statement is the compliant
+  // explanatory form of the same result.
+  if (
+    !evidenceText &&
+    !SYNTHESIS_EMPTY_EVIDENCE_ACK_PATTERN.test(message) &&
+    !isUncertaintyMessage &&
+    !isUncertaintyLedMessage
+  ) {
     return undefined;
   }
 

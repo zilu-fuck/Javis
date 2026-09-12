@@ -10,6 +10,7 @@ import {
   getWorkbenchWorkflow,
   listWorkbenchWorkflows,
   normalizeTaskProgress,
+  validateSynthesisConclusion,
   TASK_PROGRESS_ITEM_STATUSES,
   TASK_PROGRESS_STATUSES,
   type WorkbenchWorkflow,
@@ -3957,7 +3958,6 @@ describe("createFileScanTaskRuntime", () => {
 
     expect(scanMarkdownDocuments).not.toHaveBeenCalled();
     expect(complete).toHaveBeenCalledWith("浣犲ソ", expect.objectContaining({
-      maxTokens: 1200,
       temperature: 0.7,
       locale: "zh-CN",
       systemPrompt: expect.stringContaining("不要把推测写成事实"),
@@ -4202,7 +4202,6 @@ describe("createFileScanTaskRuntime", () => {
 
     expect(finalSnapshot.id).toBe("task-existing");
     expect(complete).toHaveBeenCalledWith("second question", expect.objectContaining({
-      maxTokens: 1200,
       temperature: 0.7,
       locale: "en",
       systemPrompt: expect.stringMatching(/prior user\/assistant messages[\s\S]*do not present guesses as facts/),
@@ -6496,5 +6495,38 @@ describe("delta-reducer streaming metadata", () => {
     });
     expect(final.commanderMessage).toBe("Based on the evidence, the project is healthy.");
     expect(final.isStreaming).toBe(false);
+  });
+});
+
+describe("validateSynthesisConclusion evidence guard", () => {
+  it("accepts an explanatory uncertainty answer when evidence is empty", () => {
+    // Reproduced from a real qwen3.8-flash synthesis answer that previously
+    // failed the full-match uncertainty pattern and failed the whole
+    // direct_response step ("Evidence-bound Commander synthesis was
+    // unavailable").
+    const message =
+      "目前缺少关于“你”具体指代对象、可用工具或任务上下文的证据，因此无法确定你能做什么。" +
+      "你可以提供目标、场景或可用资源，我再据此说明你能完成哪些事情。";
+    expect(validateSynthesisConclusion({ message }, {})).toMatchObject({ message });
+  });
+
+  it("accepts an English uncertainty answer that leads with missing evidence", () => {
+    const message =
+      "I don't have enough evidence to determine what you can do. " +
+      "Please provide your goal, context, or available resources and I will answer from them.";
+    expect(validateSynthesisConclusion({ message }, {})).toMatchObject({ message });
+  });
+
+  it("still rejects capability claims made without any evidence", () => {
+    const message = "我可以帮你做工作区结构分析、代码搜索与调用、网页检索和定时任务。";
+    expect(validateSynthesisConclusion({ message }, {})).toBeUndefined();
+  });
+
+  it("still applies clause checks to uncertainty-led answers when evidence exists", () => {
+    const evidence = { workspaceSummary: "Rust Tauri desktop app" };
+    const message =
+      "目前缺少完整证据，无法确定全部细节。" +
+      "The warehouse orbits Jupiter at 42 percent capacity every third moon.";
+    expect(validateSynthesisConclusion({ message }, evidence)).toBeUndefined();
   });
 });
