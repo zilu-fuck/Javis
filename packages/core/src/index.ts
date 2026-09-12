@@ -529,6 +529,16 @@ export {
   mergeFailureActions,
 } from "./failure-guidance";
 export {
+  collectFailureCommands,
+  describeFailureActions,
+  primaryFailureAction,
+} from "./failure-actions";
+export type {
+  FailureActionCommand,
+  FailureActionContext,
+  FailureActionDescriptor,
+} from "./failure-actions";
+export {
   HIGH_CONTEXT_UTILIZATION_THRESHOLD,
   LOW_CACHE_HIT_RATE_THRESHOLD,
   computeCacheHitRate,
