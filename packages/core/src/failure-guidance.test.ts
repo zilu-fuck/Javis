@@ -85,6 +85,20 @@ describe("classifyFailureKind", () => {
 });
 
 describe("classifyFailure", () => {
+  it("does not invent a cause for an unclassified failure", () => {
+    // The runtime table this module replaced kept the original wording here. Substituting
+    // a model-specific sentence would misattribute a persistence or provenance failure to
+    // the model, sending the user to debug the wrong subsystem.
+    const guidance = classifyFailureDetail("Error: Durable persistence failed in runtime-event-sink");
+    expect(guidance.kind).toBe("unknown");
+    expect(guidance.message).toBe("Durable persistence failed in runtime-event-sink");
+    // The transport prefix is stripped, not the meaning.
+    expect(classifyFailureDetail("[javis] mismatched provenance").message).toBe("mismatched provenance");
+    // With nothing to quote, the actionable sentence is still better than an empty message.
+    expect(classifyFailureDetail("").message.length).toBeGreaterThan(0);
+    expect(classifyFailureDetail("   ").message.length).toBeGreaterThan(0);
+  });
+
   it("returns a localized message and ordered actions", () => {
     const guidance = classifyFailure(new Error("API Key 验证失败（mimo 返回 401）"));
     expect(guidance.kind).toBe("auth");

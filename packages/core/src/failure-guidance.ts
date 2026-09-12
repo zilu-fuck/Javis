@@ -24,6 +24,7 @@ export type FailureKind =
   | "request_invalid"
   | "tool_schema"
   | "tool_unavailable"
+  | "plan_unparsed"
   | "plan_invalid"
   | "approval_denied"
   | "cancelled"
@@ -126,12 +127,23 @@ const TEMPLATES: Record<FailureKind, FailureTemplate> = {
     actions: ["retry", "switch_model", "open_settings"],
     retryable: true,
   },
+  plan_unparsed: {
+    // Distinct from `plan_invalid`: here the model returned *nothing parseable*, so
+    // "add more detail to the goal" is the right advice. When structure came back but was
+    // illegal, that advice is wrong — which is why these are not one kind.
+    message: {
+      en: "Plan generation failed: the model did not return an executable structured plan. Retry, or add the key details (goal, paths, platform).",
+      zhCN: "计划生成失败：模型没有返回可执行的结构化计划。请重试，或补充目标、路径和平台等关键信息。",
+    },
+    actions: ["retry", "replan", "switch_model"],
+    retryable: true,
+  },
   request_invalid: {
     // Distinct from `plan_invalid`: the *request* never formed (a missing prompt field),
     // so replanning will not help — the model configuration or the caller is at fault.
     message: {
-      en: "The model request was built incompletely, so it never reached the provider. Retry, and if it persists, check the model configuration.",
-      zhCN: "模型请求参数不完整，请求没有成功发出。请重试；如果仍失败，请检查模型配置。",
+      en: "The model request was built incompletely. Retry; if it persists, check the model configuration and update the app.",
+      zhCN: "模型请求参数不完整。请重试当前任务；如果仍失败，请检查模型配置并更新应用。",
     },
     actions: ["retry", "open_settings", "inspect_log"],
     retryable: true,
@@ -229,8 +241,18 @@ const MATCHERS: Array<{ kind: FailureKind; pattern: RegExp }> = [
     pattern: /not in the .*allowlist|not implemented|tool dispatch not implemented|tool .* is not available|unsupported approval|requires approval|工具不可用|未被允许/i,
   },
   {
+    // Before `plan_invalid`: nothing parseable came back, which is a different problem
+    // with different advice.
+    kind: "plan_unparsed",
+    pattern: /did not contain a JSON object|did not contain valid JSON|invalid JSON|(?:returned|contains) no JSON|没有返回可执行的结构化计划|未返回结构化/i,
+  },
+  {
     kind: "plan_invalid",
-    pattern: /plan compilation failed|plan has no capability-tagged steps|commander plan|invalid_plan_shape|plan is not valid|计划未通过/i,
+    // Deliberately requires validation vocabulary. Matching a bare "commander plan"
+    // would classify unrelated failures that merely mention the plan (an MCP allowlist
+    // rejection, for instance) and replace their specific reason with this template —
+    // the same information loss as substituting a cause for an unclassified failure.
+    pattern: /plan compilation failed|has no capability-tagged steps|invalid_plan_shape|plan is not valid|计划未通过校验/i,
   },
   { kind: "approval_denied", pattern: /denied by user|user denied|not approved|未被批准|已拒绝/i },
   { kind: "cancelled", pattern: /cancelled|canceled|aborted|已取消/i },
@@ -273,13 +295,30 @@ function buildGuidance(
 ): FailureGuidance {
   const template = TEMPLATES[kind];
   const locale = options.locale ?? "en";
+  const cleaned = cleanDetail(detail);
+  // An unclassified failure must not claim a cause. The runtime table this module
+  // replaced kept the cleaned detail here, and substituting "the model request failed"
+  // actively misattributes a persistence or provenance failure to the model — the user
+  // then debugs the wrong subsystem. The template is only used when there is nothing to
+  // quote.
+  const message = kind === "unknown" && cleaned.length > 0
+    ? cleaned
+    : template.message[locale];
   return {
     kind,
-    message: template.message[locale],
+    message,
     actions: [...template.actions],
     retryable: template.retryable,
     ...(detail.length > 0 ? { detail } : {}),
   };
+}
+
+/** Strips transport prefixes while keeping the original wording. */
+export function cleanDetail(detail: string): string {
+  return detail
+    .replace(/^Error:\s*/iu, "")
+    .replace(/^\[.*?\]\s*/u, "")
+    .trim();
 }
 
 /** Ordered, de-duplicated actions across several failures. */

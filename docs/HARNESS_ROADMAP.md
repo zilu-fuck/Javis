@@ -308,15 +308,16 @@
   词序一变就掉进 `unknown`。**用户可见文案有变更**：该场景从泛泛的 "model request failed" 变为
   "No model is configured for this task. Choose a provider, model and API key in Settings."——这是 E2 的既定目标（消息必须可行动），
   已更新对应测试断言并注明这是刻意变更
-- [~] **E2c** 合并第三份分类器（`workflow-executor.ts:2193` 的 `toUserFacingError`）——**已完成使这一步变得安全的前置工作**：
-  核查发现**不能直接删表委托**，否则会**丢失信息**——`failure-guidance` 里没有任何分类能命中 `complete_model_prompt`，
-  它会掉到 `unknown`，比原来那句具体的"请求参数不完整"更差。所以先补上：
-  ① 新增 `request_invalid` 分类（含中英双语消息与 `retry`/`open_settings`/`inspect_log` 动作），并**排在 `plan_invalid` 之前**——
-  请求根本没发出去时，重新规划修不了它，把它报成"计划问题"会误导；
-  ② 匹配器补 `complete_model_prompt` / `missing field prompt`（引号三种写法）。
-  剩余工作已很机械：把 `toUserFacingError` 改成委托、**默认 locale 用 `zhCN`**（保持该路径现状），
-  并更新 `index.test.ts` 里两处被钉住的旧中文串（609 行、639 行）。**注意**这两处断言会变，
-  而新文案多了 action 与语言切换，属于刻意的改进，不是回归
+- [x] **E2c** **第三份分类器已合并**（`workflow-executor.ts` 的 `toUserFacingError` 现在委托 `failure-guidance`）：
+  删掉了一张**中文硬编码、无动作、无视语言**的 9 分支匹配表，全仓只剩一个失败分类器（`zhCN` 作默认值以保持该路径现状）。
+  为了让这一步**不丢信息**，先补了两个分类：`request_invalid`（请求根本没发出去，重新规划修不了）、
+  `plan_unparsed`（模型没返回可解析结构，与"结构非法"是两回事、给的建议也不同），并让它们的文案**逐字等于**原表的两句，
+  所以**该路径的用户可见文案零回归**，同时新增了双语与动作。
+  **过程中测试抓出我引入的一个真实回归**：原表的兜底分支会**保留原始错误文本**，而我的 `unknown` 模板会替换成
+  "模型请求失败"——这对一个"持久化写入失败"来说不只是信息更少，而是**把原因归错了子系统**，用户会去查错地方。
+  已修：`unknown` 在能引用原文时**引用原文**（只剥掉 `Error:`/`[tag]` 前缀），只有原文为空时才用模板。这条有专门测试。
+  另有一处测试断言更新属于**刻意改进**（该路径已能分类，用户看到"只返回思考过程、没有最终回答"而不是原始英文 detail；
+  原始 detail 仍保留在 `primaryFailure.message` 上并继续被断言）
 - [ ] **E2d** UI 侧把 `failureGuidance.actions` 渲染成按钮并接线到重试/换模型/打开设置等真实动作（快照字段已就绪）
 - [x] **E3** 结论优先视图（见上方 C5 之后的 E3 行）
 - [x] **E4** 审批中心（同 D5）
@@ -456,6 +457,10 @@ $env:PATH="$env:USERPROFILE\.cargo\bin;C:\Program Files\Git\cmd;$env:PATH"; core
 
 ## 变更记录
 
+- 2026-09-13（第 32 轮，接线切片）：**E2c 完成**——第三份失败分类器合并，全仓只剩一个（中文硬编码/无动作/无视语言的那张表已删除）。
+  为"不丢信息"先补 `request_invalid` 与 `plan_unparsed` 两个分类并把文案设为与原表逐字相同，故该路径**用户可见文案零回归**。
+  测试抓出我引入的真实回归：`unknown` 模板会把"持久化写入失败"说成"模型请求失败"——**归错了子系统**；
+  已改为能引用原文就引用原文（只剥 `Error:`/`[tag]` 前缀）。下一轮：E2d（把 actions 渲染成按钮）。
 - 2026-09-13（第 31 轮，接线切片）：E2c **前置工作**完成——核查发现"删表直接委托"会**丢信息**（`complete_model_prompt` 在
   `failure-guidance` 里无匹配 → 掉到 `unknown`，比原来更差），于是先补 `request_invalid` 分类（双语 + 动作，且排在 `plan_invalid`
   之前，因为请求没发出去时重新规划修不了它）与匹配器。剩余委托工作已很机械，路线图里写明了要改的两处断言与原因。

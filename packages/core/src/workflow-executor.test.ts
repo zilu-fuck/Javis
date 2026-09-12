@@ -11128,7 +11128,10 @@ describe("backend diagnostics and primary failure (plan §13.1)", () => {
       phase: "runtime",
     });
     expect(finalSnapshot?.primaryFailure?.message).toContain("empty response");
-    expect(finalSnapshot?.commanderMessage).toContain("empty response");
+    // E2c: this failure is now classified, so the user-facing message explains the cause
+    // ("reasoning only, no final answer") instead of echoing the raw English detail. The
+    // raw detail is still asserted above, on `primaryFailure`.
+    expect(finalSnapshot?.commanderMessage).toContain("没有最终回答");
   });
 });
 

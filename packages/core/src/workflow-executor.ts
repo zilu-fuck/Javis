@@ -56,6 +56,9 @@ import {
 import {
   assertToolCallAllowedByHooks,
 } from "./config/hooks";
+// E2c: one failure classifier for the whole runtime (was a second table in this file).
+import { classifyFailureDetail } from "./failure-guidance";
+import type { FailureLocale } from "./failure-guidance";
 import {
   createDefaultAgentRegistry,
   demoAgents,
@@ -2187,51 +2190,16 @@ interface AllCapabilityTools {
 
 /** Find the first ToolDescriptor whose capabilityTags include the given tag. */
 /**
- * Map technical error messages to user-readable Chinese/English strings.
- * Avoids exposing raw stack traces and internal jargon to the user.
+ * Map technical error messages to user-readable strings.
+ *
+ * E2c: this used to be a third, independent matching table — Chinese-only, ignoring the
+ * locale, and producing no actions. It now delegates to the single classifier, which is a
+ * superset of what this table covered (`request_invalid` and `plan_unparsed` were added to
+ * keep the two path-specific messages this table had). The `zhCN` default preserves the
+ * current behaviour on this path; callers that know the locale should pass it.
  */
-function toUserFacingError(errorMsg: string): string {
-  if (
-    errorMsg.includes("complete_model_prompt") ||
-    errorMsg.includes("missing field `prompt`") ||
-    errorMsg.includes("missing field 'prompt'")
-  ) {
-    return "模型请求参数不完整。请重试当前任务；如果仍失败，请检查模型配置并更新应用。";
-  }
-  if (
-    errorMsg.includes("did not contain a JSON object") ||
-    errorMsg.includes("valid JSON") ||
-    errorMsg.includes("invalid JSON")
-  ) {
-    return "计划生成失败：模型没有返回可执行的结构化计划。请重试，或补充目标、路径和平台等关键信息。";
-  }
-  if (errorMsg.includes("API key") || errorMsg.includes("unauthorized") || errorMsg.includes("401")) {
-    return "API 密钥无效或已过期，请在设置中更新密钥。";
-  }
-  if (errorMsg.includes("timeout") || errorMsg.includes("Timed out")) {
-    return "操作超时，请检查网络连接后重试。";
-  }
-  if (errorMsg.includes("rate") || errorMsg.includes("429")) {
-    return "请求频率过高，请稍后重试。";
-  }
-  if (errorMsg.includes("Unsupported workflow step")) {
-    return "任务步骤无法执行，请尝试重新描述你的需求。";
-  }
-  if (errorMsg.includes("Workflow deadlock")) {
-    return "任务步骤存在循环依赖，请用不同的方式重新描述目标。";
-  }
-  if (errorMsg.includes("not available")) {
-    return "所需工具不可用，部分功能需要特定配置。";
-  }
-  if (errorMsg.includes("denied")) {
-    return "操作已被取消。";
-  }
-  // Fallback: strip technical prefixes but keep the core message
-  const cleaned = errorMsg
-    .replace(/^Error:\s*/i, "")
-    .replace(/^\[.*?\]\s*/, "")
-    .trim();
-  return cleaned.length > 0 ? cleaned : "任务执行出错，请重试。";
+function toUserFacingError(errorMsg: string, locale: FailureLocale = "zhCN"): string {
+  return classifyFailureDetail(errorMsg, { locale }).message;
 }
 
 function normalizeAskUserPromptForUserLanguage(
