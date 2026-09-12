@@ -543,6 +543,21 @@ export type {
 export { diagnoseSetup } from "./setup-diagnostics";
 export { planResume } from "./resume-plan";
 export { decideAgentRouting, describeRoutingDecision } from "./routing-decision";
+export {
+  commandLabel,
+  isSubsequence,
+  listPaletteCommands,
+  scoreCommandMatch,
+  unavailableReason,
+} from "./command-palette";
+export type {
+  PaletteCommand,
+  PaletteContext,
+  PaletteEntry,
+  PaletteListing,
+  PaletteLocale,
+  PaletteUnavailable,
+} from "./command-palette";
 export type {
   CandidateEvaluation,
   RoutingCandidate,
