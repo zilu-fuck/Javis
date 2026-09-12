@@ -204,8 +204,7 @@
   已知的那一处用**带理由的允许清单**容忍并只报 warning。**实测过它会失败**：注入一个 `import * as fs from "node:fs"` 的探针文件后
   如实报 ERROR 且非零退出，删除后恢复 0。
 - [ ] **G2c** 前端首屏懒加载（把只在一部分功能里用到的依赖改为动态 import）——**G2b 已完成**，本条可据此继续
-- [ ] **B4b/B4c 继续拆巨石的接缝已用实测选出**（`pnpm extraction:analyze`，新增 `scripts/analyze-extraction.mjs`）。
-  该脚本对目标文件里每个大函数统计"它引用了多少个**同文件私有声明**"——因为把一个函数搬出去是否安全，
+- [ ] **B4b/B4c 继续拆巨石的接缝已用实测选出**（`pnpm extraction:analyze`，新增 `scripts/analyze-extraction.mjs`）。  该脚本对目标文件里每个大函数统计"它引用了多少个**同文件私有声明**"——因为把一个函数搬出去是否安全，
   取决于它有没有缠在一堆私有 helper 上。实测 `workflow-executor.ts`（**14,818 行 / 357 个顶层声明**）：
 
   | 函数 | 行数 | 私有依赖数 |
@@ -225,6 +224,19 @@
   而 `runCommanderDagTask` 有 **115** 个私有依赖，**不能**整体搬——它必须先按职责拆成多个内部函数。
   **本轮没有执行这次搬迁**：会话已到后段、剩余上下文有限，而一次约 1,343 行的搬移需要脚本化的文本改写与多轮验证；
   在此状态下动手，失手就是留下坏掉的树。分析结论已固化为脚本（可重复、可验证），搬迁是明确的下一步。
+
+  **⚠️ 本轮实际尝试过一次并已回滚，教训值得记（下一刀请先读这段）**：
+  我用一个一次性脚本（`.dsh-tmp/extract-dag-steps.mjs`，未提交）真的搬了 **17 个声明 / 1,496 行**，
+  源文件 14,818 → 13,340 行，dry-run 与写入都成功。但 **typecheck 报出 50 个错误 / 12 个未解析名字**，我**回滚**了
+  （`git checkout` + 删除新文件，回滚后 typecheck 0、工作树干净）。
+  **根因：`analyze-extraction.mjs` 的依赖计数是低估的**——它只统计"像调用一样被使用的同文件声明"，漏掉了三类真实依赖：
+  ① **模块私有常量**（`FILE_WRITE_TEXT_CONTENT_KEYS`、`FILE_WRITE_TEXT_CONTROL_INPUT_KEYS`）；
+  ② **模块私有 helper**（`buildMarkdownFromWriteEvidence`、`isPlainRecord`）；
+  ③ **type-only 导入**（`SharedTaskContext`、`TaskRuntimeEvent`、`PermissionDecision`）。
+  另有导出名在生成文件里**明明存在却仍报未解析**的现象（`GIT_*_TOOL_NAME`、`FILE_WRITE_TEXT_TOOL_NAME`），
+  这一点我在预算内**没有查出原因**，如实记录。
+  **下一刀的正确前置工作**：把 `analyze-extraction.mjs` 升级为计算**传递闭包**（私有函数 + 私有常量 + 私有类型），
+  并用"词边界精确匹配标识符位置"而不是子串来筛选导入——之后再执行搬迁，否则必然重现这类失败。
 - [ ] **B5** `RuntimeEvent` / `ArtifactEnvelope` / `SharedContext` / `WorkflowCheckpoint` 收敛成一份与代码对齐的对外契约（`docs/CORE_CONTRACTS.md`）
 - [ ] **B6** preset 提升为一等公民（agents + tools + 权限策略 + 模型槽 + 提示词版本，可导入导出 / A-B）
 
@@ -593,6 +605,12 @@ $env:PATH="$env:USERPROFILE\.cargo\bin;C:\Program Files\Git\cmd;$env:PATH"; core
 
 ## 变更记录
 
+- 2026-09-13（第 41 轮，工程）：**尝试了一次实测选中的巨石搬迁并回滚**。用一次性脚本真的搬了 17 个声明 / 1,496 行
+  （14,818 → 13,340 行），dry-run 与写入都成功，但 typecheck 报 50 错 / 12 个未解析名字，于是 `git checkout` 回滚，
+  回滚后 typecheck 0、工作树干净。**根因：`analyze-extraction.mjs` 的依赖计数是低估的**——它漏掉了模块私有常量、
+  私有 helper 与 type-only 导入三类真实依赖（`FILE_WRITE_TEXT_CONTENT_KEYS`、`isPlainRecord`、`SharedTaskContext`…），
+  另有一个"导出名存在却仍报未解析"的现象未查明原因。**下一步前置工作已写明**：把分析器升级为传递闭包 + 词边界精确匹配。
+  这次失败的价值在于：它把"为什么不能靠肉眼判断内聚"变成了一条可复现的教训，而不是一次静默的半成品。
 - 2026-09-13（第 40 轮，工程）：为"下一刀切哪里"做了**实测选缝**（新增 `scripts/analyze-extraction.mjs`，`pnpm extraction:analyze`）：
   统计每个大函数引用了多少**同文件私有声明**。实测 `workflow-executor.ts`（14,818 行 / 357 个顶层声明）——
   `runCommanderDagTask` **3,925 行占全文件 26% 且缠着 115 个私有依赖**（不能整体搬），
