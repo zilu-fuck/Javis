@@ -544,6 +544,23 @@ export { diagnoseSetup } from "./setup-diagnostics";
 export { planResume } from "./resume-plan";
 export { decideAgentRouting, describeRoutingDecision } from "./routing-decision";
 export {
+  addStep,
+  collectDependentSteps,
+  findEntrySteps,
+  removeStep,
+  renameStepId,
+  topologicalStepOrder,
+  updateDependencies,
+  validateWorkflowGraph,
+} from "./workflow-editing";
+export type {
+  EditableStep,
+  EditableWorkflow,
+  WorkflowDiagnostic,
+  WorkflowDiagnosticCode,
+  WorkflowEditResult,
+} from "./workflow-editing";
+export {
   BUILTIN_UI_PREFERENCES,
   RESERVED_SHORTCUTS,
   detectShortcutConflicts,
