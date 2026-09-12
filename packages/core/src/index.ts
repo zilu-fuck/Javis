@@ -3594,10 +3594,14 @@ export function createFileScanTaskRuntime({
         throw error;
       }
       const recoveredMessages = await createRecoveredContextMessages({
-        messages: input.priorMessages,
+        messages: input.modelMessages,
         summaryTool: input.activeChatTool,
         locale: input.options.locale,
         recentRounds: 5,
+        // P1-8 warm replay: the summary request reuses the same chat system
+        // prompt and replays the earlier window turns as quoted history, so
+        // it hits the provider prefix cache instead of paying full price.
+        systemPrompt: createGeneralChatSystemPrompt(input.isChinese),
         timeoutMs: input.timeoutMs,
       });
       return completeGeneralChat(
