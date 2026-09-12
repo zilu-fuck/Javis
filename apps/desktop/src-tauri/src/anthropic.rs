@@ -68,7 +68,7 @@ pub(crate) fn build_anthropic_completion_body(
         "stream": false,
     });
     if let Some(system_prompt) = crate::trimmed_non_empty(request.system_prompt.as_deref()) {
-        body["system"] = serde_json::json!(system_prompt);
+        body["system"] = anthropic_system_body_value(system_prompt, request.provider_id.as_deref());
     }
     if let Some(temperature) = request.temperature {
         body["temperature"] = serde_json::json!(temperature);
@@ -94,7 +94,7 @@ fn build_anthropic_stream_body(
         "stream": true,
     });
     if let Some(system_prompt) = crate::trimmed_non_empty(request.system_prompt.as_deref()) {
-        body["system"] = serde_json::json!(system_prompt);
+        body["system"] = anthropic_system_body_value(system_prompt, request.provider_id.as_deref());
     }
     if let Some(temperature) = request.temperature {
         body["temperature"] = serde_json::json!(temperature);
@@ -104,6 +104,24 @@ fn build_anthropic_stream_body(
         body["stop_sequences"] = serde_json::json!(stop_sequences);
     }
     Ok(body)
+}
+
+/// Anthropic caches only up to an explicit `cache_control` breakpoint. One
+/// ephemeral breakpoint on the system block covers the static prefix
+/// (tools + system) without evicting message-level reuse. Providers behind
+/// the Anthropic protocol other than the official API (for example
+/// DeepSeek's compatibility endpoint) keep the plain-string system form —
+/// their tolerance for cache_control is unverified.
+fn anthropic_system_body_value(system_prompt: &str, provider_id: Option<&str>) -> serde_json::Value {
+    if provider_id == Some("anthropic") {
+        serde_json::json!([{
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": { "type": "ephemeral" },
+        }])
+    } else {
+        serde_json::Value::String(system_prompt.to_string())
+    }
 }
 
 fn build_anthropic_message_content(
@@ -523,10 +541,27 @@ fn extract_anthropic_stream_usage(value: &serde_json::Value) -> Option<ModelUsag
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_anthropic_stream_usage, format_anthropic_stream_error,
+        anthropic_system_body_value, extract_anthropic_stream_usage, format_anthropic_stream_error,
         validate_anthropic_stream_completion,
     };
     use super::extract_anthropic_usage;
+
+    #[test]
+    fn system_body_value_carries_breakpoint_only_for_official_anthropic() {
+        let block = anthropic_system_body_value("static policy", Some("anthropic"));
+        assert_eq!(block[0]["type"], "text");
+        assert_eq!(block[0]["text"], "static policy");
+        assert_eq!(block[0]["cache_control"]["type"], "ephemeral");
+
+        assert_eq!(
+            anthropic_system_body_value("static policy", Some("deepseek-anthropic")),
+            serde_json::json!("static policy")
+        );
+        assert_eq!(
+            anthropic_system_body_value("static policy", None),
+            serde_json::json!("static policy")
+        );
+    }
 
     #[test]
     fn normalizes_anthropic_usage_to_total_input_with_cache_fields() {

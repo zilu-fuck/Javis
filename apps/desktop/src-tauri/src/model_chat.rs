@@ -1463,7 +1463,10 @@ fn build_anthropic_chat_body(
         "stream": stream,
     });
     if !system.is_empty() {
-        body["system"] = serde_json::Value::String(system);
+        // Cache breakpoint (P2-12): covers tools + system for the official
+        // Anthropic API; other Anthropic-protocol providers keep the plain
+        // string form (cache_control tolerance unverified there).
+        body["system"] = anthropic_chat_system_value(&system, request.provider_id.as_deref());
     }
     if let Some(temperature) = request.temperature {
         body["temperature"] = serde_json::json!(temperature);
@@ -1494,8 +1497,22 @@ fn build_anthropic_chat_body(
     Ok(body)
 }
 
-fn anthropic_message_value(message: &ModelChatMessage) -> Result<serde_json::Value, String> {
-    match message {
+/// System block with a cache breakpoint for the official Anthropic API;
+/// plain string for other Anthropic-protocol providers (unverified
+/// cache_control tolerance there).
+fn anthropic_chat_system_value(system: &str, provider_id: Option<&str>) -> serde_json::Value {
+    if provider_id == Some("anthropic") {
+        serde_json::json!([{
+            "type": "text",
+            "text": system,
+            "cache_control": { "type": "ephemeral" },
+        }])
+    } else {
+        serde_json::Value::String(system.to_string())
+    }
+}
+
+fn anthropic_message_value(message: &ModelChatMessage) -> Result<serde_json::Value, String> {    match message {
         ModelChatMessage::User { content } => Ok(serde_json::json!({
             "role": "user",
             "content": anthropic_content_value(content)?,
@@ -2351,6 +2368,29 @@ fn request(protocol: &str) -> ModelChatRequest {
         let parsed = parse_anthropic_chat_response(&response, &request).expect("response");
         assert_eq!(parsed.message.tool_calls[0].id, "toolu-2");
         assert!(matches!(parsed.finish_reason, ModelFinishReason::ToolCalls));
+    }
+
+    #[test]
+    fn anthropic_chat_body_adds_cache_breakpoint_for_official_provider_only() {
+        let system_message = || ModelChatMessage::System {
+            content: vec![ModelContentBlock::Text {
+                text: "static policy".to_string(),
+            }],
+        };
+
+        let mut official_request = request("anthropic");
+        official_request.messages.insert(0, system_message());
+        let body = build_anthropic_chat_body("test-model", &official_request, false).expect("body");
+        assert_eq!(body["system"][0]["type"], "text");
+        assert_eq!(body["system"][0]["text"], "static policy");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+
+        let mut deepseek_request = request("anthropic");
+        deepseek_request.provider_id = Some("deepseek-anthropic".to_string());
+        deepseek_request.messages.insert(0, system_message());
+        let plain_body =
+            build_anthropic_chat_body("test-model", &deepseek_request, false).expect("body");
+        assert_eq!(plain_body["system"], serde_json::json!("static policy"));
     }
 
     #[test]
