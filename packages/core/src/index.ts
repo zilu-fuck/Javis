@@ -541,6 +541,14 @@ export type {
   UsagePricing,
 } from "./usage-panel";
 export { diagnoseSetup } from "./setup-diagnostics";
+export { planResume } from "./resume-plan";
+export type {
+  ResumeCheckpointState,
+  ResumeMode,
+  ResumePlan,
+  ResumePlanInput,
+  ResumeStep,
+} from "./resume-plan";
 export {
   DEFAULT_MAX_PREFIX_TOOLS,
   DEFAULT_MIN_CALLS_TO_KEEP,
