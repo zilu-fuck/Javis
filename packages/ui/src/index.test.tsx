@@ -4003,10 +4003,8 @@ describe("JavisWorkbench permission cards", () => {
       target: { value: "Commit changes" },
     });
 
-    const prepareCommitButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.trim() === "Prepare commit" && !button.disabled);
-    expect(prepareCommitButton).toBeDefined();
-    fireEvent.click(prepareCommitButton!);
+    const prepareCommitButton = await findEnabledButtonByLabel(view.container, "Prepare commit");
+    fireEvent.click(prepareCommitButton);
     await waitFor(() => expect(onPlan).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: "thread-1:task-git-commit",
       workspaceRoot: "E:/Javis",
@@ -4014,10 +4012,8 @@ describe("JavisWorkbench permission cards", () => {
     }), "Commit changes"));
     expect(view.container.textContent).toContain("Pending Commit Approval");
 
-    const approveCommitButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.trim() === "Approve and commit" && !button.disabled);
-    expect(approveCommitButton).toBeDefined();
-    fireEvent.click(approveCommitButton!);
+    const approveCommitButton = await findEnabledButtonByLabel(view.container, "Approve and commit");
+    fireEvent.click(approveCommitButton);
     await waitFor(() => expect(onExecute).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: "thread-1:task-git-commit",
       workspaceRoot: "E:/Javis",
@@ -4105,10 +4101,8 @@ describe("JavisWorkbench permission cards", () => {
     fireEvent.click(checkboxes[1]);
     await waitFor(() => expect(checkboxes[1].checked).toBe(false));
 
-    const prepareStageButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.trim() === "Prepare stage" && !button.disabled);
-    expect(prepareStageButton).toBeDefined();
-    fireEvent.click(prepareStageButton!);
+    const prepareStageButton = await findEnabledButtonByLabel(view.container, "Prepare stage");
+    fireEvent.click(prepareStageButton);
     await waitFor(() => expect(onPlan).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: "thread-1:task-git-stage",
       workspaceRoot: "E:/Javis",
@@ -4116,10 +4110,8 @@ describe("JavisWorkbench permission cards", () => {
     }), ["README.md"]));
     expect(view.container.textContent).toContain("Pending Stage Approval");
 
-    const approveStageButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.trim() === "Approve and stage" && !button.disabled);
-    expect(approveStageButton).toBeDefined();
-    fireEvent.click(approveStageButton!);
+    const approveStageButton = await findEnabledButtonByLabel(view.container, "Approve and stage");
+    fireEvent.click(approveStageButton);
     await waitFor(() => expect(onExecute).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: "thread-1:task-git-stage",
       workspaceRoot: "E:/Javis",
@@ -4211,10 +4203,8 @@ describe("JavisWorkbench permission cards", () => {
       target: { value: "Summarizes the README update." },
     });
 
-    const preparePullRequestButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.trim() === "Prepare PR" && !button.disabled);
-    expect(preparePullRequestButton).toBeDefined();
-    fireEvent.click(preparePullRequestButton!);
+    const preparePullRequestButton = await findEnabledButtonByLabel(view.container, "Prepare PR");
+    fireEvent.click(preparePullRequestButton);
     await waitFor(() => expect(onPlan).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: "thread-1:task-git-pr",
       workspaceRoot: "E:/Javis",
@@ -4227,10 +4217,8 @@ describe("JavisWorkbench permission cards", () => {
     }));
     expect(view.container.textContent).toContain("Pending PR Approval");
 
-    const approvePullRequestButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.trim() === "Approve and create PR" && !button.disabled);
-    expect(approvePullRequestButton).toBeDefined();
-    fireEvent.click(approvePullRequestButton!);
+    const approvePullRequestButton = await findEnabledButtonByLabel(view.container, "Approve and create PR");
+    fireEvent.click(approvePullRequestButton);
     await waitFor(() => expect(onExecute).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: "thread-1:task-git-pr",
       workspaceRoot: "E:/Javis",
@@ -4344,10 +4332,8 @@ describe("JavisWorkbench permission cards", () => {
     }));
     expect(view.container.textContent).toContain("Pending PR Comment Approval");
 
-    const approveCommentButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")]
-      .find((button) => button.textContent?.trim() === "Approve and post comment" && !button.disabled);
-    expect(approveCommentButton).toBeDefined();
-    fireEvent.click(approveCommentButton!);
+    const approveCommentButton = await findEnabledButtonByLabel(view.container, "Approve and post comment");
+    fireEvent.click(approveCommentButton);
     await waitFor(() => expect(onExecute).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: "thread-1:task-git-pr-comment",
       workspaceRoot: "E:/Javis",
@@ -5358,6 +5344,30 @@ function getEnabledButton(container: HTMLElement, selector: string): HTMLButtonE
     throw new Error(`No enabled button found for ${selector}`);
   }
   return button;
+}
+
+/**
+ * Waits for a button with this exact label to exist *and* be enabled.
+ *
+ * The approval-card tests previously waited on a proxy — the panel's text appearing —
+ * and then looked up the enabled button synchronously. The panel renders before its
+ * button is enabled, so those tests failed intermittently (observed once under full-suite
+ * load, then passing in isolation). Waiting on the actual precondition removes the race
+ * and produces a clearer failure than `expect(...).toBeDefined()` when a button never
+ * appears.
+ */
+async function findEnabledButtonByLabel(
+  container: HTMLElement,
+  label: string,
+): Promise<HTMLButtonElement> {
+  return await waitFor(() => {
+    const button = Array.from(container.querySelectorAll<HTMLButtonElement>("button"))
+      .find((candidate) => candidate.textContent?.trim() === label && !candidate.disabled);
+    if (!button) {
+      throw new Error(`No enabled button labelled "${label}" yet`);
+    }
+    return button;
+  });
 }
 
 function clickResourceTab(container: HTMLElement, label: string): void {
