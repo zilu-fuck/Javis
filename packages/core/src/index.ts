@@ -544,6 +544,21 @@ export { diagnoseSetup } from "./setup-diagnostics";
 export { planResume } from "./resume-plan";
 export { decideAgentRouting, describeRoutingDecision } from "./routing-decision";
 export {
+  AGENT_PROMPT_LARGE_CHARS,
+  DEFAULT_AGENT_CONTEXT_BUDGET_TOKENS,
+  DEFAULT_AGENT_MAX_TURNS,
+  effectivePermissionCeiling,
+  previewAgentView,
+  validateAgentDraft,
+} from "./agent-customization";
+export type {
+  AgentDraft,
+  AgentDraftDiagnostic,
+  AgentPreviewLocale,
+  AgentViewPreview,
+  PreviewToolSource,
+} from "./agent-customization";
+export {
   commandLabel,
   isSubsequence,
   listPaletteCommands,

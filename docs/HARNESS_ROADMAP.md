@@ -166,7 +166,15 @@
 - [x] **C1b** 桌面侧加载器：Rust `load_javis_config_files` 读 `<workspace>/.javis/config.json` 与 `<config dir>/javis/config.json`
   （**先 canonicalize 再做包含性检查**，符号链接逃逸会被拒；256KB 上限；缺文件不是错误），TS 侧只做解析与合并；
   已接入 App 启动链（配置问题只产诊断，绝不让启动失败）。5 个 Rust 测试 + 8 个 TS 测试
-- [ ] **C2** Agent 定制面板（人格 / 模型 / 工具白名单 / 权限上限 / 上下文预算 / 最大轮次）+ 实时预览它能看到什么
+- [x] **C2** Agent 定制面板**核心**（`packages/core/src/agent-customization.ts`，18 测试）：草稿校验 + **"这个 agent 到底能看到什么"的实时预览**。
+  预览刻意用**生效后**的配置算（与运行时同一套输入），这样"它会看到什么"只有一个答案，而不是两个会互相矛盾的答案。
+  要点：
+  ① **不变量沿用 B3**——agent 只能收紧自己的权限，**永远不能超过宿主上限**（生效上限 = min(草稿声明, 宿主)，越界给警告且宿主限制生效）；
+  ② **显式空 allowlist = 没有工具，`undefined` = 全部工具**（这个区分有专门测试钉住——把 `[]` 当成"无限制"是很容易犯的错）；
+  ③ denylist 恒胜过 allowlist；被撤回的工具**逐条给出原因**（在拒绝名单 / 不在允许名单 / 需要 X 权限超过上限 Y）；
+  ④ 点名了本版本不存在的工具 → 警告（它永远不会被调用）；只有一种语言的人格 → 警告；预算/轮次非正整数 → 错误；
+  ⑤ 组装出的提示词**写明生效后的权限上限、上下文预算、最大轮次**，过长时警告（每轮都会重复的东西）
+- [ ] **C2b** 面板 UI（核心校验与预览就绪，尚未接线）
 - [x] **C3** Skill / 知识包（`config/skill-frontmatter.ts` + 接线，14 测试）：**先按你要求用仓库自带 Playwright 做了外部核对**
   （`code.claude.com/docs/en/skills`），确认了真实约定：`SKILL.md` + YAML frontmatter（`name`/`description` 属于 Agent Skills 开放标准，
   `allowed-tools`/`disable-model-invocation`/`argument-hint` 是扩展）、描述驱动自动选择、**清单文本上限 1,536 字符**、正文按需加载。
@@ -404,6 +412,10 @@ $env:PATH="$env:USERPROFILE\.cargo\bin;C:\Program Files\Git\cmd;$env:PATH"; core
 
 ## 变更记录
 
+- 2026-09-13（第 25 轮，批次⑦）：C2 Agent 定制核心（18 测试）：草稿校验 + "它到底能看到什么"的预览（用生效后的配置算，
+  与运行时同一套输入）。沿用了 B3 的不变量：**agent 只能收紧权限，永远不能超过宿主上限**。
+  修掉自己两处测试写错：按索引取撤回工具（应**按名字查**——撤回列表跟随注册表顺序，index 0 是另一个工具）、
+  以及把可用工具数算成 2（实际 3——两个 confirmed_write 加一个 read 在 confirmed_write 上限下都可用）。
 - 2026-09-13（第 24 轮，批次⑦）：E6 命令面板核心（23 测试）。修掉自己一处**自相矛盾**：未指定权限等级时我默认成 `read`，
   把写命令全灰掉，违背了我给其它标志定的"未知不等于 false"规则。新增 id 前缀匹配分级（`file.w` → `file.write`）。
   另外在路线图补了**交接说明**一节：验证命令、环境坑（PATH/中文输出/shell 改源码会毁 UTF-8）、剩余项分类与已建立的约定。
