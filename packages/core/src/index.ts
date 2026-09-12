@@ -542,6 +542,34 @@ export type {
 } from "./usage-panel";
 export { diagnoseSetup } from "./setup-diagnostics";
 export {
+  DEFAULT_MAX_PREFIX_TOOLS,
+  DEFAULT_MIN_CALLS_TO_KEEP,
+  diffToolPrefix,
+  planToolDeferral,
+  searchDeferredTools,
+} from "./tool-deferral";
+export type {
+  DeferrableTool,
+  DeferredToolMatch,
+  ToolDeferralPolicy,
+  ToolDeferralResult,
+  ToolPrefixDiff,
+} from "./tool-deferral";
+export {
+  DEFAULT_CONCLUSION_MAX_CHARS,
+  DEFAULT_MAX_BULLETS,
+  buildConclusionView,
+  truncateAtSentence,
+} from "./conclusion-view";
+export type {
+  ConclusionEvidenceItem,
+  ConclusionLocale,
+  ConclusionStatus,
+  ConclusionStepSummary,
+  ConclusionView,
+  ConclusionViewInput,
+} from "./conclusion-view";
+export {
   compareVersions,
   decideUpdate,
   isWellFormedSha256,
