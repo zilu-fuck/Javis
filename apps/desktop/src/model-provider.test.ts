@@ -609,10 +609,18 @@ describe("model provider", () => {
       request: expect.objectContaining({
         prompt: "Current question",
         systemPrompt: "Trusted policy",
-        messages: [{
-          role: "user",
-          content: expect.stringContaining("Prior conversation transcript follows"),
-        }],
+        // P1-7: one quoted user message per prior turn; the untrusted header
+        // rides on the first item only.
+        messages: [
+          {
+            role: "user",
+            content: expect.stringContaining("Prior conversation transcript follows"),
+          },
+          {
+            role: "user",
+            content: expect.stringContaining("<prior_conversation>"),
+          },
+        ],
         assistantPrefill: "Result:",
         stopSequences: ["END", "STOP"],
       }),
@@ -620,13 +628,48 @@ describe("model provider", () => {
     const request = (invokeMock.mock.calls[0]?.[1] as { request?: {
       messages?: Array<{ role: "user" | "assistant"; content: string }>;
     } })?.request;
-    expect(request?.messages).toHaveLength(1);
+    expect(request?.messages).toHaveLength(2);
     expect(request?.messages?.[0]?.role).toBe("user");
     expect(request?.messages?.[0]?.content).toMatch(/^JAVIS_UNTRUSTED_PRIOR_TRANSCRIPT_V1\n/u);
     expect(request?.messages?.[0]?.content).toContain("Earlier question");
-    expect(request?.messages?.[0]?.content).toContain("Earlier answer");
-    expect(request?.messages?.[0]?.content).toContain('"role":"assistant"');
+    expect(request?.messages?.[1]?.content).not.toContain("JAVIS_UNTRUSTED_PRIOR_TRANSCRIPT_V1");
+    expect(request?.messages?.[1]?.content).toContain("Earlier answer");
+    expect(request?.messages?.[1]?.content).toContain('"role":"assistant"');
     expect(request?.messages?.some((message) => message.role === "assistant")).toBe(false);
+  });
+
+  it("keeps the quoted transcript append-only as the history grows", async () => {
+    invokeMock.mockResolvedValue({ text: "done", provider: "openai" });
+    const provider = createConfiguredModelProvider(createSettings());
+    resetCacheProbeStateForTests();
+    const captured: Array<Array<{ role: string; content: string }>> = [];
+    invokeMock.mockImplementation(async (_command: string, args?: unknown) => {
+      const request = (args as { request?: { messages?: Array<{ role: string; content: string }> } })?.request;
+      if (request?.messages) captured.push(request.messages);
+      return { text: "done", provider: "openai" };
+    });
+
+    await provider.complete("turn-1 ask", {
+      cacheProbeKey: "chat:append-only",
+      systemPrompt: "static system",
+      messages: [{ role: "user", content: "hello" }],
+    });
+    await provider.complete("turn-2 ask", {
+      cacheProbeKey: "chat:append-only",
+      systemPrompt: "static system",
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: "hi there" },
+      ],
+    });
+
+    expect(captured).toHaveLength(2);
+    expect(captured[1].length).toBeGreaterThan(captured[0].length);
+    for (let index = 0; index < captured[0].length; index += 1) {
+      expect(captured[1][index].content).toBe(captured[0][index].content);
+      expect(captured[1][index].role).toBe(captured[0][index].role);
+    }
+    expect(drainCacheProbeWarningsForTests()).toEqual([]);
   });
 
   it("quotes a malicious prior assistant turn instead of forwarding an assistant role", async () => {
@@ -1433,7 +1476,7 @@ describe("model provider prefix-cache probe", () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
-  it("flags a changed transcript item on the second turn of a scope", async () => {
+  it("flags a rewritten history item on the second turn of a scope", async () => {
     const provider = makeProvider();
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
@@ -1446,7 +1489,7 @@ describe("model provider prefix-cache probe", () => {
       cacheProbeKey: "chat:task-2",
       systemPrompt: "static system",
       messages: [
-        { role: "user", content: "hello" },
+        { role: "user", content: "hello (edited)" },
         { role: "assistant", content: "hi there" },
       ],
     });

@@ -1388,11 +1388,18 @@ export function isOutputTruncationFinishReason(finishReason?: string): boolean {
   return OUTPUT_TRUNCATION_FINISH_REASONS.has(normalized);
 }
 
+/**
+ * Marker prefix for runtime-context transport messages (context-budget
+ * omissions, memory/skill data). Marks the content as untrusted runtime data
+ * so native defense-in-depth can pass pre-framed items through without
+ * re-wrapping them into one blob (which would break append-only prefixes).
+ * Mirrored by the native boundary in apps/desktop/src-tauri/src/lib.rs.
+ */
+export const RUNTIME_CONTEXT_DATA_MARKER = "JAVIS_RUNTIME_CONTEXT_DATA_V1";
+
 export function createGeneralChatSystemPrompt(
   isChinese: boolean,
-  omittedPriorMessageCount = 0,
-): string {
-  return [
+): string {  return [
     isChinese
       ? "\u4f60\u662f Javis\uff0c\u4e00\u4e2a\u53ef\u4ee5\u666e\u901a\u804a\u5929\u3001\u4e5f\u53ef\u4ee5\u5728\u7528\u6237\u660e\u786e\u8981\u6c42\u65f6\u6267\u884c\u5de5\u4f5c\u6d41\u7684\u684c\u9762\u52a9\u624b\u3002"
       : "You are Javis, a desktop assistant that can chat normally and can run workflows when the user clearly asks for work.",
@@ -1411,10 +1418,27 @@ export function createGeneralChatSystemPrompt(
     isChinese
       ? "\u6ca1\u6709\u8bc1\u636e\u6216\u4e0d\u786e\u5b9a\u65f6\uff0c\u76f4\u63a5\u8bf4\u4e0d\u786e\u5b9a\u6216\u8bf7\u6c42\u66f4\u591a\u4fe1\u606f\uff1b\u4e0d\u8981\u628a\u63a8\u6d4b\u5199\u6210\u4e8b\u5b9e\u3002"
       : "When evidence is missing or uncertain, say so or ask for more information; do not present guesses as facts.",
-    omittedPriorMessageCount > 0
-      ? `${omittedPriorMessageCount} earlier message(s) were omitted by the runtime context budget.`
-      : "",
   ].filter(Boolean).join("\n");
+}
+
+/**
+ * Per-turn runtime fact (context-budget omissions) transported as a trailing
+ * message instead of a system-prompt rewrite, so the chat system prompt stays
+ * byte-stable for the whole session and the quoted history keeps its
+ * append-only prefix property.
+ */
+function appendOmissionNotice(
+  messages: ChatMessage[],
+  omittedPriorMessageCount: number,
+): ChatMessage[] {
+  if (omittedPriorMessageCount <= 0) return messages;
+  return [
+    ...messages,
+    {
+      role: "user",
+      content: `${RUNTIME_CONTEXT_DATA_MARKER}\n${omittedPriorMessageCount} earlier message(s) were omitted by the runtime context budget.`,
+    },
+  ];
 }
 
 export interface ChatTool {
@@ -3550,11 +3574,14 @@ export function createFileScanTaskRuntime({
         input.activeChatTool,
         {
           ...input.options,
-          systemPrompt: createGeneralChatSystemPrompt(
-            input.isChinese,
+          // The chat system prompt stays byte-stable for the whole session
+          // (P1-7); per-turn runtime facts like context-budget omissions ride
+          // as a trailing message so the cached prefix survives window moves.
+          systemPrompt: createGeneralChatSystemPrompt(input.isChinese),
+          messages: appendOmissionNotice(
+            input.modelMessages,
             input.omittedPriorMessageCount,
           ),
-          messages: input.modelMessages,
           timeoutMs: input.timeoutMs,
         },
         input.timeoutMs,

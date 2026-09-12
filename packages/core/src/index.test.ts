@@ -4413,9 +4413,14 @@ describe("createFileScanTaskRuntime", () => {
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(prompt).toBe("continue the thread");
-    expect(options?.systemPrompt).toContain("10 earlier message(s) were omitted");
+    // P1-7: the omission notice rides as a trailing message; the chat system
+    // prompt stays byte-stable for the whole session.
+    expect(options?.systemPrompt).not.toContain("earlier message(s) were omitted");
+    expect(options?.messages?.[options.messages.length - 1]?.content).toContain(
+      "10 earlier message(s) were omitted",
+    );
+    expect(options?.messages?.[options.messages.length - 2]?.content).toBe("message-129");
     expect(options?.messages?.some((message) => message.content === "oldest-message-should-be-omitted")).toBe(false);
-    expect(options?.messages?.[options.messages.length - 1]?.content).toBe("message-129");
     expect(finalSnapshot.conversationMessages).toHaveLength(132);
     expect(finalSnapshot.conversationMessages?.[0]?.content).toBe("oldest-message-should-be-omitted");
     expect(finalSnapshot.conversationMessages?.[130]).toEqual({
@@ -4530,9 +4535,12 @@ describe("createFileScanTaskRuntime", () => {
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(prompt).toBe("continue briefly");
-    expect(options?.systemPrompt).toContain("10 earlier message(s) were omitted");
+    expect(options?.systemPrompt).not.toContain("earlier message(s) were omitted");
+    expect(options?.messages?.[options.messages.length - 1]?.content).toContain(
+      "10 earlier message(s) were omitted",
+    );
+    expect(options?.messages?.[options.messages.length - 2]?.content).toBe("short-message-49");
     expect(options?.messages?.some((message) => message.content === "short-context-oldest-message")).toBe(false);
-    expect(options?.messages?.[options.messages.length - 1]?.content).toBe("short-message-49");
     expect(finalSnapshot.conversationMessages).toHaveLength(52);
     expect(finalSnapshot.conversationMessages?.[0]?.content).toBe("short-context-oldest-message");
 
@@ -4624,7 +4632,10 @@ describe("createFileScanTaskRuntime", () => {
 
     await waitForStatus(snapshots, "completed");
 
-    expect(modelMessages).toEqual([]);
+    // P1-7: the per-turn omission notice rides as the only history item;
+    // the orphaned assistant reply itself stays out of the window.
+    expect(modelMessages).toHaveLength(1);
+    expect(modelMessages[0]?.content).toContain("2 earlier message(s) were omitted");
 
     unsubscribe();
     runtime.dispose();
