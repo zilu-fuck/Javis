@@ -151,12 +151,16 @@ import type {
 import { encodeMcpToolServerName, normalizeWorkspaceRelativeTextTargetPath } from "@javis/tools";
 import { initialToolDescriptors, isDisabledBrowserWriteToolName } from "@javis/tools";
 import { parseGitStatusFiles } from "./git-status";
-import {
-  createLocalTextSemanticReranker,
-  resolveModuleSpecifierWithFileSearch,
-  searchRepositoryWithFileSearch,
-  traceCallChainWithFileSearch,
-} from "./repo-intelligence-service";
+/**
+ * G2b: `repo-intelligence-service` statically imports the TypeScript compiler, which the
+ * bundle analysis measured at **9.2 MB rendered** — and it was landing in the initial
+ * bundle. Loading it on demand keeps the compiler in its own async chunk: it is only
+ * needed when a repository-analysis tool actually runs.
+ */
+let repoIntelligenceModule: Promise<typeof import("./repo-intelligence-service")> | undefined;
+function loadRepoIntelligence() {
+  return (repoIntelligenceModule ??= import("./repo-intelligence-service"));
+}
 import { inspectWorkspaceTree } from "./workspace-inspection-service";
 import { fetchTrendHotList } from "./trending-service";
 import {
@@ -2434,6 +2438,8 @@ export function createJavisRuntime({
         const priorityPaths = request.priorityPaths && request.priorityPaths.length > 0
           ? request.priorityPaths
           : await readChangedFilesForRepositoryPriority(runReadOnlyCommand);
+        const { searchRepositoryWithFileSearch, createLocalTextSemanticReranker } =
+          await loadRepoIntelligence();
         return searchRepositoryWithFileSearch({ ...request, priorityPaths }, {
           searchFiles: ({ query, maxResults }) =>
             invoke<Array<{ path: string; line?: number; preview?: string; provider?: string }>>("files_search", {
@@ -2458,6 +2464,8 @@ export function createJavisRuntime({
           throw new Error("Select a workspace before tracing the repository.");
         }
         const sessionId = taskIdRef.current ?? "repo-intelligence";
+        const { traceCallChainWithFileSearch, resolveModuleSpecifierWithFileSearch } =
+          await loadRepoIntelligence();
         const searchFiles = ({ query, maxResults }: { query: string; maxResults: number }) =>
           invoke<Array<{ path: string; line?: number; preview?: string; provider?: string }>>("files_search", {
             request: {

@@ -183,9 +183,21 @@
   而 `app-runtime.ts:154-159` **急切导入**该服务。**这是真实缺陷而非体积问题**：编译器是构建期工具，
   放进渲染进程等于每次冷启动都白付一次。
 
-  **修法（未做，因其为行为变更）**：把 4 个调用点改为 `await import("./repo-intelligence-service")`（该服务在
-  `app-runtime.ts` 中每个导出符号**恰好只有 1 个使用点**，位于 2437 / 2447 / 2470 / 2479 行，其中 `traceCallChain` 已是 async）。
-  预估首屏可省约 9 MB。**我没有在本轮动它**：这是一次跨越 3,000 行运行时文件的 async 重构，在我剩余预算内风险过高。
+  **✅ 已修复（本轮，实测前后对比）**：修法比预估的小——该服务在 `app-runtime.ts` 里每个导出符号恰好只有 1 个使用点，
+  而两处调用点**都已在 async 处理函数内**，所以只需 **2 处插入**：
+  ① 模块级惰性加载器（缓存 Promise，`await import("./repo-intelligence-service")`），删除静态导入；
+  ② 两个调用点各加一行解构。**另需一步关键动作**：给 `typescript` **单独的 chunk**——
+  否则 `manualChunks` 会把编译器留在被入口**静态**引入的 `vendor` 里，动态导入**只是引用它而无法把它移出首屏**。
+  实测结果：
+
+  | chunk | 修复前 | 修复后 |
+  |---|---|---|
+  | `vendor`（**首屏急切**） | 4,309 kB | **711 kB**（−83%） |
+  | `vendor-typescript`（**按需**） | 混在 vendor 里 | 3,571 kB / gzip 1,023 kB |
+  | `repo-intelligence-service`（按需） | 混在 index 里 | 29.7 kB |
+
+  **惰性已核实**：入口 chunk 只是通过 Vite 的 `__vite__mapDeps` 惰性清单引用它，真正的动态导入目标是该服务 chunk。
+  desktop 1012 个测试全绿（行为未变）。
 
   **✅ 已加的防复发闸门**：`scripts/check-bundle-hygiene.mjs`（`pnpm bundle:check`，已接入 `pnpm check`）——
   规则是"渲染进程代码**不得静态导入**构建期/node 专用包"（`typescript` / `playwright` / `node:fs` / `node:child_process`…），
@@ -543,6 +555,11 @@ $env:PATH="$env:USERPROFILE\.cargo\bin;C:\Program Files\Git\cmd;$env:PATH"; core
 
 ## 变更记录
 
+- 2026-09-13（第 38 轮，工程）：**G2b 修复完成**——TypeScript 编译器（3,571 kB / gzip 1,023 kB）移出首屏。
+  关键发现：光把服务的导入改成动态 import **不够**，因为 `manualChunks` 会把 `typescript` 留在被入口**静态**引入的 `vendor` 里，
+  动态导入只能"引用"它而无法把它移出首屏；必须**同时**给编译器单独的 chunk。
+  实测：**首屏 `vendor` 4,309 → 711 kB（−83%）**，编译器成为按需 chunk，并且核实了入口只通过 Vite 惰性清单引用它。
+  desktop 1012 测试全绿（行为未变）；`bundle:check` 的允许清单理由已更新为"当前状态正确，但若恢复静态导入会回来"。
 - 2026-09-13（第 37 轮，工程）：**G2b 根因查明**——用实测（新增 `scripts/analyze-bundle.mjs`，按包名聚合每个模块的 `renderedLength`）
   定位到 `vendor` 那 4.3 MB 的 **9,240 kB 全是 `typescript` 编译器本体**，来源是 `repo-intelligence-service.ts:11` 的静态 import
   加上 `app-runtime.ts` 的急切导入。**这是真实缺陷**（构建期工具进了渲染进程），修法是 4 个调用点改动态 import，

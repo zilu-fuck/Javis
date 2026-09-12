@@ -67,6 +67,19 @@ export default defineConfig(async () => ({
           if (inNodeModules && id.includes("node_modules/@tauri-apps")) {
             return "vendor-tauri";
           }
+          /**
+           * The TypeScript compiler (~9.2 MB rendered, measured by
+           * `scripts/analyze-bundle.mjs`) gets its own chunk.
+           *
+           * This is what makes the lazy import in `app-runtime.ts` effective: while the
+           * compiler was assigned to the catch-all `vendor` chunk — which the entry
+           * imports statically — a dynamic import of the service could not pull it out of
+           * the initial bundle, it merely referenced it. Isolated here, the compiler is
+           * reached only through `repo-intelligence-service`, so it loads on demand.
+           */
+          if (inNodeModules && id.includes("node_modules/typescript/")) {
+            return "vendor-typescript";
+          }
           if (inNodeModules) {
             return "vendor";
           }
