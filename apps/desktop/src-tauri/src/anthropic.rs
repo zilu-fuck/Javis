@@ -12,7 +12,7 @@ use crate::{
     classify_http_request_error, classify_http_status_error, create_fnv1a_hash,
     create_model_completion_response_diagnostic, infer_model_completion_provider_id,
     normalize_model_completion_model_name,
-    streaming::{StreamChunkPayload, StreamingRequestResult},
+    streaming::{StreamChunkPayload, StreamReasoningPayload, StreamingRequestResult},
     ModelCompletionRequest, ModelCompletionResponse, ModelUsage,
 };
 
@@ -313,6 +313,7 @@ pub(crate) fn execute_anthropic_streaming_request(
 
     let buf_reader = BufReader::with_capacity(65536, response);
     let mut total_chunks: u32 = 0;
+    let mut reasoning_chunks: u32 = 0;
     let mut token_usage: Option<ModelUsage> = None;
     let mut input_tokens: u32 = 0;
     let mut output_tokens: u32 = 0;
@@ -370,7 +371,8 @@ pub(crate) fn execute_anthropic_streaming_request(
         // Extract text from content_block_delta with type=text_delta
         if event_type == "content_block_delta" {
             if let Some(delta) = value.get("delta") {
-                if delta.get("type").and_then(|t| t.as_str()) == Some("text_delta") {
+                let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if delta_type == "text_delta" {
                     if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
                         if !text.is_empty() {
                             let _ = app.emit(
@@ -384,6 +386,22 @@ pub(crate) fn execute_anthropic_streaming_request(
                                 },
                             );
                             total_chunks += 1;
+                        }
+                    }
+                } else if delta_type == "thinking_delta" {
+                    if let Some(text) = delta.get("thinking").and_then(|t| t.as_str()) {
+                        if !text.is_empty() {
+                            let _ = app.emit(
+                                "stream-model-reasoning",
+                                StreamReasoningPayload {
+                                    stream_id: stream_id.to_string(),
+                                    text: text.to_string(),
+                                    model: Some(model.clone()),
+                                    provider: Some(provider_id.clone()),
+                                    index: reasoning_chunks,
+                                },
+                            );
+                            reasoning_chunks += 1;
                         }
                     }
                 }

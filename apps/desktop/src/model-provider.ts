@@ -77,6 +77,13 @@ export interface CompletionChunk {
   text: string;
   model?: string;
   provider?: string;
+  /**
+   * Native reasoning (thinking) delta when the provider ships it on a
+   * separate field (reasoning_content / thinking_delta). Reasoning chunks
+   * carry `text: ""` so consumers accumulating `text` never mix thinking
+   * into the visible answer.
+   */
+  reasoning?: string;
 }
 
 export interface ModelUsage {
@@ -217,6 +224,15 @@ interface StreamChunkPayload {
   index: number;
 }
 
+interface StreamReasoningPayload {
+  streamId?: string;
+  stream_id?: string;
+  text: string;
+  model?: string;
+  provider?: string;
+  index: number;
+}
+
 interface StreamDonePayload {
   streamId?: string;
   stream_id?: string;
@@ -326,6 +342,27 @@ async function* streamModelPrompt(
       },
     );
     unlisteners.push(unlistenChunk);
+
+    // Native reasoning deltas bypass the prefill/stop/reasoning-markup
+    // filters — those only shape the visible answer. They also never count
+    // as generated visible text, so a reasoning-only stream still surfaces
+    // the "no visible final text" error instead of silently succeeding.
+    const unlistenReasoning = await listen<StreamReasoningPayload>(
+      "stream-model-reasoning",
+      (event) => {
+        if (getPayloadStreamId(event.payload) !== streamId) return;
+        if (!event.payload.text) return;
+        lastModel = event.payload.model ?? lastModel;
+        lastProvider = event.payload.provider ?? lastProvider;
+        push({
+          text: "",
+          reasoning: event.payload.text,
+          model: event.payload.model,
+          provider: event.payload.provider,
+        });
+      },
+    );
+    unlisteners.push(unlistenReasoning);
 
     const unlistenDone = await listen<StreamDonePayload>(
       "stream-model-done",

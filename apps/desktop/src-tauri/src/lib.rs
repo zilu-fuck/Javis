@@ -1554,6 +1554,35 @@ pub(crate) fn extract_openai_compatible_stream_text(value: &serde_json::Value) -
     (!text.is_empty()).then_some(text)
 }
 
+/// Extract a native reasoning (thinking) delta from an OpenAI-compatible
+/// stream chunk. Providers ship it under `delta.reasoning_content` (DeepSeek,
+/// Qwen, GLM) or `delta.reasoning` (OpenRouter-style); non-string values are
+/// ignored rather than stringified.
+pub(crate) fn extract_openai_compatible_stream_reasoning(
+    value: &serde_json::Value,
+) -> Option<String> {
+    let choice = value
+        .get("choices")
+        .and_then(|choices| choices.as_array())
+        .and_then(|choices| choices.first())?;
+    let reasoning = choice
+        .get("delta")
+        .and_then(|delta| {
+            delta
+                .get("reasoning_content")
+                .or_else(|| delta.get("reasoning"))
+        })
+        .or_else(|| {
+            choice.get("message").and_then(|message| {
+                message
+                    .get("reasoning_content")
+                    .or_else(|| message.get("reasoning"))
+            })
+        })?;
+    let text = reasoning.as_str()?;
+    (!text.is_empty()).then(|| text.to_string())
+}
+
 pub(crate) fn extract_openai_compatible_finish_reason(value: &serde_json::Value) -> Option<String> {
     value
         .get("choices")
@@ -4432,6 +4461,44 @@ mod tests {
             extract_openai_compatible_finish_reason(&value).as_deref(),
             Some("length")
         );
+    }
+
+    #[test]
+    fn extracts_openai_compatible_stream_reasoning_from_delta() {
+        let value: serde_json::Value = serde_json::json!({
+            "choices": [{"delta": {"reasoning_content": "thinking..."}}]
+        });
+        assert_eq!(
+            extract_openai_compatible_stream_reasoning(&value).as_deref(),
+            Some("thinking...")
+        );
+    }
+
+    #[test]
+    fn extracts_openai_compatible_stream_reasoning_from_reasoning_fallback() {
+        let value: serde_json::Value = serde_json::json!({
+            "choices": [{"delta": {"reasoning": "OpenRouter thinking"}}]
+        });
+        assert_eq!(
+            extract_openai_compatible_stream_reasoning(&value).as_deref(),
+            Some("OpenRouter thinking")
+        );
+    }
+
+    #[test]
+    fn ignores_non_string_and_empty_stream_reasoning() {
+        let structured: serde_json::Value = serde_json::json!({
+            "choices": [{"delta": {"reasoning": {"summary": "object"}}}]
+        });
+        assert_eq!(extract_openai_compatible_stream_reasoning(&structured), None);
+        let empty: serde_json::Value = serde_json::json!({
+            "choices": [{"delta": {"reasoning_content": ""}}]
+        });
+        assert_eq!(extract_openai_compatible_stream_reasoning(&empty), None);
+        let answer_only: serde_json::Value = serde_json::json!({
+            "choices": [{"delta": {"content": "answer"}}]
+        });
+        assert_eq!(extract_openai_compatible_stream_reasoning(&answer_only), None);
     }
 
     #[test]

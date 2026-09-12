@@ -1420,6 +1420,8 @@ export interface ChatTool {
     },
   ): AsyncIterable<{
     text: string;
+    /** Native reasoning (thinking) delta; chunks carrying it always have empty `text`. */
+    reasoning?: string;
   }>;
 }
 
@@ -3345,8 +3347,21 @@ export function createFileScanTaskRuntime({
     }
 
     let text = "";
+    let reasoningText = "";
+    let reasoningOpen = false;
     let tokenUsage: ModelUsage | undefined;
     let finishReason: string | undefined;
+    const closeReasoningSegment = (error?: string) => {
+      if (!reasoningOpen) return;
+      reasoningOpen = false;
+      eventBus.emit({
+        kind: "agent.reasoning_chunk_end",
+        taskId,
+        agentKind: "commander",
+        fullText: reasoningText,
+        ...(error ? { error } : {}),
+      });
+    };
     eventBus.emit({ kind: "agent.chunk_start", taskId, agentKind: "commander" });
     try {
       for await (const chunk of activeChatTool.stream(prompt, {
@@ -3362,16 +3377,34 @@ export function createFileScanTaskRuntime({
         },
       })) {
         throwIfTaskAborted(signal, "chat.stream");
-        text += chunk.text;
-        eventBus.emit({
-          kind: "agent.chunk",
-          taskId,
-          agentKind: "commander",
-          text: chunk.text,
-        });
+        if (chunk.reasoning) {
+          if (!reasoningOpen) {
+            reasoningOpen = true;
+            eventBus.emit({ kind: "agent.reasoning_chunk_start", taskId, agentKind: "commander" });
+          }
+          reasoningText += chunk.reasoning;
+          eventBus.emit({
+            kind: "agent.reasoning_chunk",
+            taskId,
+            agentKind: "commander",
+            text: chunk.reasoning,
+          });
+        }
+        if (chunk.text) {
+          // The answer starting means the thinking phase is over.
+          closeReasoningSegment();
+          text += chunk.text;
+          eventBus.emit({
+            kind: "agent.chunk",
+            taskId,
+            agentKind: "commander",
+            text: chunk.text,
+          });
+        }
         // Yield to the event loop so React can render between chunks
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
       }
+      closeReasoningSegment();
       if (isOutputTruncationFinishReason(finishReason)) {
         throw new Error(`Model response was truncated (${finishReason}); no complete answer was returned.`);
       }
@@ -3385,6 +3418,7 @@ export function createFileScanTaskRuntime({
     } catch (streamError) {
       throwIfTaskAborted(signal, "chat.stream");
       if (isOutputTruncationFinishReason(finishReason)) {
+        closeReasoningSegment("output truncated");
         eventBus.emit({
           kind: "agent.chunk_end",
           taskId,
@@ -3397,6 +3431,7 @@ export function createFileScanTaskRuntime({
           : new Error(`Model response was truncated (${finishReason}); no complete answer was returned.`);
       }
       if (isContextOverflowError(streamError)) {
+        closeReasoningSegment("context overflow");
         eventBus.emit({
           kind: "agent.chunk_end",
           taskId,
@@ -3407,6 +3442,7 @@ export function createFileScanTaskRuntime({
         throw streamError;
       }
       console.log("[Javis] stream() threw, falling back to complete():", streamError);
+      closeReasoningSegment("stream failed");
       eventBus.emit({
         kind: "agent.chunk_end",
         taskId,

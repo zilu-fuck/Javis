@@ -184,6 +184,48 @@ describe("model provider", () => {
     });
   });
 
+  it("forwards native reasoning deltas as reasoning chunks without touching answer text", async () => {
+    const NOW = 3000;
+    const RAND = 0.789;
+    const PREDICTABLE_ID = `stream-${NOW}-${RAND.toString(36).slice(2)}`;
+    vi.spyOn(Date, "now").mockReturnValue(NOW);
+    vi.spyOn(Math, "random").mockReturnValue(RAND);
+
+    const handlers = new Map<string, (event: { payload: unknown }) => void>();
+    listenMock.mockImplementation(async (eventName, handler) => {
+      handlers.set(eventName, handler as never);
+      return (() => {}) as () => void;
+    });
+    // Native delivery order: reasoning deltas arrive before the answer.
+    invokeMock.mockImplementation(async () => {
+      handlers.get("stream-model-reasoning")?.({
+        payload: { streamId: PREDICTABLE_ID, text: "private <think> reasoning", model: "qwen-test", provider: "openai", index: 0 },
+      } as never);
+      handlers.get("stream-model-reasoning")?.({
+        payload: { streamId: "other", text: "skip", index: 0 },
+      } as never);
+      handlers.get("stream-model-chunk")?.({
+        payload: { streamId: PREDICTABLE_ID, text: "Answer", model: "qwen-test", provider: "openai", index: 0 },
+      } as never);
+      handlers.get("stream-model-done")?.({
+        payload: { streamId: PREDICTABLE_ID, totalChunks: 1 },
+      } as never);
+      return undefined;
+    });
+    const provider = createConfiguredModelProvider(createSettings());
+    const chunks = [];
+    for await (const chunk of provider.stream("你好", {})) {
+      chunks.push(chunk);
+    }
+
+    // Reasoning bypasses the visible-text filters (raw, including markup that
+    // would be stripped from an answer) and never suppresses answer text.
+    expect(chunks).toEqual([
+      { text: "", reasoning: "private <think> reasoning", model: "qwen-test", provider: "openai" },
+      { text: "Answer", model: "qwen-test", provider: "openai" },
+    ]);
+  });
+
   it("uses the async L1 stream command when requested", async () => {
     const NOW = 2000;
     const RAND = 0.456;

@@ -52,6 +52,16 @@ pub struct StreamChunkPayload {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct StreamReasoningPayload {
+    pub stream_id: String,
+    pub text: String,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub index: u32,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StreamDonePayload {
     pub stream_id: String,
     pub finish_reason: Option<String>,
@@ -225,6 +235,60 @@ pub async fn stream_model_prompt_l1_start(
     Ok(stream_id)
 }
 
+/// Flush an accumulated reasoning batch as a `stream-model-reasoning` event.
+/// Reasoning travels on its own channel so the visible answer stream stays
+/// untouched (stop sequences and reasoning-markup filters never apply to it).
+#[allow(clippy::too_many_arguments)]
+fn flush_reasoning_batch(
+    app: &AppHandle,
+    stream_id: &str,
+    model: &str,
+    provider_id: &str,
+    batch_reasoning: &mut String,
+    reasoning_chunks: &mut u32,
+) {
+    if batch_reasoning.is_empty() {
+        return;
+    }
+    let _ = app.emit(
+        "stream-model-reasoning",
+        StreamReasoningPayload {
+            stream_id: stream_id.to_string(),
+            text: std::mem::take(batch_reasoning),
+            model: Some(model.to_string()),
+            provider: Some(provider_id.to_string()),
+            index: *reasoning_chunks,
+        },
+    );
+}
+
+fn accumulate_stream_reasoning(
+    value: &serde_json::Value,
+    app: &AppHandle,
+    stream_id: &str,
+    model: &str,
+    provider_id: &str,
+    batch_reasoning: &mut String,
+    reasoning_chunks: &mut u32,
+) {
+    if let Some(text) = crate::extract_openai_compatible_stream_reasoning(value) {
+        batch_reasoning.push_str(&text);
+        *reasoning_chunks += 1;
+        if batch_reasoning.len() >= STREAMING_CHUNK_CHAR_THRESHOLD
+            || *reasoning_chunks >= STREAMING_CHUNK_COUNT_THRESHOLD
+        {
+            flush_reasoning_batch(
+                app,
+                stream_id,
+                model,
+                provider_id,
+                batch_reasoning,
+                reasoning_chunks,
+            );
+        }
+    }
+}
+
 fn execute_streaming_request(
     request: &ModelCompletionRequest,
     app: &AppHandle,
@@ -286,6 +350,8 @@ fn execute_streaming_request(
     // instead of one Tauri event per token.
     let mut batch_text = String::with_capacity(64);
     let mut batch_chunks: u32 = 0;
+    let mut batch_reasoning = String::with_capacity(64);
+    let mut reasoning_chunks: u32 = 0;
 
     for line in buf_reader.lines() {
         if cancelled.load(Ordering::Relaxed) {
@@ -336,6 +402,15 @@ fn execute_streaming_request(
                 batch_chunks = 0;
             }
         }
+        accumulate_stream_reasoning(
+            &value,
+            app,
+            stream_id,
+            &model,
+            &provider_id,
+            &mut batch_reasoning,
+            &mut reasoning_chunks,
+        );
     }
 
     // Flush any remaining batched text
@@ -351,6 +426,14 @@ fn execute_streaming_request(
             },
         );
     }
+    flush_reasoning_batch(
+        app,
+        stream_id,
+        &model,
+        &provider_id,
+        &mut batch_reasoning,
+        &mut reasoning_chunks,
+    );
 
     validate_openai_stream_completion(
         total_chunks,
@@ -422,6 +505,8 @@ async fn execute_streaming_request_async(
     let mut saw_done_marker = false;
     let mut batch_text = String::with_capacity(64);
     let mut batch_chunks: u32 = 0;
+    let mut batch_reasoning = String::with_capacity(64);
+    let mut reasoning_chunks: u32 = 0;
     let mut pending: Vec<u8> = Vec::new();
 
     'stream: while let Some(chunk) = response
@@ -452,6 +537,8 @@ async fn execute_streaming_request_async(
                 &mut saw_done_marker,
                 &mut batch_text,
                 &mut batch_chunks,
+                &mut batch_reasoning,
+                &mut reasoning_chunks,
             )?;
             if saw_done_marker {
                 break 'stream;
@@ -476,6 +563,8 @@ async fn execute_streaming_request_async(
             &mut saw_done_marker,
             &mut batch_text,
             &mut batch_chunks,
+            &mut batch_reasoning,
+            &mut reasoning_chunks,
         )?;
     }
 
@@ -491,6 +580,14 @@ async fn execute_streaming_request_async(
             },
         );
     }
+    flush_reasoning_batch(
+        app,
+        stream_id,
+        &model,
+        &provider_id,
+        &mut batch_reasoning,
+        &mut reasoning_chunks,
+    );
 
     validate_openai_stream_completion(
         total_chunks,
@@ -523,6 +620,8 @@ fn consume_stream_line(
     saw_done_marker: &mut bool,
     batch_text: &mut String,
     batch_chunks: &mut u32,
+    batch_reasoning: &mut String,
+    reasoning_chunks: &mut u32,
 ) -> Result<(), String> {
     let trimmed = line.trim();
     if !trimmed.starts_with("data:") {
@@ -568,6 +667,15 @@ fn consume_stream_line(
             *batch_chunks = 0;
         }
     }
+    accumulate_stream_reasoning(
+        &value,
+        app,
+        stream_id,
+        model,
+        provider_id,
+        batch_reasoning,
+        reasoning_chunks,
+    );
     Ok(())
 }
 

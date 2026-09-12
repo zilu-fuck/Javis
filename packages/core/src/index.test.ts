@@ -6226,6 +6226,65 @@ describe("completeGeneralChat streaming pipeline", () => {
     runtime.dispose();
   });
 
+  it("streams native reasoning as a separate segment before the answer", async () => {
+    async function* reasoningStream() {
+      yield { text: "", reasoning: "Let me think" };
+      yield { text: "", reasoning: " more" };
+      yield { text: "Final answer" };
+    }
+    const mockChatTool = {
+      complete: vi.fn(async () => ({ text: "unused" })),
+      stream: reasoningStream,
+    };
+
+    const eventBus = createTaskEventBus();
+    const events: Array<Record<string, unknown>> = [];
+    eventBus.on((event) => {
+      if (event.kind === "agent.reasoning_chunk") {
+        events.push({ kind: event.kind, text: event.text });
+      } else if (event.kind === "agent.reasoning_chunk_end") {
+        events.push({ kind: event.kind, fullText: event.fullText, error: event.error });
+      } else if (event.kind === "agent.chunk") {
+        events.push({ kind: event.kind, text: event.text });
+      } else if (event.kind === "agent.chunk_end") {
+        events.push({ kind: event.kind, fullText: event.fullText, error: event.error });
+      } else if (
+        event.kind === "agent.chunk_start" ||
+        event.kind === "agent.reasoning_chunk_start"
+      ) {
+        events.push({ kind: event.kind });
+      }
+    });
+    const runtime = createFileScanTaskRuntime({
+      fileTool: undefined as any,
+      chatTool: mockChatTool,
+      eventBus,
+    });
+
+    const { snapshots } = subscribeToRuntime(runtime);
+    runtime.start("test reasoning stream", { mode: "chat", taskId: "task-reasoning-stream-test" });
+
+    await vi.waitFor(() => {
+      expect(snapshots[snapshots.length - 1]?.status).toBe("completed");
+    }, { timeout: 3000 });
+
+    // The reasoning segment opens lazily with the first reasoning delta and
+    // closes as soon as the answer starts; reasoning never mixes into the
+    // visible answer text.
+    expect(events).toEqual([
+      { kind: "agent.chunk_start" },
+      { kind: "agent.reasoning_chunk_start" },
+      { kind: "agent.reasoning_chunk", text: "Let me think" },
+      { kind: "agent.reasoning_chunk", text: " more" },
+      { kind: "agent.reasoning_chunk_end", fullText: "Let me think more", error: undefined },
+      { kind: "agent.chunk", text: "Final answer" },
+      { kind: "agent.chunk_end", fullText: "Final answer", error: undefined },
+    ]);
+    expect(snapshots[snapshots.length - 1]?.commanderMessage).toBe("Final answer");
+
+    runtime.dispose();
+  });
+
   it("keeps streamed usage when stream and fallback both fail", async () => {
     const mockChatTool = {
       complete: vi.fn(async () => {
