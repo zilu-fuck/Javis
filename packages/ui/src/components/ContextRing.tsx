@@ -60,6 +60,10 @@ export function ContextRing({
     ? `${labels.contextRemaining} ${formatCompactTokenCount(remainingTokens)}`
     : labels.noModelCalls;
   const breakdown = task.tokenUsage?.byAgentKind ?? [];
+  const cacheReadTokens = task.tokenUsage?.cacheReadTokens;
+  const cacheHitPercent = typeof cacheReadTokens === "number" && inputTokens > 0
+    ? Math.round((cacheReadTokens / inputTokens) * 100)
+    : undefined;
 
   const color =
     ratio > 0.6 ? "var(--color-danger)"
@@ -173,6 +177,12 @@ export function ContextRing({
                   <span>{labels.tokenCalls}</span>
                   <strong>{modelCalls.toLocaleString()}</strong>
                 </div>
+                {cacheHitPercent !== undefined ? (
+                  <div className="javis-context-window-stat javis-context-window-cache-hit">
+                    <span>{labels.cacheHit}</span>
+                    <strong>{cacheHitPercent}%</strong>
+                  </div>
+                ) : null}
               </div>
             </>
           ) : (

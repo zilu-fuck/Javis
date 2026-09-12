@@ -1798,6 +1798,7 @@ export interface WorkbenchLocale {
     tokenInput: string;
     tokenOutput: string;
     tokenCalls: string;
+    cacheHit: string;
     trustedComputerApps: string;
     removeTrustedApp: string;
     contextWindow: string;
