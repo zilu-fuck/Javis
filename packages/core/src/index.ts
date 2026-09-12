@@ -544,6 +544,22 @@ export { diagnoseSetup } from "./setup-diagnostics";
 export { planResume } from "./resume-plan";
 export { decideAgentRouting, describeRoutingDecision } from "./routing-decision";
 export {
+  buildSessionLineage,
+  isForeignContextWrite,
+  namespaceChildContextKey,
+  parseChildContextKey,
+  planSubagentFork,
+} from "./subagent-session";
+export type {
+  ForkPlan,
+  ForkPlanInput,
+  SessionLineage,
+  SessionMessage,
+  SessionMessageRole,
+  SubagentSession,
+  SubagentSessionStatus,
+} from "./subagent-session";
+export {
   AGENT_PROMPT_LARGE_CHARS,
   DEFAULT_AGENT_CONTEXT_BUDGET_TOKENS,
   DEFAULT_AGENT_MAX_TURNS,
