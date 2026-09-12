@@ -211,8 +211,29 @@
   ③ 搬迁脚本在移动后**清理被孤立的导入**（`canExecuteWorkspaceWrite` 等原只被这些执行器使用）。
   验证：`typecheck` **0 错误**、core **1,652 测试全绿**（行为未变）。
   **这是"测量 → 动手 → 失败 → 查根因 → 修工具 → 重做成功"这条闭环的兑现**——如果第 41 轮失败后只是默默回滚，就不会有今天这一刀。
-- [ ] **B4d** 下一批接缝（同类可搬）：`dispatchToolByName`（425 行 / 13 依赖）、`waitForAskUserAnswer`（350 行 / 5 声明）；
-  `runCommanderDagTask` 仍需**先内部拆分**（其闭包 12,199 行，占全文件绝大部分）
+- [ ] **B4e 判定：`workflow-executor.ts` 的可抽接缝基本用尽（数据结论）**。
+  用升级后的分析器对**全部**大声明做闭包 + 中心度分析，结论是明确的：
+
+  | 大声明（自身 ≥150 行） | 闭包声明数 | 需搬行数 | 中心成员（被引用次数） |
+  |---|---|---|---|
+  | `waitForAskUserAnswer` | **5** | 350 | 无（但**语义上**拖中央类型，见 B4d） |
+  | **`executeSchedulerCreateTaskDagStep`** | **5** | **219** | **无** ✅ |
+  | `projectAgentRuntimeEvents` | 14 | 349 | 无 ✅ |
+  | `requestComputerUseApproval` | 13 | 344 | `redactImageDataUrlsForSummary`(12) |
+  | `executeFileWriteTextDagStep` | 35 | 691 | `isCompletedGenericStepOutput`(14), `TrendProvider`(13) |
+  | `dispatchToolByName` | 43 | 1,101 | `TrendProvider`(13) |
+  | `executeConcreteGenericStep` | 70 | 1,193 | 同上两者 |
+  | `runReadCurrentProjectWorkflow` | 77 | 1,804 | `redactImageDataUrlsForSummary`(12) |
+  | `runGenericWorkbenchWorkflow` | 149 | 2,753 | 三个中心成员 |
+  | `runCommanderDagTask` | **304** | **10,812** | 三个中心成员 |
+
+  **汇总：大声明里闭包干净的只有 3 个，7 个都拖着中心声明。**
+  **这意味着"靠抽取继续瘦身"这条路基本走到头了**——`runCommanderDagTask` 的闭包是 **10,812 行 / 304 个声明**
+  （占全文件 73%），它**不是可以搬走的东西，而是这个文件本身**。
+  **下一步唯一有效的方向是"内部拆分"**：先把 `runCommanderDagTask` 拆成若干内部函数（保持同一个模块、不改外部接口），
+  拆出清晰边界后再考虑外移。这比继续找外部接缝更现实。
+  剩余 3 个干净接缝（`executeSchedulerCreateTaskDagStep` 219 行、`projectAgentRuntimeEvents` 349 行、`waitForAskUserAnswer` 350 行）
+  仍可按已验证的流程（闭包搬运 + 全量名字导回 + 清理孤立导入）执行，但**收益有限**。
 
   **⚠️ `waitForAskUserAnswer` 本轮核查后判定"不该切"**：它的闭包只有 5 个声明，但其中包含
   **`CommanderDagTaskOptions`（131 行）—— 整个模块的中央 options 类型**。把这个类型搬进一个"ask-user"模块，
@@ -662,6 +683,12 @@ $env:PATH="$env:USERPROFILE\.cargo\bin;C:\Program Files\Git\cmd;$env:PATH"; core
 
 ## 变更记录
 
+- 2026-09-13（第 46 轮，工程）：**B4 的调查收口（数据结论）**。对全部大声明做闭包 + 中心度分析：
+  **大声明里闭包干净的只有 3 个，7 个拖着中心声明**；`runCommanderDagTask` 的闭包是 **10,812 行 / 304 个声明**
+  （占全文件 73%）——它**不是能搬走的东西，而是这个文件本身**。结论：**"靠抽取继续瘦身"这条路基本走到头**，
+  下一步唯一有效的方向是**内部拆分**（先在同一模块内把它拆成若干内部函数，再考虑外移）。
+  另外修掉自己一个观察错误：我以为工具把中心警告打了两次，实际是**我的 grep 匹配了两行各自打了上下文**——
+  工具只输出一次（已验证），**错的是我的检查方式，不是代码**。
 - 2026-09-13（第 45 轮，工程）：核查下一个候选 `waitForAskUserAnswer` 后**判定不该切**——闭包虽只有 5 个声明，
   但含 **`CommanderDagTaskOptions`（131 行，模块中央 options 类型）**，搬走会把核心类型放进外围模块。
   为此给分析器加了**扇入指标**（阈值 10）——**它这次没触发**：该类型是"语义中央但引用不广"，

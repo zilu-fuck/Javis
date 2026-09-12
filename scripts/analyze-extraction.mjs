@@ -212,6 +212,18 @@ const cleanest = [...ranked]
   .sort((left, right) => (left.declarationCount - right.declarationCount)
     || (right.ownLines - left.ownLines));
 console.log("\ncleanest seams (fewest declarations to move with it):");
-for (const entry of cleanest.slice(0, 8)) {
-  console.log(`  ${String(entry.declarationCount).padStart(3)} decls, ${String(entry.linesToMove).padStart(5)} lines  ${entry.name}`);
+for (const entry of cleanest.slice(0, 12)) {
+  const central = entry.centralMembers.length > 0
+    ? `  ⚠ drags ${entry.centralMembers.map((member) => `${member.name}(${member.usedBy})`).join(", ")}`
+    : "";
+  console.log(`  ${String(entry.declarationCount).padStart(3)} decls, ${String(entry.linesToMove).padStart(5)} lines  ${entry.name}${central}`);
+}
+
+const clean = ranked.filter((entry) => entry.ownLines >= 150 && entry.centralMembers.length === 0);
+const entangled = ranked.filter((entry) => entry.ownLines >= 150 && entry.centralMembers.length > 0);
+console.log(`\nlarge declarations with a clean closure: ${clean.length}`);
+console.log(`large declarations whose closure drags something central: ${entangled.length}`);
+if (entangled.length > 0 && clean.length === 0) {
+  console.log("=> every large function here is entangled with a central declaration.");
+  console.log("   Extraction is not available; these need internal decomposition first.");
 }
