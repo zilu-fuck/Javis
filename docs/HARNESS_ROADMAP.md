@@ -150,7 +150,24 @@
   不可修复才抛错、体积限制）、以及超时取小。抽出的理由不只是行数：一个"失败即关闭"的守卫不该埋在 15,000 行文件里找不到、也不好测。
   **这只是一刀，不是解决方案**：还剩 `App.tsx` 6,597 行、`computer-use-loop.test.ts` 8,480 行，以及 `workflow-executor.ts` 内
   仍然混着的大量职责（能力派发、验证/综合、PDF/研究等流程）需要继续按接缝切分
-- [ ] **B4b** 继续切分：`App.tsx`（UI 状态与运行时装配混在一个组件）与 `workflow-executor.ts` 的流程族（research / pdf / vision / code-review）
+- [~] **G2b 前端 bundle 拆分**（第一刀已落，**根因未查清**）：`apps/desktop/vite.config.ts` 原先的规则把**除 React 外的所有
+  `node_modules` 塞进一个 `vendor` chunk**，构建报告 ~**4.9 MB**。改为按依赖族拆分后（`vendor-react` / `vendor-langchain` /
+  `vendor-tauri` / `vendor`），实测：
+
+  | chunk | 之前 | 之后 |
+  |---|---|---|
+  | `vendor`（大杂烩） | **4,945 kB** | **4,309 kB** |
+  | `vendor-langchain` | — | 620 kB |
+  | `vendor-tauri` | — | 15 kB |
+  | `vendor-react` | 198 kB | 189 kB |
+
+  收益是**可缓存性**：改应用代码不再让一个 4.7 MB 的大块失效，langchain 单独可缓存。
+  **但 4.3 MB 的大块仍未查明来源**（langchain 只占其中 620 kB），所以：
+  ① `chunk larger than 500 kB` 的告警**仍然存在**，只是现在能归因到具体 chunk 而不是一个"杂项袋"；
+  ② 已找到两条线索待查：扫这个 chunk 发现里面含 **`child_process` 与 `node:` 前缀**——**浏览器 bundle 里出现 node 专用入口**，
+  说明某个依赖的 node 版入口被打了进来；`zod` 出现 348 次（被完整打包）。
+  下一步应当用 `rollup-plugin-visualizer` 或 `vite build --debug` 的模块图**定位贡献最大的模块**，再决定是懒加载还是排除 node 入口。
+- [ ] **G2c** 前端首屏懒加载（把只在一部分功能里用到的依赖改为动态 import）——需先完成 G2b 的定位
 - [ ] **B5** `RuntimeEvent` / `ArtifactEnvelope` / `SharedContext` / `WorkflowCheckpoint` 收敛成一份与代码对齐的对外契约（`docs/CORE_CONTRACTS.md`）
 - [ ] **B6** preset 提升为一等公民（agents + tools + 权限策略 + 模型槽 + 提示词版本，可导入导出 / A-B）
 
@@ -502,6 +519,11 @@ $env:PATH="$env:USERPROFILE\.cargo\bin;C:\Program Files\Git\cmd;$env:PATH"; core
 
 ## 变更记录
 
+- 2026-09-13（第 36 轮，工程）：G2b 前端 bundle **第一刀**——把"除 React 外所有 node_modules 塞进一个 vendor chunk"改为按依赖族拆分，
+  实测 `vendor` **4,945 → 4,309 kB**，并分出 `vendor-langchain`(620 kB) 与 `vendor-tauri`(15 kB)，收益是可缓存性。
+  **但 4.3 MB 的来源仍未查明**（langchain 只占 620 kB），已把两条线索写进路线图（chunk 内含 `child_process`/`node:` 前缀
+  → 某依赖的 node 入口被打了进来；`zod` 完整打包），并给出下一步做法（模块图定位）。
+  **没有把"告警仍然存在"说成已解决**。下一轮：用模块图定位 4.3 MB 贡献者。
 - 2026-09-13（第 35 轮，接线切片）：E2d **app 侧适配层**完成（`failure-action-view.ts`，10 测试）。
   两个设计要点：UI 不能 import core（包边界）→ 必须有 app 侧纯函数做转换，好处是**不挂载组件也能测**；
   以及**不是所有失败路径都设置 `failureGuidance`** → 无分类时**从消息反推**，让按钮在计划编译等路径上也出现，

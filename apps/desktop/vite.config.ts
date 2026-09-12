@@ -42,11 +42,32 @@ export default defineConfig(async () => ({
   build: {
     rollupOptions: {
       output: {
+        /**
+         * Splits the bundle by dependency family.
+         *
+         * The previous rule put every `node_modules` module except React into a single
+         * `vendor` chunk, which the build reported at ~4.7 MB. That is worse than a large
+         * number: any change to any dependency, and any change to application code that
+         * shares the chunk, invalidates the whole blob in the browser cache, and the
+         * "chunk larger than 500 kB" warning names a bag instead of a culprit.
+         *
+         * Families are ordered most specific first; the catch-all stays last so an
+         * unrecognised dependency still lands somewhere predictable.
+         */
         manualChunks(id) {
-          if (id.includes("node_modules/react") || id.includes("node_modules/react-dom")) {
+          const inNodeModules = id.includes("node_modules");
+          if (inNodeModules && (id.includes("node_modules/react-dom") || id.includes("node_modules/react/"))) {
             return "vendor-react";
           }
-          if (id.includes("node_modules")) {
+          // The langchain family is the heavy one and is only needed by the langchain
+          // execution kernel, so it is worth keeping separately cacheable.
+          if (inNodeModules && (id.includes("node_modules/langchain") || id.includes("node_modules/@langchain"))) {
+            return "vendor-langchain";
+          }
+          if (inNodeModules && id.includes("node_modules/@tauri-apps")) {
+            return "vendor-tauri";
+          }
+          if (inNodeModules) {
             return "vendor";
           }
           if (id.includes("/packages/core/src/") || id.includes("\\packages\\core\\src\\")) {
