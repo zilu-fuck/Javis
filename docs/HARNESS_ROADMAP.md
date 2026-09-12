@@ -203,7 +203,28 @@
   规则是"渲染进程代码**不得静态导入**构建期/node 专用包"（`typescript` / `playwright` / `node:fs` / `node:child_process`…），
   已知的那一处用**带理由的允许清单**容忍并只报 warning。**实测过它会失败**：注入一个 `import * as fs from "node:fs"` 的探针文件后
   如实报 ERROR 且非零退出，删除后恢复 0。
-- [ ] **G2c** 前端首屏懒加载（把只在一部分功能里用到的依赖改为动态 import）——需先完成 G2b 的定位
+- [ ] **G2c** 前端首屏懒加载（把只在一部分功能里用到的依赖改为动态 import）——**G2b 已完成**，本条可据此继续
+- [ ] **B4b/B4c 继续拆巨石的接缝已用实测选出**（`pnpm extraction:analyze`，新增 `scripts/analyze-extraction.mjs`）。
+  该脚本对目标文件里每个大函数统计"它引用了多少个**同文件私有声明**"——因为把一个函数搬出去是否安全，
+  取决于它有没有缠在一堆私有 helper 上。实测 `workflow-executor.ts`（**14,818 行 / 357 个顶层声明**）：
+
+  | 函数 | 行数 | 私有依赖数 |
+  |---|---|---|
+  | `runCommanderDagTask` | **3,925**（占全文件 **26%**） | **115** ← 真正的巨石，接缝极脏 |
+  | `dispatchToolByName` | 425 | 13 |
+  | `buildCommanderResumeState` | 223 | **0** ← 最干净的单函数 |
+  | `executeGitCommitDagStep` | 273 | 3 |
+  | `executeGitStageDagStep` | 270 | 3 |
+  | `executeGitCreatePullRequestDagStep` | 267 | 3 |
+  | `executeGitCommentPullRequestDagStep` | 264 | 3 |
+  | `executeFileWriteTextDagStep` | 269 | 4 |
+  | `executeWorkspaceMutationDagStep` | 201 | 4 |
+
+  **结论（下一刀应切这里）**：那 5-6 个 `execute*DagStep` 是内聚家族（"审批门控写入工具的 DAG 步骤执行器"），
+  合计约 **1,343 行**，每个只依赖 3-4 个私有项（工具名常量 + `extract*Input` + `mergeStepInput`），这些依赖可**一起搬走**。
+  而 `runCommanderDagTask` 有 **115** 个私有依赖，**不能**整体搬——它必须先按职责拆成多个内部函数。
+  **本轮没有执行这次搬迁**：会话已到后段、剩余上下文有限，而一次约 1,343 行的搬移需要脚本化的文本改写与多轮验证；
+  在此状态下动手，失手就是留下坏掉的树。分析结论已固化为脚本（可重复、可验证），搬迁是明确的下一步。
 - [ ] **B5** `RuntimeEvent` / `ArtifactEnvelope` / `SharedContext` / `WorkflowCheckpoint` 收敛成一份与代码对齐的对外契约（`docs/CORE_CONTRACTS.md`）
 - [ ] **B6** preset 提升为一等公民（agents + tools + 权限策略 + 模型槽 + 提示词版本，可导入导出 / A-B）
 
@@ -572,6 +593,12 @@ $env:PATH="$env:USERPROFILE\.cargo\bin;C:\Program Files\Git\cmd;$env:PATH"; core
 
 ## 变更记录
 
+- 2026-09-13（第 40 轮，工程）：为"下一刀切哪里"做了**实测选缝**（新增 `scripts/analyze-extraction.mjs`，`pnpm extraction:analyze`）：
+  统计每个大函数引用了多少**同文件私有声明**。实测 `workflow-executor.ts`（14,818 行 / 357 个顶层声明）——
+  `runCommanderDagTask` **3,925 行占全文件 26% 且缠着 115 个私有依赖**（不能整体搬），
+  而 5-6 个 `execute*DagStep` 合计约 **1,343 行、每个仅 3-4 个依赖**（可一起搬）。
+  **本轮没有执行搬迁**：会话后段上下文有限，而 1,343 行的搬移需要脚本化改写与多轮验证，失手会留下坏掉的树；
+  结论已固化为可重复运行的脚本，搬迁路径明确。
 - 2026-09-13（第 39 轮，自审）：做了**勾选一致性核对**并做成闸门 `pnpm roadmap:audit`（已接入 `pnpm check`）：63 个引用路径 **0 缺失**、
   引用的 core 测试数（1652）**与实测一致**。**诚实记录**：该审计脚本**第一版是错的**（用候选目录前缀猜路径，
   把 24 个真实存在的文件误报为缺失），修的是**脚本**而非路线图。

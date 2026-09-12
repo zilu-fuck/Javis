@@ -21,6 +21,7 @@
     "roadmap:audit": "node scripts/audit-roadmap.mjs",
     "bundle:check": "node scripts/check-bundle-hygiene.mjs",
     "bundle:analyze": "node scripts/analyze-bundle.mjs",
+    "extraction:analyze": "node scripts/analyze-extraction.mjs",
     "metrics": "node scripts/eval/report-runtime-metrics.mjs",
     "diagnostics": "node scripts/eval/export-diagnostics.mjs",
     "package-boundaries": "node scripts/check-package-boundaries.mjs",
