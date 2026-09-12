@@ -542,6 +542,13 @@ export type {
 } from "./usage-panel";
 export { diagnoseSetup } from "./setup-diagnostics";
 export { planResume } from "./resume-plan";
+export { decideAgentRouting, describeRoutingDecision } from "./routing-decision";
+export type {
+  CandidateEvaluation,
+  RoutingCandidate,
+  RoutingDecision,
+  RoutingRequest,
+} from "./routing-decision";
 export type {
   ResumeCheckpointState,
   ResumeMode,

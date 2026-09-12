@@ -208,7 +208,16 @@
 
 ## D. 多 Agent 协作
 
-- [ ] **D1** 按 `docs/COMMANDER_CAPABILITY_ROUTING_REFACTOR_PLAN.md` 收口能力路由，并把路由决策作为可见对象暴露
+- [x] **D1** 能力路由决策可见化（`packages/core/src/routing-decision.ts`，15 测试）：**先核查了现状**——
+  `AgentRuntimeRoutingDecision` 已存在，但它描述的是**执行内核**（langchain/javis/opencode 哪个跑这步），不是"派给哪个 agent、哪个模型"。
+  本轮补的是上面那一层：`decideAgentRouting` 返回一个可展示的对象——选中的 agent、**每个候选的评分与理由**、
+  以及**每个被拒候选的被拒原因**（"为什么不是 explorer？"才是真正会被问到的问题），外加 `summary` 与
+  `describeRoutingDecision` 的逐行解释。两条刻意的判定：
+  ① **缺少必需能力 = 不合格，而不是分低**；缺上下文窗口、需要视觉却没有视觉模型，同样是**不合格**——
+   混进评分会产出一个看起来很笃定的答案，却把视觉步骤静默派给"看不见"的模型；
+  ② **平局要上报**（`unambiguous: false` + summary 写明"按字母序打破平局"），因为平局意味着结果取决于 tie-break，
+   这正是值得暴露的路由意外。测试还钉住了**判定顺序**（先能力后视觉），因为它决定了用户读到的解释是否可行动
+- [ ] **D1b** 把决策对象接进 Inspector 与任务日志（核心决策就绪，尚未接线）；`COMMANDER_CAPABILITY_ROUTING_REFACTOR_PLAN.md` 的收口仍未做
 - [ ] **D2** 把 handoff report 从"工程报告"变成"协作叙事"（谁交给谁什么、缺什么、谁没被消费）
 - [x] **D3** 并发预算与背压 —— **核查后确认已经实现**（不是我加的）：`workflow-dag-executor.ts` 有 `maxConcurrency`（默认 4，钳制 1–8）、
   `maxReadyQueueSize`、`waitForRateLimit` 限速、熔断器（连续失败阈值）、心跳、重试与 `onBackpressure` 回调；
@@ -354,6 +363,10 @@
 
 ## 变更记录
 
+- 2026-09-13（第 23 轮，批次⑦）：D1 能力路由决策可见化（15 测试）。核查发现既有的 `AgentRuntimeRoutingDecision` 只管**执行内核**，
+  本轮补的是"派给哪个 agent/模型 + 为什么 + 为什么不是别人"。核心判定：**缺能力是不合格而非分低**（避免笃定地把视觉步骤派给看不到的模型）、
+  **平局上报**。另外修掉自己一处测试写错（断言了根本不会触发的视觉拒绝分支——因为它被更早的能力过滤挡掉了，
+  这反而证明了判定顺序正确，现补了一条专门钉顺序的测试）。下一轮：C2 Agent 定制面板 / E6 命令面板。
 - 2026-09-13（第 22 轮，批次⑦）：E7 中断/续跑/回滚**规划**（`resume-plan.ts`，19 测试）：三种模式统一到一张依赖图上，
   核心是"**某步重跑就必须让下游上下文失效**"——否则下游会静默读到上一次尝试的产物（artifact 存在、schema 合法，只是过期）。
   开发中测试抓出我自己两个逻辑错误：`retry_failed` 里一段把"既完成又放弃"的步骤删掉的**死逻辑**（那是重试失败，失败是更新的事实）、
