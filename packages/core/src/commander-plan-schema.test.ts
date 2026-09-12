@@ -269,6 +269,9 @@ describe("buildCommanderPlanPrompt", () => {
 
     expect(prompt).toContain("Current date context");
     expect(prompt).toContain("2026-07-09");
+    // Only the calendar date is rendered: a per-request ISO timestamp would
+    // change every call and defeat provider-side prefix caching.
+    expect(prompt).not.toContain("2026-07-09T08:00:00.000Z");
     expect(prompt).toContain("do not add a date-discovery step");
   });
 
