@@ -167,6 +167,10 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
           activeStreamingAgentKind = undefined;
           break;
         }
+        case "task.diagnostic": {
+          pushLog(taskEventToLogEntry(event));
+          break;
+        }
         case "ask_user.requested": {
           current = { ...current, askUserQuestion: event.question };
           break;

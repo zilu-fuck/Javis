@@ -4434,6 +4434,7 @@ describe("createFileScanTaskRuntime", () => {
 
   it("recovers general chat from context overflow with summary plus recent messages", async () => {
     let recoveredMessages: Array<{ role: "user" | "assistant"; content: string }> = [];
+    let recoveredProbeKey: string | undefined;
     let summaryCallOptions: {
       systemPrompt?: string;
       messages?: Array<{ role: "user" | "assistant"; content: string }>;
@@ -4444,7 +4445,11 @@ describe("createFileScanTaskRuntime", () => {
     }));
     const complete = vi.fn(async (
       nextPrompt: string,
-      options?: { messages?: Array<{ role: "user" | "assistant"; content: string }>; systemPrompt?: string },
+      options?: {
+        messages?: Array<{ role: "user" | "assistant"; content: string }>;
+        systemPrompt?: string;
+        cacheProbeKey?: string;
+      },
     ) => {
       if (complete.mock.calls.length === 1) {
         throw new Error("maximum context length exceeded");
@@ -4456,6 +4461,7 @@ describe("createFileScanTaskRuntime", () => {
         return { text: "- Earlier discussion established a stable API constraint." };
       }
       recoveredMessages = options?.messages ?? [];
+      recoveredProbeKey = options?.cacheProbeKey;
       return { text: "Recovered answer" };
     });
     const runtime = createFileScanTaskRuntime({
@@ -4477,6 +4483,9 @@ describe("createFileScanTaskRuntime", () => {
     expect(summaryCallOptions?.systemPrompt).toContain("You are Javis");
     expect(summaryCallOptions?.messages?.some((message) => message.content === "old-raw-detail-should-be-summarized")).toBe(true);
     expect(summaryCallOptions?.messages?.some((message) => message.content === "context-message-13")).toBe(false);
+    // P1-9: the recovered conversation starts a fresh probe scope so the
+    // expected compaction break does not surface as a diagnostic.
+    expect(recoveredProbeKey).toBe("chat:task-chat-context-recovery:recovered");
     expect(recoveredMessages[0]?.content).toContain("Earlier conversation summary:");
     expect(recoveredMessages[0]?.content).toContain("stable API constraint");
     expect(recoveredMessages.some((message) => message.content === "context-message-13")).toBe(true);

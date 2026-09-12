@@ -19,6 +19,15 @@ type ToolRuntimeIdentity = {
 export type TaskRuntimeEvent =
   | { kind: "task.created"; taskId: ID }
   | {
+      kind: "task.diagnostic";
+      taskId: ID;
+      /** Stable diagnostic code, e.g. cache.prefix_broken. */
+      code: string;
+      label: string;
+      detail: string;
+      agentKind?: AgentKind;
+    }
+  | {
       kind: "task.waiting";
       taskId: ID;
       phase: "waiting_model" | "waiting_tool" | "waiting_user";
@@ -205,6 +214,20 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         detail: "Task event bus recorded task creation.",
         userMessage: "任务已创建",
         devDetail: "Task event bus recorded task creation.",
+      };
+    case "task.diagnostic":
+      return {
+        id: `${event.taskId}-diagnostic-${toLogIdPart(event.code)}-${toLogIdPart(event.label)}`,
+        kind: "event",
+        title: event.code,
+        detail: `${event.label}: ${event.detail}`,
+        userMessage: event.label,
+        devDetail: JSON.stringify({
+          code: event.code,
+          label: event.label,
+          detail: event.detail,
+        }),
+        ...(event.agentKind ? optionalLogOwnership(agentIdFromKind(event.agentKind), undefined) : {}),
       };
     case "task.waiting":
       return {

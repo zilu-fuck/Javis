@@ -1501,6 +1501,27 @@ describe("model provider prefix-cache probe", () => {
     expect(warnSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("reports cache breaks through the onCacheBreak callback", async () => {
+    const provider = makeProvider();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const breaks: Array<{ scope: string; index: number; kind: string }> = [];
+    const onCacheBreak = (violation: { index: number; kind: string }, scope: string) => {
+      breaks.push({ scope, index: violation.index, kind: violation.kind });
+    };
+
+    await provider.complete("first ask", {
+      cacheProbeKey: "chat:task-6",
+      systemPrompt: "static system",
+    });
+    await provider.complete("second ask", {
+      cacheProbeKey: "chat:task-6",
+      systemPrompt: "rewritten system",
+      onCacheBreak,
+    });
+
+    expect(breaks).toEqual([{ scope: "chat:task-6", index: 0, kind: "changed" }]);
+  });
+
   it("flags a system-prompt rewrite as an index-0 break", async () => {
     const provider = makeProvider();
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});

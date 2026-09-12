@@ -32,6 +32,23 @@ describe("taskEventToLogEntry", () => {
     expect(log.agentId).toBe("agent-code");
   });
 
+  it("maps task.diagnostic events to inspector log entries", () => {
+    const log = taskEventToLogEntry({
+      kind: "task.diagnostic",
+      taskId: "task-1",
+      code: "cache.prefix_broken",
+      label: "Cache prefix broken",
+      detail: "scope=chat:task-1; item 1 changed",
+      agentKind: "commander",
+    });
+
+    expect(log.kind).toBe("event");
+    expect(log.title).toBe("cache.prefix_broken");
+    expect(log.userMessage).toBe("Cache prefix broken");
+    expect(log.detail).toContain("scope=chat:task-1");
+    expect(log.agentId).toBe("agent-commander");
+  });
+
   it("does not call an empty or failed stream a completed reply", () => {
     const empty = taskEventToLogEntry({
       kind: "agent.chunk_end",

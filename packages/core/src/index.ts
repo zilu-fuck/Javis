@@ -3373,6 +3373,7 @@ export function createFileScanTaskRuntime({
       temperature?: number;
       locale?: string;
       systemPrompt?: string;
+      cacheProbeKey?: string;
       messages?: ModelMessage[];
       images?: string[];
       timeoutMs?: number;
@@ -3389,7 +3390,7 @@ export function createFileScanTaskRuntime({
         const result = await activeChatTool.complete(prompt, {
           ...options,
           timeoutMs,
-          cacheProbeKey: `chat:${taskId}`,
+          cacheProbeKey: options.cacheProbeKey ?? `chat:${taskId}`,
         });
         if (result.tokenUsage) onUsage?.(result.tokenUsage);
         if (isOutputTruncationFinishReason(result.finishReason)) {
@@ -3407,7 +3408,7 @@ export function createFileScanTaskRuntime({
         const result = await activeChatTool.complete(prompt, {
           ...options,
           timeoutMs,
-          cacheProbeKey: `chat:${taskId}`,
+          cacheProbeKey: options.cacheProbeKey ?? `chat:${taskId}`,
         });
         if (result.tokenUsage) onUsage?.(result.tokenUsage);
         if (isOutputTruncationFinishReason(result.finishReason)) {
@@ -3442,7 +3443,7 @@ export function createFileScanTaskRuntime({
       for await (const chunk of activeChatTool.stream(prompt, {
         ...options,
         timeoutMs,
-        cacheProbeKey: `chat:${taskId}`,
+        cacheProbeKey: options.cacheProbeKey ?? `chat:${taskId}`,
         streamMode: "l1",
         onUsage: (usage) => {
           tokenUsage = usage;
@@ -3530,7 +3531,7 @@ export function createFileScanTaskRuntime({
         const result = await activeChatTool.complete(prompt, {
           ...options,
           timeoutMs,
-          cacheProbeKey: `chat:${taskId}`,
+          cacheProbeKey: options.cacheProbeKey ?? `chat:${taskId}`,
         });
         if (result.tokenUsage) onUsage?.(result.tokenUsage);
         if (isOutputTruncationFinishReason(result.finishReason)) {
@@ -3610,6 +3611,10 @@ export function createFileScanTaskRuntime({
         input.activeChatTool,
         {
           ...input.options,
+          // P1-9: compaction legitimately replaces the history, so the
+          // recovered conversation starts a fresh probe scope instead of
+          // firing an expected cache break on the old one.
+          cacheProbeKey: `chat:${input.taskId}:recovered`,
           systemPrompt: createGeneralChatSystemPrompt(input.isChinese),
           messages: recoveredMessages,
           timeoutMs: input.timeoutMs,

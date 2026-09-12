@@ -10,6 +10,7 @@ import {
   getAdapter,
   injectTerminologyPrompt,
   RUNTIME_CONTEXT_DATA_MARKER,
+  type CacheProbeViolation,
 } from "@javis/core";
 import { inferContextTokensFromModelName } from "@javis/ui/model-context-window";
 import type {
@@ -71,6 +72,8 @@ export interface CompletionOptions {
    * calls; violations are logged as hashes only. Never sent to providers.
    */
   cacheProbeKey?: string;
+  /** Invoked when the probe detects a prefix-cache break in this scope. */
+  onCacheBreak?: (violation: CacheProbeViolation, scope: string) => void;
 }
 
 export interface StreamOptions extends CompletionOptions {
@@ -946,6 +949,7 @@ export function drainCacheProbeWarningsForTests(): string[] {
 function probeCachePrefix(
   scope: string,
   items: { systemPrompt?: string; messages?: ModelMessage[]; prompt: string },
+  onCacheBreak?: (violation: CacheProbeViolation, scope: string) => void,
 ): void {
   const fingerprints = computeCacheProbeFingerprints(items);
   const previous = cacheProbeLedger.get(scope);
@@ -958,6 +962,7 @@ function probeCachePrefix(
       const message = `[javis-cache-probe] ${describeCacheProbeViolation(scope, violation, previousHistory, nextHistory)}`;
       console.warn(message);
       recordCacheProbeWarning(message);
+      onCacheBreak?.(violation, scope);
     }
   }
   recordCacheProbeResult(scope, fingerprints);
@@ -994,11 +999,15 @@ async function createModelRequest(
   });
 
   if (options?.cacheProbeKey) {
-    probeCachePrefix(options.cacheProbeKey, {
-      systemPrompt: boundedInput.systemPrompt,
-      messages: boundedInput.messages,
-      prompt: boundedInput.prompt,
-    });
+    probeCachePrefix(
+      options.cacheProbeKey,
+      {
+        systemPrompt: boundedInput.systemPrompt,
+        messages: boundedInput.messages,
+        prompt: boundedInput.prompt,
+      },
+      options.onCacheBreak,
+    );
   }
 
   if (adapter) {

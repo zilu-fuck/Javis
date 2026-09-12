@@ -1590,6 +1590,26 @@ export function createJavisRuntime({
 
   const sharedContext = createSharedTaskContext();
   const eventBus = createTaskEventBus();
+
+  // P2-16: surface probe-detected prefix-cache breaks as task diagnostics so
+  // they show up in the Inspector instead of only the dev console.
+  const withCacheBreakDiagnostic = (options?: CompletionOptions): CompletionOptions => {
+    const isChinese = options?.locale?.toLowerCase().startsWith("zh");
+    return {
+      ...options,
+      onCacheBreak: (violation, scope) => {
+        eventBus.emit({
+          kind: "task.diagnostic",
+          taskId: taskIdRef.current ?? "task-unknown",
+          code: "cache.prefix_broken",
+          label: isChinese ? "缓存前缀断裂" : "Cache prefix broken",
+          detail: `scope=${scope}; item ${violation.index} ${violation.kind}`,
+          agentKind: "commander",
+        });
+      },
+    };
+  };
+
   const runtimeEventStore = createRuntimeEventStoreRef(getDatabase);
   const checkpointStore = createCheckpointStoreRef(getDatabase);
   const usageObservationStore = createUsageObservationStoreRef(getDatabase);
@@ -1874,8 +1894,10 @@ export function createJavisRuntime({
     checkpointSink: checkpointStore,
     usageObservationSink: usageObservationStore,
     chatTool: {
-      complete: (prompt, options) => providerForChat().complete(prompt, options),
-      stream: (prompt, options) => providerForChat().stream(prompt, options),
+      complete: (prompt, options) =>
+        providerForChat().complete(prompt, withCacheBreakDiagnostic(options)),
+      stream: (prompt, options) =>
+        providerForChat().stream(prompt, withCacheBreakDiagnostic(options)),
     },
     commanderTool: {
       plan: async (request, observer) => {
