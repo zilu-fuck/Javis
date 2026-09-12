@@ -21,6 +21,7 @@ export type FailureKind =
   | "empty_final_content"
   | "context_overflow"
   | "truncated_output"
+  | "request_invalid"
   | "tool_schema"
   | "tool_unavailable"
   | "plan_invalid"
@@ -125,6 +126,16 @@ const TEMPLATES: Record<FailureKind, FailureTemplate> = {
     actions: ["retry", "switch_model", "open_settings"],
     retryable: true,
   },
+  request_invalid: {
+    // Distinct from `plan_invalid`: the *request* never formed (a missing prompt field),
+    // so replanning will not help — the model configuration or the caller is at fault.
+    message: {
+      en: "The model request was built incompletely, so it never reached the provider. Retry, and if it persists, check the model configuration.",
+      zhCN: "模型请求参数不完整，请求没有成功发出。请重试；如果仍失败，请检查模型配置。",
+    },
+    actions: ["retry", "open_settings", "inspect_log"],
+    retryable: true,
+  },
   tool_schema: {
     message: {
       en: "A tool returned data that does not match its declared shape. The step was stopped rather than guessing.",
@@ -202,6 +213,12 @@ const MATCHERS: Array<{ kind: FailureKind; pattern: RegExp }> = [
   {
     kind: "truncated_output",
     pattern: /truncated \(length\)|was truncated|finish_reason.*length|输出被长度上限截断/i,
+  },
+  {
+    // Placed before `plan_invalid` so a request that never formed is not reported as a
+    // planning problem: replanning cannot fix a missing prompt field.
+    kind: "request_invalid",
+    pattern: /complete_model_prompt|missing field [`'"]?prompt[`'"]?/i,
   },
   {
     kind: "tool_schema",

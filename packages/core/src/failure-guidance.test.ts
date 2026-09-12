@@ -40,6 +40,19 @@ describe("classifyFailureKind", () => {
     )).toBe("context_overflow");
   });
 
+  it("separates a malformed request from an invalid plan", () => {
+    // E2c groundwork: `toUserFacingError` had a dedicated message for this, and a blank
+    // delegation would have replaced it with "unknown". Replanning cannot fix a request
+    // that never formed, so it must not be reported as a planning problem.
+    expect(classifyFailureKind("complete_model_prompt was not provided")).toBe("request_invalid");
+    expect(classifyFailureKind("missing field `prompt`")).toBe("request_invalid");
+    expect(classifyFailureKind("missing field 'prompt'")).toBe("request_invalid");
+
+    const guidance = classifyFailureDetail("complete_model_prompt was not provided", { locale: "zhCN" });
+    expect(guidance.actions).toContain("retry");
+    expect(guidance.message).toContain("请求参数不完整");
+  });
+
   it("classifies tool contract, availability and plan failures", () => {
     expect(classifyFailureKind("Tool code.searchRepository output.actualFound[27].line must be a integer."))
       .toBe("tool_schema");

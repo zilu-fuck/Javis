@@ -308,7 +308,15 @@
   词序一变就掉进 `unknown`。**用户可见文案有变更**：该场景从泛泛的 "model request failed" 变为
   "No model is configured for this task. Choose a provider, model and API key in Settings."——这是 E2 的既定目标（消息必须可行动），
   已更新对应测试断言并注明这是刻意变更
-- [ ] **E2c** 把 `workflow-executor.ts` 的 `toUserFacingError` 也改为委托 `failure-guidance`（当前它绕过了分类与动作，且中文硬编码）；
+- [~] **E2c** 合并第三份分类器（`workflow-executor.ts:2193` 的 `toUserFacingError`）——**已完成使这一步变得安全的前置工作**：
+  核查发现**不能直接删表委托**，否则会**丢失信息**——`failure-guidance` 里没有任何分类能命中 `complete_model_prompt`，
+  它会掉到 `unknown`，比原来那句具体的"请求参数不完整"更差。所以先补上：
+  ① 新增 `request_invalid` 分类（含中英双语消息与 `retry`/`open_settings`/`inspect_log` 动作），并**排在 `plan_invalid` 之前**——
+  请求根本没发出去时，重新规划修不了它，把它报成"计划问题"会误导；
+  ② 匹配器补 `complete_model_prompt` / `missing field prompt`（引号三种写法）。
+  剩余工作已很机械：把 `toUserFacingError` 改成委托、**默认 locale 用 `zhCN`**（保持该路径现状），
+  并更新 `index.test.ts` 里两处被钉住的旧中文串（609 行、639 行）。**注意**这两处断言会变，
+  而新文案多了 action 与语言切换，属于刻意的改进，不是回归
 - [ ] **E2d** UI 侧把 `failureGuidance.actions` 渲染成按钮并接线到重试/换模型/打开设置等真实动作（快照字段已就绪）
 - [x] **E3** 结论优先视图（见上方 C5 之后的 E3 行）
 - [x] **E4** 审批中心（同 D5）
@@ -448,6 +456,9 @@ $env:PATH="$env:USERPROFILE\.cargo\bin;C:\Program Files\Git\cmd;$env:PATH"; core
 
 ## 变更记录
 
+- 2026-09-13（第 31 轮，接线切片）：E2c **前置工作**完成——核查发现"删表直接委托"会**丢信息**（`complete_model_prompt` 在
+  `failure-guidance` 里无匹配 → 掉到 `unknown`，比原来更差），于是先补 `request_invalid` 分类（双语 + 动作，且排在 `plan_invalid`
+  之前，因为请求没发出去时重新规划修不了它）与匹配器。剩余委托工作已很机械，路线图里写明了要改的两处断言与原因。
 - 2026-09-13（第 30 轮，接线切片）：E2b——失败指引接进模型调用失败路径（`TaskSnapshot.failureGuidance` 携带 kind/actions/retryable）。
   **发现"第三份分类器"**：`workflow-executor.ts:2193` 的 `toUserFacingError` 是另一张独立字符串表，只有中文、没有动作、无语言切换
   （正是 E2 从 index.ts 删掉的重复）；本轮只接线了一条路径，缺口记为 **E2c/E2d**。
