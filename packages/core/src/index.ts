@@ -541,6 +541,22 @@ export type {
   UsagePricing,
 } from "./usage-panel";
 export { diagnoseSetup } from "./setup-diagnostics";
+export {
+  compareVersions,
+  decideUpdate,
+  isWellFormedSha256,
+  parseVersion,
+  validateReleaseManifest,
+  verifyUpdateArtifact,
+} from "./update-policy";
+export type {
+  ReleaseManifest,
+  UpdateAction,
+  UpdateArtifact,
+  UpdateCandidate,
+  UpdateDecision,
+  UpdatePolicy,
+} from "./update-policy";
 export type {
   SetupDiagnosis,
   SetupDiagnosisInput,

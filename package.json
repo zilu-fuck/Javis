@@ -12,6 +12,7 @@
     "release:check-version": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/check-release-version.ps1",
     "release:windows:signed": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/build-windows-signed.ps1",
     "release:rollback-notes": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/release/write-release-rollback-notes.ps1",
+    "release:update-manifest": "node scripts/release/update-manifest.mjs",
     "typecheck": "corepack pnpm -r typecheck",
     "eval": "node scripts/eval/run-golden-tasks.mjs",
     "eval:test": "node --test scripts/test-eval-redaction.mjs",
