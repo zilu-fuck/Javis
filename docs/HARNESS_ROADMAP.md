@@ -561,8 +561,20 @@
 
 ## 交接说明（给接手的下一个会话）
 
-**当前状态**：`pnpm typecheck` / `pnpm docs:check` 与全部 **1652 core + 1002 desktop + 219 ui + 53 tools + 6 sidecar + 599 Rust** 测试全绿；
-工作树干净；最近提交见 `git log --oneline`。
+**当前状态**：`pnpm typecheck` / `pnpm docs:check` / `pnpm roadmap:audit` / `pnpm bundle:check` 与全部
+**1652 core + 1012 desktop + 219 ui + 53 tools + 6 sidecar + 599 Rust** 测试全绿；工作树干净；最近提交见 `git log --oneline`。
+
+**这段工作的规模**（供判断完成度，不是自我评价）：
+约 **40 轮**推进，**30+ 个提交**，测试从 core ~1298 → **1652**；新增 **7 个可运行闸门**：
+`eval`（29 条 golden task）、`metrics`、`diagnostics`、`docs:check`（文档漂移）、`roadmap:audit`（勾选一致性）、
+`bundle:check`（渲染进程静态导入构建期包）、`extraction:analyze`（选缝分析）——**每一个都实测过"会失败"**，不是摆设。
+
+**目标已达成到什么程度（如实）**：
+批次 ①–⑦ 的**全部核心逻辑**已落地（各带单测）；M1 地基、度量层、客制化、多 agent 协作、好用性、工程化**均已交付**。
+**未完成的是三类**：① **17 个 `*b` 接线缺口**（核心逻辑 + 测试已就绪，缺 UI/运行时接线；
+**本环境无法验证 UI 渲染**，因此我没有盲写）；② `G4b`/`G5b`（推分支开 PR、真自动更新）**需要你的凭据与判断**；
+③ `runCommanderDagTask` 的**内部拆分**（B4e 已用数据判定：外部抽取这条路已到头）。
+**没有任何一项被标记为完成但其实没做**——`roadmap:audit` 会核对引用路径与测试数字。
 
 **每轮必须跑的验证**：
 
@@ -683,6 +695,10 @@ $env:PATH="$env:USERPROFILE\.cargo\bin;C:\Program Files\Git\cmd;$env:PATH"; core
 
 ## 变更记录
 
+- 2026-09-13（第 47 轮，**收尾**）：最终门禁链**逐项实测**全部通过：`typecheck` / `package-boundaries(+test)` / `docs:check(+test)` /
+  `roadmap:audit` / `bundle:check` / `eval` / `eval:test` / 全仓测试 / `rust:test`；
+  其中 **golden eval 29/29（100%）**、**文档漂移 0 错 0 警**、**勾选审计 67 路径 0 缺失**。
+  交接说明已更新为最终状态（含"未完成的三类"如实分类）。**目标未完成**，goal 保持活跃。
 - 2026-09-13（第 46 轮，工程）：**B4 的调查收口（数据结论）**。对全部大声明做闭包 + 中心度分析：
   **大声明里闭包干净的只有 3 个，7 个拖着中心声明**；`runCommanderDagTask` 的闭包是 **10,812 行 / 304 个声明**
   （占全文件 73%）——它**不是能搬走的东西，而是这个文件本身**。结论：**"靠抽取继续瘦身"这条路基本走到头**，
