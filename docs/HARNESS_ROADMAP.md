@@ -167,6 +167,30 @@
   ② 已找到两条线索待查：扫这个 chunk 发现里面含 **`child_process` 与 `node:` 前缀**——**浏览器 bundle 里出现 node 专用入口**，
   说明某个依赖的 node 版入口被打了进来；`zod` 出现 348 次（被完整打包）。
   下一步应当用 `rollup-plugin-visualizer` 或 `vite build --debug` 的模块图**定位贡献最大的模块**，再决定是懒加载还是排除 node 入口。
+
+  **✅ 根因已查明（用实测，不是猜）**：新增 `scripts/analyze-bundle.mjs`（用 Vite JS API 的 `generateBundle` 累加每个模块的
+  `renderedLength`，按**包名**聚合，避免上百个小模块掩盖真凶），跑真实构建得到：
+
+  | 包 | 打进 bundle 的体积 |
+  |---|---|
+  | **`typescript`（TypeScript 编译器本体！）** | **9,240 kB** |
+  | `langsmith` | 440 kB |
+  | `zod` | 318 kB |
+  | `@xterm/xterm` | 285 kB |
+
+  也就是说 `vendor` 里那条 4.3 MB（未 gzip 前约 10 MB rendered）**几乎全是 TypeScript 编译器**。
+  来源已定位到**唯一一处**：`apps/desktop/src/repo-intelligence-service.ts:11` 的 `import * as ts from "typescript"`，
+  而 `app-runtime.ts:154-159` **急切导入**该服务。**这是真实缺陷而非体积问题**：编译器是构建期工具，
+  放进渲染进程等于每次冷启动都白付一次。
+
+  **修法（未做，因其为行为变更）**：把 4 个调用点改为 `await import("./repo-intelligence-service")`（该服务在
+  `app-runtime.ts` 中每个导出符号**恰好只有 1 个使用点**，位于 2437 / 2447 / 2470 / 2479 行，其中 `traceCallChain` 已是 async）。
+  预估首屏可省约 9 MB。**我没有在本轮动它**：这是一次跨越 3,000 行运行时文件的 async 重构，在我剩余预算内风险过高。
+
+  **✅ 已加的防复发闸门**：`scripts/check-bundle-hygiene.mjs`（`pnpm bundle:check`，已接入 `pnpm check`）——
+  规则是"渲染进程代码**不得静态导入**构建期/node 专用包"（`typescript` / `playwright` / `node:fs` / `node:child_process`…），
+  已知的那一处用**带理由的允许清单**容忍并只报 warning。**实测过它会失败**：注入一个 `import * as fs from "node:fs"` 的探针文件后
+  如实报 ERROR 且非零退出，删除后恢复 0。
 - [ ] **G2c** 前端首屏懒加载（把只在一部分功能里用到的依赖改为动态 import）——需先完成 G2b 的定位
 - [ ] **B5** `RuntimeEvent` / `ArtifactEnvelope` / `SharedContext` / `WorkflowCheckpoint` 收敛成一份与代码对齐的对外契约（`docs/CORE_CONTRACTS.md`）
 - [ ] **B6** preset 提升为一等公民（agents + tools + 权限策略 + 模型槽 + 提示词版本，可导入导出 / A-B）
@@ -519,6 +543,11 @@ $env:PATH="$env:USERPROFILE\.cargo\bin;C:\Program Files\Git\cmd;$env:PATH"; core
 
 ## 变更记录
 
+- 2026-09-13（第 37 轮，工程）：**G2b 根因查明**——用实测（新增 `scripts/analyze-bundle.mjs`，按包名聚合每个模块的 `renderedLength`）
+  定位到 `vendor` 那 4.3 MB 的 **9,240 kB 全是 `typescript` 编译器本体**，来源是 `repo-intelligence-service.ts:11` 的静态 import
+  加上 `app-runtime.ts` 的急切导入。**这是真实缺陷**（构建期工具进了渲染进程），修法是 4 个调用点改动态 import，
+  但**本轮没做**——跨越 3,000 行运行时文件的 async 重构在剩余预算内风险过高，已把精确位置与做法写进路线图。
+  同时加了**防复发闸门** `pnpm bundle:check`（已接入 `pnpm check`），并**实测它会失败**（注入探针后报 ERROR 非零退出）。
 - 2026-09-13（第 36 轮，工程）：G2b 前端 bundle **第一刀**——把"除 React 外所有 node_modules 塞进一个 vendor chunk"改为按依赖族拆分，
   实测 `vendor` **4,945 → 4,309 kB**，并分出 `vendor-langchain`(620 kB) 与 `vendor-tauri`(15 kB)，收益是可缓存性。
   **但 4.3 MB 的来源仍未查明**（langchain 只占 620 kB），已把两条线索写进路线图（chunk 内含 `child_process`/`node:` 前缀
