@@ -179,7 +179,10 @@ const TEMPLATES: Record<FailureKind, FailureTemplate> = {
 const MATCHERS: Array<{ kind: FailureKind; pattern: RegExp }> = [
   {
     kind: "model_unconfigured",
-    pattern: /could not read model api key secret|no model (?:is )?configured|model settings (?:are )?missing|api key secret/i,
+    // The phrase order varies in the wild ("missing model settings" as well as
+    // "model settings are missing"), and a miss here is the difference between an
+    // actionable "configure a model" and a useless "unknown".
+    pattern: /could not read model api key secret|no model (?:is )?configured|model settings (?:are )?missing|missing model settings|api key secret/i,
   },
   {
     kind: "auth",

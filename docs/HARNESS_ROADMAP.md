@@ -299,7 +299,17 @@
   `Tool ... must be a integer`、`plan compilation failed`…），所以这是一条真实失败分类的回归钉。
   同时**删掉运行时里那份更小的重复分类器**（`classifyModelFailureKind` / `modelFailureUserMessage` 改为委托），
   运行时因此自动获得限流、上下文溢出、截断、工具 schema 这些原本只会落到 `unknown` 的类别
-- [ ] **E2b** UI 侧渲染动作按钮（核心已给出 `actions`，按钮尚未接线）
+- [x] **E2b** 失败指引接进真实失败路径（模型调用失败路径已接线）：`TaskSnapshot.failureGuidance` 现在携带
+  `{ kind, message, actions, retryable, detail }`，UI 可以直接把 `actions` 渲染成按钮。
+  **这轮最值钱的发现是一个"第三份分类器"**：`workflow-executor.ts:2193` 的 `toUserFacingError` 又是一个独立字符串匹配表，
+  **只有中文、没有动作、也没有语言切换**——正是 E2 从 `index.ts` 里删掉的那种重复。本轮**只接线了一条失败路径**（模型调用失败），
+  这条路径的覆盖缺口记为 **E2c**（见下）。
+  另修掉匹配器一处真实缺口：`model_unconfigured` 只认"model settings are missing"，而线上文案是"**missing** model settings"，
+  词序一变就掉进 `unknown`。**用户可见文案有变更**：该场景从泛泛的 "model request failed" 变为
+  "No model is configured for this task. Choose a provider, model and API key in Settings."——这是 E2 的既定目标（消息必须可行动），
+  已更新对应测试断言并注明这是刻意变更
+- [ ] **E2c** 把 `workflow-executor.ts` 的 `toUserFacingError` 也改为委托 `failure-guidance`（当前它绕过了分类与动作，且中文硬编码）；
+- [ ] **E2d** UI 侧把 `failureGuidance.actions` 渲染成按钮并接线到重试/换模型/打开设置等真实动作（快照字段已就绪）
 - [x] **E3** 结论优先视图（见上方 C5 之后的 E3 行）
 - [x] **E4** 审批中心（同 D5）
 - [x] **E5** 成本 / 缓存 / 上下文面板（见上方 E5 行）
@@ -438,6 +448,11 @@ $env:PATH="$env:USERPROFILE\.cargo\bin;C:\Program Files\Git\cmd;$env:PATH"; core
 
 ## 变更记录
 
+- 2026-09-13（第 30 轮，接线切片）：E2b——失败指引接进模型调用失败路径（`TaskSnapshot.failureGuidance` 携带 kind/actions/retryable）。
+  **发现"第三份分类器"**：`workflow-executor.ts:2193` 的 `toUserFacingError` 是另一张独立字符串表，只有中文、没有动作、无语言切换
+  （正是 E2 从 index.ts 删掉的重复）；本轮只接线了一条路径，缺口记为 **E2c/E2d**。
+  修掉匹配器一处真实缺口（"missing model settings" 词序不同就掉进 unknown）；
+  **用户可见文案变更**：模型未配置时从泛泛的 "model request failed" 改为明确指出原因与做法的英文/中文消息（已更新断言并注明）。
 - 2026-09-13（第 29 轮，接线切片）：**F5 波动测试已修**。追查后发现问题比"一个偶发测试"更大：审批卡那批测试等待的是**代理信号**
   （面板文本），再**同步**查"未禁用的按钮"——面板先渲染、按钮后启用，所以**8 处同写法里 7 处都是竞态**，我那次只是其中一个输了。
   改为等待真正的前置条件（`findEnabledButtonByLabel`），并改善失败信息。UI 套件连跑 3 次全绿。

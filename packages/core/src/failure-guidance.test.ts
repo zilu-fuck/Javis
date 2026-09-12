@@ -15,6 +15,9 @@ describe("classifyFailureKind", () => {
   it("classifies the model-configuration and auth failures", () => {
     expect(classifyFailureKind("Could not read model API key secret. Tried these references but none found: model.openai"))
       .toBe("model_unconfigured");
+    // Phrase order varies in the wild; both must classify, or the user gets "unknown".
+    expect(classifyFailureKind("model request failed: missing model settings")).toBe("model_unconfigured");
+    expect(classifyFailureKind("model settings are missing")).toBe("model_unconfigured");
     expect(classifyFailureKind("API 密钥无效或已过期，请在设置中更新密钥。")).toBe("auth");
     expect(classifyFailureKind('API Key 验证失败（mimo 返回 401）')).toBe("auth");
     expect(classifyFailureKind("model.call.failed provider=deepseek status=403 Forbidden")).toBe("auth");

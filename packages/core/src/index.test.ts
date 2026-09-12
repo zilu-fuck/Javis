@@ -4892,7 +4892,16 @@ describe("createFileScanTaskRuntime", () => {
     expect(scanMarkdownDocuments).not.toHaveBeenCalled();
     expect(complete).toHaveBeenCalled();
     expect(finalSnapshot.commanderMessage).toBeTruthy();
-    expect(finalSnapshot.userFacingError).toContain("model request failed");
+    // E2 changed this deliberately: the old message was the generic
+    // "model request failed". The classification now names the cause and the fix,
+    // which is the whole point of the change.
+    expect(finalSnapshot.userFacingError).toContain("No model is configured");
+    // E2b: the message says what broke; the guidance says what to do about it, and the
+    // failure surface renders those actions as buttons.
+    expect(finalSnapshot.failureGuidance).toBeDefined();
+    expect(finalSnapshot.failureGuidance?.actions.length).toBeGreaterThan(0);
+    expect(finalSnapshot.failureGuidance?.kind).toBe("model_unconfigured");
+    expect(finalSnapshot.failureGuidance?.actions).toContain("open_settings");
     expect(finalSnapshot.logs[finalSnapshot.logs.length - 1]?.detail).toContain(
       "missing model settings",
     );

@@ -117,9 +117,11 @@ import { isTaskCancelledError, throwIfTaskAborted, withTaskTimeout } from "./tas
 import { clipChatTurnPrompt as clipChatTurn } from "./chat-turn-budget";
 import { evaluateHooks } from "./config/hooks";
 import {
+  classifyFailureDetail,
   classifyFailureKind,
   failureMessageForKind,
 } from "./failure-guidance";
+import type { FailureGuidance } from "./failure-guidance";
 import { isTerminalTaskStatus } from "./state/task-state";
 import { inferVisionMode } from "./vision-utils";
 
@@ -1462,6 +1464,11 @@ export interface TaskSnapshot {
   planGenerationTrace?: PlanGenerationTrace;
   /** User-readable error message set when task fails. Avoids exposing raw stack traces. */
   userFacingError?: string;
+  /**
+   * E2b: the classified failure plus the actions the user can take, so a failure surface
+   * can render real buttons instead of only explaining what went wrong.
+   */
+  failureGuidance?: FailureGuidance;
 }
 
 /** Per-step timing and resource data for performance analysis. */
@@ -4123,6 +4130,9 @@ export function createFileScanTaskRuntime({
       streamingText: "",
       isStreaming: false,
       userFacingError,
+      // E2b: carry the classified failure and its actions so the UI can offer them.
+      // The message alone told the user what broke; the actions tell them what to do.
+      failureGuidance: classifyFailureDetail(detail, { locale: isChinese ? "zhCN" : "en" }),
       logs: [
         ...(currentSnapshot.id === taskId ? currentSnapshot.logs : []),
         {
