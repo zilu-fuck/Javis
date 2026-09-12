@@ -544,6 +544,26 @@ export { diagnoseSetup } from "./setup-diagnostics";
 export { planResume } from "./resume-plan";
 export { decideAgentRouting, describeRoutingDecision } from "./routing-decision";
 export {
+  BUILTIN_UI_PREFERENCES,
+  RESERVED_SHORTCUTS,
+  detectShortcutConflicts,
+  normalizeKeybinding,
+  resolveEffectiveTheme,
+  resolveUiPreferences,
+  validateUiPreferences,
+} from "./ui-preferences";
+export type {
+  KeybindingConflict,
+  KeybindingConflictKind,
+  ResolvedUiPreferences,
+  UiDensity,
+  UiLocale,
+  UiPlatform,
+  UiPreferenceDiagnostic,
+  UiPreferences,
+  UiTheme,
+} from "./ui-preferences";
+export {
   buildSessionLineage,
   isForeignContextWrite,
   namespaceChildContextKey,
