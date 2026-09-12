@@ -384,6 +384,15 @@ export {
   toolDescriptorsToAgentToolSpecs,
 } from "./agent-runtime/tool-schema";
 export {
+  compareStringsByCodePoint,
+  computeCacheProbeFingerprints,
+  describeCacheProbeViolation,
+  findCacheProbeViolation,
+  hashPromptItem,
+  type CacheProbeItems,
+  type CacheProbeViolation,
+} from "./agent-runtime/prompt-determinism";
+export {
   addAgentTokenUsage,
   createAgentRuntimeMetricsCollector,
   createAgentRuntimeRoutingMetricsCollector,
@@ -1423,6 +1432,8 @@ export interface ChatTool {
       timeoutMs?: number;
       skipAgentMemory?: boolean;
       skipSkillContext?: boolean;
+      /** Scope for the provider-side prefix-cache probe; hashes only, never sent to providers. */
+      cacheProbeKey?: string;
     },
   ): Promise<{
     text: string;
@@ -1446,6 +1457,7 @@ export interface ChatTool {
       onFinish?: (finishReason?: string) => void;
       skipAgentMemory?: boolean;
       skipSkillContext?: boolean;
+      cacheProbeKey?: string;
     },
   ): AsyncIterable<{
     text: string;
@@ -3350,7 +3362,11 @@ export function createFileScanTaskRuntime({
     throwIfTaskAborted(signal, "chat.complete");
     if (!activeChatTool.stream) {
       return withTaskTimeout(async () => {
-        const result = await activeChatTool.complete(prompt, { ...options, timeoutMs });
+        const result = await activeChatTool.complete(prompt, {
+          ...options,
+          timeoutMs,
+          cacheProbeKey: `chat:${taskId}`,
+        });
         if (result.tokenUsage) onUsage?.(result.tokenUsage);
         if (isOutputTruncationFinishReason(result.finishReason)) {
           throw new Error(`Model response was truncated (${result.finishReason}); no complete answer was returned.`);
@@ -3364,7 +3380,11 @@ export function createFileScanTaskRuntime({
     }
     if (!eventBus) {
       return withTaskTimeout(async () => {
-        const result = await activeChatTool.complete(prompt, { ...options, timeoutMs });
+        const result = await activeChatTool.complete(prompt, {
+          ...options,
+          timeoutMs,
+          cacheProbeKey: `chat:${taskId}`,
+        });
         if (result.tokenUsage) onUsage?.(result.tokenUsage);
         if (isOutputTruncationFinishReason(result.finishReason)) {
           throw new Error(`Model response was truncated (${result.finishReason}); no complete answer was returned.`);
@@ -3398,6 +3418,7 @@ export function createFileScanTaskRuntime({
       for await (const chunk of activeChatTool.stream(prompt, {
         ...options,
         timeoutMs,
+        cacheProbeKey: `chat:${taskId}`,
         streamMode: "l1",
         onUsage: (usage) => {
           tokenUsage = usage;
@@ -3482,7 +3503,11 @@ export function createFileScanTaskRuntime({
         error: "stream failed",
       });
       return withTaskTimeout(async () => {
-        const result = await activeChatTool.complete(prompt, { ...options, timeoutMs });
+        const result = await activeChatTool.complete(prompt, {
+          ...options,
+          timeoutMs,
+          cacheProbeKey: `chat:${taskId}`,
+        });
         if (result.tokenUsage) onUsage?.(result.tokenUsage);
         if (isOutputTruncationFinishReason(result.finishReason)) {
           throw new Error(`Model response was truncated (${result.finishReason}); no complete answer was returned.`);

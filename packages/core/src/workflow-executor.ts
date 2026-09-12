@@ -227,6 +227,7 @@ import {
 } from "./agent-runtime/metrics";
 import { createScopedToolExecutionGateway } from "./agent-runtime/read-only-tool-gateway";
 import { toolDescriptorsToAgentToolSpecs } from "./agent-runtime/tool-schema";
+import { compareStringsByCodePoint } from "./agent-runtime/prompt-determinism";
 import { isTaskCancelledError, TaskTimeoutError, throwIfTaskAborted, withTaskTimeout } from "./task-wait";
 import { createAskUserRequest } from "./ask-user";
 import {
@@ -1279,7 +1280,7 @@ export function getAvailableAgentsForPlanning(
       allowedToolNames,
       capabilities,
     };
-  });
+  }).sort((left, right) => compareStringsByCodePoint(left.kind, right.kind));
 }
 
 export function getDelegableSubAgentsForPlanning(
@@ -1464,7 +1465,11 @@ function isRuntimeMcpDescriptorAllowed(descriptor: ToolDescriptor): boolean {
 function toolDescriptorsForPlanner(
   toolDescriptors: readonly ToolDescriptor[],
 ): ToolDescriptor[] {
-  return toolDescriptors.map((descriptor) => ({
+  // Deterministic wire order (P0-3): codepoint name sort so the planner's
+  // tool block never depends on registration or MCP refresh order.
+  return [...toolDescriptors]
+    .sort((left, right) => compareStringsByCodePoint(left.name, right.name))
+    .map((descriptor) => ({
     name: descriptor.name,
     permissionLevel: descriptor.permissionLevel,
     ...(descriptor.writeRiskLevel ? { writeRiskLevel: descriptor.writeRiskLevel } : {}),
@@ -3232,7 +3237,10 @@ function filterToolDescriptorsForStep(
     if (capability) return descriptor.capabilityTags.includes(capability);
     return true;
   });
-  return limitReactMcpSubtoolDescriptors(filtered);
+  // Deterministic wire order (P0-3): ReAct tool specs follow the planner's
+  // codepoint-sorted convention regardless of upstream registration order.
+  return limitReactMcpSubtoolDescriptors(filtered)
+    .sort((left, right) => compareStringsByCodePoint(left.name, right.name));
 }
 
 function verifyStructuredTrendEvidence(
@@ -3504,7 +3512,7 @@ function limitReactMcpSubtoolDescriptors(
   }
   const perServerCount = new Map<string, number>();
   const selectedSubtools = mcpSubtools
-    .sort((left, right) => left.name.localeCompare(right.name))
+    .sort((left, right) => compareStringsByCodePoint(left.name, right.name))
     .filter((descriptor) => {
       const serverKey = mcpPromptServerKey(descriptor);
       const count = perServerCount.get(serverKey) ?? 0;

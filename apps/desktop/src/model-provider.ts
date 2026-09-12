@@ -2,7 +2,14 @@ import type { ModelSettings } from "./model-settings";
 import { localeDefaultModelSettings } from "./model-settings";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { buildAgentPromptBundle, injectTerminologyPrompt, getAdapter } from "@javis/core";
+import {
+  buildAgentPromptBundle,
+  computeCacheProbeFingerprints,
+  describeCacheProbeViolation,
+  findCacheProbeViolation,
+  getAdapter,
+  injectTerminologyPrompt,
+} from "@javis/core";
 import { inferContextTokensFromModelName } from "@javis/ui/model-context-window";
 import type {
   AgentKind,
@@ -57,6 +64,12 @@ export interface CompletionOptions {
   skillContextMaxSkills?: number;
   skillContextMaxChars?: number;
   timeoutMs?: number;
+  /**
+   * Scope key for the prefix-cache probe (DSH-style runtime assertion, P0-3).
+   * Requests sharing a key must keep the item-wise prefix invariant across
+   * calls; violations are logged as hashes only. Never sent to providers.
+   */
+  cacheProbeKey?: string;
 }
 
 export interface StreamOptions extends CompletionOptions {
@@ -882,6 +895,68 @@ function isUsableContextWindow(value: number | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
+const CACHE_PROBE_LEDGER_LIMIT = 64;
+const CACHE_PROBE_WARNING_LIMIT = 32;
+
+/**
+ * Prefix-cache probe state (P0-3 runtime assertion). Keyed by the caller's
+ * `cacheProbeKey`; stores fingerprints only so nothing prompt-shaped is ever
+ * retained or logged. Bounded: oldest scope evicted, warnings ring-buffered.
+ */
+const cacheProbeLedger = new Map<string, string[]>();
+const cacheProbeWarnings: string[] = [];
+
+function recordCacheProbeResult(scope: string, fingerprints: string[]): void {
+  if (cacheProbeLedger.size >= CACHE_PROBE_LEDGER_LIMIT) {
+    const oldest = cacheProbeLedger.keys().next().value;
+    if (oldest !== undefined) cacheProbeLedger.delete(oldest);
+  }
+  cacheProbeLedger.set(scope, fingerprints);
+}
+
+function recordCacheProbeWarning(message: string): void {
+  cacheProbeWarnings.push(message);
+  if (cacheProbeWarnings.length > CACHE_PROBE_WARNING_LIMIT) {
+    cacheProbeWarnings.shift();
+  }
+}
+
+/** Test-only: reset probe ledger and warnings between cases. */
+export function resetCacheProbeStateForTests(): void {
+  cacheProbeLedger.clear();
+  cacheProbeWarnings.length = 0;
+}
+
+/** Test-only: read (and clear) recent probe warnings; hashes only. */
+export function drainCacheProbeWarningsForTests(): string[] {
+  const warnings = [...cacheProbeWarnings];
+  cacheProbeWarnings.length = 0;
+  return warnings;
+}
+
+/**
+ * DSH-style runtime assertion on emitted requests: within one probe scope,
+ * each request must keep every item the scope has already sent byte-stable.
+ * Violations mean a real provider prefix-cache break, so they are surfaced
+ * even when provider usage metrics are absent.
+ */
+function probeCachePrefix(
+  scope: string,
+  items: { systemPrompt?: string; messages?: ModelMessage[]; prompt: string },
+): void {
+  const fingerprints = computeCacheProbeFingerprints(items);
+  const previous = cacheProbeLedger.get(scope);
+  if (previous) {
+    const violation = findCacheProbeViolation(previous, fingerprints);
+    if (violation) {
+      const message = `[javis-cache-probe] ${describeCacheProbeViolation(scope, violation, previous, fingerprints)}`;
+      console.warn(message);
+      recordCacheProbeWarning(message);
+    }
+  }
+  recordCacheProbeResult(scope, fingerprints);
+}
+
 async function createModelRequest(
   prompt: string,
   providerSettings: ModelProviderSettings,
@@ -911,6 +986,14 @@ async function createModelRequest(
     contextWindowTokens: providerSettings.contextWindowTokens,
     imageCount: countUniqueModelImages(options),
   });
+
+  if (options?.cacheProbeKey) {
+    probeCachePrefix(options.cacheProbeKey, {
+      systemPrompt: boundedInput.systemPrompt,
+      messages: boundedInput.messages,
+      prompt: boundedInput.prompt,
+    });
+  }
 
   if (adapter) {
     return adapter.buildCompletionRequest({

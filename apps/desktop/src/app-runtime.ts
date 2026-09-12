@@ -40,7 +40,12 @@ import type {
   RuntimeExecutionConfig,
   TaskSnapshot,
 } from "@javis/core";
-import { createDefaultAgentRegistry, demoAgents, normalizeAgentKind } from "@javis/core";
+import {
+  compareStringsByCodePoint,
+  createDefaultAgentRegistry,
+  demoAgents,
+  normalizeAgentKind,
+} from "@javis/core";
 import type {
   AgentKind,
   AgentRegistry,
@@ -253,7 +258,11 @@ function commanderPromptToolDescriptors(
     agents: (agentRegistry ?? createDefaultAgentRegistry()).list().map((reg) => reg.agent.kind),
     tools: normalized,
   }).tools;
-  return limitMcpPromptToolDescriptors(scoped).map((descriptor) => ({
+  // Deterministic wire order (P0-3): codepoint name sort so the prompt's
+  // tool block never depends on registration or MCP refresh order.
+  return limitMcpPromptToolDescriptors(scoped)
+    .sort((left, right) => compareStringsByCodePoint(left.name, right.name))
+    .map((descriptor) => ({
     name: descriptor.name,
     permissionLevel: descriptor.permissionLevel,
     summary: descriptor.summary,
@@ -306,7 +315,7 @@ function mcpPromptServerKey(descriptor: ToolDescriptor): string {
 
 function compareMcpPromptToolDescriptors(a: ToolDescriptor, b: ToolDescriptor): number {
   return mcpPromptToolDescriptorScore(b) - mcpPromptToolDescriptorScore(a)
-    || a.name.localeCompare(b.name);
+    || compareStringsByCodePoint(a.name, b.name);
 }
 
 function mcpPromptToolDescriptorScore(descriptor: ToolDescriptor): number {
@@ -3001,7 +3010,8 @@ export function createJavisRuntime({
           allowedToolNames: allowedToolNamesForAgent(reg.agent.kind, availableTools, registry)
             .filter((toolName) => availableToolNames.has(toolName)),
           capabilities: reg.capabilityTags,
-        }));
+        }))
+        .sort((left, right) => compareStringsByCodePoint(left.kind, right.kind));
       const replanParams = {
         userGoal,
         locale: inferCommanderPromptLocale(userGoal),

@@ -1249,7 +1249,10 @@ describe("createJavisRuntime", () => {
 
     await vi.waitFor(() => expect(commanderPlanPrompts).toHaveLength(1));
     expect(commanderPlanPrompts[0]).toContain("\"mcp.filesystem.listTools\"");
-    expect(commanderPlanPrompts[0]).toContain("\"allowedToolNames\":[\"commander.plan\"");
+    // P0-3: tool names are emitted in deterministic codepoint order, so the
+    // commander allowlist starts with commander.askUser regardless of the
+    // descriptor registration order.
+    expect(commanderPlanPrompts[0]).toContain("\"allowedToolNames\":[\"commander.askUser\",\"commander.plan\"");
     expect(commanderPlanPrompts[0]).toContain("\"mcp.filesystem.listTools\"");
     await vi.waitFor(() => expect(snapshots[snapshots.length - 1]?.status).toBe("completed"));
 

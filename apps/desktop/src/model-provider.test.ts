@@ -1,10 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createConfiguredModelProvider,
   createModelProviderFromProfile,
+  drainCacheProbeWarningsForTests,
   ModelProviderError,
+  resetCacheProbeStateForTests,
 } from "./model-provider";
 import type { ModelSettings } from "./model-settings";
 
@@ -1396,6 +1398,107 @@ describe("model provider", () => {
     }
 
     expect(invokeMock).toHaveBeenLastCalledWith("stream_model_prompt_cancel", { streamId });
+  });
+});
+
+describe("model provider prefix-cache probe", () => {
+  beforeEach(() => {
+    invokeMock.mockReset();
+    listenMock.mockReset();
+    resetCacheProbeStateForTests();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeProvider() {
+    invokeMock.mockResolvedValue({ text: "ok", provider: "openai" });
+    return createConfiguredModelProvider(createSettings());
+  }
+
+  it("stays silent when a scope replays byte-stable requests", async () => {
+    const provider = makeProvider();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const options = {
+      cacheProbeKey: "chat:task-1",
+      systemPrompt: "static system",
+      messages: [{ role: "user" as const, content: "hello" }],
+    };
+
+    await provider.complete("answer", options);
+    await provider.complete("answer", options);
+
+    expect(drainCacheProbeWarningsForTests()).toEqual([]);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("flags a changed transcript item on the second turn of a scope", async () => {
+    const provider = makeProvider();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await provider.complete("first ask", {
+      cacheProbeKey: "chat:task-2",
+      systemPrompt: "static system",
+      messages: [{ role: "user", content: "hello" }],
+    });
+    await provider.complete("second ask", {
+      cacheProbeKey: "chat:task-2",
+      systemPrompt: "static system",
+      messages: [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: "hi there" },
+      ],
+    });
+
+    const warnings = drainCacheProbeWarningsForTests();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("scope chat:task-2");
+    expect(warnings[0]).toContain("item 1 changed");
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("flags a system-prompt rewrite as an index-0 break", async () => {
+    const provider = makeProvider();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await provider.complete("ask", {
+      cacheProbeKey: "chat:task-3",
+      systemPrompt: "old system",
+    });
+    await provider.complete("ask", {
+      cacheProbeKey: "chat:task-3",
+      systemPrompt: "new system",
+    });
+
+    expect(drainCacheProbeWarningsForTests()[0]).toContain("item 0 changed");
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps scopes isolated and never emits on a scope's first request", async () => {
+    const provider = makeProvider();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await provider.complete("other scope", {
+      cacheProbeKey: "plan:task-4",
+      systemPrompt: "planner system",
+    });
+
+    expect(drainCacheProbeWarningsForTests()).toEqual([]);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("emits hashes only, never prompt content", async () => {
+    const provider = makeProvider();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await provider.complete("ask", { cacheProbeKey: "chat:task-5", systemPrompt: "secret-sauce" });
+    await provider.complete("ask", { cacheProbeKey: "chat:task-5", systemPrompt: "different-sauce" });
+
+    const warnings = drainCacheProbeWarningsForTests();
+    expect(warnings).toHaveLength(1);
+    expect(warnings.join("\n")).not.toContain("secret-sauce");
+    expect(warnings.join("\n")).not.toContain("different-sauce");
   });
 });
 
