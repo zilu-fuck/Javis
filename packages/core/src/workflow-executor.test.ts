@@ -2615,14 +2615,11 @@ describe("runCommanderDagTask observability", () => {
     expect(synthesize).toHaveBeenCalledTimes(synthesisCallCount + 1);
     const lastSynthesisRequest = synthesize.mock.calls[synthesize.mock.calls.length - 1]?.[0];
     const finalResumedSnapshot = resumed.emitted[resumed.emitted.length - 1];
-    expect(lastSynthesisRequest?.evidence).toMatchObject({
-      userGoal: "summarize launch code",
-      commanderPlan: {
-        steps: expect.arrayContaining([
-          expect.objectContaining({ id: "recover-with-partial-evidence" }),
-        ]),
-      },
-    });
+    // A direct_response step's synthesis evidence is exactly its declared
+    // inputs; the recovery step declares none, so the guard sees an empty
+    // evidence record while the goal still arrives on the request itself.
+    expect(lastSynthesisRequest?.evidence).toEqual({});
+    expect(lastSynthesisRequest?.userGoal).toBe("summarize launch code");
     expect(finalResumedSnapshot?.status).toBe("completed");
     expect(finalResumedSnapshot?.plan).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: "collect-evidence", status: "failed" }),
@@ -3273,22 +3270,28 @@ describe("executeCapabilityStep synthesis dispatch", () => {
 });
 
 describe("Commander direct_response evidence boundary", () => {
-  it("fails instead of persisting an ungrounded plan title when synthesis is rejected", async () => {
-    const ungroundedTitle = "Project uses PostgreSQL";
+  it("accepts the model's direct answer when the step declares no evidence inputs", async () => {
+    // direct_response steps promise no evidence collection (capability
+    // questions, greetings); the model's answer is the contract. The
+    // anti-hallucination boundary lives on the evidence-bound paths — a
+    // direct_response step that DOES declare inputContextKeys still runs
+    // the full anchor and clause checks (see the deterministic fallback
+    // tests below).
+    const capabilityAnswer = "我可以帮你检查项目、整理文档、搜索网页，也能操作桌面应用。";
     const synthesize = vi.fn<NonNullable<CommanderTool["synthesize"]>>(async () => ({
-      message: ungroundedTitle,
+      message: capabilityAnswer,
     }));
     const commanderTool: CommanderTool = {
       plan: vi.fn<CommanderTool["plan"]>(async () => ({
-        title: "Answer project question",
-        reasoning: "The answer requires an evidence-bound synthesis.",
+        title: "Answer capability question",
+        reasoning: "The question needs no tools; answer directly.",
         steps: [{
-          id: "answer-project-question",
-          title: ungroundedTitle,
+          id: "explain-capabilities",
+          title: "Explain capabilities",
           assignedAgentKind: "commander",
           executionMode: "direct_response",
           dependsOn: [],
-          successCriteria: "Return an evidence-bound answer.",
+          successCriteria: "The user receives a capability overview.",
         }],
       })),
       synthesize,
@@ -3298,14 +3301,13 @@ describe("Commander direct_response evidence boundary", () => {
     await runCommanderDagTask({
       controller,
       commanderTool,
-      taskId: "task-direct-response-evidence-boundary",
-      userGoal: "Summarize the project without running tools.",
+      taskId: "task-direct-response-direct-answer",
+      userGoal: "你能干些什么",
     });
 
     const finalSnapshot = emitted[emitted.length - 1];
-    expect(finalSnapshot?.status).toBe("failed");
-    expect(finalSnapshot?.commanderMessage).not.toContain(ungroundedTitle);
-    expect(emitted.every((snapshot) => !snapshot.commanderMessage.includes(ungroundedTitle))).toBe(true);
+    expect(finalSnapshot?.status).toBe("completed");
+    expect(finalSnapshot?.commanderMessage).toBe(capabilityAnswer);
     expect(synthesize).toHaveBeenCalledTimes(1);
   });
 

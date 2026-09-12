@@ -221,7 +221,10 @@ export function taskEventToLogEntry(event: TaskRuntimeEvent): TaskLogEntry {
         kind: "event",
         title: event.code,
         detail: `${event.label}: ${event.detail}`,
-        userMessage: event.label,
+        // The Inspector log list renders the user message; fold the reason
+        // into it so a diagnostic is self-explanatory without opening the
+        // detail view.
+        userMessage: `${event.label}: ${event.detail}`.slice(0, 300),
         devDetail: JSON.stringify({
           code: event.code,
           label: event.label,

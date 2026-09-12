@@ -10408,12 +10408,22 @@ export async function runCommanderDagTask({
           emitSnapshot,
           emitEvent,
         });
+        // Evidence for a direct_response step is exactly what it declared as
+        // inputs — not the whole SharedContext snapshot, whose residual
+        // runtime metadata (routing, preprocessing) would otherwise enter
+        // the guard as fake "collected evidence" and re-frame a direct
+        // answer as an ungrounded claim.
+        const stepEvidence: Record<string, unknown> = {};
+        for (const key of dagStep.inputContextKeys ?? []) {
+          const value = context.get(key);
+          if (value !== undefined) stepEvidence[key] = value;
+        }
         const modelSynthesis = await withTaskTimeout(
           () => safeSynthesizeConclusion(
             commanderTool,
             userGoal,
             dagStep.title,
-            context.snapshot(),
+            stepEvidence,
             modelImages,
             (usage) => recordModelUsage("commander", usage),
             {
@@ -14199,10 +14209,10 @@ function evaluateSynthesisResult(
 
   const evidenceText = serializeSynthesisEvidence(evidence);
   if (!evidenceText) {
-    // With no trusted evidence there is nothing from which to derive a
-    // factual claim. An acknowledgement, an explicit uncertainty result, or a
-    // direct_response answer (the plan decided the question needs no
-    // evidence) is in-contract; anything else is rejected.
+    // With no collected evidence there is nothing from which to derive a
+    // factual claim. A direct_response step (the plan decided the question
+    // needs no evidence and declared no inputs), an acknowledgement, or an
+    // explicit uncertainty result is in-contract; anything else is rejected.
     if (
       options?.allowEvidenceFreeDirectAnswer ||
       SYNTHESIS_EMPTY_EVIDENCE_ACK_PATTERN.test(message) ||
@@ -14220,6 +14230,8 @@ function evaluateSynthesisResult(
       message,
     };
   }
+  // Evidence is present (the step declared inputContextKeys and they
+  // resolved): grounding applies even to direct_response answers.
 
   const anchors = extractSynthesisAnchors(message);
   const unsupportedAnchors = anchors.filter(

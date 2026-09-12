@@ -194,6 +194,26 @@ describe("safeSynthesizeConclusion evidence guard", () => {
     });
   });
 
+  it("keeps evidence grounding for direct_response steps that declared inputs", async () => {
+    // A direct_response step that DOES declare inputContextKeys receives
+    // real evidence; the full anchor and clause checks apply (the executor
+    // passes only declared inputs, never residual runtime metadata, so an
+    // evidence-bearing direct_response answer cannot dodge the guard).
+    const synthesize = vi.fn<NonNullable<CommanderTool["synthesize"]>>(async () => ({
+      message: "我是 Javis。比如你可以说\"在这个工作区里看看项目结构\"、\"帮我评审最近的改动\"。",
+    }));
+
+    await expect(safeSynthesizeConclusion(
+      commanderWithSynthesis(synthesize),
+      "你能干些什么",
+      "能力概览",
+      { workspaceInventory: { entries: [] } },
+      undefined,
+      undefined,
+      { directResponse: true },
+    )).resolves.toBeUndefined();
+  });
+
   it("still rejects evidence-free factual claims when the step is not direct_response", async () => {
     const synthesize = vi.fn<NonNullable<CommanderTool["synthesize"]>>(async () => ({
       message: "我可以帮你检查和分析项目代码、整理文档、搜索本地文件和网页内容。",

@@ -44,7 +44,7 @@ describe("taskEventToLogEntry", () => {
 
     expect(log.kind).toBe("event");
     expect(log.title).toBe("cache.prefix_broken");
-    expect(log.userMessage).toBe("Cache prefix broken");
+    expect(log.userMessage).toBe("Cache prefix broken: scope=chat:task-1; item 1 changed");
     expect(log.detail).toContain("scope=chat:task-1");
     expect(log.agentId).toBe("agent-commander");
   });
