@@ -237,6 +237,29 @@
   这一点我在预算内**没有查出原因**，如实记录。
   **下一刀的正确前置工作**：把 `analyze-extraction.mjs` 升级为计算**传递闭包**（私有函数 + 私有常量 + 私有类型），
   并用"词边界精确匹配标识符位置"而不是子串来筛选导入——之后再执行搬迁，否则必然重现这类失败。
+
+  **✅ 前置工作已完成（本轮），并且它当场修正了我的计划**。`analyze-extraction.mjs` 现在：
+  扫描前**剥离注释与字符串字面量**（避免把散文里的名字算成依赖、也避免字符串里的用法被漏掉）、
+  把顶层声明全部分类编目（函数 / 常量 / 类型 / 枚举）、计算**传递闭包到不动点**、并按模块路径输出**所需的导入**。
+  **先拿已知的失败集做验证**：`executeGitCommitDagStep` 的闭包现在**正确包含**了当初漏掉、导致 50 个编译错误的
+  `isPlainRecord`；`executeFileWriteTextDagStep` 的闭包也包含了 `FILE_WRITE_TEXT_CONTENT_KEYS` 等三个当初漏掉的常量。
+
+  修正后的实测（这才是可信的数字）：
+
+  | 候选 | 自身行数 | 闭包内声明数 | **需一起搬的行数** |
+  |---|---|---|---|
+  | `executeGitCommitDagStep` | 273 | **5** | **313** ✅干净 |
+  | `executeGitStageDagStep` | 270 | **5** | **299** ✅干净 |
+  | `executeGitCreatePullRequestDagStep` | 267 | **5** | **322** ✅干净 |
+  | `executeGitCommentPullRequestDagStep` | 264 | **5** | **309** ✅干净 |
+  | `executeWorkspaceMutationDagStep` | 201 | **5** | 242 ✅干净 |
+  | `waitForAskUserAnswer` | — | 5 | 350 ✅干净 |
+  | **`executeFileWriteTextDagStep`** | 269 | **37** | **703** ❌**不是干净接缝**（会拖进一串 markdown 格式化器） |
+  | `runCommanderDagTask` | 3,925 | **321** | **12,199**（占全文件 82%）❌**完全搬不动** |
+
+  **两处修正**：① 我上一轮把 `executeFileWriteTextDagStep` 列为干净接缝是**错的**（低估的旧工具给的假象）；
+  ② `runCommanderDagTask` 的闭包是 **12,199 行**——它不是"需要先内部拆分"那么简单，而是**几乎整个文件都挂在它下面**。
+  **下一刀应只做那 4 个 git 执行器 + workspace mutation（合计约 1,485 行 / 各 5 个声明）**。
 - [ ] **B5** `RuntimeEvent` / `ArtifactEnvelope` / `SharedContext` / `WorkflowCheckpoint` 收敛成一份与代码对齐的对外契约（`docs/CORE_CONTRACTS.md`）
 - [ ] **B6** preset 提升为一等公民（agents + tools + 权限策略 + 模型槽 + 提示词版本，可导入导出 / A-B）
 
@@ -605,6 +628,11 @@ $env:PATH="$env:USERPROFILE\.cargo\bin;C:\Program Files\Git\cmd;$env:PATH"; core
 
 ## 变更记录
 
+- 2026-09-13（第 42 轮，工程）：**把选缝工具升级为传递闭包，并当场修正了计划**。新 `analyze-extraction.mjs` 剥离注释/字符串、
+  编目全部顶层声明、算闭包到不动点、按模块输出所需导入；**先用已知失败集验证**（它现在正确包含当初漏掉的
+  `isPlainRecord` / `FILE_WRITE_TEXT_CONTENT_KEYS`）。修正后：4 个 git 执行器 + workspace mutation 是干净接缝
+  （各 **5** 个声明、约 300 行）；而我上一轮列为干净接缝的 **`executeFileWriteTextDagStep` 其实要搬 37 个声明 / 703 行**
+  （旧工具低估造成的假象）；`runCommanderDagTask` 的闭包是 **12,199 行**（占全文件 82%），**完全搬不动**。
 - 2026-09-13（第 41 轮，工程）：**尝试了一次实测选中的巨石搬迁并回滚**。用一次性脚本真的搬了 17 个声明 / 1,496 行
   （14,818 → 13,340 行），dry-run 与写入都成功，但 typecheck 报 50 错 / 12 个未解析名字，于是 `git checkout` 回滚，
   回滚后 typecheck 0、工作树干净。**根因：`analyze-extraction.mjs` 的依赖计数是低估的**——它漏掉了模块私有常量、
