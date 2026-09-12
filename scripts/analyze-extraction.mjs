@@ -75,6 +75,28 @@ for (let index = 0; index < spans.length; index += 1) {
 const byStart = spans;
 const spanByName = new Map(spans.map((span) => [span.name, span]));
 
+/**
+ * How many other declarations reference each name (its fan-in).
+ *
+ * Closure size alone does not decide whether a seam is *sensible*. A candidate whose closure
+ * includes a high-fan-in declaration is dragging something central along: `waitForAskUserAnswer`
+ * looks clean at five declarations, but one is `CommanderDagTaskOptions` — the module's central
+ * options interface — and moving that into an ask-user module would place a core type in a
+ * peripheral one.
+ */
+const fanIn = new Map();
+for (const span of spans) {
+  const body = stripNonCode(lines.slice(span.start, span.end + 1).join("\n"));
+  const seen = new Set();
+  for (const match of body.matchAll(/\b([A-Za-z_$][A-Za-z0-9_$]*)\b/gu)) {
+    const token = match[1];
+    if (token === span.name || seen.has(token) || !spanByName.has(token)) continue;
+    seen.add(token);
+    fanIn.set(token, (fanIn.get(token) ?? 0) + 1);
+  }
+}
+
+
 /** Imported names, so the new module can be given exactly the imports it uses. */
 const importNames = new Map();
 for (const match of source.matchAll(/^import (?:type )?\{([\s\S]*?)\} from "([^"]+)";$/gmu)) {
@@ -133,6 +155,12 @@ function closureOf(rootName) {
     linesToMove: moving.reduce((sum, span) => sum + (span.end - span.start + 1), 0),
     importsBySpecifier: [...new Set([...importsUsed].map((name) => importNames.get(name)))].sort(),
     imports: [...importsUsed].sort(),
+    // Members that many other declarations depend on. A closure containing one of these is
+    // moving something central, however few declarations it lists.
+    centralMembers: moving
+      .filter((span) => span.name !== rootName && (fanIn.get(span.name) ?? 0) >= 10)
+      .map((span) => ({ name: span.name, usedBy: fanIn.get(span.name) }))
+      .sort((left, right) => right.usedBy - left.usedBy),
   };
 }
 
@@ -150,6 +178,13 @@ if (requestedFunction) {
   for (const entry of result.importsBySpecifier) {
     const names = result.imports.filter((name) => importNames.get(name) === entry);
     console.log(`  ${entry}\n    ${names.join(", ")}`);
+  }
+  if (result.centralMembers.length > 0) {
+    console.log("\n⚠ this closure moves something central:");
+    for (const member of result.centralMembers) {
+      console.log(`  ${member.name} is referenced by ${member.usedBy} other declarations`);
+    }
+    console.log("  Consider a different seam, or move that declaration separately.");
   }
   process.exit(0);
 }
