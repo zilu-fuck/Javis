@@ -1,0 +1,228 @@
+{
+  "generatedAt": "2026-09-12T16:33:39.852Z",
+  "dataDir": "C:\\Users\\s1897\\AppData\\Roaming\\app.javis.desktop",
+  "inputs": {
+    "auditLog": {
+      "path": "C:\\Users\\s1897\\AppData\\Roaming\\app.javis.desktop\\task-audit.jsonl",
+      "bytes": 1198272
+    },
+    "database": {
+      "path": "C:\\Users\\s1897\\AppData\\Roaming\\app.javis.desktop\\javis.db",
+      "bytes": 487211008
+    }
+  },
+  "audit": {
+    "lines": 3149,
+    "byKind": {
+      "agent_run_audit": 2420,
+      "tool_call_audit": 687,
+      "sandbox_process": 42
+    },
+    "tasks": {
+      "observed": 216,
+      "failed": 100,
+      "failureRate": 0.463,
+      "durationSeconds": {
+        "p50": 19,
+        "p95": 500,
+        "max": 548790
+      }
+    },
+    "agentFailures": [
+      [
+        "Some steps failed",
+        28
+      ],
+      [
+        "模型请求失败",
+        13
+      ],
+      [
+        "Patch application failed",
+        12
+      ],
+      [
+        "Post-apply verification unavailable",
+        12
+      ],
+      [
+        "Task ended before assigned work completed",
+        12
+      ],
+      [
+        "Image target missing",
+        5
+      ],
+      [
+        "commander.plan timed out after 90000ms.",
+        5
+      ],
+      [
+        "Could not read model API key secret: 系统找不到指定的文件。 (os error 2)",
+        3
+      ],
+      [
+        "Commander plan has no capability-tagged steps. The plan must include at least one step with a capability or requiredCapabilities field.",
+        3
+      ],
+      [
+        "Model response did not contain a JSON object.",
+        3
+      ],
+      [
+        "Failed: trend.fetchHotList Browser and registered-adapter attempts failed; Page Agent fallback required. browser: bilibili:browser:generic-search HTTP 200: Browser page did not expose structured bilibili trend items.; adapter: Trend hot list fetch failed for all configured providers.",
+        3
+      ],
+      [
+        "Patch proposal unavailable",
+        2
+      ],
+      [
+        "Patch proposal failed",
+        2
+      ],
+      [
+        "API 密钥无效或已过期，请在设置中更新密钥。",
+        2
+      ],
+      [
+        "Task failed before assigned work completed",
+        2
+      ]
+    ],
+    "toolFailures": [
+      [
+        "code.searchRepository",
+        58
+      ],
+      [
+        "shell.runReadOnlyCommand",
+        11
+      ],
+      [
+        "file.scanMarkdownDocuments",
+        7
+      ],
+      [
+        "code.inspectRepository",
+        7
+      ],
+      [
+        "commander.plan",
+        5
+      ],
+      [
+        "file.writeText",
+        5
+      ],
+      [
+        "code.inspectWorkspace",
+        3
+      ],
+      [
+        "computer.screenshot",
+        1
+      ],
+      [
+        "file.planWriteText",
+        1
+      ]
+    ],
+    "activityByDay": {
+      "": 42,
+      "2026-05-25": 16,
+      "2026-05-26": 422,
+      "2026-05-27": 192,
+      "2026-05-28": 69,
+      "2026-05-29": 80,
+      "2026-05-30": 48,
+      "2026-05-31": 65,
+      "2026-06-01": 97,
+      "2026-06-02": 261,
+      "2026-06-03": 151,
+      "2026-06-04": 8,
+      "2026-06-06": 71,
+      "2026-06-07": 147,
+      "2026-06-13": 34,
+      "2026-06-14": 189,
+      "2026-06-15": 5,
+      "2026-06-16": 67,
+      "2026-06-17": 5,
+      "2026-07-11": 18,
+      "2026-07-16": 159,
+      "2026-07-17": 6,
+      "2026-07-18": 17,
+      "2026-07-19": 75,
+      "2026-07-20": 93,
+      "2026-07-22": 68,
+      "2026-07-24": 7,
+      "2026-07-25": 379,
+      "2026-07-26": 218,
+      "2026-09-12": 140
+    }
+  },
+  "storage": {
+    "taskHistoryByStatus": {
+      "failed": 3,
+      "completed": 1
+    },
+    "largestTables": [
+      {
+        "table": "task_session_log",
+        "megabytes": 397.2
+      },
+      {
+        "table": "workflow_checkpoints",
+        "megabytes": 59.5
+      },
+      {
+        "table": "runtime_events",
+        "megabytes": 1.7
+      },
+      {
+        "table": "idx_task_session_log_task_id",
+        "megabytes": 1.4
+      },
+      {
+        "table": "file_scan_cache",
+        "megabytes": 0.9
+      },
+      {
+        "table": "file_classifications",
+        "megabytes": 0.7
+      },
+      {
+        "table": "sqlite_autoindex_file_scan_cache_1",
+        "megabytes": 0.6
+      },
+      {
+        "table": "sqlite_autoindex_file_classifications_1",
+        "megabytes": 0.6
+      },
+      {
+        "table": "sqlite_autoindex_runtime_events_1",
+        "megabytes": 0.1
+      },
+      {
+        "table": "tool_call_audit",
+        "megabytes": 0.1
+      },
+      {
+        "table": "sqlite_autoindex_runtime_events_2",
+        "megabytes": 0.1
+      },
+      {
+        "table": "idx_runtime_events_run_sequence",
+        "megabytes": 0.1
+      }
+    ]
+  },
+  "usage": {
+    "calls": 2,
+    "input_tokens": 8410,
+    "output_tokens": 1165,
+    "total_tokens": 9575,
+    "tasks": 2,
+    "providers": 1
+  }
+}

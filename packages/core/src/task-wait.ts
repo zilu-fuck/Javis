@@ -14,6 +14,25 @@ export class TaskTimeoutError extends Error {
   }
 }
 
+/**
+ * Raised when an operation stopped reporting progress.
+ *
+ * Distinct from a total timeout: a long generation is allowed to take a long
+ * time, but a generation that has produced nothing for a minute is dead. The
+ * distinction matters because the caller can keep partial output on a stall but
+ * must not treat it as a clean, complete result.
+ */
+export class TaskStallError extends Error {
+  constructor(label: string, stallMs: number) {
+    super(`${label} stalled: no progress for ${stallMs}ms.`);
+    this.name = "TaskStallError";
+  }
+}
+
+export function isTaskStallError(error: unknown): boolean {
+  return error instanceof TaskStallError;
+}
+
 export interface TaskWaitOptions {
   label: string;
   timeoutMs?: number;
@@ -71,6 +90,86 @@ export async function withTaskTimeout<T>(
   } finally {
     if (timeoutId) {
       clearTimeout(timeoutId);
+    }
+    if (abortHandler) {
+      signal?.removeEventListener("abort", abortHandler);
+    }
+  }
+}
+
+export interface StallWatchdogOptions {
+  label: string;
+  /** Fail once no progress has been reported for this long. */
+  stallMs: number;
+  signal?: AbortSignal;
+  onStall?: () => void;
+  onAbort?: () => void;
+}
+
+/**
+ * Runs an operation that must keep reporting progress, and fails it when it goes
+ * quiet for `stallMs`.
+ *
+ * A total timeout cannot express "this is still working" versus "this is hung".
+ * Long document generation legitimately runs for minutes, but production also
+ * showed tasks that produced nothing for hours. This watchdog lets the caller
+ * distinguish the two and decide whether partial output is worth keeping.
+ *
+ * The operation receives `reportProgress`, which must be called on every unit of
+ * real progress (a streamed chunk, a completed step).
+ */
+export async function withStallWatchdog<T>(
+  run: (reportProgress: () => void) => Promise<T>,
+  { label, stallMs, signal, onStall, onAbort }: StallWatchdogOptions,
+): Promise<T> {
+  throwIfTaskAborted(signal, label);
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let abortHandler: (() => void) | undefined;
+  let settled = false;
+
+  const arm = (reject: (error: unknown) => void) => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+    timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      onStall?.();
+      reject(new TaskStallError(label, stallMs));
+    }, stallMs);
+  };
+
+  try {
+    return await new Promise<T>((resolve, reject) => {
+      abortHandler = () => {
+        if (settled) return;
+        settled = true;
+        onAbort?.();
+        const reason = signal?.reason;
+        reject(reason instanceof Error ? reason : new TaskCancelledError(`${label} cancelled.`));
+      };
+      signal?.addEventListener("abort", abortHandler, { once: true });
+
+      arm(reject);
+      run(() => {
+        if (!settled) {
+          arm(reject);
+        }
+      }).then(
+        (value) => {
+          settled = true;
+          resolve(value);
+        },
+        (error: unknown) => {
+          settled = true;
+          reject(error);
+        },
+      );
+    });
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
     }
     if (abortHandler) {
       signal?.removeEventListener("abort", abortHandler);

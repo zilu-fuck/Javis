@@ -39,7 +39,7 @@ describe("decideRuntimeChain", () => {
     expect(decision.surfaces.user).toBe("natural_response");
   });
 
-  it("downgrades a project-mode greeting to the L1 direct-chat path", () => {
+  it("lets project-mode greetings use direct response without opening a clarification card", () => {
     const decision = decideRuntimeChain(makeInput({
       startMode: "project",
       routeDecision: {

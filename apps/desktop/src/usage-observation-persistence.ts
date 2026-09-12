@@ -95,6 +95,7 @@ SELECT call_id, revision, final, task_id, workflow_run_id, step_id, attempt,
 FROM usage_observations
 WHERE task_id = ?
 ORDER BY updated_at ASC
+LIMIT 10000
 `.trim();
 
 export interface UsageObservationStore {

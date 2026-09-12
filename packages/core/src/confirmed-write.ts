@@ -7,6 +7,7 @@ import {
   resolvePermissionRequest,
   type PermissionDecision,
 } from "./permission-state";
+import { evaluateHooks } from "./config/hooks";
 
 export type PendingPermissionHandler = (
   decision: PermissionDecision,
@@ -17,6 +18,8 @@ interface ConfirmedWriteRequestInput {
   title: string;
   reason: string;
   dryRun: DryRunSummary;
+  /** Tool this approval is for, when known; used to scope `beforeApproval` hooks. */
+  toolName?: string;
 }
 
 interface ConfirmedWriteApprovalOptions {
@@ -43,8 +46,19 @@ export function createConfirmedWriteApproval({
   onDenied,
   onApproved,
 }: ConfirmedWriteApprovalOptions): ConfirmedWriteApproval {
+  // C4b: `beforeApproval` hooks add their reasons to the card, so a policy that
+  // forces a review explains itself to the reviewer. A hook cannot approve: only
+  // the human decision below resolves the request.
+  const approvalHooks = evaluateHooks({
+    phase: "beforeApproval",
+    ...(request.toolName ? { toolName: request.toolName } : {}),
+    reason: request.reason,
+  });
   const permissionRequest = createPendingPermissionRequest({
     ...request,
+    reason: approvalHooks.reasons.length === 0
+      ? request.reason
+      : `${request.reason}\n\n${approvalHooks.reasons.join("\n")}`,
     level: "confirmed_write",
   });
 

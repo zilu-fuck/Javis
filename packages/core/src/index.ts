@@ -90,7 +90,7 @@ import {
   isResearchGoal,
   getRecommendedWorkflowIds,
 } from "./routing";
-import { createRuntimeState } from "./runtime-state";
+import { createRuntimeState, shouldAcceptRuntimeDelta } from "./runtime-state";
 import { appendLog } from "./snapshot-utils";
 import {
   addModelUsage,
@@ -114,6 +114,12 @@ import {
 } from "./local-router";
 import { decideRuntimeChain } from "./runtime-chain";
 import { isTaskCancelledError, throwIfTaskAborted, withTaskTimeout } from "./task-wait";
+import { clipChatTurnPrompt as clipChatTurn } from "./chat-turn-budget";
+import { evaluateHooks } from "./config/hooks";
+import {
+  classifyFailureKind,
+  failureMessageForKind,
+} from "./failure-guidance";
 import { isTerminalTaskStatus } from "./state/task-state";
 import { inferVisionMode } from "./vision-utils";
 
@@ -431,6 +437,149 @@ export type {
   RepairAttemptRecord,
 } from "./planning";
 export { createAgentStateTracker } from "./agent-state-tracker";
+export {
+  CONFIG_SCOPE_PRECEDENCE,
+  JAVIS_CONFIG_DIR,
+  JAVIS_CONFIG_FILE,
+  JAVIS_CONFIG_VERSION,
+  JAVIS_HOOK_ACTION_KINDS,
+  parseJavisConfigDocument,
+  resolveJavisConfig,
+} from "./config/javis-config";
+export type {
+  ConfigDiagnostic,
+  ConfigScope,
+  JavisAgentDeclaration,
+  JavisConfigDocument,
+  JavisConfigLayer,
+  JavisHookDeclaration,
+  JavisPluginDeclaration,
+  JavisSkillDeclaration,
+  JavisToolDeclaration,
+  ResolvedJavisConfig,
+} from "./config/javis-config";
+export {
+  HOOK_NOTICES_CONTEXT_KEY,
+  appendContextHookNotices,
+  assertToolCallAllowedByHooks,
+  configureHooks,
+  createHookRegistry,
+  evaluateHooks,
+  hookAppliesToTool,
+  listConfiguredHooks,
+  resetHooks,
+  validateHookDeclarations,
+} from "./config/hooks";
+export type { HookCallContext, HookDecision, HookPhase, HookRegistry } from "./config/hooks";
+export {
+  applyAgentDeclarations,
+  mergeAgentRuntimeOverrides,
+} from "./config/agent-declarations";
+export {
+  SKILL_LISTING_DESCRIPTION_MAX_CHARS,
+  createSkillListing,
+  isSkillAutoInvocable,
+  parseSkillFrontmatter,
+} from "./config/skill-frontmatter";
+export type {
+  ParsedSkillDocument,
+  SkillFrontmatter,
+  SkillListingEntry,
+} from "./config/skill-frontmatter";
+export {
+  PLUGIN_MANIFEST_VERSION,
+  isPluginCapability,
+  parsePluginManifest,
+  planPluginInstall,
+} from "./config/plugin-manifest";
+export type {
+  JavisPluginManifest,
+  PluginDiagnostic,
+  PluginInstallPlan,
+  PluginRequestedCapability,
+} from "./config/plugin-manifest";
+export {
+  DEFAULT_SESSION_GRANT_TTL_MS,
+  RISKY_PATH_COUNT_THRESHOLD,
+  classifyApprovalRisk,
+  createApprovalCenter,
+  normalizeApprovalPath,
+} from "./approval-center";
+export type {
+  ApprovalCenter,
+  ApprovalCenterEntry,
+  ApprovalCenterRequest,
+  ApprovalCenterSummary,
+  ApprovalRisk,
+  ApprovalSource,
+  ApprovalStatus,
+  SessionApprovalGrant,
+} from "./approval-center";
+export { formatHandoffNarrative } from "./handoff-narrative";
+export {
+  classifyFailure,
+  classifyFailureDetail,
+  classifyFailureKind,
+  failureActionsForKind,
+  failureMessageForKind,
+  firstSentence,
+  isRetryableFailureSet,
+  mergeFailureActions,
+} from "./failure-guidance";
+export {
+  HIGH_CONTEXT_UTILIZATION_THRESHOLD,
+  LOW_CACHE_HIT_RATE_THRESHOLD,
+  computeCacheHitRate,
+  computeContextUtilization,
+  estimateUsageCost,
+  formatUsagePanel,
+} from "./usage-panel";
+export type {
+  UsagePanel,
+  UsagePanelLine,
+  UsagePanelLocale,
+  UsagePricing,
+} from "./usage-panel";
+export { diagnoseSetup } from "./setup-diagnostics";
+export type {
+  SetupDiagnosis,
+  SetupDiagnosisInput,
+  SetupLocale,
+  SetupProfileInput,
+  SetupStep,
+  SetupStepId,
+  SetupStepStatus,
+} from "./setup-diagnostics";
+export type {
+  FailureAction,
+  FailureGuidance,
+  FailureKind,
+  FailureLocale,
+} from "./failure-guidance";
+export type {
+  HandoffNarrative,
+  HandoffNarrativeLine,
+  HandoffNarrativeLocale,
+} from "./handoff-narrative";
+export {
+  DEFAULT_WRITE_LEASE_TTL_MS,
+  WRITE_PATH_INPUT_KEYS,
+  createWriteLeaseRegistry,
+  extractDeclaredWritePaths,
+  normalizeLeasePath,
+  pathsConflict,
+} from "./write-lease";
+export type {
+  AcquireWriteLeaseResult,
+  WriteLease,
+  WriteLeaseConflict,
+  WriteLeaseRegistry,
+  WriteLeaseRequest,
+} from "./write-lease";
+export type {
+  ApplyAgentDeclarationsResult,
+  DeclaredAgentRuntimeOverrides,
+} from "./config/agent-declarations";
 export type {
   AgentState,
   AgentStateTracker,
@@ -1427,6 +1576,22 @@ export function createGeneralChatSystemPrompt(
  * byte-stable for the whole session and the quoted history keeps its
  * append-only prefix property.
  */
+/**
+ * Bounds the current turn's prompt against the model context window (A5).
+ * See `chat-turn-budget.ts` for why this is separate from history windowing.
+ */
+function clipChatTurnPrompt(prompt: string, contextWindowTokens?: number): string {
+  const result = clipChatTurn(prompt, contextWindowTokens);
+  if (!result.clipped) {
+    return result.prompt;
+  }
+  console.warn(
+    `[context-budget] clipped the current turn from ~${result.originalTokens} to ~${result.clippedTokens} tokens `
+    + `for a ${result.budgetTokens} token budget`,
+  );
+  return result.prompt;
+}
+
 function appendOmissionNotice(
   messages: ChatMessage[],
   omittedPriorMessageCount: number,
@@ -1458,6 +1623,12 @@ export interface ChatTool {
       skipSkillContext?: boolean;
       /** Scope for the provider-side prefix-cache probe; hashes only, never sent to providers. */
       cacheProbeKey?: string;
+      /**
+       * Context window of the target model, when the caller knows it. Used for the
+       * pre-flight budget so an over-long conversation is trimmed locally instead
+       * of failing with a provider context-length error.
+       */
+      contextWindowTokens?: number;
     },
   ): Promise<{
     text: string;
@@ -1482,6 +1653,8 @@ export interface ChatTool {
       skipAgentMemory?: boolean;
       skipSkillContext?: boolean;
       cacheProbeKey?: string;
+      /** See the `complete` options: pre-flight context budget input. */
+      contextWindowTokens?: number;
     },
   ): AsyncIterable<{
     text: string;
@@ -1603,7 +1776,8 @@ function isChatModeMessagingAutomationGoal(userGoal: string): boolean {
 }
 
 function isChatModeFileWriteGoal(userGoal: string): boolean {
-  return /\b(save|export|write)\b.*\b(file|md|markdown|path|disk)\b|\bwrite\s+(?:to|into)\b|\.md\b|\.txt\b|\.docx\b|保存|导出|写入|写到|写成.*文件|生成.*(?:文件|\.md|\.txt|\.docx|路径|本地)/i.test(userGoal);
+  return isTextWriteGoal(userGoal)
+    || /\bwrite\s+(?:to|into)\b|写入|写到|写成.*文件|生成.*(?:路径|本地)/i.test(userGoal);
 }
 
 function isChatModeBlockedGoal(userGoal: string): boolean {
@@ -1989,7 +2163,10 @@ export function createFileScanTaskRuntime({
   );
   const eventBusUnsubscribe = eventBus
     ? eventBus.on((e) => {
-        if (runtimeState.getSnapshot().id !== e.taskId) {
+        // Ignore deltas for another task, and for a task that already reached a
+        // terminal status but still has a stream running (see
+        // `shouldAcceptRuntimeDelta`).
+        if (!shouldAcceptRuntimeDelta(runtimeState.getSnapshot(), e)) {
           return;
         }
         runtimeState.emitDelta(e);
@@ -2635,6 +2812,7 @@ export function createFileScanTaskRuntime({
           effectiveRuntimeConfig,
           signal,
           appendUserMessage,
+          startMode === "project" ? "agent" : "chat",
         );
         return;
       }
@@ -3171,6 +3349,7 @@ export function createFileScanTaskRuntime({
     runtimeConfig?: RuntimeExecutionConfig,
     signal?: AbortSignal,
     appendUserMessage = true,
+    executionMode: "chat" | "agent" = "chat",
   ) {
     const isChinese = /[\u3400-\u9fff]/u.test(userGoal);
     const displayContent = displayGoal ?? userGoal;
@@ -3182,23 +3361,33 @@ export function createFileScanTaskRuntime({
     const startedMessages: ChatMessage[] = appendUserMessage
       ? [...priorMessages, displayUserMessage]
       : [...priorMessages];
+    const chatCeilingMessage = isChinese
+      ? "\u6211\u6b63\u5728\u4f5c\u4e3a\u666e\u901a\u52a9\u624b\u56de\u7b54\uff0c\u6ca1\u6709\u542f\u52a8\u5de5\u4f5c\u6d41\u6216\u672c\u5730\u5de5\u5177\u3002"
+      : "I'm answering as a general assistant without starting a workflow or local tool.";
+    const agentDirectMessage = isChinese
+      ? "Commander \u6b63\u5728\u76f4\u63a5\u56de\u7b54\u672c\u8f6e\u95ee\u9898\uff08\u672a\u8c03\u5ea6\u5b50\u4ee3\u7406\uff09\u3002"
+      : "Commander is answering this turn directly (no sub-agents).";
+    const commanderTaskLabel = executionMode === "agent"
+      ? (isChinese ? "Commander \u76f4\u63a5\u56de\u7b54" : "Commander direct response")
+      : (isChinese ? "\u666e\u901a\u5bf9\u8bdd\u56de\u7b54" : "General chat response");
+    const routeLogDetail = executionMode === "agent"
+      ? "Agent mode: Commander direct response (no sub-agents)."
+      : routeDecision.level === "L1"
+        ? "Chat mode: single-agent direct response."
+        : "Chat mode: single-agent direct response (route suggested a workflow; chat ceiling applied).";
     emitForActiveTask(taskId, {
       id: taskId,
       title: isChinese ? "\u6b63\u5728\u56de\u7b54" : "Answering",
       userGoal,
       status: "running",
       updatedAt: new Date().toISOString(),
-      commanderMessage: isChinese
-        ? "\u6211\u6b63\u5728\u4f5c\u4e3a\u666e\u901a\u52a9\u624b\u56de\u7b54\uff0c\u6ca1\u6709\u542f\u52a8\u5de5\u4f5c\u6d41\u6216\u672c\u5730\u5de5\u5177\u3002"
-        : "I'm answering as a general assistant without starting a workflow or local tool.",
+      commanderMessage: executionMode === "agent" ? agentDirectMessage : chatCeilingMessage,
       plan: [],
       agents: createRuntimeAgentSnapshots((agent) => ({
         status: agent.kind === "commander" ? "running" : "completed",
         task:
           agent.kind === "commander"
-            ? isChinese
-              ? "\u666e\u901a\u5bf9\u8bdd\u56de\u7b54"
-              : "General chat response"
+            ? commanderTaskLabel
             : isChinese
               ? "\u672a\u5206\u914d\u5de5\u4f5c\u4efb\u52a1"
               : "No workflow task assigned",
@@ -3211,9 +3400,7 @@ export function createFileScanTaskRuntime({
           id: `${taskId}-created`,
           kind: "event",
           title: "task.created",
-          detail: routeDecision.level === "L1"
-            ? "Local router selected direct chat."
-            : "Local router selected a single-agent task; using direct model response fallback.",
+          detail: routeLogDetail,
         },
       ],
     });
@@ -3237,6 +3424,12 @@ export function createFileScanTaskRuntime({
         temperature: 0.7,
         locale: isChinese ? "zh-CN" : "en",
         ...(modelImages?.length ? { images: modelImages } : {}),
+        // Pre-flight context budget input (A5). The desktop knows the primary
+        // profile's context window; when it is absent the budget falls back to a
+        // conservative default rather than letting the provider reject the call.
+        ...(runtimeConfig?.contextWindowTokens
+          ? { contextWindowTokens: runtimeConfig.contextWindowTokens }
+          : {}),
       };
       const chatTimeoutMs = runtimeConfig?.taskTimeoutMs ?? 90_000;
       const result = await withTaskTimeout(
@@ -3345,6 +3538,7 @@ export function createFileScanTaskRuntime({
     runtimeConfig?: RuntimeExecutionConfig,
     signal?: AbortSignal,
     appendUserMessage = true,
+    executionMode: "chat" | "agent" = "chat",
   ) {
     return runChatTask(
       taskId,
@@ -3361,6 +3555,7 @@ export function createFileScanTaskRuntime({
       runtimeConfig,
       signal,
       appendUserMessage,
+      executionMode,
     );
   }
 
@@ -3379,15 +3574,22 @@ export function createFileScanTaskRuntime({
       timeoutMs?: number;
       skipAgentMemory?: boolean;
       skipSkillContext?: boolean;
+      /** Pre-flight current-turn budget input (A5); see `clipChatTurnPrompt`. */
+      contextWindowTokens?: number;
     },
     timeoutMs = 90_000,
     signal?: AbortSignal,
     onUsage?: (usage: ModelUsage) => void,
   ): Promise<{ text: string; tokenUsage?: ModelUsage; finishReason?: string }> {
     throwIfTaskAborted(signal, "chat.complete");
+    // A5: history is already windowed by `selectModelContextMessages`, but the
+    // current turn itself was unbudgeted, so a pasted document or an injected
+    // reference could push the request past the model window and earn a
+    // context-length 400. Bound the turn before spending a round trip on it.
+    const boundedPrompt = clipChatTurnPrompt(prompt, options.contextWindowTokens);
     if (!activeChatTool.stream) {
       return withTaskTimeout(async () => {
-        const result = await activeChatTool.complete(prompt, {
+        const result = await activeChatTool.complete(boundedPrompt, {
           ...options,
           timeoutMs,
           cacheProbeKey: options.cacheProbeKey ?? `chat:${taskId}`,
@@ -3405,7 +3607,7 @@ export function createFileScanTaskRuntime({
     }
     if (!eventBus) {
       return withTaskTimeout(async () => {
-        const result = await activeChatTool.complete(prompt, {
+        const result = await activeChatTool.complete(boundedPrompt, {
           ...options,
           timeoutMs,
           cacheProbeKey: options.cacheProbeKey ?? `chat:${taskId}`,
@@ -3722,6 +3924,20 @@ export function createFileScanTaskRuntime({
       ],
     });
   }
+  function classifyModelFailureKind(detail: string): ReturnType<typeof classifyFailureKind> {
+    // E2: one classifier for the whole runtime. This used to be a second, smaller
+    // regex list that had to be kept in sync with the failure-guidance module.
+    return classifyFailureKind(detail);
+  }
+
+  function modelFailureUserMessage(
+    kind: Parameters<typeof failureMessageForKind>[0],
+    isChinese: boolean,
+    short = false,
+  ): string {
+    return failureMessageForKind(kind, isChinese ? "zhCN" : "en", { short });
+  }
+
   function runModelFailureTask(taskId: ID, userGoal: string, error: unknown) {
     const isChinese = /[\u3400-\u9fff]/u.test(userGoal);
     const detail = error instanceof Error ? error.message : String(error);
@@ -3729,12 +3945,20 @@ export function createFileScanTaskRuntime({
     if (currentSnapshot.id !== taskId) {
       return;
     }
+    const errorKind = classifyModelFailureKind(detail);
+    // C4b: `onTaskFail` hooks contribute to the user-visible failure log, so a
+    // policy that explains a known failure cause is seen where the failure is.
+    const failureHooks = evaluateHooks({ phase: "onTaskFail", taskId });
+    const hookNotes = [...failureHooks.reasons, ...failureHooks.notices];
+    const hookSuffix = hookNotes.length > 0 ? ` | hooks: ${hookNotes.join("; ")}` : "";
+    if (hookNotes.length > 0) {
+      console.warn(`[javis-hooks] onTaskFail for ${taskId}: ${hookNotes.join("; ")}`);
+    }
     const partialText = currentSnapshot.id === taskId
       ? (currentSnapshot.streamingText || currentSnapshot.commanderMessage || "").trim()
       : "";
-    const userFacingError = isChinese
-      ? "模型请求失败。已保留当前已生成的内容，请检查服务商、模型、API 密钥和基础 URL 后重试。"
-      : "The model request failed. Any generated content was kept; check the provider, model, API key, and base URL before retrying.";
+    const userFacingError = modelFailureUserMessage(errorKind, isChinese);
+    const shortUserFacingError = modelFailureUserMessage(errorKind, isChinese, true);
     emitForActiveTask(taskId, {
       ...(currentSnapshot.id === taskId ? currentSnapshot : {}),
       id: taskId,
@@ -3743,9 +3967,7 @@ export function createFileScanTaskRuntime({
       status: "failed",
       commanderMessage: partialText || (currentSnapshot.id === taskId
         ? currentSnapshot.commanderMessage
-        : isChinese
-          ? "模型请求失败，请检查服务商、模型、API 密钥和基础 URL 后重试。"
-          : "The model request failed. Check the provider, model, API key, and base URL before retrying."),
+        : shortUserFacingError),
       plan: [],
       agents: createRuntimeAgentSnapshots((agent) => ({
         status: agent.kind === "commander" ? "failed" : "completed",
@@ -3765,9 +3987,9 @@ export function createFileScanTaskRuntime({
           id: `${taskId}-model-failed`,
           kind: "event",
           title: "model.call.failed",
-          detail: `General chat model call failed: ${detail}`,
+          detail: `Model call failed (${errorKind}): ${detail}${hookSuffix}`,
           userMessage: userFacingError,
-          devDetail: `General chat model call failed: ${detail}`,
+          devDetail: `Model call failed (${errorKind}): ${detail}${hookSuffix}`,
         },
       ],
     });

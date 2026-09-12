@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createInitialTaskSnapshot, type TaskSnapshot } from "@javis/core";
 import {
   appendTaskSessionSnapshotJsonLine,
+  createDeduplicatingTaskSessionWriter,
   createTaskSessionSnapshotJsonLine,
   createFileBackedTaskSessionJsonLineWriter,
   createLocalStorageTaskSessionJsonLineWriter,
@@ -9,6 +10,7 @@ import {
   resumeLatestTaskSessionSnapshot,
   rewindTaskSessionToSnapshot,
   TASK_SESSION_JSONL_STORAGE_KEY,
+  type TaskSessionJsonLineWriter,
 } from "./task-session-log";
 
 function createMemoryStorage(): Pick<Storage, "getItem" | "setItem"> {
@@ -235,4 +237,206 @@ describe("task session JSONL", () => {
 
     expect(rewindTaskSessionToSnapshot(lines, "task-1", "task-1")).toHaveLength(1);
   });
+});
+
+describe("deduplicating task session writer", () => {
+  function createRecordingWriter() {
+    const lines: string[] = [];
+    const inner: TaskSessionJsonLineWriter = {
+      async appendLine(line) {
+        lines.push(line);
+      },
+    };
+    return { inner, lines };
+  }
+
+  it("writes an unchanged terminal snapshot only once", async () => {
+    const { inner, lines } = createRecordingWriter();
+    const writer = createDeduplicatingTaskSessionWriter(() => inner, { minIntervalMs: 0 });
+    const failed = createSnapshot("task-1", "failed");
+
+    for (let index = 0; index < 1_000; index += 1) {
+      await appendTaskSessionSnapshotJsonLine(writer, failed);
+    }
+
+    expect(lines).toHaveLength(1);
+    expect(writer.writtenRows).toBe(1);
+    expect(writer.skippedDuplicateRows).toBe(999);
+  });
+
+  it("always writes a status transition even inside the throttle window", async () => {
+    const { inner, lines } = createRecordingWriter();
+    let now = 1_000;
+    const writer = createDeduplicatingTaskSessionWriter(() => inner, {
+      minIntervalMs: 1_500,
+      now: () => now,
+    });
+
+    await appendTaskSessionSnapshotJsonLine(writer, createSnapshot("task-1", "planning"));
+    await appendTaskSessionSnapshotJsonLine(writer, createSnapshot("task-1", "running"));
+    now += 10;
+    await appendTaskSessionSnapshotJsonLine(writer, createSnapshot("task-1", "waiting_permission"));
+    now += 10;
+    await appendTaskSessionSnapshotJsonLine(writer, createSnapshot("task-1", "completed"));
+
+    expect(lines).toHaveLength(4);
+    const statuses = parseTaskSessionJsonLines(lines.join("")).map((line) => line.snapshot.status);
+    expect(statuses).toEqual(["planning", "running", "waiting_permission", "completed"]);
+  });
+
+  it("throttles same-status streaming writes while staying within one interval of the newest state", async () => {
+    const { inner, lines } = createRecordingWriter();
+    let now = 0;
+    const intervalMs = 1_500;
+    const stepMs = 10;
+    const writer = createDeduplicatingTaskSessionWriter(() => inner, {
+      minIntervalMs: intervalMs,
+      now: () => now,
+    });
+
+    // 1,000 distinct streaming updates over ~10 seconds of wall clock: one row
+    // per interval instead of one row per delta.
+    const updates = 1_000;
+    for (let index = 0; index < updates; index += 1) {
+      now += stepMs;
+      await appendTaskSessionSnapshotJsonLine(writer, {
+        ...createSnapshot("task-1", "running"),
+        commanderMessage: `chunk-${index}`,
+      });
+    }
+
+    expect(lines.length).toBeLessThanOrEqual(Math.ceil((updates * stepMs) / intervalMs) + 1);
+    expect(lines.length).toBeGreaterThan(1);
+    expect(writer.skippedThrottledRows).toBeGreaterThan(900);
+
+    // The newest state is never more than one throttle interval behind: anything
+    // older than that within the same status carries no resumable information.
+    const lastWritten = Number(
+      (parseTaskSessionJsonLines(lines[lines.length - 1] ?? "")[0]?.snapshot.commanderMessage ?? "")
+        .replace("chunk-", ""),
+    );
+    expect(updates - 1 - lastWritten).toBeLessThanOrEqual(intervalMs / stepMs);
+  });
+
+  it("writes the final terminal state even when it lands inside the throttle window", async () => {
+    const { inner, lines } = createRecordingWriter();
+    let now = 0;
+    const writer = createDeduplicatingTaskSessionWriter(() => inner, {
+      minIntervalMs: 1_500,
+      now: () => now,
+    });
+
+    await appendTaskSessionSnapshotJsonLine(writer, {
+      ...createSnapshot("task-1", "running"),
+      commanderMessage: "streaming",
+    });
+    now += 5;
+    await appendTaskSessionSnapshotJsonLine(writer, {
+      ...createSnapshot("task-1", "failed"),
+      commanderMessage: "model call failed",
+    });
+
+    expect(lines).toHaveLength(2);
+    expect(parseTaskSessionJsonLines(lines[1] ?? "")[0]?.snapshot.status).toBe("failed");
+  });
+
+  it("keeps per-task state independent and isolates unknown tasks", async () => {
+    const { inner, lines } = createRecordingWriter();
+    const writer = createDeduplicatingTaskSessionWriter(() => inner, { minIntervalMs: 0 });
+
+    await appendTaskSessionSnapshotJsonLine(writer, createSnapshot("task-1", "running"));
+    await appendTaskSessionSnapshotJsonLine(writer, createSnapshot("task-2", "running"));
+    await appendTaskSessionSnapshotJsonLine(writer, createSnapshot("task-1", "running"));
+    await appendTaskSessionSnapshotJsonLine(writer, createSnapshot("task-2", "running"));
+
+    expect(lines).toHaveLength(2);
+    writer.forgetTask("task-1");
+    await appendTaskSessionSnapshotJsonLine(writer, createSnapshot("task-1", "running"));
+    expect(lines).toHaveLength(3);
+  });
+
+  it("bounds tracked tasks and never drops unparseable lines", async () => {
+    const { inner, lines } = createRecordingWriter();
+    const writer = createDeduplicatingTaskSessionWriter(() => inner, {
+      minIntervalMs: 0,
+      maxTrackedTasks: 2,
+    });
+
+    await writer.appendLine("not json at all\n");
+    expect(lines).toEqual(["not json at all\n"]);
+
+    for (const taskId of ["task-1", "task-2", "task-3"]) {
+      await appendTaskSessionSnapshotJsonLine(writer, createSnapshot(taskId, "running"));
+    }
+    // Eviction must only forget dedupe memory, never skip a legitimate write.
+    expect(lines).toHaveLength(4);
+  });
+
+  it("creates the inner writer lazily per append", async () => {
+    const { inner, lines } = createRecordingWriter();
+    const createInner = vi.fn(() => inner);
+    const writer = createDeduplicatingTaskSessionWriter(createInner, { minIntervalMs: 1_500 });
+
+    await appendTaskSessionSnapshotJsonLine(writer, createSnapshot("task-1", "running"));
+    await appendTaskSessionSnapshotJsonLine(writer, createSnapshot("task-1", "running"));
+
+    expect(createInner).toHaveBeenCalledTimes(1);
+    expect(lines).toHaveLength(1);
+  });
+
+  it("resets counters and dedupe memory", async () => {
+    const { inner, lines } = createRecordingWriter();
+    const writer = createDeduplicatingTaskSessionWriter(() => inner, { minIntervalMs: 0 });
+
+    await appendTaskSessionSnapshotJsonLine(writer, createSnapshot("task-1", "failed"));
+    writer.reset();
+    expect(writer.writtenRows).toBe(0);
+    expect(writer.skippedDuplicateRows).toBe(0);
+    await appendTaskSessionSnapshotJsonLine(writer, createSnapshot("task-1", "failed"));
+    expect(lines).toHaveLength(2);
+  });
+
+  it("keeps a production-scale runaway stream under the M1 write budget", async () => {
+    // Reproduces the observed pathology for task-1789226288412: ~3 minutes of
+    // streamed snapshots, then a terminal snapshot re-notified 15,929 times at
+    // ~52/s for five minutes. That produced 34,577 rows / 93 MB.
+    const { inner, lines } = createRecordingWriter();
+    let now = 0;
+    const writer = createDeduplicatingTaskSessionWriter(() => inner, {
+      minIntervalMs: 1_500,
+      now: () => now,
+    });
+
+    const streamingUpdates = 10_800; // ~60/s for 3 minutes
+    for (let index = 0; index < streamingUpdates; index += 1) {
+      now += 17;
+      await appendTaskSessionSnapshotJsonLine(writer, {
+        ...createSnapshot("task-1", "running"),
+        commanderMessage: `chunk-${index}`,
+      });
+    }
+
+    const terminal = {
+      ...createSnapshot("task-1", "failed"),
+      commanderMessage: "模型请求失败",
+    };
+    await appendTaskSessionSnapshotJsonLine(writer, terminal);
+    const writesAfterTerminal = lines.length;
+
+    const runawayRepeats = 15_929;
+    for (let index = 0; index < runawayRepeats; index += 1) {
+      now += 19;
+      await appendTaskSessionSnapshotJsonLine(writer, terminal);
+    }
+
+    // M1 acceptance: a long task must stay far below 500 rows.
+    expect(lines.length).toBeLessThan(500);
+    // The runaway phase contributes nothing at all, not merely "less".
+    expect(lines.length).toBe(writesAfterTerminal);
+    expect(writer.skippedDuplicateRows).toBe(runawayRepeats);
+    // The terminal snapshot itself is always persisted, so the task stays resumable.
+    expect(
+      parseTaskSessionJsonLines(lines[lines.length - 1] ?? "")[0]?.snapshot.status,
+    ).toBe("failed");
+  }, 60_000);
 });

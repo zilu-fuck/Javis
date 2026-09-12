@@ -976,6 +976,75 @@ describe("executeWorkflow", () => {
     expect(result.completedStepIds[result.completedStepIds.length - 1]).toBe("build-trip-plan");
   });
 
+  it("refuses two parallel steps that declare the same write path", async () => {
+    // D4: a lease is what stops two agents clobbering one file and then verifying a
+    // file they no longer own.
+    const workflow = createWorkflow([
+      { ...step("write-a", [], true), declaredWritePaths: ["notes.md"] },
+      { ...step("write-b", [], true), declaredWritePaths: ["notes.md"] },
+    ]);
+    const started: string[] = [];
+
+    const result = await executeWorkflow({
+      workflow,
+      executionPolicy: { maxConcurrency: 2 },
+      executeStep: async (workflowStep) => {
+        started.push(workflowStep.id);
+        // Hold the path long enough for the other step to attempt dispatch.
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        return { output: workflowStep.id };
+      },
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.error ?? "").toContain("cannot write notes.md");
+    expect(result.error ?? "").toContain("Parallel writers must target different paths");
+  });
+
+  it("allows two parallel steps that declare different write paths", async () => {
+    const workflow = createWorkflow([
+      { ...step("write-a", [], true), declaredWritePaths: ["a.md"] },
+      { ...step("write-b", [], true), declaredWritePaths: ["b.md"] },
+    ]);
+    let maxActive = 0;
+    let active = 0;
+
+    const result = await executeWorkflow({
+      workflow,
+      executionPolicy: { maxConcurrency: 2 },
+      executeStep: async (workflowStep) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        active -= 1;
+        return { output: workflowStep.id };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(maxActive).toBe(2);
+  });
+
+  it("frees the path once a step settles", async () => {
+    const workflow = createWorkflow([
+      step("write-first", [], false),
+      { ...step("write-second", [], false), declaredWritePaths: ["shared.md"] },
+    ]);
+    const order: string[] = [];
+
+    const result = await executeWorkflow({
+      workflow,
+      executeStep: async (workflowStep) => {
+        order.push(workflowStep.id);
+        return { output: workflowStep.id };
+      },
+    });
+
+    // Serial steps reuse the same path without conflicting: the first released it.
+    expect(result.status).toBe("completed");
+    expect(order).toContain("write-second");
+  });
+
   it("rate-limits step starts while preserving parallel eligibility", async () => {
     const startedAt: number[] = [];
     const workflow = createWorkflow([

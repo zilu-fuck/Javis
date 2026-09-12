@@ -1,0 +1,32 @@
+{
+  "generatedAt": "2026-09-12T16:33:22.034Z",
+  "suite": "golden-tasks",
+  "node": "v24.14.0",
+  "platform": "win32-x64",
+  "totals": {
+    "tasks": 29,
+    "passed": 29,
+    "failed": 0,
+    "successRate": 1,
+    "durationMs": 38,
+    "coverageSelfCheck": "passed"
+  },
+  "byCategory": {
+    "plan-legality": {
+      "total": 13,
+      "passed": 13,
+      "failed": 0
+    },
+    "routing": {
+      "total": 6,
+      "passed": 6,
+      "failed": 0
+    },
+    "write-intent": {
+      "total": 10,
+      "passed": 10,
+      "failed": 0
+    }
+  },
+  "failures": []
+}

@@ -506,6 +506,93 @@ fn create_workspace_mutation_preview_hash(
     )
 }
 
+// ── `.javis` configuration loading (C1b) ─────────────────────────────────────
+
+/// Directory and file name of the project configuration layer.
+const JAVIS_CONFIG_DIR: &str = ".javis";
+const JAVIS_CONFIG_FILE: &str = "config.json";
+/// Configuration is data, not a payload: anything larger is a mistake or an attack.
+const MAX_JAVIS_CONFIG_BYTES: u64 = 256 * 1024;
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct JavisConfigFiles {
+    pub(crate) project_path: Option<String>,
+    pub(crate) project_text: Option<String>,
+    pub(crate) user_path: Option<String>,
+    pub(crate) user_text: Option<String>,
+}
+
+/// Reads a file only when it is directly inside `root`, refusing symlink escapes.
+///
+/// The file is canonicalized first, so a `.javis/config.json` symlinked outside the
+/// workspace resolves to its real target and then fails the containment check.
+pub(crate) fn read_config_file_within_root(
+    root: &Path,
+    file_name: &str,
+    max_bytes: u64,
+) -> Result<Option<String>, String> {
+    let candidate = root.join(file_name);
+    if !candidate.exists() {
+        return Ok(None);
+    }
+    let canonical_root = fs::canonicalize(root)
+        .map_err(|error| format!("Cannot resolve workspace root: {error}"))?;
+    let canonical_file = fs::canonicalize(&candidate)
+        .map_err(|error| format!("Cannot resolve config path: {error}"))?;
+    if !canonical_file.starts_with(&canonical_root) {
+        return Err(format!(
+            "Config file {} resolves outside the workspace root.",
+            candidate.to_string_lossy()
+        ));
+    }
+    let metadata = fs::metadata(&canonical_file)
+        .map_err(|error| format!("Cannot stat config file: {error}"))?;
+    if metadata.len() > max_bytes {
+        return Err(format!(
+            "Config file {} is {} bytes; the limit is {max_bytes}.",
+            canonical_file.to_string_lossy(),
+            metadata.len()
+        ));
+    }
+    fs::read_to_string(&canonical_file)
+        .map(Some)
+        .map_err(|error| format!("Cannot read config file: {error}"))
+}
+
+/// Loads the project (`<workspace>/.javis/config.json`) and user
+/// (`<config dir>/javis/config.json`) layers. A missing layer is `None`, not an
+/// error: most installs have neither.
+#[tauri::command]
+pub(crate) fn load_javis_config_files(
+    workspace_path: Option<String>,
+) -> Result<JavisConfigFiles, String> {
+    let mut files = JavisConfigFiles::default();
+
+    if let Some(workspace) = workspace_path.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        let root = PathBuf::from(workspace).join(JAVIS_CONFIG_DIR);
+        if root.exists() {
+            if let Some(text) = read_config_file_within_root(&root, JAVIS_CONFIG_FILE, MAX_JAVIS_CONFIG_BYTES)? {
+                files.project_path = Some(root.join(JAVIS_CONFIG_FILE).to_string_lossy().to_string());
+                files.project_text = Some(text);
+            }
+        }
+    }
+
+    // Mirrors the MCP config location so both live side by side.
+    if let Some(config_dir) = dirs::config_dir() {
+        let root = config_dir.join("javis");
+        if root.exists() {
+            if let Some(text) = read_config_file_within_root(&root, JAVIS_CONFIG_FILE, MAX_JAVIS_CONFIG_BYTES)? {
+                files.user_path = Some(root.join(JAVIS_CONFIG_FILE).to_string_lossy().to_string());
+                files.user_text = Some(text);
+            }
+        }
+    }
+
+    Ok(files)
+}
+
 // ── Workspace Definition CRUD ────────────────────────────────────────────────
 
 pub(crate) fn get_workspaces_dir(app_handle: &tauri::AppHandle) -> Result<PathBuf, JavisError> {
@@ -537,6 +624,70 @@ pub(crate) fn validate_workspace_id(id: &str) -> Result<(), JavisError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("javis-config-{label}-{unique}"));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn reads_a_config_file_inside_its_root() {
+        let root = temp_dir("inside");
+        fs::write(root.join("config.json"), "{\"version\":1}").expect("write config");
+        let text = read_config_file_within_root(&root, "config.json", 1024)
+            .expect("read config")
+            .expect("config present");
+        assert_eq!(text, "{\"version\":1}");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn treats_a_missing_config_file_as_absent_rather_than_an_error() {
+        let root = temp_dir("missing");
+        assert!(read_config_file_within_root(&root, "config.json", 1024)
+            .expect("missing file is not an error")
+            .is_none());
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn refuses_a_config_file_that_escapes_its_root() {
+        let root = temp_dir("escape-root");
+        let outside = temp_dir("escape-outside");
+        fs::write(outside.join("secret.json"), "{\"version\":1}").expect("write outside file");
+        let relative = format!(
+            "../{}/secret.json",
+            outside.file_name().expect("outside dir name").to_string_lossy()
+        );
+        let error = read_config_file_within_root(&root, &relative, 1024)
+            .expect_err("escaping path must be rejected");
+        assert!(error.contains("outside the workspace root"), "unexpected error: {error}");
+        fs::remove_dir_all(&root).ok();
+        fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn refuses_a_config_file_over_the_size_limit() {
+        let root = temp_dir("oversize");
+        fs::write(root.join("config.json"), "x".repeat(64)).expect("write config");
+        let error = read_config_file_within_root(&root, "config.json", 16)
+            .expect_err("oversize config must be rejected");
+        assert!(error.contains("the limit is 16"), "unexpected error: {error}");
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn returns_no_layers_when_nothing_is_configured() {
+        let files = load_javis_config_files(None).expect("load config files");
+        assert!(files.project_text.is_none());
+        assert!(files.project_path.is_none());
+    }
 
     #[test]
     fn validate_workspace_id_accepts_valid_kebab_case() {

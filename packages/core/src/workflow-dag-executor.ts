@@ -17,6 +17,10 @@ import {
   throwIfTaskAborted,
   withTaskTimeout,
 } from "./task-wait";
+import {
+  createWriteLeaseRegistry,
+  extractDeclaredWritePaths,
+} from "./write-lease";
 import type { WorkbenchWorkflow, WorkbenchWorkflowStep } from "./workflows";
 import {
   createFailedStepResult,
@@ -618,6 +622,15 @@ function validateWorkflowDag(workflow: WorkbenchWorkflow): void {
   assertValidWorkflowDag(workflow.steps);
 }
 
+/**
+ * D4: process-wide write leases.
+ *
+ * Deliberately process-wide rather than per-workflow: two concurrent workflow runs
+ * writing the same path is exactly the conflict this exists to catch, and leases
+ * are released on step settle so nothing accumulates.
+ */
+const writeLeaseRegistry = createWriteLeaseRegistry();
+
 async function executeReadySteps(
   steps: WorkbenchWorkflowStep[],
   activeWorkflow: WorkbenchWorkflow,
@@ -670,6 +683,44 @@ async function executeReadySteps(
     }
   };
 
+  /**
+   * D4: a step that declares a write path claims it before dispatch, so two
+   * parallel steps cannot write the same file (or a path inside the same
+   * directory). The lease is released when the step settles, expires on its TTL if
+   * the step is killed, and is scoped per workflow run so two different runs
+   * writing the same path still conflict.
+   */
+  const leaseScopeId = `wf:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
+  // Forward every argument: `executeStep` also receives the attempt's abort signal,
+  // and dropping it broke per-step timeout cancellation.
+  const leasedExecuteStep: WorkflowExecutorOptions["executeStep"] = async (...args) => {
+    const step = args[0];
+    const declared = (step as { declaredWritePaths?: string[] }).declaredWritePaths;
+    const paths = declared && declared.length > 0
+      ? declared
+      : extractDeclaredWritePaths((step as { toolInput?: Record<string, unknown> }).toolInput);
+    if (paths.length === 0) {
+      return executeStep(...args);
+    }
+    const acquired = writeLeaseRegistry.acquire({
+      taskId: leaseScopeId,
+      stepId: step.id,
+      paths,
+    });
+    if (!acquired.ok) {
+      const holder = acquired.conflicts[0];
+      throw new Error(
+        `Step ${step.id} cannot write ${holder.path}: it is claimed by step `
+        + `${holder.heldBy.stepId}. Parallel writers must target different paths.`,
+      );
+    }
+    try {
+      return await executeStep(...args);
+    } finally {
+      writeLeaseRegistry.release(acquired.lease.leaseId);
+    }
+  };
+
   while (queue.length > 0 || pending.size > 0) {
     throwIfTaskAborted(signal, "Workflow step batch");
     while (queue.length > 0 && !circuitOpen) {
@@ -682,7 +733,7 @@ async function executeReadySteps(
         nextStep,
         context,
         runningOrFinished,
-        executeStep,
+        leasedExecuteStep,
         signal,
         resolveExecutionPolicy,
         shouldRetryStep,

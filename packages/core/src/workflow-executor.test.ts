@@ -9,6 +9,7 @@ import type { WorkbenchWorkflow } from "./workflows";
 import { executeCapabilityStep, isReadCurrentProjectGoal, runCommanderDagTask, runGenericWorkbenchWorkflow, runReadCurrentProjectWorkflow, SUPPORTED_APPROVAL_GATED_TOOLS } from "./workflow-executor";
 import type { WorkspaceRuntime } from "./workspace-runtime";
 import { createCodeProposalHash } from "./code-proposal-safety";
+import { configureHooks, resetHooks } from "./config/hooks";
 
 function createTestController(options: { withPermissionHandler?: boolean; withStepWaitHandler?: boolean } = {}) {
   let snapshot = createInitialTaskSnapshot();
@@ -4124,6 +4125,177 @@ describe("executeCapabilityStep repository search dispatch", () => {
       { codeTool: { inspectRepository: vi.fn(), searchRepository } },
     )).rejects.toThrow("Tool code.searchRepository output contains an undeclared field: undeclared");
     expect(context.has("repoSearch")).toBe(false);
+  });
+
+  it("repairs a mistyped scalar in one evidence item instead of failing the step", async () => {
+    const context = createSharedTaskContext({});
+    const searchRepository = vi.fn(async () => ({
+      actualFound: [
+        { path: "src/a.ts", excerpt: "alpha", matchedTerms: ["alpha"], line: 1 },
+        // Deliberately mistyped: this is the production payload shape the repair
+        // pass exists for, so the cast is the point of the test.
+        { path: "src/b.ts", excerpt: "beta", matchedTerms: ["beta"], line: "27" as unknown as number },
+      ],
+      inferred: [],
+      needsConfirmation: [],
+      keyFiles: [],
+      relatedTestFiles: [],
+      testFileCandidates: [],
+      clusters: [],
+      attempts: [],
+    }));
+
+    const result = await executeCapabilityStep(
+      {
+        id: "search-repo-coerced-output",
+        title: "Search repository",
+        assignedAgentKind: "code",
+        capability: "code_search",
+        requiredCapabilities: ["code_search"],
+        dependsOn: [],
+        toolInput: { goal: "find registry" },
+        outputContextKey: "repoSearch",
+        successCriteria: "Repository search evidence is collected.",
+      },
+      context,
+      { codeTool: { inspectRepository: vi.fn(), searchRepository } },
+    );
+
+    const written = context.get("repoSearch") as {
+      actualFound: Array<{ line?: unknown }>;
+    };
+    expect(written.actualFound).toHaveLength(2);
+    expect(written.actualFound[1].line).toBe(27);
+    // The repaired value is what the step returns, so downstream steps see it too.
+    expect((result.output as typeof written).actualFound[1].line).toBe(27);
+    // A4b: the repair is also recorded and carried with the task artifacts instead
+    // of only appearing in the console.
+    const repairs = context.get("toolOutputRepairs") as
+      | Array<{ toolName: string; repairs: string[]; stepId?: string }>
+      | undefined;
+    expect(repairs).toHaveLength(1);
+    expect(repairs?.[0].toolName).toBe("code.searchRepository");
+    expect(repairs?.[0].stepId).toBe("search-repo-coerced-output");
+    expect(repairs?.[0].repairs.join(" ")).toContain("coerced");
+  });
+
+  it("still fails when most evidence items are unusable", async () => {
+    const context = createSharedTaskContext({});
+    const searchRepository = vi.fn(async () => ({
+      actualFound: [
+        { path: "src/a.ts", excerpt: "alpha", matchedTerms: ["alpha"] },
+        { path: "", excerpt: "beta", matchedTerms: ["beta"] },
+        { path: "", excerpt: "gamma", matchedTerms: ["gamma"] },
+        { path: "", excerpt: "delta", matchedTerms: ["delta"] },
+      ],
+      inferred: [],
+      needsConfirmation: [],
+      keyFiles: [],
+      relatedTestFiles: [],
+      testFileCandidates: [],
+      clusters: [],
+      attempts: [],
+    }));
+
+    await expect(executeCapabilityStep(
+      {
+        id: "search-repo-broken-output",
+        title: "Search repository",
+        assignedAgentKind: "code",
+        capability: "code_search",
+        requiredCapabilities: ["code_search"],
+        dependsOn: [],
+        toolInput: { goal: "find registry" },
+        outputContextKey: "repoSearch",
+        successCriteria: "Repository search evidence is collected.",
+      },
+      context,
+      { codeTool: { inspectRepository: vi.fn(), searchRepository } },
+    )).rejects.toThrow("must contain at least 1 character");
+    expect(context.has("repoSearch")).toBe(false);
+  });
+
+  it("enforces a configured beforeToolCall deny hook instead of calling the tool", async () => {
+    // C4: a declarative hook must actually stop dispatch, not merely be parsed.
+    configureHooks([{
+      id: "freeze-writes",
+      phase: "beforeToolCall",
+      tool: "code.searchRepository",
+      action: { kind: "deny", reason: "repository search is disabled for this project" },
+    }]);
+    try {
+      const searchRepository = vi.fn(async () => ({
+        actualFound: [],
+        inferred: [],
+        needsConfirmation: [],
+        keyFiles: [],
+        relatedTestFiles: [],
+        testFileCandidates: [],
+        clusters: [],
+        attempts: [],
+      }));
+
+      await expect(executeCapabilityStep(
+        {
+          id: "search-repo-hooked",
+          title: "Search repository",
+          assignedAgentKind: "code",
+          capability: "code_search",
+          requiredCapabilities: ["code_search"],
+          dependsOn: [],
+          toolInput: { goal: "find registry" },
+          outputContextKey: "repoSearch",
+          successCriteria: "Repository search evidence is collected.",
+        },
+        createSharedTaskContext({}),
+        { codeTool: { inspectRepository: vi.fn(), searchRepository } },
+      )).rejects.toThrow("blocked by a configured hook: repository search is disabled for this project");
+
+      expect(searchRepository).not.toHaveBeenCalled();
+    } finally {
+      resetHooks();
+    }
+  });
+
+  it("enforces a configured requireApproval hook without granting approval", async () => {
+    configureHooks([{
+      id: "writes-need-approval",
+      phase: "beforeToolCall",
+      tool: "code.searchRepository",
+      action: { kind: "requireApproval", reason: "search must be reviewed" },
+    }]);
+    try {
+      const searchRepository = vi.fn(async () => ({
+        actualFound: [],
+        inferred: [],
+        needsConfirmation: [],
+        keyFiles: [],
+        relatedTestFiles: [],
+        testFileCandidates: [],
+        clusters: [],
+        attempts: [],
+      }));
+
+      await expect(executeCapabilityStep(
+        {
+          id: "search-repo-approval-hooked",
+          title: "Search repository",
+          assignedAgentKind: "code",
+          capability: "code_search",
+          requiredCapabilities: ["code_search"],
+          dependsOn: [],
+          toolInput: { goal: "find registry" },
+          outputContextKey: "repoSearch",
+          successCriteria: "Repository search evidence is collected.",
+        },
+        createSharedTaskContext({}),
+        { codeTool: { inspectRepository: vi.fn(), searchRepository } },
+      )).rejects.toThrow("requires approval by a configured hook");
+
+      expect(searchRepository).not.toHaveBeenCalled();
+    } finally {
+      resetHooks();
+    }
   });
 
   it("rejects governed tool output that exceeds the descriptor byte limit", async () => {

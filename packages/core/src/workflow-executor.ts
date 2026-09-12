@@ -42,8 +42,18 @@ import {
   sanitizeMcpInputSchema,
   validateMcpInput,
   validateToolSchema,
+  repairToolSchemaValue,
 } from "@javis/tools";
 import { summarizeMarkdownDocuments } from "@javis/tools";
+import {
+  appendContextToolOutputRepairs,
+  recordToolOutputRepair,
+} from "./tool-output-repairs";
+import {
+  appendContextHookNotices,
+  assertToolCallAllowedByHooks,
+  evaluateHooks,
+} from "./config/hooks";
 import {
   createDefaultAgentRegistry,
   demoAgents,
@@ -2504,6 +2514,16 @@ async function dispatchToolByName(
   }
   assertToolCanDispatchWithoutApproval(toolName, toolDescriptors);
   validateToolDescriptorInputs(descriptor, input);
+  // C4: configured `beforeToolCall` hooks are enforced here, at the single point
+  // every DAG/ReAct tool call passes through. A hook can block or force approval;
+  // it can never grant approval.
+  assertToolCallAllowedByHooks({
+    toolName,
+    ...(step ? { stepId: step.id } : {}),
+    ...(context && typeof (context as { taskId?: string }).taskId === "string"
+      ? { taskId: (context as { taskId?: string }).taskId as string }
+      : {}),
+  });
 
   if (toolName.startsWith("mcp.")) {
     if (!tools.mcpTool) throw new Error("MCP tool bridge is not available");
@@ -2962,7 +2982,17 @@ export async function executeCapabilityStep(
         signal,
       },
     );
-    if (descriptor) validateToolDescriptorOutput(descriptor, output);
+    if (descriptor) {
+      const validated = validateToolDescriptorOutput(descriptor, output);
+      recordToolOutputRepairForStep({
+        toolName: step.toolName,
+        repairs: validated.repairs,
+        step,
+        context,
+      });
+      writeStepOutput(step.outputContextKey, validated.output, context);
+      return { output: validated.output, toolName: step.toolName };
+    }
     writeStepOutput(step.outputContextKey, output, context);
     return { output, toolName: step.toolName };
   }
@@ -3018,11 +3048,16 @@ export async function executeCapabilityStep(
       signal,
     },
   );
-  validateToolDescriptorOutput(descriptor, output);
+  const validated = validateToolDescriptorOutput(descriptor, output);
+  recordToolOutputRepairForStep({
+    toolName: descriptor.name,
+    repairs: validated.repairs,
+    step,
+    context,
+  });
+  writeStepOutput(step.outputContextKey, validated.output, context);
 
-  writeStepOutput(step.outputContextKey, output, context);
-
-  return { output, toolName: descriptor.name };
+  return { output: validated.output, toolName: descriptor.name };
 }
 
 function adaptCapabilityToolInput(
@@ -3345,24 +3380,89 @@ function isPublicHttpUrl(value: string): boolean {
   }
 }
 
+/**
+ * Validates tool output and returns the value the step should actually use.
+ *
+ * Output is produced by tool implementations, not by the model, so a stray scalar
+ * in one array item used to abort a whole task (`... output.actualFound[27].line
+ * must be a integer.`). A bounded repair pass now coerces unambiguous scalars and
+ * drops a small number of invalid array items; everything else still fails.
+ */
 function validateToolDescriptorOutput(
   descriptor: Pick<ToolDescriptor, "name" | "limits" | "outputSchema">,
   output: unknown,
-): void {
+): { output: unknown; repairs: string[] } {
+  let resolvedOutput = output;
+  let repairs: string[] = [];
   if (descriptor.outputSchema) {
-    const schemaError = validateToolSchema(
+    const repair = repairToolSchemaValue(
       descriptor.outputSchema,
       output,
+      {},
       `Tool ${descriptor.name} output`,
     );
-    if (schemaError) throw new Error(schemaError);
+    if (!repair.ok) {
+      throw new Error(repair.error ?? `Tool ${descriptor.name} output failed schema validation.`);
+    }
+    repairs = repair.repairs;
+    if (repairs.length > 0) {
+      console.warn(
+        `[tool-schema] ${descriptor.name} output repaired: ${repairs.join("; ")}`,
+      );
+    }
+    resolvedOutput = repair.value;
   }
   validateToolPayloadSize(
     descriptor.name,
     "output",
-    output,
+    resolvedOutput,
     descriptor.limits?.maxOutputBytes,
   );
+  return { output: resolvedOutput, repairs };
+}
+
+/**
+ * Records a repaired tool output (A4b) so it is visible and countable instead of
+ * only appearing in the console.
+ */
+function recordToolOutputRepairForStep(input: {
+  toolName: string;
+  repairs: string[];
+  step?: { id: string };
+  context?: { get<T>(key: string): T | undefined; set<T>(key: string, value: T): void; taskId?: string };
+}): void {
+  if (input.repairs.length === 0) {
+    return;
+  }
+  const taskId = (input.context as { taskId?: string } | undefined)?.taskId;
+  recordToolOutputRepair({
+    toolName: input.toolName,
+    ...(typeof taskId === "string" ? { taskId } : {}),
+    ...(input.step ? { stepId: input.step.id } : {}),
+    repairs: input.repairs,
+  });
+  if (input.context) {
+    appendContextToolOutputRepairs(input.context, {
+      ...(input.step ? { stepId: input.step.id } : {}),
+      toolName: input.toolName,
+      repairs: input.repairs,
+    });
+  }
+  // C4: `afterToolCall` annotations/notices ride with the task artifacts too.
+  const hookDecision = evaluateHooks({
+    phase: "afterToolCall",
+    toolName: input.toolName,
+    ...(input.step ? { stepId: input.step.id } : {}),
+  });
+  if (input.context && (hookDecision.annotations.length > 0 || hookDecision.notices.length > 0)) {
+    appendContextHookNotices(input.context, {
+      phase: "afterToolCall",
+      toolName: input.toolName,
+      ...(input.step ? { stepId: input.step.id } : {}),
+      ...(hookDecision.notices.length > 0 ? { notices: hookDecision.notices } : {}),
+      ...(hookDecision.annotations.length > 0 ? { annotations: hookDecision.annotations } : {}),
+    });
+  }
 }
 
 function validateToolPayloadSize(
@@ -9939,8 +10039,14 @@ export async function runCommanderDagTask({
                   signal: stepSignal,
                 },
               );
-              validateToolDescriptorOutput(td, output);
-              const sanitizedOutput = sanitizeAgentReActOutput(output);
+              const validated = validateToolDescriptorOutput(td, output);
+              recordToolOutputRepairForStep({
+                toolName: td.name,
+                repairs: validated.repairs,
+                step: dagStep,
+                context,
+              });
+              const sanitizedOutput = sanitizeAgentReActOutput(validated.output);
               return sanitizedOutput;
             },
           };

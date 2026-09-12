@@ -345,9 +345,24 @@ export function createDefaultAgentRegistry(): AgentRegistry {
   return _defaultRegistry;
 }
 
-/** Normalize persisted plans from before Browser Agent was retired. */
+/**
+ * Legacy agent-kind aliases.
+ *
+ * `browser` became `page-agent`, and the Chinese-language reviewer was renamed
+ * `chinese-reviewer` → `language-reviewer`. The rename was never reflected in every
+ * call site: `providerFor("chinese-reviewer")` in the desktop runtime silently missed
+ * that agent's model override and used the primary profile instead. Aliases resolve
+ * here, and `agents.test.ts` pins the canonical vocabulary so drift is caught.
+ */
+const AGENT_KIND_ALIASES: Record<string, string> = {
+  browser: "page-agent",
+  "chinese-reviewer": "language-reviewer",
+};
+
+/** Normalize persisted plans and legacy call sites onto the canonical kinds. */
 export function normalizeAgentKind(kind: string): string {
-  return kind === "browser" ? "page-agent" : kind;
+  const normalized = kind.trim().toLowerCase();
+  return AGENT_KIND_ALIASES[normalized] ?? kind;
 }
 
 export function getAgentSystemPrompt(agent: Agent, locale = "en"): string {

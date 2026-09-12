@@ -1,6 +1,7 @@
 import type { DesktopDatabase, DesktopDatabaseMigration } from "./desktop-database";
 import {
   type TaskSessionJsonLineWriter,
+  type TaskSessionSnapshotJsonLine,
   parseTaskSessionJsonLines,
   TASK_SESSION_JSONL_STORAGE_KEY,
 } from "./task-session-log";
@@ -76,17 +77,21 @@ VALUES (?, ?, ?)`.trim();
 export function createSqliteTaskSessionWriter(
   database: Pick<DesktopDatabase, "execute">,
 ): TaskSessionJsonLineWriter {
+  async function insert(entry: TaskSessionSnapshotJsonLine): Promise<void> {
+    await database.execute(INSERT_TASK_SESSION_LOG_SQL, [
+      entry.taskId,
+      entry.recordedAt,
+      JSON.stringify(entry),
+    ]);
+  }
   return {
     async appendLine(line: string): Promise<void> {
-      const parsed = parseTaskSessionJsonLines(line);
-      for (const entry of parsed) {
-        await database.execute(INSERT_TASK_SESSION_LOG_SQL, [
-          entry.taskId,
-          entry.recordedAt,
-          JSON.stringify(entry),
-        ]);
+      for (const entry of parseTaskSessionJsonLines(line)) {
+        await insert(entry);
       }
     },
+    // Fast path: the caller already sanitized the snapshot.
+    appendEntry: insert,
   };
 }
 

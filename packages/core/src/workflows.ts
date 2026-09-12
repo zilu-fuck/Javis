@@ -40,6 +40,12 @@ export interface WorkbenchWorkflowStep {
   canRunInParallel: boolean;
   inputContextKeys?: string[];
   outputContextKey?: string;
+  /**
+   * D4: paths this step will write, so the scheduler can lease them and refuse two
+   * parallel writers on the same path. Declared rather than guessed — inferring paths
+   * from free text would create conflicts that block legitimate parallel work.
+   */
+  declaredWritePaths?: string[];
 }
 
 export interface WorkbenchWorkflow {

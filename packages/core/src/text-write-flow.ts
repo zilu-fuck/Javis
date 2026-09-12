@@ -16,7 +16,7 @@ import type { FlowController } from "./flow-controller";
 import type { ChatTool, ID } from "./index";
 import { appendLog, appendTaskLogEntry } from "./snapshot-utils";
 import type { TaskEventBus } from "./task-event-bus";
-import { isTaskCancelledError, throwIfTaskAborted, withTaskTimeout } from "./task-wait";
+import { DEFAULT_TASK_TIMEOUT_MS, isTaskCancelledError, isTaskStallError, TaskTimeoutError, throwIfTaskAborted, withStallWatchdog, withTaskTimeout } from "./task-wait";
 import { addModelUsage, createEmptyTokenUsageSummary } from "./token-usage";
 
 interface TextWriteFlowOptions {
@@ -35,16 +35,42 @@ interface TextWriteFlowOptions {
   ): void;
 }
 
+/**
+ * Goals that *ask about* creating something rather than *instructing* Javis to
+ * write a file. These must not open a confirmed-write flow.
+ */
+const TEXT_WRITE_QUESTION_PATTERN =
+  /^\s*(?:如何|怎么|怎样|为什么|什么是|请问|能否|可不可以|是不是)|[?？]\s*$|\b(?:how (?:do|can|would|should) i|how to|what is|why (?:is|does)|can you explain)\b/iu;
+
+/** Goals whose intent is to review/analyse existing material, not produce a file. */
+const TEXT_WRITE_REVIEW_PATTERN =
+  /评审|审查|检查一下|排查|分析一下|解释|总结一下|回顾|复盘|\b(?:review|explain|analy[sz]e|summari[sz]e|inspect)\b/iu;
+
+/** An explicit write destination: "保存到 X" / "save to X" / any file extension. */
+const TEXT_WRITE_EXPLICIT_DESTINATION =
+  /(?:保存到|保存为|写入到|写到|导出到|输出到|生成到)|(?:\bsave|\bwrite|\bexport)\s+(?:it\s+|this\s+|the\s+\w+\s+)?(?:to|into|as)\b|\.[a-z0-9]{1,5}\b/iu;
+
 export function isTextWriteGoal(userGoal: string): boolean {
-  // Require an explicit "save/write/export" action verb, not just a mention
-  // of "markdown" or "file" in a question context.
+  // Require an explicit write/create action plus a concrete file/page target.
+  // Mentions of "file" in a pure question are not enough.
   const hasWriteAction =
-    /\b(write|save|export|create|generate)\b.*\b(file|md|markdown|notes?|document)\b/i.test(userGoal)
-    || /\b(write|save|export)\s+(to|as|a|the)\b/i.test(userGoal)
-    || /\u5199\u6210|\u4fdd\u5b58|\u5bfc\u51fa|\u751f\u6210/i.test(userGoal);
+    /\b(write|save|export|create|generate|build)\b/i.test(userGoal)
+    || /写成|保存|导出|生成|创建|新建|做一个|做一份|写一个|写一份/i.test(userGoal);
   const hasFileTarget =
-    /\.md\b|markdown|\u6587\u4ef6|\u6587\u6863/i.test(userGoal);
-  return hasWriteAction && hasFileTarget;
+    /\.(md|txt|html?|css|js|ts|tsx|jsx|json|docx|pdf)\b/i.test(userGoal)
+    || /\bHTML\b/i.test(userGoal)
+    // Bilingual target nouns: an English goal must classify like its Chinese twin.
+    || /文件|文档|页面|网页|脚本|笔记|报告|\b(?:file|document|docs?|page|web ?page|script|notes?|report|markdown)\b/i.test(userGoal);
+  if (!hasWriteAction || !hasFileTarget) {
+    return false;
+  }
+  // A goal that names where to write is unambiguous, whatever its grammar.
+  if (TEXT_WRITE_EXPLICIT_DESTINATION.test(userGoal)) {
+    return true;
+  }
+  // Otherwise a question ("如何创建一个 HTML 页面？") or a review request
+  // ("做一个页面设计评审") is asking about the artifact, not ordering a write.
+  return !(TEXT_WRITE_QUESTION_PATTERN.test(userGoal) || TEXT_WRITE_REVIEW_PATTERN.test(userGoal));
 }
 
 export async function runTextWriteTask({
@@ -199,6 +225,7 @@ export async function runTextWriteTask({
           "将文本写入本地文件会更改文件系统，因此 Javis 需要你的明确授权。",
         ),
         dryRun: writePlan.dryRun,
+        toolName: "file.writeText",
       },
       setPendingPermissionHandler,
       onDenied(resolvedRequest) {
@@ -519,6 +546,46 @@ interface RequestedLength {
 interface GeneratedTextCall {
   content: string;
   truncated: boolean;
+  /**
+   * Set when the generation was cut short (stall or timeout) but produced enough
+   * text to be worth keeping instead of failing the whole task.
+   */
+  partial?: boolean;
+}
+
+/**
+ * How long a text generation may produce nothing before it is considered hung.
+ * Production saw tasks idle for hours with no progress at all.
+ */
+export const TEXT_GENERATION_STALL_TIMEOUT_MS = 60_000;
+
+/** Minimum characters for interrupted output to be worth keeping. */
+const TEXT_GENERATION_MIN_USABLE_CHARS = 200;
+
+/**
+ * Generation budget for the text-write flow.
+ *
+ * The generic task timeout (default 90s, 180s in the observed failure) is sized
+ * for tool calls, not for writing a document. Long-form generation gets at least
+ * five minutes, scaled by the requested length when the goal states one.
+ */
+export function resolveGenerationTimeoutMs(
+  taskTimeoutMs: number | undefined,
+  requestedLength?: RequestedLength,
+): number {
+  const base = typeof taskTimeoutMs === "number" && Number.isFinite(taskTimeoutMs)
+    ? taskTimeoutMs
+    : DEFAULT_TASK_TIMEOUT_MS;
+  const scale = requestedLength === undefined
+    ? 1
+    : requestedLength.unit === "words"
+      ? Math.max(1, requestedLength.amount / 500)
+      : Math.max(1, requestedLength.amount / 1_000);
+  return Math.min(Math.round(Math.max(base * 2, base + 180_000) * scale), 900_000);
+}
+
+export function hasUsablePartialContent(content: string): boolean {
+  return content.trim().length >= TEXT_GENERATION_MIN_USABLE_CHARS;
 }
 
 async function planTextWriteWithAvailableTarget({
@@ -593,40 +660,65 @@ async function generateTextContent(
 
   const requestedLength = inferRequestedLength(userGoal);
   const locale = /[\u3400-\u9fff]/u.test(userGoal) ? "zh-CN" : "en";
+  const generationTimeoutMs = resolveGenerationTimeoutMs(taskTimeoutMs, requestedLength);
   const complete = async (prompt: string, temperature: number): Promise<GeneratedTextCall> => {
     if (chatTool.stream && eventBus && taskId) {
       let streamedText = "";
       let tokenUsage: ModelUsage | undefined;
       let finishReason: string | undefined;
       let modelCallRecorded = false;
+      let interruptedBy: "stall" | "timeout" | undefined;
       eventBus.emit({ kind: "agent.chunk_start", taskId, agentKind: "commander" });
       try {
+        // Two guards, deliberately different:
+        //  * the stall watchdog fails a generation that has gone quiet, which is
+        //    what a hung provider looks like (production saw tasks idle for hours);
+        //  * the outer timeout bounds the whole attempt generously, because long
+        //    documents legitimately stream for minutes.
         await withTaskTimeout(
-          async () => {
-            for await (const chunk of chatTool.stream!(prompt, {
-              useMaxOutputTokens: true,
-              temperature,
-              locale,
-              timeoutMs: taskTimeoutMs,
-              onUsage: (usage) => {
-                tokenUsage = usage;
+          () => withStallWatchdog(
+            async (reportProgress) => {
+              for await (const chunk of chatTool.stream!(prompt, {
+                useMaxOutputTokens: true,
+                temperature,
+                locale,
+                timeoutMs: generationTimeoutMs,
+                onUsage: (usage) => {
+                  tokenUsage = usage;
+                },
+                onFinish: (reason) => {
+                  finishReason = reason;
+                },
+              })) {
+                throwIfTaskAborted(signal, "Text content generation");
+                streamedText += chunk.text;
+                reportProgress();
+                eventBus.emit({
+                  kind: "agent.chunk",
+                  taskId,
+                  agentKind: "commander",
+                  text: chunk.text,
+                });
+                await new Promise<void>((resolve) => setTimeout(resolve, 0));
+              }
+            },
+            {
+              label: "Text content generation",
+              stallMs: TEXT_GENERATION_STALL_TIMEOUT_MS,
+              signal,
+              onStall: () => {
+                interruptedBy = "stall";
               },
-              onFinish: (reason) => {
-                finishReason = reason;
-              },
-            })) {
-              throwIfTaskAborted(signal, "Text content generation");
-              streamedText += chunk.text;
-              eventBus.emit({
-                kind: "agent.chunk",
-                taskId,
-                agentKind: "commander",
-                text: chunk.text,
-              });
-              await new Promise<void>((resolve) => setTimeout(resolve, 0));
-            }
+            },
+          ),
+          {
+            label: "Text content generation",
+            timeoutMs: generationTimeoutMs,
+            signal,
+            onTimeout: () => {
+              interruptedBy = "timeout";
+            },
           },
-          { label: "Text content generation", timeoutMs: taskTimeoutMs, signal },
         );
         recordModelCall(tokenUsage);
         modelCallRecorded = true;
@@ -652,6 +744,15 @@ async function generateTextContent(
           error: error instanceof Error ? error.message : String(error),
         });
         throwIfTaskAborted(signal, "Text content generation");
+        // A stalled or timed-out generation that already produced a usable amount
+        // of text is kept instead of failing the whole task. Production failed a
+        // task at exactly the 180s mark and threw away the generated document.
+        const partial = normalizeGeneratedContent(streamedText);
+        const interrupted = interruptedBy !== undefined || isTaskStallError(error) || error instanceof TaskTimeoutError;
+        if (interrupted && hasUsablePartialContent(partial)) {
+          return { content: partial, truncated: true, partial: true };
+        }
+        throw error;
       }
     }
 

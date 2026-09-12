@@ -56,7 +56,8 @@ pnpm rust:test           # Rust tests only
 
 - **称呼规则**：每次回答或总结之前，必须以"哥哥"作为称呼开头。
 - Task statuses: `created → planning → running → waiting_permission → running → verifying → completed`
-- Agent kinds: `commander | file | shell | browser | computer | scheduler | research | code | verifier | chinese-reviewer`
+- Agent kinds: `commander | file | shell | code | research | computer | scheduler | verifier | vision | workspace | page-agent | language-reviewer | security-reviewer | build-fix | test-runner | doc-updater | explorer | perf-analyzer | refactor`
+  （`browser` 是 `page-agent` 的历史别名，`chinese-reviewer` 是 `language-reviewer` 的历史别名；两者都由 `normalizeAgentKind` 归一化）
 - Permission levels: `read | preview | confirmed_write | dangerous`
 - Tool names follow `{category}.{action}` pattern (e.g., `code.inspectRepository`, `file.scanMarkdownDocuments`)
 - Agent system prompts are bilingual (`en` + `zhCN`) using `AgentPromptSet`
@@ -112,7 +113,10 @@ echo "self-contained prompt" | bash ~/.claude/scripts/mimo-agent.sh
 - opencode/Code Agent: proposal only, never writes files directly
 - PDF operations: Downloads-scoped, move-only, one-time approval
 
-## Current State (2026-06-14)
+## Historical State (2026-06-14)
+
+> 本节是**历史快照**，不再维护。当前状态请看 `docs/HARNESS_ROADMAP.md`（唯一的勾选式账本）与 `AGENTS.md`。
+> 文档漂移由 `pnpm docs:check` 自动检查（`pnpm check` 会跑）。
 
 - Desktop workbench: implemented and packaged (Windows MSI/NSIS), custom titlebar with drag regions.
 - File scan, project inspection, research, PDF organization, AI file classification, RAG-lite document references, VisionBridge, and commander.askUser are implemented.
@@ -125,7 +129,8 @@ echo "self-contained prompt" | bash ~/.claude/scripts/mimo-agent.sh
 - Sandbox state: read-only shell routing goes through the sandbox broker; code patch apply, git mutations, and interactive terminal writes fail closed until an OS-enforced workspace-write/PTY backend is available.
 - Temporary workspace sandbox: native copy/diff/apply/finalize flow exists under ignored `.codex-tmp/javis-sandboxes`, with approval-bound apply and binary-change rejection.
 - Workspace sandbox UI support: backend status and settings persistence are implemented; saved settings still need wiring into native policy construction.
-- Large files needing decomposition: `packages/core/src/workflow-executor.ts` is ~6,821 lines; `apps/desktop/src/App.tsx` is ~5,685 lines.
+- Large files needing decomposition: `packages/core/src/workflow-executor.ts` 与 `apps/desktop/src/App.tsx` 仍是最大的两个文件。
+  **具体行数不在此处硬编码**——它会腐化；`pnpm docs:check` 会检查文中任何行数声明与实际的偏差（>30% 报警）。
 - Latest verification: segmented gate passed on 2026-06-14: `pnpm typecheck`, core Vitest (448), desktop Vitest (695), ui Vitest (183), `pnpm rust:check`, and Rust tests (462). Combined total: 1,788 tests.
 - Full `pnpm check` should remain the CI gate, but the local 2026-06-14 run timed out after 124 seconds before producing output; the same component checks passed when run separately.
 

@@ -20,3 +20,16 @@ yolo26n.pt
 .tmp/
 __pycache__/
 *.pyc
+
+# ── Local scratch and downloaded reference material (G4) ─────────────────────
+# These accumulated 141 MB of untracked, unignored files: `git status` was noisy and
+# a `git add -A` would have committed them. Everything here is derived or
+# re-downloadable, so it is ignored rather than tracked.
+.dsh-tmp/
+.tmp-*/
+.tmp-*
+runs/
+
+# Generated support bundles embed local task data (redacted, but still this machine's
+# activity). They are produced on demand by `pnpm diagnostics` and are not source.
+docs/qa/diagnostics/

@@ -1100,13 +1100,25 @@ function buildToolActivities(task: WorkbenchTask, locale: WorkbenchLocale): Thre
         ? ` · 缓存命中 ${Math.round((cacheReadTokens / inputTokens) * 100)}%`
         : ` · ${Math.round((cacheReadTokens / inputTokens) * 100)}% cached`
       : "";
+    const hasModelFailureLog = task.logs.some((log) =>
+      `${log.title} ${log.detail}`.toLowerCase().includes("model.call.failed")
+      || `${log.title} ${log.detail}`.toLowerCase().includes("no final message content")
+    );
+    const modelActivityStatus: ToolActivityStatus =
+      task.status === "failed" || hasModelFailureLog
+        ? "failed"
+        : task.status === "completed"
+          ? "completed"
+          : task.status === "cancelled"
+            ? "failed"
+            : "running";
     activities.set("model-generation", {
       id: "model-generation",
       name: isChinese ? "文本生成模型" : "Text generation model",
       description: isChinese
         ? `${callCount} 次调用 · ${totalTokens.toLocaleString()} tokens${cacheSuffix}`
         : `${callCount} call${callCount === 1 ? "" : "s"} · ${totalTokens.toLocaleString()} tokens${cacheSuffix}`,
-      status: task.status === "failed" ? "failed" : task.status === "completed" ? "completed" : "running",
+      status: modelActivityStatus,
     });
   }
 

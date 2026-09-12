@@ -151,6 +151,69 @@ describe("desktop database migrations", () => {
     expect(invoke).not.toHaveBeenCalledWith("db_execute", expect.anything());
   });
 
+  it("routes runtime history maintenance through one dedicated native command", async () => {
+    delete (window as any).__TAURI_INTERNALS__;
+    const invoke = vi.fn(async () => ({
+      deletedSessionRows: 34_537,
+      remainingSessionRows: 40,
+      deletedCheckpointRows: 122,
+      remainingCheckpointRows: 20,
+      reclaimedBytes: 419_430_400,
+      vacuumed: true,
+      databaseBytes: 12_582_912,
+    }));
+    const database = invokeDesktopDatabase(invoke);
+
+    const report = await database.maintainRuntimeHistory?.({
+      keepLatestPerTask: 100,
+      keepLatestCheckpointsPerTask: 20,
+      cutoffIso: "2026-08-14T00:00:00.000Z",
+      vacuum: true,
+    });
+
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith("runtime_history_maintain", {
+      request: {
+        keepLatestPerTask: 100,
+        keepLatestCheckpointsPerTask: 20,
+        cutoffIso: "2026-08-14T00:00:00.000Z",
+        vacuum: true,
+      },
+    });
+    expect(report).toEqual({
+      deletedSessionRows: 34_537,
+      remainingSessionRows: 40,
+      deletedCheckpointRows: 122,
+      remainingCheckpointRows: 20,
+      reclaimedBytes: 419_430_400,
+      vacuumed: true,
+      databaseBytes: 12_582_912,
+    });
+  });
+
+  it("sanitizes a malformed runtime history maintenance report", async () => {
+    delete (window as any).__TAURI_INTERNALS__;
+    const invoke = vi.fn(async () => ({ deletedSessionRows: "many", vacuumed: "yes" }));
+    const database = invokeDesktopDatabase(invoke);
+
+    await expect(
+      database.maintainRuntimeHistory?.({
+        keepLatestPerTask: 100,
+        keepLatestCheckpointsPerTask: 20,
+        cutoffIso: "2026-08-14T00:00:00.000Z",
+        vacuum: false,
+      }),
+    ).resolves.toEqual({
+      deletedSessionRows: 0,
+      remainingSessionRows: 0,
+      deletedCheckpointRows: 0,
+      remainingCheckpointRows: 0,
+      reclaimedBytes: 0,
+      vacuumed: false,
+      databaseBytes: 0,
+    });
+  });
+
   it("routes resource scan root access through dedicated native commands", async () => {
     const invoke = vi.fn(async (command: string) => {
       if (command === "resource_scan_roots_list") {

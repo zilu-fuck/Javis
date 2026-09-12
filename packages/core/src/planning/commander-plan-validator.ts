@@ -100,6 +100,21 @@ export function validateCommanderPlan(input: PlanValidationInput): PlanDiagnosti
 
   const diagnostics: PlanDiagnostic[] = [];
 
+  // An empty plan has no work to do: executing it would report success without
+  // doing anything. Clarification plans still carry an explicit commander.askUser
+  // step (`requiresClarification` below requires one), so this never rejects a
+  // legitimate shape.
+  if (plan.steps.length === 0) {
+    diagnostics.push({
+      code: "INVALID_PLAN_SHAPE",
+      severity: "error",
+      path: "steps",
+      message: "Commander plan must contain at least one step.",
+      suggestedFix:
+        "Emit at least one step, or ask the user a clarifying question through commander.askUser.",
+    });
+  }
+
   const agentKinds = new Set(availableAgents.map((a) => a.kind));
   const toolByName = new Map(availableTools.map((t) => [t.name, t]));
   const agentToolMap = new Map(

@@ -2,6 +2,30 @@ import type { TaskSnapshot } from "./index";
 import type { TaskRuntimeEvent } from "./task-event-bus";
 import { createDeltaReducer } from "./delta-reducer";
 import { compactTaskSnapshotLogs } from "./snapshot-utils";
+import { isTerminalTaskStatus } from "./state/task-state";
+
+/**
+ * Whether a streaming delta should still be applied to the current snapshot.
+ *
+ * Once a task has reached a terminal status its remaining stream deltas are
+ * noise: the flows have already emitted the final snapshot, and applying them
+ * re-notifies subscribers (which persist a row per notification) at the stream's
+ * own rate. Production data showed a failed task re-persisting an unchanged
+ * snapshot ~52 times per second for five minutes for exactly this reason, and
+ * because the sanitizer drops `streamingText` the repeated rows looked identical.
+ *
+ * A continuation that reuses a task id is unaffected: the flow always emits its
+ * non-terminal starting snapshot before the model stream produces deltas.
+ */
+export function shouldAcceptRuntimeDelta(
+  snapshot: Pick<TaskSnapshot, "id" | "status">,
+  event: Pick<TaskRuntimeEvent, "taskId">,
+): boolean {
+  if (snapshot.id !== event.taskId) {
+    return false;
+  }
+  return !isTerminalTaskStatus(snapshot.status);
+}
 
 export interface RuntimeState {
   clearTimers(): void;

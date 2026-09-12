@@ -312,10 +312,12 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
-  it("downgrades a project-mode greeting to L1 direct chat", async () => {
+  it("answers a project-mode greeting directly without a clarification card", async () => {
+    // Project/agent mode keeps originMode=project (no chat downgrade), but a
+    // pure casual greeting should not open Commander askUser clarification.
     const commanderPlan = vi.fn(async () => ({
       title: "Clarification needed",
-      reasoning: "Project mode should ask before planning ambiguous work.",
+      reasoning: "Should not run for casual greetings.",
       steps: [{
         id: "ask-scope",
         title: "What should I plan first?",
@@ -349,11 +351,14 @@ describe("createFileScanTaskRuntime", () => {
     expect(chatComplete).toHaveBeenCalledTimes(1);
     expect(finalSnapshot.commanderMessage).toBe("Hello, I am Javis.");
     expect(finalSnapshot.askUserQuestion).toBeUndefined();
-    expect(finalSnapshot.logs.some((log) => log.title === "route_decided")).toBe(true);
-    expect(finalSnapshot.logs.find((log) => log.title === "route_decided")?.detail)
-      .toContain('"routeLevel":"L1"');
-    expect(finalSnapshot.logs.find((log) => log.title === "route_decided")?.userMessage)
-      .toBe("已选择合适的处理方式。");
+    // Agent-mode direct response must not use the chat-mode ceiling banner.
+    expect(finalSnapshot.commanderMessage.includes("\u6ca1\u6709\u542f\u52a8\u5de5\u4f5c\u6d41")).toBe(false);
+    expect(finalSnapshot.logs.some((log) =>
+      (log.detail ?? "").includes("Chat mode: single-agent")
+    )).toBe(false);
+    expect(finalSnapshot.logs.some((log) =>
+      (log.detail ?? "").includes("Agent mode: Commander direct response")
+    )).toBe(true);
 
     unsubscribe();
     runtime.dispose();
@@ -3711,6 +3716,12 @@ describe("createFileScanTaskRuntime", () => {
     expect(isTextWriteGoal("write the search results to reports/search.md")).toBe(true);
   });
 
+  it("detects HTML/page create goals as text writes", () => {
+    expect(isTextWriteGoal("创建一个 HTML，内容是: SVG 绘制一个鹈鹕骑自行车的 2D 动画。")).toBe(true);
+    expect(isTextWriteGoal("create an HTML page with a parrot animation")).toBe(true);
+    expect(isTextWriteGoal("帮我对比这两个方案")).toBe(false);
+  });
+
   it("routes image questions to Vision Agent", async () => {
     const analyze = vi.fn(async () => ({
       description: "A chart is visible.",
@@ -4427,6 +4438,29 @@ describe("createFileScanTaskRuntime", () => {
       role: "user",
       content: "continue the thread",
     });
+
+    unsubscribe();
+    runtime.dispose();
+  });
+
+  it("passes a normal-sized turn through unchanged", async () => {
+    let prompt = "";
+    const complete = vi.fn(async (nextPrompt: string) => {
+      prompt = nextPrompt;
+      return { text: "ok" };
+    });
+    const runtime = createFileScanTaskRuntime({
+      delayMs: 0,
+      runtimeConfig: { contextWindowTokens: 32_000 },
+      fileTool: { scanMarkdownDocuments: vi.fn(async () => []) },
+      chatTool: { complete },
+    });
+    const { snapshots, unsubscribe } = subscribeToRuntime(runtime);
+
+    runtime.start("解释一下这个函数的作用", { mode: "chat", taskId: "task-normal-turn" });
+    await waitForStatus(snapshots, "completed");
+
+    expect(prompt).toBe("解释一下这个函数的作用");
 
     unsubscribe();
     runtime.dispose();
@@ -6077,7 +6111,7 @@ describe("completeGeneralChat streaming pipeline", () => {
 
     const finalSnapshot = snapshots[snapshots.length - 1];
     expect(finalSnapshot?.commanderMessage).toBeTruthy();
-    expect(finalSnapshot?.userFacingError).toContain("model request failed");
+    expect(finalSnapshot?.userFacingError).toMatch(/authentication failed|API key|model request failed/i);
     expect(finalSnapshot?.logs.some((log) => log.userMessage === finalSnapshot.userFacingError)).toBe(true);
 
     runtime.dispose();

@@ -19,6 +19,7 @@ import {
 import { bridgeVisionIfNeeded } from "./vision-bridge";
 import {
   extractAtReferences,
+  resolveContinuationComposeMode,
   resolveContinuationTask,
   resolveVisionBridgeRuntimeMode,
 } from "./submission-routing";
@@ -325,8 +326,14 @@ import {
 } from "./terminal-audit";
 import {
   appendTaskSessionSnapshotJsonLine,
+  createDeduplicatingTaskSessionWriter,
   createFileBackedTaskSessionJsonLineWriter,
+  type DeduplicatingTaskSessionWriter,
 } from "./task-session-log";
+import {
+  runRuntimeHistoryMaintenance,
+  shouldRunRuntimeHistoryMaintenance,
+} from "./runtime-history-maintenance";
 import {
   createRuntimeEventStore,
   RUNTIME_EVENT_MIGRATIONS,
@@ -364,7 +371,7 @@ import {
   JSONL_LOG_MIGRATIONS,
 } from "./jsonl-log-persistence";
 import type { ToolDescriptor, TrustedComputerApp } from "@javis/tools";
-import { decodeMcpToolServerName, encodeMcpToolServerName, initialToolDescriptors, isDisabledBrowserWriteToolName } from "@javis/tools";
+import { decodeMcpToolServerName, encodeMcpToolServerName, initialToolDescriptors, isDisabledBrowserWriteToolName, mergeToolDeclarations } from "@javis/tools";
 import {
   buildMcpListToolsDescriptor,
   buildMcpToolDescriptorsFromList,
@@ -388,12 +395,18 @@ import {
   type SkillContextSelectionRequest,
 } from "./skill-context";
 import {
+  applyAgentDeclarations,
+  configureHooks,
   createDefaultAgentRegistry,
   createWorkflowRegistry,
   createRouteRegistry,
   demoAgents,
   WORKBENCH_WORKFLOWS,
 } from "@javis/core";
+import {
+  loadJavisConfig,
+  type LoadedJavisConfig,
+} from "./javis-config-loader";
 import type {
   AgentRegistry,
   WorkflowRegistry,
@@ -906,6 +919,9 @@ function App() {
   const workflowCheckpointStoreRef = useRef<WorkflowCheckpointStore | null>(null);
   const restoredApprovalResumeSeedRef = useRef(createRestoredApprovalResumeStore());
   const agentRegistryRef = useRef<AgentRegistry>(createDefaultAgentRegistry());
+  const javisConfigRef = useRef<LoadedJavisConfig | null>(null);
+  /** B2b: runtime knobs declared by `.javis` (model slot, max iterations). */
+  const declaredAgentRuntimeOverridesRef = useRef<Record<string, { modelSlot?: string; maxIterations?: number }>>({});
   const workflowRegistryRef = useRef<WorkflowRegistry>(createWorkflowRegistry(WORKBENCH_WORKFLOWS));
   const routeRegistryRef = useRef<RouteRegistry>(createRouteRegistry());
   const [workspaceDefs, setWorkspaceDefs] = useState<WorkspaceDefinition[]>([]);
@@ -1005,6 +1021,8 @@ function App() {
   isAgentMemoryEnabledRef.current = isAgentMemoryEnabled;
   const disabledBuiltinToolNamesRef = useRef(disabledBuiltinToolNames);
   disabledBuiltinToolNamesRef.current = disabledBuiltinToolNames;
+  /** B3: tool names disabled by `.javis` configuration (separate from UI prefs). */
+  const configDisabledToolNamesRef = useRef<ReadonlySet<string>>(new Set());
   const mcpConfigRef = useRef<McpServerConfig[]>([]);
   const codexMcpServersRef = useRef<CodexMcpServerSummary[]>([]);
   const mcpToolDescriptorsRef = useRef<ToolDescriptor[]>([]);
@@ -1092,7 +1110,9 @@ function App() {
       getScheduledTasksRepository: () => scheduledTasksRepoRef.current,
       getComputerUseConfig: () => loadComputerUseConfigFromStorage(window.localStorage),
       getAvailableToolDescriptors: () => getEnabledToolDescriptors(
-        disabledBuiltinToolNamesRef.current,
+        // B3: `.javis` configuration can disable a builtin tool. It is merged at
+        // read time because the UI preference set is re-assigned every render.
+        new Set([...disabledBuiltinToolNamesRef.current, ...configDisabledToolNamesRef.current]),
         mcpConfigRef.current,
         codexMcpServersRef.current,
         mcpToolDescriptorsRef.current,
@@ -1256,6 +1276,8 @@ function App() {
   const didInitDatabaseRef = useRef(false);
   const auditRecordIdsRef = useRef(new Set<string>());
   const savedAgentSessionSummaryIdsRef = useRef(new Set<string>());
+  const taskSessionLogWriterRef = useRef<DeduplicatingTaskSessionWriter | null>(null);
+  const runtimeHistoryMaintenanceAtRef = useRef<number | undefined>(undefined);
   const [draftGoal, setDraftGoal] = useState(DEFAULT_DRAFT_GOAL);
   const [composeMode, setComposeMode] = useState<"chat" | "project">(
     DEFAULT_RUNTIME_PREFERENCES.defaultStartupMode === "project" ? "project" : "chat",
@@ -2305,6 +2327,15 @@ function App() {
       await runDesktopDatabaseMigrations(database, WORKFLOW_CHECKPOINT_MIGRATIONS);
       await runDesktopDatabaseMigrations(database, USAGE_OBSERVATION_MIGRATIONS);
 
+      // Housekeeping before anything reads or writes the runtime history, so a
+      // database that grew without bound is reclaimed once at startup. Deferred
+      // because the VACUUM rewrites the whole file and holds the native database
+      // mutex, which would otherwise stall the first interactive queries.
+      runtimeHistoryMaintenanceAtRef.current = undefined;
+      window.setTimeout(() => {
+        maybeRunRuntimeHistoryMaintenance({ vacuum: true, force: true });
+      }, 5_000);
+
       // One-time import from localStorage
       const taskHistoryRepo = createTaskHistoryRepository(database);
       const workspaceSessionRepo = createWorkspaceSessionRepository(database);
@@ -2620,6 +2651,48 @@ function App() {
       } catch (error) {
         setWorkspaceDefs([]);
         logNonFatalError("Failed to load workspace definitions", error);
+      }
+
+      // C1b + C4: load the `.javis` configuration layers and install the declarative
+      // tool hooks. Configuration problems are reported as diagnostics, never as a
+      // startup failure: an unreadable config must not stop the workbench.
+      try {
+        const loadedJavisConfig = await loadJavisConfig(invoke, workspaceRef.current);
+        javisConfigRef.current = loadedJavisConfig;
+        configureHooks(loadedJavisConfig.config.hooks);
+        // B2b: apply declared agents to the *existing* registry. The runtime
+        // captured this registry object at construction, so replacing the ref
+        // would leave it holding the builtin cast.
+        const appliedAgents = applyAgentDeclarations(demoAgents, loadedJavisConfig.config.agents);
+        for (const agent of appliedAgents.changedAgents) {
+          agentRegistryRef.current.register(agent, { allowKindReplacement: true });
+        }
+        declaredAgentRuntimeOverridesRef.current = appliedAgents.runtimeOverrides;
+        // B3: apply declared tools. Disabling is the capability that takes effect
+        // here; added/overridden descriptors still need the descriptor source wired
+        // (tracked as B3b in the roadmap).
+        const appliedTools = mergeToolDeclarations(
+          initialToolDescriptors,
+          loadedJavisConfig.config.tools,
+        );
+        configDisabledToolNamesRef.current = new Set(appliedTools.disabledNames);
+        if (appliedTools.diagnostics.length > 0) {
+          console.warn("[javis-config] tool declaration diagnostics", appliedTools.diagnostics);
+        }
+        if (appliedAgents.diagnostics.length > 0) {
+          console.warn("[javis-config] agent declaration diagnostics", appliedAgents.diagnostics);
+        }
+        if (appliedAgents.changedAgents.length > 0) {
+          console.info(
+            "[javis-config] applied declared agents",
+            appliedAgents.changedAgents.map((agent) => agent.kind),
+          );
+        }
+        if (loadedJavisConfig.diagnostics.length > 0) {
+          console.warn("[javis-config] configuration diagnostics", loadedJavisConfig.diagnostics);
+        }
+      } catch (error) {
+        logNonFatalError("Failed to load .javis configuration", error);
       }
 
       setDurableApprovalRecordsReady(true);
@@ -3203,8 +3276,6 @@ function App() {
       );
       return;
     }
-    const effectiveComposeMode = requestedComposeMode;
-    const historyComposeMode = requestedComposeMode;
     const canContinueHistory =
       requestedSubmitIntent === "continue_history" ||
       requestedSubmitIntent === "queued_continuation";
@@ -3219,6 +3290,16 @@ function App() {
       history: historyCurrentRef.current,
       queuedContinuationTask,
     });
+    // Continuation keeps the session originMode. Never silently downgrade an
+    // agent/project conversation to chat because UI composeMode was reset.
+    const historyComposeMode = resolveContinuationComposeMode({
+      continuationTask,
+      requestedComposeMode,
+      forcedMode,
+    });
+    if (historyComposeMode !== composeMode) {
+      setComposeMode(historyComposeMode);
+    }
     const startOptions = continuationTask
       ? {
           taskId: continuationTask.id,
@@ -3229,7 +3310,7 @@ function App() {
     const startMode =
       forcedMode ??
       (!goalOverride && !workspacePathOverride && !scheduledTaskId
-        ? effectiveComposeMode
+        ? historyComposeMode
         : undefined);
     const taskWorkspacePath =
       historyComposeMode === "project" || workspacePathOverride || scheduledTaskId
@@ -3246,7 +3327,7 @@ function App() {
       submitIntent: requestedSubmitIntent,
       rawGoal,
       requestedComposeMode,
-      effectiveComposeMode,
+      effectiveComposeMode: historyComposeMode,
       historyComposeMode,
       continuationTaskId: continuationTask?.id,
       hasPriorMessages: Boolean(startOptions?.priorMessages.length),
@@ -3516,8 +3597,42 @@ function App() {
     });
   }
 
+  function taskSessionLogWriter(): DeduplicatingTaskSessionWriter {
+    taskSessionLogWriterRef.current ??= createDeduplicatingTaskSessionWriter(() =>
+      databaseRef.current
+        ? createSqliteTaskSessionWriter(databaseRef.current)
+        : createFileBackedTaskSessionJsonLineWriter(
+            (line) => invoke("append_task_session_jsonl_line", { request: { line } }).then(() => undefined),
+            window.localStorage,
+          ),
+    );
+    return taskSessionLogWriterRef.current;
+  }
+
+  /**
+   * Housekeeping for the append-heavy runtime history (task session snapshots and
+   * workflow checkpoints). Startup runs it with VACUUM so an unbounded historical
+   * table is reclaimed; later passes are cheap delete-only runs, throttled so a
+   * burst of finished tasks does not repeat the work.
+   */
+  function maybeRunRuntimeHistoryMaintenance(options: { vacuum: boolean; force?: boolean }) {
+    const now = Date.now();
+    if (!options.force && !shouldRunRuntimeHistoryMaintenance(runtimeHistoryMaintenanceAtRef.current, now)) {
+      return;
+    }
+    runtimeHistoryMaintenanceAtRef.current = now;
+    void runRuntimeHistoryMaintenance(databaseRef.current, { vacuum: options.vacuum }, now)
+      .then((report) => {
+        if (report && (report.deletedSessionRows > 0 || report.deletedCheckpointRows > 0 || report.vacuumed)) {
+          console.info("[RuntimeHistory] maintenance", report);
+        }
+      })
+      .catch((error: unknown) => {
+        console.warn("[RuntimeHistory] maintenance failed", error);
+      });
+  }
+
   function appendRuntimeJsonlLogs(nextTask: TaskSnapshot) {
-    const database = databaseRef.current;
     void appendTaskSnapshotAuditJsonLines(
       createFileBackedTaskAuditJsonLineWriter(
         (line) => invoke("append_task_audit_jsonl_line", { request: { line } }).then(() => undefined),
@@ -3527,15 +3642,11 @@ function App() {
       auditRecordIdsRef.current,
     );
     void appendTaskSessionSnapshotJsonLine(
-      database
-        ? createSqliteTaskSessionWriter(database)
-        : createFileBackedTaskSessionJsonLineWriter(
-            (line) => invoke("append_task_session_jsonl_line", { request: { line } }).then(() => undefined),
-            window.localStorage,
-          ),
+      taskSessionLogWriter(),
       nextTask,
     );
     if (nextTask.status === "completed" || nextTask.status === "failed" || nextTask.status === "cancelled") {
+      maybeRunRuntimeHistoryMaintenance({ vacuum: false });
       persistAgentSessionSummary(nextTask);
       if (suppressNextQueuedGoalForTaskRef.current === nextTask.id) {
         suppressNextQueuedGoalForTaskRef.current = null;

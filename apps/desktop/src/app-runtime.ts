@@ -3128,7 +3128,7 @@ export function createJavisRuntime({
   return {
     ...runtime,
     async translateSkillsToChinese(skills: SkillTranslationInput[]) {
-      const provider = providerFor("chinese-reviewer");
+      const provider = providerFor("language-reviewer");
       return translateSkillsWithChineseAgent(skills, provider);
     },
     classifyWithFileAgent(

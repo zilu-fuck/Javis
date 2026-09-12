@@ -329,6 +329,205 @@ fn prune_approval_records(conn: &Connection, limit: i64) -> Result<usize, String
     .map_err(|error| format!("Approval record prune error: {error}"))
 }
 
+// ---------------------------------------------------------------------------
+// Runtime history maintenance
+//
+// Two append-heavy tables grow without bound because nothing ever prunes them:
+//
+// * `task_session_log` stores one full task snapshot per streaming notification.
+//   A single 8 minute task has been observed writing 34,577 rows / 93 MB.
+// * `workflow_checkpoints` stores a full workflow + context snapshot per step,
+//   and the store's own `pruneByTaskId` has no production caller.
+//
+// Maintenance keeps a bounded, useful history instead:
+//
+//   1. the newest row of every task is always kept, so
+//      `resumeLatestTaskSessionSnapshot`, rewind and `latestByTaskId` still find
+//      the task's last known state;
+//   2. within that guarantee, only the newest `keep_latest_per_task` rows / the
+//      newest `keep_latest_checkpoints_per_task` checkpoints per task survive;
+//   3. apart from the row from rule 1, rows older than `cutoff_iso` are dropped;
+//   4. checkpoints whose run still has an `approval_records` row are never
+//      dropped: the durable approval-resume path reads them back through
+//      `latestByRunId`, and a not-yet-decided or not-yet-finished approval may
+//      still need to execute after a restart. Runtime-event compaction does not
+//      depend on checkpoints (it validates against `runtime_events`), so this is
+//      the only reader that constrains pruning;
+//   5. VACUUM only runs when enough free pages exist to be worth rewriting the
+//      file.
+//
+// This command is deliberately native instead of going through `db_execute`: the
+// generic SQL channel only accepts a hand-maintained list of exact statement
+// shapes, and VACUUM is refused there on purpose (see
+// `rejects_unknown_or_dangerous_execute_statements`).
+// ---------------------------------------------------------------------------
+
+const RUNTIME_HISTORY_MIN_KEEP_LATEST: i64 = 1;
+const RUNTIME_HISTORY_MAX_KEEP_LATEST: i64 = 5_000;
+const RUNTIME_HISTORY_VACUUM_MIN_RECLAIM_BYTES: i64 = 16 * 1024 * 1024;
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeHistoryMaintenanceRequest {
+    keep_latest_per_task: i64,
+    keep_latest_checkpoints_per_task: i64,
+    cutoff_iso: String,
+    vacuum: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeHistoryMaintenanceReport {
+    deleted_session_rows: i64,
+    remaining_session_rows: i64,
+    deleted_checkpoint_rows: i64,
+    remaining_checkpoint_rows: i64,
+    reclaimed_bytes: i64,
+    vacuumed: bool,
+    database_bytes: i64,
+}
+
+#[tauri::command]
+pub async fn runtime_history_maintain(
+    app: AppHandle,
+    request: RuntimeHistoryMaintenanceRequest,
+) -> Result<RuntimeHistoryMaintenanceReport, String> {
+    if !(RUNTIME_HISTORY_MIN_KEEP_LATEST..=RUNTIME_HISTORY_MAX_KEEP_LATEST)
+        .contains(&request.keep_latest_per_task)
+    {
+        return Err("Runtime history keepLatestPerTask is out of range.".to_string());
+    }
+    if !(RUNTIME_HISTORY_MIN_KEEP_LATEST..=RUNTIME_HISTORY_MAX_KEEP_LATEST)
+        .contains(&request.keep_latest_checkpoints_per_task)
+    {
+        return Err("Runtime history keepLatestCheckpointsPerTask is out of range.".to_string());
+    }
+    validate_iso_utc_timestamp(&request.cutoff_iso, "cutoffIso")?;
+    let path = db_path(&app)?;
+    with_connection(&app, |conn| {
+        let deleted_session_rows =
+            prune_task_session_log(conn, request.keep_latest_per_task, &request.cutoff_iso)?;
+        let remaining_session_rows = count_task_session_log_rows(conn)?;
+        let deleted_checkpoint_rows = prune_workflow_checkpoints(
+            conn,
+            request.keep_latest_checkpoints_per_task,
+            &request.cutoff_iso,
+        )?;
+        let remaining_checkpoint_rows = count_workflow_checkpoint_rows(conn)?;
+        let reclaimed_bytes = reclaimable_bytes(conn)?;
+        let mut vacuumed = false;
+        if request.vacuum && reclaimed_bytes >= RUNTIME_HISTORY_VACUUM_MIN_RECLAIM_BYTES {
+            // VACUUM cannot run inside a transaction, and a WAL checkpoint first
+            // keeps the rewritten file from immediately growing back.
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")
+                .map_err(|error| format!("Runtime history vacuum error: {error}"))?;
+            vacuumed = true;
+        }
+        let database_bytes = std::fs::metadata(&path).map(|m| m.len() as i64).unwrap_or(0);
+        Ok(RuntimeHistoryMaintenanceReport {
+            deleted_session_rows,
+            remaining_session_rows,
+            deleted_checkpoint_rows,
+            remaining_checkpoint_rows,
+            reclaimed_bytes,
+            vacuumed,
+            database_bytes,
+        })
+    })
+}
+
+fn prune_task_session_log(
+    conn: &Connection,
+    keep_latest_per_task: i64,
+    cutoff_iso: &str,
+) -> Result<i64, String> {
+    conn.execute(
+        "WITH ranked AS (
+           SELECT id,
+                  ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY id DESC) AS row_rank,
+                  recorded_at
+           FROM task_session_log
+         ),
+         keep AS (
+           SELECT id FROM ranked
+           WHERE row_rank = 1
+              OR (row_rank <= ?1 AND recorded_at >= ?2)
+         )
+         DELETE FROM task_session_log
+         WHERE id NOT IN (SELECT id FROM keep)",
+        rusqlite::params![keep_latest_per_task, cutoff_iso],
+    )
+    .map(|deleted| deleted as i64)
+    .map_err(|error| format!("Task session log prune error: {error}"))
+}
+
+/// Checkpoints are ordered exactly like `WorkflowCheckpointStore::latestByTaskId`
+/// (`created_at DESC, rowid DESC`) so "newest" means the same thing in both places.
+/// A checkpoint is kept when it is the newest of its task, when it is recent and
+/// within the per-task cap, or when its run still has an approval record.
+fn prune_workflow_checkpoints(
+    conn: &Connection,
+    keep_latest_per_task: i64,
+    cutoff_iso: &str,
+) -> Result<i64, String> {
+    conn.execute(
+        "WITH ranked AS (
+           SELECT checkpoint_id,
+                  run_id,
+                  created_at,
+                  ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY created_at DESC, rowid DESC) AS row_rank
+           FROM workflow_checkpoints
+         ),
+         keep AS (
+           SELECT checkpoint_id FROM ranked
+           WHERE row_rank = 1
+              OR (row_rank <= ?1 AND created_at >= ?2)
+              OR run_id IN (SELECT run_id FROM approval_records WHERE run_id IS NOT NULL)
+         )
+         DELETE FROM workflow_checkpoints
+         WHERE checkpoint_id NOT IN (SELECT checkpoint_id FROM keep)",
+        rusqlite::params![keep_latest_per_task, cutoff_iso],
+    )
+    .map(|deleted| deleted as i64)
+    .map_err(|error| format!("Workflow checkpoint prune error: {error}"))
+}
+
+fn count_task_session_log_rows(conn: &Connection) -> Result<i64, String> {
+    conn.query_row("SELECT COUNT(*) FROM task_session_log", [], |row| row.get(0))
+        .map_err(|error| format!("Task session log count error: {error}"))
+}
+
+fn count_workflow_checkpoint_rows(conn: &Connection) -> Result<i64, String> {
+    conn.query_row("SELECT COUNT(*) FROM workflow_checkpoints", [], |row| row.get(0))
+        .map_err(|error| format!("Workflow checkpoint count error: {error}"))
+}
+
+fn reclaimable_bytes(conn: &Connection) -> Result<i64, String> {
+    let page_size: i64 = conn
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .map_err(|error| format!("Database page size error: {error}"))?;
+    let freelist_count: i64 = conn
+        .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+        .map_err(|error| format!("Database freelist error: {error}"))?;
+    Ok(page_size.saturating_mul(freelist_count))
+}
+
+fn validate_iso_utc_timestamp(value: &str, field: &str) -> Result<(), String> {
+    let bytes = value.as_bytes();
+    let expected_separators = [(4, b'-'), (7, b'-'), (10, b'T'), (13, b':'), (16, b':'), (19, b'.'), (23, b'Z')];
+    let well_formed = bytes.len() == 24
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            if let Some((_, separator)) = expected_separators.iter().find(|(at, _)| *at == index) {
+                return byte == separator;
+            }
+            byte.is_ascii_digit()
+        });
+    if !well_formed {
+        return Err(format!("{field} must be an ISO-8601 UTC timestamp, for example 2026-09-12T15:21:30.812Z."));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn resource_scan_roots_list(
     app: AppHandle,
@@ -1461,6 +1660,7 @@ fn require_known_select_shape(tokens: &[String], sql_text: &str) -> Result<(), S
             | "select id name goal workspace_path schedule_type schedule_value enabled last_run_at last_run_started_at next_run_at created_at source updated_at from scheduled_tasks order by next_run_at asc"
             | "select snapshot_json from task_history order by updated_at desc id desc limit"
             | "select record_json from tool_call_audit where task_id order by coalesce started_at ended_at id asc"
+            | "select record_json from tool_call_audit order by coalesce ended_at started_at id desc limit"
             | "select key value updated_at from user_preferences order by key asc"
             | "select value from user_preferences where key"
             | "select workspace_id key value updated_at from workspace_settings where workspace_id order by key asc"
@@ -3132,9 +3332,342 @@ mod tests {
         }
     }
 
+    fn create_task_session_log_table(connection: &Connection) {
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE task_session_log (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  task_id TEXT NOT NULL,
+                  recorded_at TEXT NOT NULL,
+                  snapshot_json TEXT NOT NULL
+                );
+                CREATE INDEX idx_task_session_log_task_id ON task_session_log (task_id);
+                "#,
+            )
+            .expect("create task_session_log table");
+    }
+
+    fn insert_task_session_log_row(connection: &Connection, task_id: &str, recorded_at: &str) {
+        connection
+            .execute(
+                "INSERT INTO task_session_log (task_id, recorded_at, snapshot_json) VALUES (?, ?, ?)",
+                rusqlite::params![task_id, recorded_at, "{\"kind\":\"task_session_snapshot\"}"],
+            )
+            .expect("insert task_session_log row");
+    }
+
+    fn task_session_log_rows(connection: &Connection) -> Vec<(String, String)> {
+        connection
+            .prepare("SELECT task_id, recorded_at FROM task_session_log ORDER BY id ASC")
+            .unwrap()
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
     #[test]
-    fn task_checkpoint_queries_use_global_creation_order() {
+    fn task_session_log_prune_caps_per_task_and_always_keeps_the_newest_row() {
         let connection = in_memory_connection();
+        create_task_session_log_table(&connection);
+        for minute in 0..5 {
+            insert_task_session_log_row(
+                &connection,
+                "task-a",
+                &format!("2026-09-12T15:{minute:02}:00.000Z"),
+            );
+        }
+        for minute in 0..2 {
+            insert_task_session_log_row(
+                &connection,
+                "task-b",
+                &format!("2026-09-12T16:{minute:02}:00.000Z"),
+            );
+        }
+
+        // Everything is inside the retention window: the per-task cap decides.
+        let deleted = prune_task_session_log(&connection, 2, "2026-09-01T00:00:00.000Z")
+            .expect("prune task session log");
+        assert_eq!(deleted, 3);
+        let rows = task_session_log_rows(&connection);
+        assert_eq!(rows.len(), 4);
+        assert_eq!(
+            rows.iter().filter(|(task_id, _)| task_id == "task-a").count(),
+            2
+        );
+        assert!(rows.contains(&(
+            "task-a".to_string(),
+            "2026-09-12T15:04:00.000Z".to_string()
+        )));
+        assert!(rows.contains(&(
+            "task-a".to_string(),
+            "2026-09-12T15:03:00.000Z".to_string()
+        )));
+    }
+
+    #[test]
+    fn task_session_log_prune_drops_stale_history_but_keeps_the_latest_row_per_task() {
+        let connection = in_memory_connection();
+        create_task_session_log_table(&connection);
+        for minute in 0..6 {
+            insert_task_session_log_row(
+                &connection,
+                "stale-task",
+                &format!("2026-05-25T16:{minute:02}:00.000Z"),
+            );
+        }
+
+        let deleted = prune_task_session_log(&connection, 500, "2026-09-01T00:00:00.000Z")
+            .expect("prune task session log");
+        assert_eq!(deleted, 5);
+
+        let rows = task_session_log_rows(&connection);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1, "2026-05-25T16:05:00.000Z");
+    }
+
+    #[test]
+    fn task_session_log_prune_is_idempotent() {
+        let connection = in_memory_connection();
+        create_task_session_log_table(&connection);
+        for minute in 0..4 {
+            insert_task_session_log_row(
+                &connection,
+                "task-a",
+                &format!("2026-09-12T15:{minute:02}:00.000Z"),
+            );
+        }
+
+        let first = prune_task_session_log(&connection, 2, "2026-09-01T00:00:00.000Z").unwrap();
+        let second = prune_task_session_log(&connection, 2, "2026-09-01T00:00:00.000Z").unwrap();
+        assert_eq!(first, 2);
+        assert_eq!(second, 0);
+        assert_eq!(task_session_log_rows(&connection).len(), 2);
+    }
+
+    fn create_checkpoint_prune_tables(connection: &Connection) {
+        create_workflow_checkpoints_table(connection);
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE approval_records (
+                  approval_id TEXT PRIMARY KEY,
+                  run_id TEXT,
+                  status TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  record_json TEXT NOT NULL
+                );
+                "#,
+            )
+            .expect("create approval_records table with run_id");
+    }
+
+    fn insert_checkpoint_row(connection: &Connection, checkpoint_id: &str, task_id: &str, run_id: &str, created_at: &str) {
+        connection
+            .execute(
+                "INSERT INTO workflow_checkpoints
+                   (checkpoint_id, task_id, run_id, workflow_id, workflow_version, plan_hash, event_sequence, created_at, workflow_json, checkpoint_json)
+                 VALUES (?, ?, ?, 'wf-1', 1, 'plan-hash', 1, ?, '{}', '{}')",
+                rusqlite::params![checkpoint_id, task_id, run_id, created_at],
+            )
+            .expect("insert workflow checkpoint");
+    }
+
+    fn checkpoint_ids(connection: &Connection) -> Vec<String> {
+        connection
+            .prepare("SELECT checkpoint_id FROM workflow_checkpoints ORDER BY checkpoint_id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn workflow_checkpoint_prune_caps_per_task_and_keeps_the_newest() {
+        let connection = in_memory_connection();
+        create_checkpoint_prune_tables(&connection);
+        for minute in 0..5 {
+            insert_checkpoint_row(
+                &connection,
+                &format!("cp-a-{minute}"),
+                "task-a",
+                &format!("run-a-{minute}"),
+                &format!("2026-09-12T15:{minute:02}:00.000Z"),
+            );
+        }
+        for minute in 0..2 {
+            insert_checkpoint_row(
+                &connection,
+                &format!("cp-b-{minute}"),
+                "task-b",
+                &format!("run-b-{minute}"),
+                &format!("2026-09-12T16:{minute:02}:00.000Z"),
+            );
+        }
+
+        let deleted = prune_workflow_checkpoints(&connection, 2, "2026-09-01T00:00:00.000Z")
+            .expect("prune checkpoints");
+        assert_eq!(deleted, 3);
+        assert_eq!(
+            checkpoint_ids(&connection),
+            vec!["cp-a-3", "cp-a-4", "cp-b-0", "cp-b-1"]
+        );
+    }
+
+    #[test]
+    fn workflow_checkpoint_prune_keeps_stale_history_out_but_keeps_the_newest_per_task() {
+        let connection = in_memory_connection();
+        create_checkpoint_prune_tables(&connection);
+        for minute in 0..6 {
+            insert_checkpoint_row(
+                &connection,
+                &format!("cp-{minute}"),
+                "stale-task",
+                &format!("run-{minute}"),
+                &format!("2026-05-25T16:{minute:02}:00.000Z"),
+            );
+        }
+
+        let deleted = prune_workflow_checkpoints(&connection, 500, "2026-09-01T00:00:00.000Z")
+            .expect("prune checkpoints");
+        assert_eq!(deleted, 5);
+        assert_eq!(checkpoint_ids(&connection), vec!["cp-5"]);
+    }
+
+    #[test]
+    fn workflow_checkpoint_prune_never_drops_a_checkpoint_with_an_approval_record() {
+        let connection = in_memory_connection();
+        create_checkpoint_prune_tables(&connection);
+        for minute in 0..5 {
+            insert_checkpoint_row(
+                &connection,
+                &format!("cp-{minute}"),
+                "task-a",
+                &format!("run-{minute}"),
+                &format!("2026-05-25T16:{minute:02}:00.000Z"),
+            );
+        }
+        // `run-0` is the oldest checkpoint of the task but still has an approval
+        // record, so the durable approval-resume path may read it back.
+        connection
+            .execute(
+                "INSERT INTO approval_records (approval_id, run_id, status, created_at, record_json)
+                 VALUES ('approval-1', 'run-0', 'pending', '2026-05-25T16:00:00.000Z', '{}')",
+                [],
+            )
+            .unwrap();
+
+        let deleted = prune_workflow_checkpoints(&connection, 2, "2026-09-01T00:00:00.000Z")
+            .expect("prune checkpoints");
+        assert_eq!(deleted, 3);
+        assert_eq!(checkpoint_ids(&connection), vec!["cp-0", "cp-4"]);
+    }
+
+    #[test]
+    fn workflow_checkpoint_prune_ignores_approval_rows_without_a_run_id() {
+        let connection = in_memory_connection();
+        create_checkpoint_prune_tables(&connection);
+        for minute in 0..4 {
+            insert_checkpoint_row(
+                &connection,
+                &format!("cp-{minute}"),
+                "task-a",
+                &format!("run-{minute}"),
+                &format!("2026-05-25T16:{minute:02}:00.000Z"),
+            );
+        }
+        connection
+            .execute(
+                "INSERT INTO approval_records (approval_id, run_id, status, created_at, record_json)
+                 VALUES ('approval-null', NULL, 'pending', '2026-05-25T16:00:00.000Z', '{}')",
+                [],
+            )
+            .unwrap();
+
+        // A NULL run_id must not match every checkpoint through the IN clause.
+        let deleted = prune_workflow_checkpoints(&connection, 2, "2026-09-01T00:00:00.000Z")
+            .expect("prune checkpoints");
+        assert_eq!(deleted, 3);
+        assert_eq!(checkpoint_ids(&connection), vec!["cp-3"]);
+    }
+
+    #[test]
+    fn task_session_log_prune_handles_production_volume() {
+        // The real database held 49,950 rows with one task owning 34,577 of them
+        // (93 MB). The prune must cap that at the configured per-task limit and
+        // leave every other task's newest row intact.
+        let connection = in_memory_connection();
+        create_task_session_log_table(&connection);
+        let transaction_started = std::time::Instant::now();
+        connection.execute_batch("BEGIN").unwrap();
+        for index in 0..34_577 {
+            let minute = index / 60;
+            let second = index % 60;
+            connection
+                .execute(
+                    "INSERT INTO task_session_log (task_id, recorded_at, snapshot_json) VALUES (?, ?, ?)",
+                    rusqlite::params![
+                        "task-runaway",
+                        format!("2026-09-12T15:{:02}:{:02}.000Z", minute % 60, second),
+                        "{\"kind\":\"task_session_snapshot\"}"
+                    ],
+                )
+                .unwrap();
+        }
+        for task in 0..200 {
+            connection
+                .execute(
+                    "INSERT INTO task_session_log (task_id, recorded_at, snapshot_json) VALUES (?, ?, ?)",
+                    rusqlite::params![
+                        format!("task-{task}"),
+                        "2026-05-25T16:00:00.000Z",
+                        "{\"kind\":\"task_session_snapshot\"}"
+                    ],
+                )
+                .unwrap();
+        }
+        connection.execute_batch("COMMIT").unwrap();
+        assert_eq!(count_task_session_log_rows(&connection).unwrap(), 34_777);
+        let inserted_in = transaction_started.elapsed();
+
+        let prune_started = std::time::Instant::now();
+        let deleted = prune_task_session_log(&connection, 100, "2026-08-14T00:00:00.000Z")
+            .expect("prune production volume");
+        let prune_took = prune_started.elapsed();
+
+        // 34,577 runaway rows collapse to the newest 100; each of the 200 stale
+        // tasks keeps exactly its newest row.
+        assert_eq!(deleted, 34_477 + 0);
+        assert_eq!(count_task_session_log_rows(&connection).unwrap(), 300);
+        assert!(
+            prune_took.as_millis() < 5_000,
+            "prune over production volume took {prune_took:?} (insert took {inserted_in:?})"
+        );
+    }
+
+    #[test]
+    fn runtime_history_maintenance_rejects_malformed_cutoff_timestamps() {
+        assert!(validate_iso_utc_timestamp("2026-09-01T00:00:00.000Z", "cutoffIso").is_ok());
+        for malformed in [
+            "",
+            "2026-09-01",
+            "2026-09-01T00:00:00Z",
+            "2026-09-01 00:00:00.000Z",
+            "2026-13-01100:00:00.000Z",
+            "2026-09-01T00:00:00.000+08:00",
+            "2026-09-01T00:00:00.000Z' OR 1=1 --",
+        ] {
+            assert!(
+                validate_iso_utc_timestamp(malformed, "cutoffIso").is_err(),
+                "expected malformed timestamp to be rejected: {malformed}"
+            );
+        }
+    }
+
+    #[test]
+    fn task_checkpoint_queries_use_global_creation_order() {        let connection = in_memory_connection();
         create_workflow_checkpoints_table(&connection);
         for (id, run_id, sequence, created_at) in [
             (
@@ -3453,6 +3986,7 @@ mod tests {
                ORDER BY next_run_at ASC"#,
             "SELECT snapshot_json FROM task_history ORDER BY updated_at DESC, id DESC LIMIT ?",
             "SELECT record_json FROM tool_call_audit WHERE task_id = ? ORDER BY COALESCE(started_at, ended_at, id) ASC",
+            "SELECT record_json FROM tool_call_audit ORDER BY COALESCE(ended_at, started_at, id) DESC LIMIT ?",
             "SELECT key, value, updated_at FROM user_preferences ORDER BY key ASC",
             "SELECT value FROM user_preferences WHERE key = ?",
             "SELECT goal_json FROM current_goal WHERE id = ? LIMIT 1",
@@ -3651,5 +4185,344 @@ mod tests {
         for sql in statements {
             assert_rejected(sql, SqlOperation::Select);
         }
+    }
+}
+
+/// Cross-language gate for the generic SQL channel.
+///
+/// `db_execute` / `db_select` only accept a hand-maintained list of exact
+/// statement shapes. That list is intentionally strict (several statements that
+/// look reasonable are routed to dedicated native commands instead), which means
+/// adding a new legitimate statement without registering it fails *at runtime*,
+/// inside a task, with `db_execute only allows known app statement shapes.` —
+/// which is exactly the failure recorded once in production
+/// (`Durable persistence failed in runtime-event-sink`).
+///
+/// This gate reads the desktop TypeScript sources, extracts every SQL literal,
+/// resolves its `${CONSTANT}` table/column interpolations, and asserts the Rust
+/// validator accepts it. A forgotten registration now fails `cargo test` instead
+/// of a user's task.
+#[cfg(test)]
+mod sql_ipc_contract {
+    use super::*;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+
+    /// SQL text the desktop app contains but never sends through the generic
+    /// channel as-is. Two families exist, and both are deliberate:
+    ///
+    /// * routed — a dedicated native command owns the operation, so the generic
+    ///   `db_execute` allowlist is supposed to reject the raw text;
+    /// * composed — the literal is a statement *fragment* completed at the call
+    ///   site; the composed statement is covered by the validator's own unit
+    ///   tests instead.
+    const EXONERATED_SQL_PREFIXES: &[(&str, &str)] = &[
+        ("insert into approval_records", "routed: approval_records_upsert"),
+        (
+            "delete from approval_records",
+            "routed: approval_records_prune (also the routing predicate in desktop-database.ts)",
+        ),
+        (
+            "insert or replace into resource_scan_roots",
+            "routed: resource_scan_roots_upsert",
+        ),
+        (
+            "delete from resource_scan_roots where id",
+            "routed: resource_scan_roots_delete",
+        ),
+        (
+            "update resource_scan_roots set enabled",
+            "routed: resource_scan_roots_set_enabled",
+        ),
+        ("select * from resource_scan_roots", "routed: resource_scan_roots_list"),
+        (
+            "select rowid, id, fact",
+            "composed: SELECT_FACTS_BY_ROWID_PREFIX + generated placeholder list at the call site",
+        ),
+    ];
+
+    const MIN_EXPECTED_SOURCES: usize = 40;
+    const MIN_EXPECTED_STATEMENTS: usize = 100;
+
+    fn desktop_src_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../src")
+    }
+
+    fn collect_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_sources(&path, out);
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let is_typescript = name.ends_with(".ts") || name.ends_with(".tsx");
+            if is_typescript && !name.contains(".test.") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Reads one string literal starting at the opening quote.
+    /// Interpolations are replaced by `${index}` markers and returned separately.
+    fn read_literal(chars: &[char], start: usize) -> Option<(String, Vec<String>, usize)> {
+        let quote = *chars.get(start)?;
+        if quote != '"' && quote != '\'' && quote != '`' {
+            return None;
+        }
+        let mut body = String::new();
+        let mut interpolations = Vec::new();
+        let mut index = start + 1;
+        while index < chars.len() {
+            let current = chars[index];
+            if current == '\\' {
+                index += 1;
+                if let Some(escaped) = chars.get(index) {
+                    body.push(*escaped);
+                    index += 1;
+                }
+                continue;
+            }
+            if quote == '`' && current == '$' && chars.get(index + 1) == Some(&'{') {
+                index += 2;
+                let mut depth = 1usize;
+                let mut expression = String::new();
+                while index < chars.len() {
+                    let inner = chars[index];
+                    if inner == '{' {
+                        depth += 1;
+                    }
+                    if inner == '}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            index += 1;
+                            break;
+                        }
+                    }
+                    expression.push(inner);
+                    index += 1;
+                }
+                body.push_str(&format!("${{{}}}", interpolations.len()));
+                interpolations.push(expression.trim().to_string());
+                continue;
+            }
+            if current == quote {
+                index += 1;
+                return Some((body, interpolations, index));
+            }
+            if current == '\n' && quote != '`' {
+                return None;
+            }
+            body.push(current);
+            index += 1;
+        }
+        None
+    }
+
+    fn scan_literals(source: &str) -> Vec<(String, Vec<String>)> {
+        let chars: Vec<char> = source.chars().collect();
+        let mut literals = Vec::new();
+        let mut index = 0;
+        while index < chars.len() {
+            match read_literal(&chars, index) {
+                Some((body, interpolations, next)) => {
+                    literals.push((body, interpolations));
+                    index = next;
+                }
+                None => index += 1,
+            }
+        }
+        literals
+    }
+
+    /// Collects `const NAME = "literal"` declarations so `${NAME}` table and
+    /// column interpolations can be resolved without a TypeScript parser.
+    fn string_constants(source: &str) -> HashMap<String, String> {
+        let chars: Vec<char> = source.chars().collect();
+        let mut constants = HashMap::new();
+        let mut index = 0;
+        while index < chars.len() {
+            let is_const = chars[index..].starts_with(&['c', 'o', 'n', 's', 't']);
+            let boundary = index == 0
+                || !(chars[index - 1].is_ascii_alphanumeric() || chars[index - 1] == '_');
+            if !is_const || !boundary {
+                index += 1;
+                continue;
+            }
+            let mut cursor = index + 5;
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            let name_start = cursor;
+            while cursor < chars.len() && (chars[cursor].is_ascii_alphanumeric() || chars[cursor] == '_')
+            {
+                cursor += 1;
+            }
+            let name: String = chars[name_start..cursor].iter().collect();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if chars.get(cursor) != Some(&'=') {
+                index += 5;
+                continue;
+            }
+            cursor += 1;
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if let Some((body, interpolations, _)) = read_literal(&chars, cursor) {
+                let is_constant_name = !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+                if is_constant_name && interpolations.is_empty() {
+                    constants.insert(name, body.trim().to_string());
+                }
+            }
+            index += 5;
+        }
+        constants
+    }
+
+    fn collapse(sql: &str) -> String {
+        collapse_sql_whitespace(&sql.to_ascii_lowercase())
+    }
+
+    fn looks_like_sql(body: &str) -> bool {
+        let collapsed = collapse(body);
+        // Require the clause each verb cannot work without. This keeps English
+        // prose such as "Select a workspace before commenting on a pull request."
+        // out of the gate.
+        if collapsed.starts_with("select ") {
+            return collapsed.contains(" from ");
+        }
+        if collapsed.starts_with("insert ") || collapsed.starts_with("delete ") {
+            return collapsed.contains(" into ") || collapsed.contains(" from ");
+        }
+        if collapsed.starts_with("update ") {
+            return collapsed.contains(" set ");
+        }
+        if collapsed.starts_with("replace ") {
+            return collapsed.contains(" into ");
+        }
+        if collapsed.starts_with("alter ") {
+            return collapsed.contains(" table ");
+        }
+        if collapsed.starts_with("create ") {
+            return collapsed.contains(" table ")
+                || collapsed.contains(" index ")
+                || collapsed.contains(" trigger ")
+                || collapsed.contains(" virtual ");
+        }
+        false
+    }
+
+    /// Substitutes `${n}` markers and named constants. A marker that is not a
+    /// resolvable constant becomes `?` so unintended dynamic identifiers surface
+    /// as a table/column rejection instead of a silent skip.
+    fn resolve(
+        body: &str,
+        interpolations: &[String],
+        constants: &HashMap<String, String>,
+    ) -> String {
+        let mut resolved = body.to_string();
+        for (position, expression) in interpolations.iter().enumerate() {
+            let replacement = constants
+                .get(expression)
+                .cloned()
+                .unwrap_or_else(|| "?".to_string());
+            resolved = resolved.replace(&format!("${{{position}}}"), &replacement);
+        }
+        collapse(&resolved)
+    }
+
+    fn exoneration(collapsed: &str) -> Option<&'static str> {
+        EXONERATED_SQL_PREFIXES
+            .iter()
+            .find(|(prefix, _)| collapsed.starts_with(prefix))
+            .map(|(_, reason)| *reason)
+    }
+
+    #[test]
+    fn desktop_sql_literals_are_all_accepted_by_the_ipc_validator() {
+        let mut sources = Vec::new();
+        collect_sources(&desktop_src_dir(), &mut sources);
+        assert!(
+            sources.len() >= MIN_EXPECTED_SOURCES,
+            "expected to scan the desktop TypeScript sources, found {} (gate is not looking at the right directory)",
+            sources.len()
+        );
+
+        let mut checked = 0usize;
+        let mut exonerated = 0usize;
+        let mut failures: Vec<String> = Vec::new();
+        let mut unresolved: Vec<String> = Vec::new();
+
+        for path in &sources {
+            let file = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("unknown.ts")
+                .to_string();
+            let Ok(source) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let constants = string_constants(&source);
+            for (body, interpolations) in scan_literals(&source) {
+                if !looks_like_sql(&body) {
+                    continue;
+                }
+                let sql = resolve(&body, &interpolations, &constants);
+                if exoneration(&sql).is_some() {
+                    exonerated += 1;
+                    continue;
+                }
+                if sql.contains("${") {
+                    unresolved.push(format!("{file}: {sql}"));
+                    continue;
+                }
+                let operation = if sql.starts_with("select ") {
+                    SqlOperation::Select
+                } else {
+                    SqlOperation::Execute
+                };
+                checked += 1;
+                if let Err(error) = validate_sql(&sql, operation) {
+                    failures.push(format!("{file}: {error}\n      {sql}"));
+                }
+            }
+        }
+
+        assert!(
+            unresolved.is_empty(),
+            "SQL literals still contain unresolved interpolation markers:\n{}",
+            unresolved.join("\n")
+        );
+        assert!(
+            checked >= MIN_EXPECTED_STATEMENTS,
+            "expected the gate to cover the app's SQL surface, only checked {checked} statements"
+        );
+        assert!(
+            failures.is_empty(),
+            "desktop SQL literals rejected by the IPC validator ({} checked, {exonerated} exonerated):\n{}",
+            checked + failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn gate_detects_a_forgotten_registration() {
+        // Guards the gate itself: an unregistered statement must be rejected, so a
+        // green run actually means the surface is registered rather than the gate
+        // being a no-op.
+        let sql = collapse(
+            "INSERT INTO task_history (id, title, user_goal, status, updated_at, snapshot_json, extra) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        );
+        assert!(validate_sql(&sql, SqlOperation::Execute).is_err());
     }
 }

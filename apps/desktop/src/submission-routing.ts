@@ -62,3 +62,21 @@ export function resolveContinuationTask(input: {
   }
   return isArchivableTask(input.currentTask) ? input.currentTask : undefined;
 }
+
+/**
+ * Continuation must keep the session's originMode (agent/project vs chat).
+ * Never silently downgrade an agent conversation to chat because the current
+ * UI composeMode was reset (app restart, default_startup_mode, etc.).
+ */
+export function resolveContinuationComposeMode(input: {
+  continuationTask?: TaskSnapshot | undefined;
+  requestedComposeMode: "chat" | "project";
+  forcedMode?: "chat" | "project" | undefined;
+}): "chat" | "project" {
+  if (input.forcedMode) return input.forcedMode;
+  const sessionMode = input.continuationTask?.originMode;
+  if (sessionMode === "chat" || sessionMode === "project") {
+    return sessionMode;
+  }
+  return input.requestedComposeMode;
+}

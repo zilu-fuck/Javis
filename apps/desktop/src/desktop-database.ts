@@ -1,5 +1,22 @@
 import type { RuntimeEventEnvelope } from "@javis/core";
 
+export interface RuntimeHistoryMaintenanceRequest {
+  keepLatestPerTask: number;
+  keepLatestCheckpointsPerTask: number;
+  cutoffIso: string;
+  vacuum: boolean;
+}
+
+export interface RuntimeHistoryMaintenanceReport {
+  deletedSessionRows: number;
+  remainingSessionRows: number;
+  deletedCheckpointRows: number;
+  remainingCheckpointRows: number;
+  reclaimedBytes: number;
+  vacuumed: boolean;
+  databaseBytes: number;
+}
+
 export interface DesktopDatabase {
   execute(sql: string, bindValues?: DatabaseValue[]): Promise<void>;
   select<T extends Record<string, unknown>>(
@@ -15,6 +32,18 @@ export interface DesktopDatabase {
     eventIds: string[],
     compactionEnvelopes: RuntimeEventEnvelope[],
   ): Promise<void>;
+  /**
+   * Bounds the append-heavy runtime history: keeps the newest task session rows
+   * and workflow checkpoints per task, drops history older than the cutoff (never
+   * a task's newest row or a checkpoint whose run still has an approval record),
+   * and optionally VACUUMs the database file once enough pages are free.
+   *
+   * Native-only by design: the generic `db_execute` channel accepts a fixed list
+   * of statement shapes and refuses VACUUM.
+   */
+  maintainRuntimeHistory?(
+    request: RuntimeHistoryMaintenanceRequest,
+  ): Promise<RuntimeHistoryMaintenanceReport>;
 }
 
 export type DatabaseValue = string | number | boolean | null;
@@ -93,7 +122,36 @@ export function invokeDesktopDatabase(
         request: { taskId, eventIds, compactionEnvelopes },
       }, moduleInvoke);
     },
+    async maintainRuntimeHistory(request) {
+      const report = await directInvoke(
+        "runtime_history_maintain",
+        { request },
+        moduleInvoke,
+      );
+      return parseRuntimeHistoryMaintenanceReport(report);
+    },
   };
+}
+
+function parseRuntimeHistoryMaintenanceReport(value: unknown): RuntimeHistoryMaintenanceReport {
+  const record = isRecord(value) ? value : {};
+  return {
+    deletedSessionRows: toFiniteNumber(record.deletedSessionRows),
+    remainingSessionRows: toFiniteNumber(record.remainingSessionRows),
+    deletedCheckpointRows: toFiniteNumber(record.deletedCheckpointRows),
+    remainingCheckpointRows: toFiniteNumber(record.remainingCheckpointRows),
+    reclaimedBytes: toFiniteNumber(record.reclaimedBytes),
+    vacuumed: record.vacuumed === true,
+    databaseBytes: toFiniteNumber(record.databaseBytes),
+  };
+}
+
+function toFiniteNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function approvalRecordWriteCommand(

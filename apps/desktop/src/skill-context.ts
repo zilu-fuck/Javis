@@ -1,4 +1,5 @@
 import type { CompletionOptions } from "./model-provider";
+import { isSkillAutoInvocable, parseSkillFrontmatter } from "@javis/core";
 
 export interface EnabledUserSkillContext {
   id: string;
@@ -67,7 +68,7 @@ export function formatEnabledSkillContext(
   skills: EnabledUserSkillContext[],
   request: SkillContextSelectionRequest = {},
 ): string {
-  const enabledSkills = skills.filter((skill) => skill.content.trim());
+  const enabledSkills = skills.filter((skill) => skill.content.trim() && isSkillAutoSelectable(skill));
   if (enabledSkills.length === 0) {
     return "";
   }
@@ -155,6 +156,19 @@ function weightedTokenOverlap(
     }
   }
   return score;
+}
+
+/**
+ * C3: a skill whose `SKILL.md` frontmatter sets `disable-model-invocation: true`
+ * stays installed but is never picked up by automatic selection — only an explicit
+ * user choice may use it. The `SKILL.md` convention is the source of truth here
+ * rather than a Javis-only flag.
+ */
+function isSkillAutoSelectable(skill: EnabledUserSkillContext): boolean {
+  if (!skill.content.trimStart().startsWith("---")) {
+    return true;
+  }
+  return isSkillAutoInvocable(parseSkillFrontmatter(skill.content).frontmatter);
 }
 
 function formatSkillContextEntry(skill: EnabledUserSkillContext): string {

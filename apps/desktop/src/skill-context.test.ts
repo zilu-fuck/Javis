@@ -37,6 +37,41 @@ const SKILLS: EnabledUserSkillContext[] = [
 ];
 
 describe("skill context selection", () => {
+  it("never auto-selects a skill whose frontmatter disables model invocation", () => {
+    // C3: `disable-model-invocation: true` follows the SKILL.md convention — the
+    // skill stays installed, but automatic selection must not pick it up.
+    const locked: EnabledUserSkillContext = {
+      id: "javis:release-checklist",
+      name: "release-checklist",
+      description: "Godot release checklist.",
+      path: "C:/javis/skills/release-checklist",
+      source: "javis",
+      content: [
+        "---",
+        "name: release-checklist",
+        "description: Godot release checklist.",
+        "disable-model-invocation: true",
+        "---",
+        "",
+        "Use Godot 4 release checklist steps.",
+      ].join("\n"),
+    };
+    const context = formatEnabledSkillContext([...SKILLS, locked], {
+      userGoal: "godot release checklist",
+    });
+    expect(context).not.toContain("release-checklist");
+
+    // The same skill without the flag is selectable again.
+    const open: EnabledUserSkillContext = {
+      ...locked,
+      id: "javis:release-checklist-open",
+      content: locked.content.replace("disable-model-invocation: true\n", ""),
+    };
+    expect(
+      formatEnabledSkillContext([...SKILLS, open], { userGoal: "godot release checklist" }),
+    ).toContain("release-checklist");
+  });
+
   it("selects the relevant enabled skill for the current goal", () => {
     const selected = selectRelevantSkills(SKILLS, {
       userGoal: "Build a Godot scene with GDScript",

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { MAX_DOCUMENT_CONTEXT_REFERENCES, type TaskSnapshot } from "@javis/core";
 import {
   extractAtReferences,
+  resolveContinuationComposeMode,
   resolveContinuationTask,
   resolveVisionBridgeRuntimeMode,
 } from "./submission-routing";
@@ -83,6 +84,44 @@ describe("resolveContinuationTask", () => {
       currentTask,
       history: [selectedHistoryTask],
     })).toBeUndefined();
+  });
+});
+
+describe("resolveContinuationComposeMode", () => {
+  it("keeps the session originMode when UI composeMode was reset to chat", () => {
+    const continuationTask = createContinuationTask("task-agent-session", ["hello"]);
+    continuationTask.originMode = "project";
+
+    expect(resolveContinuationComposeMode({
+      continuationTask,
+      requestedComposeMode: "chat",
+    })).toBe("project");
+  });
+
+  it("does not upgrade a chat session to project without an explicit force", () => {
+    const continuationTask = createContinuationTask("task-chat-session", ["hi"]);
+    continuationTask.originMode = "chat";
+
+    expect(resolveContinuationComposeMode({
+      continuationTask,
+      requestedComposeMode: "project",
+    })).toBe("chat");
+    expect(resolveContinuationComposeMode({
+      continuationTask,
+      requestedComposeMode: "chat",
+      forcedMode: "project",
+    })).toBe("project");
+  });
+
+  it("falls back to the requested compose mode without a continuation session", () => {
+    expect(resolveContinuationComposeMode({
+      continuationTask: undefined,
+      requestedComposeMode: "project",
+    })).toBe("project");
+    expect(resolveContinuationComposeMode({
+      continuationTask: undefined,
+      requestedComposeMode: "chat",
+    })).toBe("chat");
   });
 });
 

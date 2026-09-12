@@ -72,6 +72,10 @@ function decideDispatch(input: RuntimeChainDecisionInput): RuntimeChainDecision[
       : { kind: "clarification", reason: "chat_mode_without_chat_tool" };
   }
 
+  // Agent/project mode is a capability ceiling: originMode stays project and
+  // write/workflow goals keep Commander. A pure L1 casual greeting may still
+  // use the direct model response so "你好" does not open a clarification card.
+  // The caller labels that path as agent-mode direct response, not chat mode.
   if (
     (
       input.startMode !== "project" ||
