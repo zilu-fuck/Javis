@@ -260,6 +260,23 @@
   **两处修正**：① 我上一轮把 `executeFileWriteTextDagStep` 列为干净接缝是**错的**（低估的旧工具给的假象）；
   ② `runCommanderDagTask` 的闭包是 **12,199 行**——它不是"需要先内部拆分"那么简单，而是**几乎整个文件都挂在它下面**。
   **下一刀应只做那 4 个 git 执行器 + workspace mutation（合计约 1,485 行 / 各 5 个声明）**。
+
+  **✅ 精确搬迁清单已由工具导出（本轮，可直接执行）**。对 5 个候选各跑一次闭包、取并集，得到**恰好 17 个声明**：
+
+  ```
+  执行器 5：executeGitCommitDagStep / executeGitStageDagStep /
+           executeGitCreatePullRequestDagStep / executeGitCommentPullRequestDagStep /
+           executeWorkspaceMutationDagStep
+  helper 6：mergeStepInput / isPlainRecord / extractGitCommitInput / extractGitStagePaths /
+           extractGitCreatePullRequestInput / extractGitCommentPullRequestInput
+  常量 6：GIT_STAGE_TOOL_NAME / GIT_COMMIT_TOOL_NAME / GIT_CREATE_PR_TOOL_NAME /
+         GIT_COMMENT_PR_TOOL_NAME / WORKSPACE_CREATE_TOOL_NAME / WORKSPACE_DELETE_TOOL_NAME
+  ```
+
+  **并且确诊了上一轮那次失败的真正原因（不是"未查明"）**：我的搬迁脚本**只把函数导回原文件，没把常量导回**，
+  于是原文件丢了 `GIT_*_TOOL_NAME` 却仍在别处引用 → 报 "Cannot find name"。
+  我上一轮记成"导出名存在却仍报未解析，原因未查明"——**那个判断是错的**：常量确实在生成文件里，报错来自**原文件**。
+  **执行时务必把并集里 17 个名字全部导回原文件**——这是那次失败的直接教训。
 - [ ] **B5** `RuntimeEvent` / `ArtifactEnvelope` / `SharedContext` / `WorkflowCheckpoint` 收敛成一份与代码对齐的对外契约（`docs/CORE_CONTRACTS.md`）
 - [ ] **B6** preset 提升为一等公民（agents + tools + 权限策略 + 模型槽 + 提示词版本，可导入导出 / A-B）
 
@@ -628,6 +645,10 @@ $env:PATH="$env:USERPROFILE\.cargo\bin;C:\Program Files\Git\cmd;$env:PATH"; core
 
 ## 变更记录
 
+- 2026-09-13（第 43 轮，工程）：导出**精确搬迁清单**（对 5 个候选各跑闭包取并集 = **恰好 17 个声明**，见上），
+  并**确诊上一轮失败的真实原因**：搬迁脚本只把**函数**导回原文件、没把**常量**导回，导致原文件引用 `GIT_*_TOOL_NAME` 却找不到。
+  我上一轮写的"导出名存在却仍报未解析、原因未查明"**是错的判断**，本轮更正——报错来自原文件，不是生成文件。
+  教训固化为执行前提：**并集 17 个名字必须全部导回原文件**。
 - 2026-09-13（第 42 轮，工程）：**把选缝工具升级为传递闭包，并当场修正了计划**。新 `analyze-extraction.mjs` 剥离注释/字符串、
   编目全部顶层声明、算闭包到不动点、按模块输出所需导入；**先用已知失败集验证**（它现在正确包含当初漏掉的
   `isPlainRecord` / `FILE_WRITE_TEXT_CONTENT_KEYS`）。修正后：4 个 git 执行器 + workspace mutation 是干净接缝
