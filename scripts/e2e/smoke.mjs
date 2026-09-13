@@ -146,6 +146,43 @@ try {
   report.title = root.title;
   report.bodyTextSample = root.bodyText.slice(0, 1_200);
 
+  /**
+   * Landmarks, not a character count.
+   *
+   * A blank page cannot satisfy these: each is a distinct piece of the workbench shell, so a
+   * partially-mounted app (the failure mode that started this file) fails the gate instead of
+   * passing on "some HTML exists".
+   */
+  const LANDMARKS = [
+    { name: "sidebar-new-chat", text: "新建对话" },
+    { name: "nav-settings", text: "设置" },
+    { name: "composer-prompt", text: "聊点什么" },
+  ];
+  report.landmarks = [];
+  for (const landmark of LANDMARKS) {
+    const found = root.bodyText.includes(landmark.text) || await page.locator(`text=${landmark.text}`).count() > 0;
+    report.landmarks.push({ ...landmark, found });
+  }
+  const missing = report.landmarks.filter((landmark) => !landmark.found).map((landmark) => landmark.name);
+  report.missingLandmarks = missing;
+
+  /**
+   * Interactivity: the app must respond to a real click.
+   *
+   * A shell that renders but whose handlers never attached would pass a text-only check, so the
+   * composer is clicked and the resulting focus is asserted.
+   */
+  try {
+    const composer = page.locator("textarea, input[type='text'], [contenteditable='true']").first();
+    await composer.click({ timeout: 5_000 });
+    report.interactive = await composer.evaluate((element) => (
+      element === document.activeElement
+    ));
+  } catch (error) {
+    report.interactive = false;
+    report.interactiveError = String(error?.message ?? error).slice(0, 300);
+  }
+
   const shot = path.join(repoRoot, ".dsh-tmp/e2e-smoke.png");
   await page.screenshot({ path: shot, fullPage: false });
   report.screenshot = shot;
@@ -157,15 +194,24 @@ try {
   fs.writeFileSync(outFile, JSON.stringify(report, null, 2), "utf8");
 
   console.log(`e2e: rendered=${report.rendered} rootHtmlChars=${report.rootHtmlChars} title="${report.title ?? ""}"`);
+  console.log(`e2e: landmarks ${(report.landmarks ?? []).filter((l) => l.found).length}/${(report.landmarks ?? []).length}`
+    + `  interactive=${report.interactive}`);
   console.log(`e2e: console errors=${report.consoleErrors.length} page errors=${report.pageErrors.length} `
     + `failed requests=${report.failedRequests.length} tauri-related=${report.tauriRelatedFailures}`);
   for (const error of [...report.pageErrors, ...report.consoleErrors].slice(0, 6)) {
     console.log(`      ${error}`);
   }
+  if ((report.missingLandmarks ?? []).length > 0) {
+    console.log(`      missing landmarks: ${report.missingLandmarks.join(", ")}`);
+  }
 
-  const failed = !report.rendered || report.pageErrors.length > 0 || report.consoleErrors.length > 0;
+  const failed = !report.rendered
+    || report.pageErrors.length > 0
+    || report.consoleErrors.length > 0
+    || (report.missingLandmarks ?? []).length > 0
+    || report.interactive !== true;
   if (failed) {
-    console.error("e2e: the built front-end did not render cleanly in a real browser.");
+    console.error("e2e: the built front-end did not render cleanly and interactively in a real browser.");
     process.exit(1);
   }
   console.log("e2e: the built front-end mounts and renders with no errors.");
