@@ -43,39 +43,45 @@ export default defineConfig(async () => ({
     rollupOptions: {
       output: {
         /**
-         * Splits the bundle by dependency family.
+         * Two rules only, and the restraint is deliberate.
          *
-         * The previous rule put every `node_modules` module except React into a single
-         * `vendor` chunk, which the build reported at ~4.7 MB. That is worse than a large
-         * number: any change to any dependency, and any change to application code that
-         * shares the chunk, invalidates the whole blob in the browser cache, and the
-         * "chunk larger than 500 kB" warning names a bag instead of a culprit.
+         * An earlier version of this function also split `vendor` into per-family chunks
+         * (langchain, tauri). The unit suite stayed green, but loading the built bundle in a
+         * real browser showed the app failing to mount:
          *
-         * Families are ordered most specific first; the catch-all stays last so an
-         * unrecognised dependency still lands somewhere predictable.
+         *   Cannot read properties of undefined (reading 'PureComponent')
+         *
+         * The extra partitions changed module initialization order, so a dependency that reads
+         * React at init time ran before the React chunk. Only a real browser caught it — every
+         * one of the ~2,900 jsdom tests passed with the broken bundle, because they import
+         * modules directly and never load the production bundle. See `.dsh-tmp/e2e-smoke.mjs`.
+         *
+         * The measured 9.2 MB win comes from the compiler chunk alone, so the family splits were
+         * not worth the ordering risk. React keeps its own chunk: that rule predates this change
+         * and is verified by the browser test.
          */
         manualChunks(id) {
           const inNodeModules = id.includes("node_modules");
-          if (inNodeModules && (id.includes("node_modules/react-dom") || id.includes("node_modules/react/"))) {
+          /**
+           * The React rule is the ORIGINAL broad match, deliberately.
+           *
+           * Narrowing it to `node_modules/react/` looked harmless and was not: it moved
+           * `react-window` and friends out of the React chunk into `vendor`, which changed which
+           * chunk initializes first and left them reading `React.PureComponent` on an undefined
+           * React. The app then failed to mount with nothing but "正在启动…" on screen.
+           *
+           * The browser test (`node .dsh-tmp/e2e-smoke.mjs`) is what caught it: the anchor here
+           * must stay `node_modules/react` — matching React's ecosystem, not just the core.
+           */
+          if (inNodeModules && id.includes("node_modules/react")) {
             return "vendor-react";
           }
-          // The langchain family is the heavy one and is only needed by the langchain
-          // execution kernel, so it is worth keeping separately cacheable.
-          if (inNodeModules && (id.includes("node_modules/langchain") || id.includes("node_modules/@langchain"))) {
-            return "vendor-langchain";
-          }
-          if (inNodeModules && id.includes("node_modules/@tauri-apps")) {
-            return "vendor-tauri";
-          }
           /**
-           * The TypeScript compiler (~9.2 MB rendered, measured by
-           * `scripts/analyze-bundle.mjs`) gets its own chunk.
-           *
-           * This is what makes the lazy import in `app-runtime.ts` effective: while the
-           * compiler was assigned to the catch-all `vendor` chunk — which the entry
-           * imports statically — a dynamic import of the service could not pull it out of
-           * the initial bundle, it merely referenced it. Isolated here, the compiler is
-           * reached only through `repo-intelligence-service`, so it loads on demand.
+           * The TypeScript compiler (~9.2 MB rendered, measured by `scripts/analyze-bundle.mjs`)
+           * gets its own chunk. This is what makes the lazy import in `app-runtime.ts` effective:
+           * while the compiler was assigned to the catch-all `vendor` chunk — which the entry
+           * imports statically — a dynamic import of the service could not pull it out of the
+           * initial bundle, it merely referenced it.
            */
           if (inNodeModules && id.includes("node_modules/typescript/")) {
             return "vendor-typescript";

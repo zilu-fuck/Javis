@@ -542,6 +542,39 @@
 
 ---
 
+## 真实浏览器测试（本轮新增，`pnpm e2e:smoke`，已接入 `pnpm check`）
+
+**为什么必须做这个**：本仓库此前所有测试都跑在 jsdom 里——它直接 import 模块，**从不加载生产 bundle**。
+这个缺口不是理论问题：我一次 chunk 拆分改动**通过了全部约 2,900 个单测**，而构建产物在真实浏览器里**根本挂载不起来**：
+
+```
+Cannot read properties of undefined (reading 'PureComponent')
+```
+
+屏幕上只有 "正在启动…"，**没有任何测试发现**。
+
+**做法**：`scripts/e2e/smoke.mjs` 在进程内起一个静态服务器托管 `apps/desktop/dist`，
+用**仓库自带的 Playwright + 本机 chromium headless shell** 加载它，然后断言：
+根节点渲染的 HTML 必须超过阈值、非 Tauri 的 console/page error 必须为 0。
+（Tauri API 在纯浏览器里必然缺失，所以那类失败**单独计数**——否则真实崩溃会被预期噪声淹没。）
+
+**它当场抓到一个我自己引进的真实回归**：
+
+| 构建 | 根节点 HTML 字符数 | 页面错误 | 首屏 `vendor` |
+|---|---|---|---|
+| 基线（改 chunk 前） | **9,184** | 0 | 4,945 kB |
+| 我改坏的那版 | **338** | 1（`PureComponent`） | 4,309 kB |
+| **修复后** | **9,184** | **0** | **1,338 kB（−73%）** |
+
+**根因**：我把 React 的 chunk 规则从 `node_modules/react` 收窄成 `node_modules/react/`，
+于是 `react-window` 一类的包被移出了 React chunk，**改变了 chunk 初始化顺序**，它们在 React 尚未定义时读取了
+`React.PureComponent`。
+**修法**：恢复原来那条宽匹配的 React 规则（它匹配的是 **React 生态**，不只是核心包），同时**保留** typescript 独立 chunk
+——那 9.2 MB 的收益来自编译器 chunk 本身，与生态拆分无关，而生态拆分带来的排序风险不值得。
+**闸门本身也验证过会失败**：用不可能达到的阈值（`--min-root-chars 100000`）运行，如实报 `rendered=false` 并非零退出。
+
+---
+
 ## 自审记录（本轮核对：勾选项与实际产物是否一致）
 
 32 轮里我在这个文档上打了约 50 个勾。勾只有在"它声明的东西真的存在"时才有意义，所以本轮做了一次机械核对，
@@ -695,6 +728,15 @@ $env:PATH="$env:USERPROFILE\.cargo\bin;C:\Program Files\Git\cmd;$env:PATH"; core
 
 ## 变更记录
 
+- 2026-09-13（第 48 轮，**真实测试**）：新增**真实浏览器 E2E**（`pnpm e2e:smoke`，已接入 `pnpm check`）——
+  用仓库自带 Playwright + 本机 chromium 加载**构建产物**。**它当场抓出一个我自己引进的真实回归**：
+  一次 chunk 拆分让**全部约 2,900 个单测通过**，而应用在真实浏览器里**挂载失败**（`PureComponent` undefined，
+  屏幕只剩"正在启动…"）。根因是我把 React chunk 规则从 `node_modules/react` 收窄为 `node_modules/react/`，
+  把 `react-window` 一类包移出了 React chunk、**改变了 chunk 初始化顺序**。
+  修法：恢复宽匹配的 React 规则 + **保留** typescript 独立 chunk（9.2 MB 收益来自它，生态拆分的排序风险不值得）。
+  结果：**渲染恢复 9,184 字符 / 0 错误，首屏 vendor 仍从 4,945 → 1,338 kB（−73%）**。
+  闸门也实测过会失败（不可能阈值 → `rendered=false` + 非零退出）。**这是本次会话最重要的一次发现**：
+  单测全绿 ≠ 应用能跑起来。
 - 2026-09-13（第 47 轮，**收尾**）：最终门禁链**逐项实测**全部通过：`typecheck` / `package-boundaries(+test)` / `docs:check(+test)` /
   `roadmap:audit` / `bundle:check` / `eval` / `eval:test` / 全仓测试 / `rust:test`；
   其中 **golden eval 29/29（100%）**、**文档漂移 0 错 0 警**、**勾选审计 67 路径 0 缺失**。
