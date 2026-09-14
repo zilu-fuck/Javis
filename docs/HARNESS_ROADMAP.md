@@ -607,7 +607,7 @@ Cannot read properties of undefined (reading 'PureComponent')
 ## 交接说明（给接手的下一个会话）
 
 **当前状态**：`pnpm typecheck` / `pnpm docs:check` / `pnpm roadmap:audit` / `pnpm bundle:check` 与全部
-**1720 core + 1022 desktop + 221 ui + 53 tools + 6 sidecar + 599 Rust** 测试全绿；最近几轮的改动**仍在工作树中未提交**（`git status` 可见新增文件与修改）；已提交历史见 `git log --oneline`。
+**1720 core + 1022 desktop + 221 ui + 53 tools + 6 sidecar + 599 Rust** 测试全绿；工作树干净；积压改动已拆成 7 个逻辑提交并与此前 54 个提交一起**推送到 `origin/codex/langchain-agent-runtime-migration`**（快进推送，未强推）；已提交历史见 `git log --oneline`。
 （core 由 1652 增至 1720：16 个产物类型 + 31 个指挥官链路对齐 + 8 个可观测性用例 + 4 个自述能力问题用例；上方带日期的实测记录保持当时快照不动。）
 
 **这段工作的规模**（供判断完成度，不是自我评价）：
@@ -690,8 +690,8 @@ $env:PATH="$env:USERPROFILE\.cargo\bin;C:\Program Files\Git\cmd;$env:PATH"; core
 - [x] **G4** **仓库卫生**：删除 5 个临时产物共 **128.1 MB**（`.tmp-gcli-main.zip` 23.4 + `.tmp-gcli-main/` 103.1 +
   `.tmp-pages/` 1.1 + 两个 `.tmp-gcli-*.txt`），并在 `.gitignore` 补 `.dsh-tmp/`、`.tmp-*/`、`.tmp-*`、`runs/`；
   生成型诊断包 `docs/qa/diagnostics/` 也忽略（含本机活动数据）。`git status` 从 37 条噪声降到 0（全是真实源码）。
-  **并把 11 轮积压的工作提交了**：`ca4d58e`，94 文件 / +12,970 / −113，工作树干净
-- [ ] **G4b** 推分支开 PR（本地已提交，远端未推；需要你的凭据与判断）
+  **并把 11 轮积压的工作提交了**：`bcff3f8`（原 `ca4d58e`），94 文件 / +12,970 / −113，工作树干净
+- [~] **G4b** 分支已推送（`1d6d6ae..a6366ad`，快进）；**PR 仍未开**（需要你的判断）。推送时 `bcff3f8` 这个提交被 GitHub 推送保护拦下过：`scripts/test-eval-redaction.mjs` 里的测试夹具是一个 `sk-` + 32 位随机串（形状与真实 DeepSeek key 一致），已换成一眼假的占位符并重放其上 39 个提交——因为这些提交都还没上远端，推送仍是快进，**没有强推**；改写前的完整历史保留在本地分支 `backup/pre-push-protection-rewrite`。**如果那串是你真实的 key，请立刻轮换**（它从未被推送出去，但它曾存在于本地历史与备份分支里）。
 - [x] **G5** 更新决策与制品校验（`packages/core/src/update-policy.ts` 24 测试 + `scripts/release/update-manifest.mjs`）：
   **先核查了现状**——`tauri.conf.json` **根本没有配置 `updater` 插件**，且 `allowDowngrades: false`（降级安装会被 OS 层拒绝，
   所以回滚确实必须先卸载）。因此本轮交付的是"更新器存在之前就必须正确"的部分：
