@@ -140,7 +140,7 @@ corepack pnpm docs:check            # 文档漂移：引用不存在的 pnpm 脚
 corepack pnpm docs:test
 corepack pnpm roadmap:audit         # 路线图勾选一致性：它引用的每个文件路径都必须存在
 corepack pnpm bundle:check          # 渲染进程不得静态导入构建期/node 专用包（typescript/playwright/node:fs…）
-corepack pnpm -r --if-present test  # core 1652 / desktop 1012 / ui 219 / tools 53 / sidecar 6
+corepack pnpm -r --if-present test  # core 1720 / desktop 1022 / ui 221 / tools 53 / sidecar 6
 corepack pnpm rust:test             # 599
 ```
 

@@ -573,6 +573,18 @@ Cannot read properties of undefined (reading 'PureComponent')
 ——那 9.2 MB 的收益来自编译器 chunk 本身，与生态拆分无关，而生态拆分带来的排序风险不值得。
 **闸门本身也验证过会失败**：用不可能达到的阈值（`--min-root-chars 100000`）运行，如实报 `rendered=false` 并非零退出。
 
+**2026-09-13 追加：布局断言**（`overflowX` / 右对齐气泡是否越界）。在同一次运行里注入一份
+`ThreadView` 结构的探针（助手消息 + 用户气泡 + 执行面板 + 思考条，含 320 字 `nowrap` 预览），
+量 `.javis-thread` 的真实 `scrollWidth`：
+
+| 被测 CSS | `overflowX` | 用户气泡右边界 / 视口 |
+|---|---|---|
+| 修复前（思考条 `max-width: min(760px, 78%)`） | **+901 px** | **1828 / 1000（越界）** |
+| 修复后（与执行面板同列 + `overflow: hidden`） | 0 px | 927 / 1000 |
+
+这一条闸门抓的是一个**没有单测能抓到的真实缺陷**：网格轨道被 `nowrap` 预览撑到 2.4 倍视口宽，
+`justify-self: end` 的用户气泡被排到视口之外——使用者看到的正是"用户发的消息没有了"。
+
 ---
 
 ## 自审记录（本轮核对：勾选项与实际产物是否一致）
@@ -583,7 +595,7 @@ Cannot read properties of undefined (reading 'PureComponent')
 | 核对项 | 结果 |
 |---|---|
 | 路线图引用的**文件路径**（63 个）是否都存在 | ✅ **0 缺失** |
-| 文中引用的 **core 测试数**与实际运行是否一致 | ✅ 引用 1652 = 实测 1652 |
+| 文中引用的 **core 测试数**与实际运行是否一致 | ✅ 最新引用 1720 = 本轮实测 1720 |
 
 **过程诚实记录**：这个审计脚本的**第一版是错的**——它用一份候选目录前缀去猜路径，于是把
 `packages/core/src/resume-plan.ts`、`tauri.conf.json`、`lib/doc-drift.mjs` 等**真实存在的文件**报成缺失（24 个）。
@@ -595,7 +607,8 @@ Cannot read properties of undefined (reading 'PureComponent')
 ## 交接说明（给接手的下一个会话）
 
 **当前状态**：`pnpm typecheck` / `pnpm docs:check` / `pnpm roadmap:audit` / `pnpm bundle:check` 与全部
-**1652 core + 1012 desktop + 219 ui + 53 tools + 6 sidecar + 599 Rust** 测试全绿；工作树干净；最近提交见 `git log --oneline`。
+**1720 core + 1022 desktop + 221 ui + 53 tools + 6 sidecar + 599 Rust** 测试全绿；最近几轮的改动**仍在工作树中未提交**（`git status` 可见新增文件与修改）；已提交历史见 `git log --oneline`。
+（core 由 1652 增至 1720：16 个产物类型 + 31 个指挥官链路对齐 + 8 个可观测性用例 + 4 个自述能力问题用例；上方带日期的实测记录保持当时快照不动。）
 
 **这段工作的规模**（供判断完成度，不是自我评价）：
 约 **40 轮**推进，**30+ 个提交**，测试从 core ~1298 → **1652**；新增 **7 个可运行闸门**：
