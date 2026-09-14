@@ -3032,10 +3032,10 @@ export async function executeCapabilityStep(
         step,
         context,
       });
-      writeStepOutput(step.outputContextKey, validated.output, context);
+      writeStepOutput(step.outputContextKey, validated.output, context, step);
       return { output: validated.output, toolName: step.toolName };
     }
-    writeStepOutput(step.outputContextKey, output, context);
+    writeStepOutput(step.outputContextKey, output, context, step);
     return { output, toolName: step.toolName };
   }
 
@@ -3097,7 +3097,7 @@ export async function executeCapabilityStep(
     step,
     context,
   });
-  writeStepOutput(step.outputContextKey, validated.output, context);
+  writeStepOutput(step.outputContextKey, validated.output, context, step);
 
   return { output: validated.output, toolName: descriptor.name };
 }

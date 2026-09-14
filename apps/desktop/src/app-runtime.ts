@@ -162,6 +162,7 @@ function loadRepoIntelligence() {
   return (repoIntelligenceModule ??= import("./repo-intelligence-service"));
 }
 import { inspectWorkspaceTree } from "./workspace-inspection-service";
+import { collectPlannerWorkspaceInventory } from "./planner-workspace-inventory";
 import { fetchTrendHotList } from "./trending-service";
 import {
   createConfiguredModelProvider,
@@ -1915,7 +1916,19 @@ export function createJavisRuntime({
             sharedContext.set("preprocessedChineseInput", preprocessedInput);
           }
           const result = await planWithModelProviderStreaming(
-            withPreprocessedCommanderGoal(request, preprocessedInput),
+            {
+              ...withPreprocessedCommanderGoal(request, preprocessedInput),
+              // W1: the planner owns no read tool, so hand it the deterministic
+              // tree summary instead of letting it guess structure or file targets.
+              workspaceInventory: await collectPlannerWorkspaceInventory({
+                workspacePath: getWorkspacePath(),
+                inspectWorkspace: (inspectRequest) =>
+                  inspectWorkspaceTree(getWorkspacePath().trim(), inspectRequest, {
+                    listDirectory: (path) =>
+                      listDirectory(path, { workspaceRoot: getWorkspacePath().trim() }),
+                  }),
+              }),
+            },
             providerFor("commander"),
             () => undefined,
             isAgentMemoryEnabled?.()
@@ -3725,6 +3738,7 @@ async function planWithModelProviderStreaming(
     const planParams = {
       userGoal: requestWithDate.userGoal,
       workspacePath: requestWithDate.workspacePath,
+      workspaceInventory: requestWithDate.workspaceInventory,
       currentDate: requestWithDate.currentDate,
       locale,
       workflowId,

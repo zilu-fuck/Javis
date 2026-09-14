@@ -922,6 +922,84 @@ describe("createJavisRuntime", () => {
     runtime.dispose();
   });
 
+  it("hands the Commander a deterministic workspace inventory in planning prompts", async () => {
+    const commanderPlanPrompts: string[] = [];
+    const complete = vi.fn((prompt: string, options?: unknown) => {
+      if (prompt.includes("Chinese input preprocessor")) {
+        return Promise.resolve({ text: "{}" });
+      }
+      if (prompt.includes("Write a concise natural-language answer")) {
+        return Promise.resolve({ text: "已梳理。" });
+      }
+      if (prompt.includes(COMMANDER_PLAN_SCHEMA_MARKER)) {
+        commanderPlanPrompts.push(combinedPlannerPrompt(prompt, options));
+      }
+      return Promise.resolve({
+        text: JSON.stringify({
+          title: "Answer directly",
+          reasoning: "Structure question only.",
+          steps: [{
+            id: "answer",
+            title: "Answer the structure question",
+            assignedAgentKind: "commander",
+            executionMode: "direct_response",
+            dependsOn: [],
+            successCriteria: "The user receives an answer.",
+          }],
+        }),
+      });
+    });
+    modelMocks.provider = {
+      id: "test-provider",
+      settings: {
+        provider: "deepseek",
+        model: "deepseek-chat",
+        apiKeyReference: "default",
+        baseUrl: "",
+      },
+      complete,
+      stream: vi.fn(async function* () {
+        throw new Error("stream unavailable in test");
+      }),
+      defaultSettingsForLocale: vi.fn(),
+    } as unknown as ModelProvider;
+
+    // The inventory comes from the deterministic primitive, so the directory
+    // listing it reads is the thing to stub here.
+    const invokeMock = vi.mocked(invoke);
+    invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+      if (command !== "list_directory") return undefined;
+      const requested = String((args as { path?: string } | undefined)?.path ?? "").replace(/\\/g, "/");
+      if (requested !== "E:/Javis") return [];
+      return [
+        { name: "packages", path: "E:/Javis/packages", isDir: true },
+        { name: "package.json", path: "E:/Javis/package.json", isDir: false },
+      ];
+    });
+
+    const runtime = createJavisRuntime({
+      getWorkspacePath: () => "E:/Javis",
+      modelSettings: DEFAULT_MODEL_SETTINGS,
+      getAvailableToolDescriptors: () =>
+        initialToolDescriptors.filter((descriptor) => descriptor.name !== "memory.search"),
+    });
+    const snapshots = subscribeToRuntime(runtime);
+
+    // The inventory is injected for every planning call (the Commander should not
+    // have to guess whether it needs the tree), so any goal that reaches the
+    // planner exercises it.
+    runtime.start("What did we decide before?", { mode: "project" });
+
+    await vi.waitFor(() => expect(commanderPlanPrompts).toHaveLength(1));
+    const plannerPrompt = commanderPlanPrompts[0];
+    expect(plannerPrompt).toMatch(/(?:工作区清单（确定性、只读）|Workspace inventory \(deterministic, read-only\))/);
+    expect(plannerPrompt).toContain("top-level: packages");
+    expect(plannerPrompt).toContain("manifests: package.json");
+    await vi.waitFor(() => expect(snapshots[snapshots.length - 1]?.status).toBe("completed"));
+
+    runtime.dispose();
+  });
+
   it("includes discovered MCP subtool descriptors in Commander planning prompts", async () => {
     const commanderPlanPrompts: string[] = [];
     const mcpToolName = `mcp.${encodeMcpToolServerName("javis:filesystem")}.tool.${encodeMcpToolServerName("search")}`;
@@ -1250,9 +1328,11 @@ describe("createJavisRuntime", () => {
     await vi.waitFor(() => expect(commanderPlanPrompts).toHaveLength(1));
     expect(commanderPlanPrompts[0]).toContain("\"mcp.filesystem.listTools\"");
     // P0-3: tool names are emitted in deterministic codepoint order, so the
-    // commander allowlist starts with commander.askUser regardless of the
-    // descriptor registration order.
-    expect(commanderPlanPrompts[0]).toContain("\"allowedToolNames\":[\"commander.askUser\",\"commander.plan\"");
+    // commander allowlist is sorted regardless of the descriptor registration
+    // order (code.inspectWorkspace sorts ahead of commander.*).
+    expect(commanderPlanPrompts[0]).toContain(
+      "\"allowedToolNames\":[\"code.inspectWorkspace\",\"commander.askUser\",\"commander.plan\"",
+    );
     expect(commanderPlanPrompts[0]).toContain("\"mcp.filesystem.listTools\"");
     await vi.waitFor(() => expect(snapshots[snapshots.length - 1]?.status).toBe("completed"));
 

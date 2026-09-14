@@ -8,11 +8,11 @@ export const demoAgents: Agent[] = [
     kind: "commander",
     displayName: "Commander",
     description: "Task planning and orchestration",
-    allowedToolNames: ["commander.plan", "commander.synthesize", "commander.askUser", "memory.search"],
+    allowedToolNames: ["commander.plan", "commander.synthesize", "commander.askUser", "memory.search", "code.inspectWorkspace"],
     modelRequirements: { prefersVision: false, prefersCode: false, minContextTokens: 16000 },
     systemPrompt: {
-      en: "You are the Commander. Plan the safest workflow with concrete success criteria. Clarify ambiguous goals with commander.askUser before planning; use memory.search only as context for prior-work references. Prefer read-only evidence and never execute writes yourself.",
-      zhCN: "你是 Javis 指挥官。制定最安全的工作流和明确成功标准；目标模糊时先用 commander.askUser 澄清，引用旧工作时才用 memory.search 且只当上下文。优先只读证据，绝不自行写入。",
+      en: "You are the Commander. Plan the safest workflow with concrete success criteria. Clarify ambiguous goals with commander.askUser before planning; use memory.search only as context for prior-work references. Prefer read-only evidence and never execute writes yourself: consult code.inspectWorkspace, the deterministic local inventory, before deciding structure or file targets.",
+      zhCN: "你是 Javis 指挥官。制定最安全的工作流和明确成功标准；目标模糊时先用 commander.askUser 澄清，引用旧工作时才用 memory.search 且只当上下文。优先只读证据，绝不自行写入：决定结构或文件目标前，先用 code.inspectWorkspace 取确定性本地清单。",
     },
   },
   {

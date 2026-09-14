@@ -3,7 +3,10 @@ import {
   buildHandoffReport,
   CONTEXT_KEYS,
   createHandoffReportArtifacts,
+  readStepReports,
+  STEP_REPORTS_CONTEXT_KEY,
   writeStepArtifactOutput,
+  writeStepOutput,
   createSharedTaskContext,
   formatHandoffReportMarkdown,
   formatStepInputValidationError,
@@ -363,5 +366,56 @@ describe("artifact output helpers", () => {
       },
     });
     expect(context.getEnvelope("diffPreview")?.artifactId).not.toBe(forged.artifactId);
+  });
+});
+
+describe("step reports to the Commander", () => {
+  it("records a bounded report whenever a step hands off an output", () => {
+    const context = createSharedTaskContext();
+    writeStepOutput("inspectionResult", { files: ["a", "b"], note: "ok" }, context, {
+      id: "inspect",
+      assignedAgentKind: "code",
+    });
+
+    const reports = readStepReports(context);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      stepId: "inspect",
+      assignedAgentKind: "code",
+      outputContextKey: "inspectionResult",
+    });
+    expect(reports[0].summary).toContain("\"note\":\"ok\"");
+    expect(reports[0].reportedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/u);
+    // The report reaches the Commander because synthesis receives the whole context.
+    expect(context.get(STEP_REPORTS_CONTEXT_KEY)).toEqual(reports);
+  });
+
+  it("reports artifact-path steps too, because the Commander-DAG path writes that way", () => {
+    const context = createSharedTaskContext();
+    writeStepArtifactOutput("verificationResult", { status: "pass" }, context, {
+      taskId: "task-1",
+      runId: "run-1",
+      stepId: "verify",
+      agentKind: "verifier",
+    });
+    expect(readStepReports(context)).toEqual([
+      expect.objectContaining({ stepId: "verify", assignedAgentKind: "verifier" }),
+    ]);
+  });
+
+  it("does not report steps that declare no output key", () => {
+    const context = createSharedTaskContext();
+    writeStepOutput(undefined, { anything: true }, context, { id: "noop", assignedAgentKind: "file" });
+    expect(readStepReports(context)).toEqual([]);
+  });
+
+  it("keeps summaries short and survives a malformed entry", () => {
+    const context = createSharedTaskContext();
+    writeStepOutput("big", "x".repeat(2_000), context, { id: "big-step", assignedAgentKind: "file" });
+    const [report] = readStepReports(context);
+    expect(report.summary.length).toBeLessThanOrEqual(241);
+
+    context.set(STEP_REPORTS_CONTEXT_KEY, [{ stepId: 42 }]);
+    expect(readStepReports(context)).toEqual([]);
   });
 });

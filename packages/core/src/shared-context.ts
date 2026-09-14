@@ -245,16 +245,95 @@ export function resolveStepInput(
 }
 
 /**
- * Write a step's output to SharedContext under its declared outputContextKey.
+ * Reserved context key holding the structured per-step reports.
+ *
+ * The Commander's synthesis already receives the whole shared context as
+ * evidence, so a step that reports here is reported *to the Commander* by
+ * construction — that is the "下级 agent 向指挥官汇报" edge of the intended chain.
+ * It is deliberately not a step-declared handoff key, so the handoff report stays
+ * about step-to-step handoffs instead of this briefing.
+ */
+export const STEP_REPORTS_CONTEXT_KEY = "stepReports";
+
+/** One step's report back to the Commander. */
+export interface StepReport {
+  stepId: string;
+  assignedAgentKind: string;
+  outputContextKey: string;
+  /** Bounded description of what the step produced, never the whole payload. */
+  summary: string;
+  reportedAt: string;
+}
+
+const MAX_STEP_REPORTS = 50;
+const MAX_STEP_REPORT_SUMMARY_CHARS = 240;
+
+/**
+ * Write a step's output to SharedContext under its declared outputContextKey and
+ * record that step's report back to the Commander.
  * No-op if outputContextKey is not set.
  */
 export function writeStepOutput(
   outputContextKey: string | undefined,
   output: unknown,
   context: SharedTaskContext,
+  step?: { id?: string; assignedAgentKind?: string },
 ): void {
   if (!outputContextKey) return;
   context.set(outputContextKey, output);
+  if (!step?.id) return;
+  recordStepReport(context, {
+    stepId: step.id,
+    assignedAgentKind: step.assignedAgentKind ?? "unknown",
+    outputContextKey,
+    summary: summarizeStepOutput(output),
+    reportedAt: new Date().toISOString(),
+  });
+}
+
+/**
+ * Appends one report, keeping the list bounded. Both writers funnel through here,
+ * so every step that hands off an artifact also reports it to the Commander.
+ */
+function recordStepReport(context: SharedTaskContext, report: StepReport): void {
+  const reports = readStepReports(context);
+  reports.push(report);
+  context.set(STEP_REPORTS_CONTEXT_KEY, reports.slice(-MAX_STEP_REPORTS));
+}
+
+/** Reads the reports recorded so far; tolerates a missing or malformed entry. */
+export function readStepReports(context: SharedTaskContext): StepReport[] {
+  const existing = context.get<unknown>(STEP_REPORTS_CONTEXT_KEY);
+  if (!Array.isArray(existing)) return [];
+  return existing.filter(isStepReport);
+}
+
+function isStepReport(value: unknown): value is StepReport {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.stepId === "string"
+    && typeof record.outputContextKey === "string"
+    && typeof record.summary === "string"
+    && typeof record.reportedAt === "string";
+}
+
+/** Keeps the report readable without copying a whole artifact into the context. */
+function summarizeStepOutput(output: unknown): string {
+  if (output === null || output === undefined) return "(no output)";
+  if (typeof output === "string") return truncate(output);
+  if (Array.isArray(output)) return `array(${output.length}) ${truncate(JSON.stringify(output.slice(0, 3)))}`;
+  if (typeof output === "object") {
+    const keys = Object.keys(output as Record<string, unknown>);
+    if (keys.length <= 6) return truncate(JSON.stringify(output));
+    return `object(${keys.length} keys) ${truncate(keys.slice(0, 6).join(", "))}`;
+  }
+  return String(output);
+}
+
+function truncate(value: string): string {
+  return value.length > MAX_STEP_REPORT_SUMMARY_CHARS
+    ? `${value.slice(0, MAX_STEP_REPORT_SUMMARY_CHARS)}\u2026`
+    : value;
 }
 
 export function writeStepArtifactOutput(
@@ -266,6 +345,18 @@ export function writeStepArtifactOutput(
   if (!outputContextKey) return;
   const artifact = toArtifactEnvelope(output, outputContextKey, artifactContext);
   context.setEnvelope(outputContextKey, artifact);
+  // The artifact context already carries the producing step, so the same report
+  // is recorded here: the Commander-DAG path writes outputs this way, and a
+  // report that only covered the other writer would miss every DAG step.
+  if (artifactContext.stepId) {
+    recordStepReport(context, {
+      stepId: artifactContext.stepId,
+      assignedAgentKind: artifactContext.agentKind ?? "unknown",
+      outputContextKey,
+      summary: summarizeStepOutput(output),
+      reportedAt: new Date().toISOString(),
+    });
+  }
 }
 
 function toArtifactEnvelope(

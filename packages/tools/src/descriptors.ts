@@ -443,7 +443,7 @@ export const initialToolDescriptors: ToolDescriptor[] = [
     permissionLevel: "read",
     summary: "Inspect the selected workspace tree without requiring Git, returning bounded directory evidence, module candidates, manifests, and obvious risk indicators.",
     capabilityTags: ["workspace_inspect"],
-    ownerAgentKinds: ["code"],
+    ownerAgentKinds: ["code", "commander"],
     inputSchema: objectSchema({
       maxDepth: { type: "integer", minimum: 1, maximum: 4 },
       maxEntries: { type: "integer", minimum: 20, maximum: 1000 },

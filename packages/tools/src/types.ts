@@ -399,6 +399,13 @@ export interface CommanderPlanRequest {
   /** Runtime-selected current workspace. This is context, not user-authored instruction text. */
   workspacePath?: string;
   /**
+   * Deterministic, read-only workspace inventory collected before planning
+   * (`code.inspectWorkspace`). Lets the planner decide structure and file
+   * targets from the real tree instead of guessing from the goal text.
+   * Rendered as untrusted planner data, never as instructions.
+   */
+  workspaceInventory?: string;
+  /**
    * Image data URLs for a vision-capable Commander model. This field is
    * transport-only and must never be interpolated into planner prompts or
    * persisted task artifacts.

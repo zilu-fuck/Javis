@@ -272,6 +272,12 @@ export function buildCommanderTaskPrompt(params: {
   userGoal: string;
   workflowId: string;
   workspacePath?: string;
+  /**
+   * Deterministic workspace inventory collected before planning. Rendered as
+   * planner data so the Commander can decide structure and file targets from the
+   * real tree; the boundary text keeps it out of the instruction channel.
+   */
+  workspaceInventory?: string;
   omittedPriorMessageCount?: number;
   locale?: string;
   currentDate?: CommanderPlanPromptParams["currentDate"];
@@ -293,6 +299,17 @@ export function buildCommanderTaskPrompt(params: {
       : "",
     params.availableAgents
       ? `${localizedLabel(locale, "Available agents", "可用 Agent")}: ${JSON.stringify(params.availableAgents)}`
+      : "",
+    params.workspaceInventory?.trim()
+      ? [
+          localizedLabel(locale, "Workspace inventory (deterministic, read-only)", "工作区清单（确定性、只读）"),
+          localizedLabel(
+            locale,
+            "plan against this real tree and do not invent structure",
+            "按这份真实结构规划，不要凭空造结构",
+          ),
+          params.workspaceInventory.trim(),
+        ].join(": ")
       : "",
     ...(params.includeRequiredInputSummary && params.availableTools
       ? formatRequiredToolInputsBlock(params.availableTools, locale)

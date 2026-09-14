@@ -82,7 +82,9 @@ describe("tool descriptors", () => {
       (tool) => tool.name === "code.inspectWorkspace",
     );
     expect(descriptor?.permissionLevel).toBe("read");
-    expect(descriptor?.ownerAgentKinds).toEqual(["code"]);
+    // The Commander owns this tool too: planning needs the deterministic tree
+    // summary, because the planner has no other way to observe the workspace.
+    expect(descriptor?.ownerAgentKinds).toEqual(["code", "commander"]);
     expect(descriptor?.requiredInputs).toBeUndefined();
     expect(descriptor?.inputSchema).toBeDefined();
     if (!descriptor?.inputSchema) return;
