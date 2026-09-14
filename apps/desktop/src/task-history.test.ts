@@ -1636,3 +1636,35 @@ function bindValuesToTaskHistoryRow(values: DatabaseValue[]): TaskHistoryRow {
     snapshot_json: String(snapshotJson),
   };
 }
+
+describe("kept reasoning digest persists", () => {
+  const digestTask = {
+    id: "task-digest",
+    title: "Task with thinking",
+    userGoal: "Goal",
+    status: "completed" as const,
+    commanderMessage: "Done",
+    plan: [],
+    agents: [],
+    logs: [],
+    reasoningDigest: "先确认产物格式，再决定文件名。",
+    reasoningDigestAgentKind: "commander" as const,
+  } satisfies TaskSnapshot;
+
+  it("survives a persistence round trip", () => {
+    const sanitized = sanitizeTaskSnapshot(digestTask);
+    expect(sanitized?.reasoningDigest).toBe("先确认产物格式，再决定文件名。");
+    expect(sanitized?.reasoningDigestAgentKind).toBe("commander");
+
+    // Loading the stored snapshot must keep it too, which is what makes the
+    // thinking readable when the task is reopened from history.
+    const reloaded = sanitizeTaskSnapshot(sanitized);
+    expect(reloaded?.reasoningDigest).toBe("先确认产物格式，再决定文件名。");
+  });
+
+  it("drops a digest of the wrong shape instead of trusting it", () => {
+    const sanitized = sanitizeTaskSnapshot({ ...digestTask, reasoningDigest: { text: "nope" } });
+    expect(sanitized).not.toBeNull();
+    expect(sanitized?.reasoningDigest).toBeUndefined();
+  });
+});

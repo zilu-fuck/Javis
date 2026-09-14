@@ -163,6 +163,7 @@ function loadRepoIntelligence() {
 }
 import { inspectWorkspaceTree } from "./workspace-inspection-service";
 import { collectPlannerWorkspaceInventory } from "./planner-workspace-inventory";
+import { createReasoningStreamForwarder } from "@javis/core";
 import { fetchTrendHotList } from "./trending-service";
 import {
   createConfiguredModelProvider,
@@ -1909,6 +1910,13 @@ export function createJavisRuntime({
         const taskId = taskIdRef.current ?? "task-unknown";
         streamingAgentRef.current = "commander";
         eventBus.emit({ kind: "agent.chunk_start", taskId, agentKind: "commander" });
+        // Planning decides what happens next, so its thinking is the most useful
+        // to keep: forward reasoning deltas instead of discarding the stream.
+        const reasoningForwarder = createReasoningStreamForwarder({
+          eventBus,
+          taskId,
+          agentKind: "commander",
+        });
         try {
           const preprocessedInput = await preprocessingByTaskId.get(taskId);
           preprocessingByTaskId.delete(taskId);
@@ -1930,7 +1938,12 @@ export function createJavisRuntime({
               }),
             },
             providerFor("commander"),
-            () => undefined,
+            // The plan is the step that decides what happens next, so its thinking
+            // is the most useful to keep: forward reasoning deltas instead of
+            // discarding the stream.
+            (chunk) => {
+              if (reasoningForwarder) reasoningForwarder.push(chunk);
+            },
             isAgentMemoryEnabled?.()
               ? async () => buildAgentMemoryPromptContext?.({
                   userGoal: request.userGoal,
@@ -1997,6 +2010,11 @@ export function createJavisRuntime({
           let streamFinishReason: string | undefined;
           try {
             const modelProvider = providerFor("commander", false);
+            const synthesisReasoning = createReasoningStreamForwarder({
+              eventBus,
+              taskId,
+              agentKind: "commander",
+            });
             let fullText = "";
             for await (const chunk of modelProvider.stream(prompt, {
               useMaxOutputTokens: true,
@@ -2012,8 +2030,10 @@ export function createJavisRuntime({
               },
               onUsage: observer?.onUsage,
             })) {
+              synthesisReasoning.push(chunk);
               fullText += chunk.text;
             }
+            synthesisReasoning.close();
             if (isOutputTruncationFinishReason(streamFinishReason)) {
               throw new Error(`Commander synthesis was truncated (${streamFinishReason}).`);
             }

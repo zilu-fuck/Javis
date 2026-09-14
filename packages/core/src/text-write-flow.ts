@@ -19,6 +19,7 @@ import { appendLog, appendTaskLogEntry } from "./snapshot-utils";
 import type { TaskEventBus } from "./task-event-bus";
 import { DEFAULT_TASK_TIMEOUT_MS, isTaskCancelledError, isTaskStallError, TaskTimeoutError, throwIfTaskAborted, withStallWatchdog, withTaskTimeout } from "./task-wait";
 import { addModelUsage, createEmptyTokenUsageSummary } from "./token-usage";
+import { createReasoningStreamForwarder } from "./reasoning-events";
 import { decideTextWriteContract } from "./text-write-contract";
 import { verifyTextWriteArtifact } from "./text-write-verification";
 
@@ -773,6 +774,13 @@ async function generateTextContent(
       let modelCallRecorded = false;
       let interruptedBy: "stall" | "timeout" | undefined;
       eventBus.emit({ kind: "agent.chunk_start", taskId, agentKind: "commander" });
+      // Long-form generation is where users most want to see the model think, so
+      // forward reasoning deltas here instead of dropping them.
+      const reasoningForwarder = createReasoningStreamForwarder({
+        eventBus,
+        taskId,
+        agentKind: "commander",
+      });
       try {
         // Two guards, deliberately different:
         //  * the stall watchdog fails a generation that has gone quiet, which is
@@ -795,6 +803,7 @@ async function generateTextContent(
                 },
               })) {
                 throwIfTaskAborted(signal, "Text content generation");
+                reasoningForwarder.push(chunk);
                 streamedText += chunk.text;
                 reportProgress();
                 eventBus.emit({
@@ -826,6 +835,7 @@ async function generateTextContent(
         );
         recordModelCall(purpose, tokenUsage);
         modelCallRecorded = true;
+        reasoningForwarder.close();
         eventBus.emit({
           kind: "agent.chunk_end",
           taskId,
@@ -840,6 +850,7 @@ async function generateTextContent(
         if (!modelCallRecorded) {
           recordModelCall(purpose, tokenUsage);
         }
+        reasoningForwarder.close(error instanceof Error ? error.message : String(error));
         eventBus.emit({
           kind: "agent.chunk_end",
           taskId,

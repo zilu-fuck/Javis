@@ -1,4 +1,5 @@
 import type { AgentKind, TaskLogEntry, TaskSnapshot } from "./index";
+import { summarizeReasoningDigest } from "./reasoning-digest";
 import { appendTaskLogEntry, compactTaskLogs } from "./snapshot-utils";
 import { taskEventToLogEntry, type TaskRuntimeEvent } from "./task-event-bus";
 
@@ -126,6 +127,21 @@ export function createDeltaReducer(initial: TaskSnapshot): DeltaReducer {
         case "agent.reasoning_chunk_end": {
           partialReasonings.delete(event.agentKind);
           reassignActiveStreamingAgentKind(event.agentKind);
+          // Keep a redacted, bounded digest of what the model was thinking. The
+          // text is otherwise discarded the moment the stream ends, which left no
+          // durable answer to "why did it do that".
+          const digest = summarizeReasoningDigest(event.fullText);
+          if (digest) {
+            current = {
+              ...current,
+              reasoningDigest: digest,
+              reasoningDigestAgentKind: event.agentKind,
+            };
+            pushLog({
+              ...taskEventToLogEntry(event),
+              userMessage: `${event.error ? "思考中断" : "思考"}：${digest}`,
+            });
+          }
           break;
         }
         case "step.progress":

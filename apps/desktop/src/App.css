@@ -9378,6 +9378,9 @@ button.javis-message-detail-body:focus-visible {
 }
 
 .javis-reasoning-stream {
+  width: min(780px, calc(100% - 108px));
+  min-width: 0;
+  margin-left: 68px;
   border: 1px solid var(--color-border-muted, rgba(128, 128, 128, 0.25));
   border-radius: 12px;
   padding: 10px 14px;
@@ -9388,6 +9391,66 @@ button.javis-message-detail-body:focus-visible {
   display: flex;
   align-items: center;
   margin-bottom: 6px;
+}
+
+.javis-reasoning-label {
+  display: block;
+  margin: 0 0 6px;
+  color: var(--color-muted);
+  font-size: 12px;
+  letter-spacing: 0.01em;
+}
+
+/* The kept thinking row: one visible line that expands to the full digest.
+   Same column as `.javis-message` / `.javis-execution-summary`. The digest is a
+   grid child of `.javis-thread`, and its nowrap preview would otherwise report a
+   ~2000px min-content width: the grid track grows past the viewport, the thread
+   gains a phantom horizontal scrollbar, and right-aligned items (user bubbles,
+   cards) drift sideways. `min-width: 0` + a definite width + `overflow: hidden`
+   keep the track at the container width — same recipe as the execution panel. */
+.javis-reasoning-digest {
+  width: min(780px, calc(100% - 108px));
+  min-width: 0;
+  margin: 6px 0 2px 68px;
+  overflow: hidden;
+}
+
+.javis-reasoning-digest-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid rgba(120, 130, 124, 0.2);
+  border-radius: 10px;
+  background: rgba(246, 248, 247, 0.72);
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.javis-reasoning-digest-toggle:hover {
+  background: rgba(240, 244, 242, 0.9);
+}
+
+.javis-reasoning-digest-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-muted);
+  font-size: 12.5px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.javis-reasoning-digest-arrow {
+  color: var(--color-muted);
+  font-size: 11px;
+}
+
+.javis-reasoning-digest .javis-reasoning-text {
+  margin-top: 6px;
+  padding: 0 10px;
 }
 
 .javis-reasoning-text {

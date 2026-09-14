@@ -62,6 +62,8 @@ import type { AgentCapabilityScore, AgentCapabilityVerificationInput, AgentRegis
 import { runCodeReviewTask } from "./code-review-flow";
 import { runPdfOrganizationPreviewTask } from "./pdf-organization-flow";
 import { isTextWriteGoal, runTextWriteTask } from "./text-write-flow";
+export { createReasoningStreamForwarder } from "./reasoning-events";
+export type { ReasoningStreamForwarder } from "./reasoning-events";
 import { isVisionGoal, runVisionTask } from "./vision-flow";
 import { runProjectInspectionTask } from "./project-inspection-flow";
 import {
@@ -1452,6 +1454,13 @@ export interface TaskSnapshot {
   streamingAgentKind?: AgentKind;
   /** Accumulated partial reasoning (model thinking) during streaming. */
   streamingReasoningText?: string;
+  /**
+   * Redacted, bounded digest of the last finished reasoning stream. Unlike
+   * streamingReasoningText this survives the step, so "why" stays readable.
+   */
+  reasoningDigest?: string;
+  /** Which agent produced reasoningDigest. */
+  reasoningDigestAgentKind?: AgentKind;
   /** Agent currently producing streaming reasoning output. */
   streamingReasoningAgentKind?: AgentKind;
   /** Whether an agent is currently generating streaming output. */

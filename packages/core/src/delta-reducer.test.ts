@@ -231,3 +231,33 @@ describe("createDeltaReducer step.failed", () => {
     expect(result.plan.find((s) => s.id === "step-b")?.status).toBe("failed");
   });
 });
+
+describe("reasoning digest durability", () => {
+  function applyReasoning(reducer: ReturnType<typeof createDeltaReducer>, text: string) {
+    reducer.apply({ kind: "agent.reasoning_chunk_start", taskId: "task-r", agentKind: "commander" });
+    reducer.apply({ kind: "agent.reasoning_chunk", taskId: "task-r", agentKind: "commander", text });
+    return reducer.apply({ kind: "agent.reasoning_chunk_end", taskId: "task-r", agentKind: "commander", fullText: text });
+  }
+
+  it("keeps a redacted digest after the live stream is gone", () => {
+    const reducer = createDeltaReducer(createInitialTaskSnapshot());
+    const snapshot = applyReasoning(reducer, "先确认格式，再看文件名。api_key: sk-abcdefgh12345678 不该留存。");
+    expect(snapshot.streamingReasoningText).toBeUndefined();
+    expect(snapshot.reasoningDigest).toContain("先确认格式");
+    expect(snapshot.reasoningDigest).not.toContain("sk-abcdefgh12345678");
+    expect(snapshot.reasoningDigestAgentKind).toBe("commander");
+  });
+
+  it("exposes the digest as a readable log line", () => {
+    const reducer = createDeltaReducer(createInitialTaskSnapshot());
+    const snapshot = applyReasoning(reducer, "需要先读目录结构。");
+    expect(snapshot.logs.some((log) => log.userMessage?.includes("需要先读目录结构"))).toBe(true);
+  });
+
+  it("keeps the previous digest when a stream produced nothing usable", () => {
+    const reducer = createDeltaReducer(createInitialTaskSnapshot());
+    applyReasoning(reducer, "第一段思考。");
+    const snapshot = applyReasoning(reducer, "   ");
+    expect(snapshot.reasoningDigest).toBe("第一段思考。");
+  });
+});

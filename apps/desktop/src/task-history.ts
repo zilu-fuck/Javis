@@ -417,6 +417,15 @@ export function sanitizeTaskSnapshot(value: unknown): TaskSnapshot | null {
   if (isString(value.workspacePath)) {
     snapshot.workspacePath = value.workspacePath;
   }
+  // The kept reasoning digest must survive persistence: it is the only durable
+  // answer to "why did the model do that", and it is already redacted + bounded
+  // by the delta reducer that produces it.
+  if (isString(value.reasoningDigest)) {
+    snapshot.reasoningDigest = value.reasoningDigest;
+  }
+  if (isString(value.reasoningDigestAgentKind)) {
+    snapshot.reasoningDigestAgentKind = value.reasoningDigestAgentKind as TaskSnapshot["reasoningDigestAgentKind"];
+  }
   if (isString(value.scheduledTaskId)) {
     snapshot.scheduledTaskId = value.scheduledTaskId;
   }

@@ -100,6 +100,9 @@ export function ThreadView({
   const autoScrollTaskRef = useRef<string | undefined>(undefined);
   const [commanderExpanded, setCommanderExpanded] = useState(false);
   const [terminalDetailsExpanded, setTerminalDetailsExpanded] = useState(false);
+  // The thinking row is its own collapsible line, so it is visible (one-line
+  // preview) without the user having to find and open the execution details.
+  const [reasoningDigestExpanded, setReasoningDigestExpanded] = useState(false);
   const [localConversationMessages, setLocalConversationMessages] =
     useState<WorkbenchChatMessage[] | null>(null);
   const [editingMessageKey, setEditingMessageKey] = useState<string | null>(null);
@@ -169,8 +172,12 @@ export function ThreadView({
   const taskProgressMessageIndex = task.taskProgress && lastConversationMessage?.role === "assistant"
     ? conversationMessages.length - 1
     : -1;
-  const reasoningText = task.streamingReasoningText ?? "";
-  const showReasoningPanel = showStreamingResponse && reasoningText.trim().length > 0;
+  const liveReasoningText = task.streamingReasoningText ?? "";
+  // The kept digest is rendered inside the execution details, not as another
+  // chat turn: thinking belongs to the step it explains, not to the answer list.
+  const digestReasoningText = task.reasoningDigest ?? "";
+  const showReasoningPanel = showStreamingResponse && liveReasoningText.trim().length > 0;
+  const showReasoningDigest = digestReasoningText.trim().length > 0;
   const reasoningTextRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -178,7 +185,7 @@ export function ThreadView({
     if (node) {
       node.scrollTop = node.scrollHeight;
     }
-  }, [reasoningText]);
+  }, [liveReasoningText]);
 
   useEffect(() => {
     setLocalConversationMessages(null);
@@ -283,6 +290,41 @@ export function ThreadView({
           onSelectAgent={(id) => onSelectAgent?.(id)}
         />
       </div>
+    );
+  }
+
+  /**
+   * The kept reasoning digest: one collapsed line that stays visible under the
+   * answer (title + first-line preview), expandable to the full redacted text.
+   */
+  function renderReasoningDigest() {
+    if (!showReasoningDigest) return null;
+    const digestId = `javis-reasoning-digest-${task.id ?? "current"}`;
+    return (
+      <section
+        aria-label={getReasoningDigestLabel(locale)}
+        className={`javis-reasoning-digest status-${task.status}`}
+      >
+        <button
+          aria-controls={digestId}
+          aria-expanded={reasoningDigestExpanded}
+          className="javis-reasoning-digest-toggle"
+          onClick={() => setReasoningDigestExpanded((value) => !value)}
+          type="button"
+        >
+          <span className="javis-reasoning-label">
+            {getReasoningDigestLabel(locale)}
+            {task.reasoningDigestAgentKind ? ` · ${task.reasoningDigestAgentKind}` : ""}
+          </span>
+          <span className="javis-reasoning-digest-preview">{digestReasoningText}</span>
+          <span aria-hidden="true" className="javis-reasoning-digest-arrow">
+            {reasoningDigestExpanded ? "▾" : "▸"}
+          </span>
+        </button>
+        {reasoningDigestExpanded ? (
+          <div className="javis-reasoning-text" id={digestId}>{digestReasoningText}</div>
+        ) : null}
+      </section>
     );
   }
 
@@ -576,13 +618,15 @@ export function ThreadView({
           : null}
 
         {showReasoningPanel ? (
-          <article className="javis-message javis-reasoning-stream" aria-live="polite">
+          <article className="javis-reasoning-stream" aria-live="polite">
             <div className="javis-reasoning-head">
               <ThinkingIndicator label={getThinkingLabel(locale)} messages={getThinkingMessages(locale)} />
             </div>
-            <div className="javis-reasoning-text" ref={reasoningTextRef}>{reasoningText}</div>
+            <div className="javis-reasoning-text" ref={reasoningTextRef}>{liveReasoningText}</div>
           </article>
         ) : null}
+
+        {showReasoningDigest && !showReasoningPanel ? renderReasoningDigest() : null}
 
         {showStreamingMessage ? (
           <>
@@ -1038,6 +1082,11 @@ async function writeClipboardText(text: string): Promise<void> {
 
 function getThinkingLabel(locale: WorkbenchLocale): string {
   return locale.labels.newChat === "New chat" ? "Thinking" : "思考中";
+}
+
+/** Title for the kept reasoning digest, shown after a step stopped streaming. */
+function getReasoningDigestLabel(locale: WorkbenchLocale): string {
+  return locale.labels.newChat === "New chat" ? "Reasoning" : "思考过程";
 }
 
 function getThinkingMessages(locale: WorkbenchLocale): string[] {

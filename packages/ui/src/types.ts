@@ -495,6 +495,8 @@ export interface WorkbenchTask {
   streamingAgentKind?: WorkbenchStreamingAgentKind;
   /** Live model reasoning (thinking) text streamed by agent runtime steps. */
   streamingReasoningText?: string;
+  reasoningDigest?: string;
+  reasoningDigestAgentKind?: string;
   streamingReasoningAgentKind?: WorkbenchStreamingAgentKind;
   isStreaming?: boolean;
   executionTrace?: WorkbenchExecutionTrace;

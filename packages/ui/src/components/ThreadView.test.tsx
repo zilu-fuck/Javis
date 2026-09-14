@@ -340,3 +340,54 @@ function createTask(overrides: Partial<WorkbenchTask> = {}): WorkbenchTask {
     ...overrides,
   };
 }
+
+describe("ThreadView reasoning placement", () => {
+  it("shows the thinking as an expandable row under the answer", () => {
+    const task = createTask({
+      status: "completed",
+      reasoningDigest: "The user asks what I can do, so answer directly.",
+      reasoningDigestAgentKind: "commander",
+    });
+    const { container } = renderThreadView(task);
+
+    // Visible without opening anything: title plus a one-line preview.
+    const row = container.querySelector(".javis-reasoning-digest");
+    expect(row).not.toBeNull();
+    expect(row?.textContent).toContain("思考过程");
+    expect(row?.textContent).toContain("The user asks what I can do");
+    // Collapsed by default: the full text block is not rendered yet.
+    expect(container.querySelector(".javis-reasoning-digest .javis-reasoning-text")).toBeNull();
+    // It is not a chat bubble, and it is not buried inside the execution details.
+    expect(container.querySelector(".javis-message.javis-reasoning-digest")).toBeNull();
+    expect(container.querySelector(".javis-terminal-execution-details .javis-reasoning-digest")).toBeNull();
+
+    fireEvent.click(container.querySelector(".javis-reasoning-digest-toggle") as Element);
+    expect(
+      container.querySelector(".javis-reasoning-digest .javis-reasoning-text")?.textContent,
+    ).toContain("The user asks what I can do");
+  });
+
+  it("keeps the live reasoning block out of the chat bubble styling", () => {
+    // jsdom has no layout, so the streaming bubble's scrollIntoView has to be
+    // shimmed before the streaming state can render at all.
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = vi.fn();
+    try {
+      const task = createTask({
+        status: "running",
+        isStreaming: true,
+        streamingText: "正在生成回答",
+        streamingReasoningText: "正在比较两种方案",
+      });
+      const { container } = renderThreadView(task);
+
+      // The live block is a status panel: it must not wear the chat message class
+      // (the old layout rendered it as an assistant bubble with an avatar).
+      expect(container.querySelectorAll(".javis-message.javis-reasoning-stream")).toHaveLength(0);
+      expect(container.querySelectorAll(".javis-message.javis-reasoning-digest")).toHaveLength(0);
+      expect(container.querySelectorAll(".javis-message.javis-reasoning-text")).toHaveLength(0);
+    } finally {
+      Element.prototype.scrollIntoView = originalScrollIntoView;
+    }
+  });
+});
