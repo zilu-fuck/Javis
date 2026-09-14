@@ -494,6 +494,69 @@ describe("compileCommanderPlan", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("answers a self-capability question instead of running a clarification-only plan", () => {
+    // Fixture copied from the plan the Commander actually produced for
+    // task-1789308179895 ("你会做些什么" -> a single clarify-capability-scope step
+    // asking "你希望我协助哪类任务？"), so this test pins the observed failure.
+    const result = compileCommanderPlan(makeInput({
+      userGoal: "你会做些什么",
+      plan: {
+        title: "能力范围澄清",
+        reasoning: "The goal does not name a target.",
+        steps: [{
+          id: "clarify-capability-scope",
+          title: "你希望我协助哪类任务？",
+          assignedAgentKind: "commander",
+          capability: "clarification",
+          requiredCapabilities: [],
+          dependsOn: [],
+          successCriteria: "The user picks a capability direction.",
+        }],
+      },
+    }));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.plan.steps).toHaveLength(1);
+      expect(result.plan.steps[0]).toEqual(expect.objectContaining({
+        id: "answer-capabilities",
+        assignedAgentKind: "commander",
+        executionMode: "direct_response",
+        capability: "synthesis",
+      }));
+      expect(result.warnings).toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "SELF_CAPABILITY_ANSWER_SUBSTITUTED", severity: "warning" }),
+      ]));
+    }
+  });
+
+  it("leaves a required clarification plan alone", () => {
+    const result = compileCommanderPlan(makeInput({
+      userGoal: "帮我处理一下那个文件。",
+      plan: {
+        title: "目录澄清",
+        reasoning: "The folder contents are unknown.",
+        steps: [{
+          id: "clarify-folder",
+          title: "要整理哪个文件夹？",
+          assignedAgentKind: "commander",
+          capability: "clarification",
+          requiredCapabilities: [],
+          dependsOn: [],
+          successCriteria: "The folder is identified.",
+        }],
+      },
+    }));
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.plan.steps.map((step) => step.id)).toEqual(["clarify-folder"]);
+      expect(result.warnings).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ code: "SELF_CAPABILITY_ANSWER_SUBSTITUTED" }),
+      ]));
+    }
+  });
+
   it("rejects file.writeText content without an explicit value or producer artifact", () => {
     const plan: CommanderDagPlan = {
       title: "Write unsupported content",

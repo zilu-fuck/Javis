@@ -109,6 +109,54 @@ export function requiresExplicitTargetClarification(
   return !hasConcretePath;
 }
 
+/** Longest message still treated as a pure self-capability question. */
+export const SELF_CAPABILITY_QUESTION_MAX_CHARS = 40;
+
+const SELF_CAPABILITY_QUESTION_ZH_PATTERNS: readonly RegExp[] = [
+  // 你会（帮我）做（些）什么 / 你能干什么 / 你会做哪些事
+  /^(?:请问|问下|想问下|说说|说说看|介绍一下)?(?:你|您)(?:都|还|到底|具体|究竟|平时|现在)?(?:会|能|可以|能够|擅长)(?:帮|给|为|替)?(?:我|我们|用户)?(?:做|干|提供|完成|搞|处理)?(?:些|哪些|一点)?(?:什么|啥|嘛)?(?:事情|事|工作|任务|活|东西|能力|功能)?(?:呢|啊|呀|吧)?$/u,
+  // 你（都）有什么能力 / 具备哪些功能
+  /^(?:请问)?(?:你|您)(?:都|还|到底|具体|究竟)?(?:有|具备)(?:些|哪些|什么|啥)?(?:能力|本领|功能|技能|特长)(?:呢|啊|呀)?$/u,
+  // 你的能力是什么
+  /^(?:请问)?(?:你|您)(?:的)?(?:能力|本领|功能|技能)(?:是|都有|有哪些|有什么)(?:什么|哪些)?(?:呢|啊)?$/u,
+  // 介绍一下你自己 / 说说你的能力
+  /^(?:请|麻烦)?(?:简单|简要|大概)?(?:介绍|说说|讲讲|聊聊|讲下|说下)(?:一下|下)?(?:你|您)(?:自己)?(?:的)?(?:能力|功能|定位|角色)?(?:呢|吧)?$/u,
+  // 你是谁
+  /^(?:请问)?(?:你|您)(?:是|叫)(?:谁|什么|啥|什么名字)(?:呢|啊)?$/u,
+];
+
+const SELF_CAPABILITY_QUESTION_EN_PATTERN =
+  /^(?:please\s+|hey\s+|hi\s+)?(?:what\s+(?:can|do|are)\s+you(?:\s+(?:do|able\s+to\s+do|capable\s+of|good\s+at|help\s+(?:me\s+)?with|do\s+for\s+(?:me|us)))?|who\s+are\s+you|what\s+are\s+your\s+(?:capabilit(?:y|ies)|skills?|abilities|features)|tell\s+me\s+about\s+yourself)\??$/i;
+
+/**
+ * A pure question about the assistant itself ("你会做些什么", "what can you do").
+ *
+ * The planner prompt tells the Commander to ask before guessing when a goal is
+ * ambiguous, and a capability question trivially qualifies: it names no target,
+ * no workspace and no artifact. That is the wrong reading of the rule — every
+ * fact the answer needs already lives in the runtime (agents, tools, permission
+ * model) — and it buys a round trip that returns no information. Observed:
+ * "你会做些什么" planned a single `clarify-capability-scope` step asking
+ * "你希望我协助哪类任务？" instead of answering.
+ *
+ * Deliberately narrow: the whole (short) message must be the question, so a real
+ * task that merely mentions capabilities — "你能做什么，顺便帮我建个文件" — keeps
+ * whatever plan the Commander produces.
+ */
+export function isSelfCapabilityQuestion(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length > SELF_CAPABILITY_QUESTION_MAX_CHARS) {
+    return false;
+  }
+  if (SELF_CAPABILITY_QUESTION_EN_PATTERN.test(trimmed.replace(/\s+/g, " "))) {
+    return true;
+  }
+  // Chinese probes are compared without spaces or trailing punctuation, so
+  // "你会做些什么？" and "你会做些什么" hit the same pattern.
+  const compact = trimmed.replace(/[\s\u3000]+/gu, "").replace(/[?？。.!！,，、~～…]+$/u, "");
+  return SELF_CAPABILITY_QUESTION_ZH_PATTERNS.some((pattern) => pattern.test(compact));
+}
+
 function shouldUseDocUpdater(text: string): boolean {
   const hasDocTarget = /\u6587\u6863|readme|changelog|adr|documentation|\bdocs?\b/i.test(text);
   const hasUpdateAction = /\u66f4\u65b0|\u8865|\u4fee\u6539|\u7f16\u5199|\u5199|\u751f\u6210|\u6574\u7406|update|write|edit|create|generate|maintain/i.test(text);

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   inferPrimarySpecialistAgentHint,
+  isSelfCapabilityQuestion,
   requiresExplicitTargetClarification,
 } from "./agent-intent";
 import { inferVisionMode, isImageContentAnalysisRequest } from "./vision-utils";
@@ -41,5 +42,43 @@ describe("short specialist and clarification intents", () => {
     expect(requiresExplicitTargetClarification("帮我处理一下那个文件。", {
       hasResolvedTarget: true,
     })).toBe(false);
+  });
+});
+
+describe("self-capability questions", () => {
+  it("recognizes the phrasings that used to open a clarification card", () => {
+    for (const prompt of [
+      "你会做些什么",
+      "你会做什么？",
+      "你能做什么",
+      "你会些什么",
+      "你能帮我做什么",
+      "你会做哪些事",
+      "你有什么能力",
+      "你有哪些能力",
+      "介绍一下你自己",
+      "你是谁",
+      "what can you do",
+      "What can you do?",
+      "what are your capabilities",
+      "who are you",
+      "tell me about yourself",
+    ]) {
+      expect(isSelfCapabilityQuestion(prompt), prompt).toBe(true);
+    }
+  });
+
+  it("stays out of real tasks and follow-up answers", () => {
+    for (const prompt of [
+      "你能做什么，顺便帮我把 README 更新一下",
+      "这个项目你能做什么",
+      "你能修复这个 bug 吗",
+      "帮我写一个 HTML 你会做什么",
+      "只是问你你会做些什么",
+      "what can you do to fix this error",
+      "",
+    ]) {
+      expect(isSelfCapabilityQuestion(prompt), prompt).toBe(false);
+    }
   });
 });

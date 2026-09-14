@@ -10,7 +10,7 @@
  *   -> DAG semantic validation (this module) -> executor
  */
 
-import type { CommanderDagPlan } from "../commander-plan-schema";
+import type { CommanderDagPlan, CommanderDagStep } from "../commander-plan-schema";
 import type { ToolDescriptor } from "@javis/tools";
 import type {
   CompileCommanderPlanResult,
@@ -23,7 +23,7 @@ import { normalizeStepContract } from "../step-protocol";
 import { normalizeAgentKind } from "../agents";
 import { getRoleCapabilityTagsForAgentKind } from "../agent-capability";
 import type { CommanderPlanIntents } from "./plan-legality";
-import { requiresExplicitTargetClarification } from "../agent-intent";
+import { isSelfCapabilityQuestion, requiresExplicitTargetClarification } from "../agent-intent";
 import {
   inferCommanderRouteRequirements,
   resolveCommanderRouteAvailability,
@@ -100,9 +100,29 @@ export function compileCommanderPlan(
       };
     }),
   };
+  // A question about the assistant itself ("你会做些什么", "what can you do") needs
+  // no target, no workspace and no artifact: every fact its answer needs is in the
+  // runtime. The planner prompt still tells the model to ask before guessing, so a
+  // capability question can come back as a plan whose only step is that question —
+  // observed as `clarify-capability-scope` asking "你希望我协助哪类任务？". Asking it
+  // returns no information, so answer instead: replace a clarification-only plan
+  // for a self-capability question with one Commander answer step. The substitution
+  // is deterministic, so it costs no repair round, and it only fires when the model
+  // planned nothing else — no work can be dropped.
+  const answersSelfCapabilityQuestion = Boolean(
+    input.userGoal &&
+    !requiresClarification &&
+    isSelfCapabilityQuestion(input.userGoal) &&
+    normalizedPlan.steps.length > 0 &&
+    normalizedPlan.steps.every(isClarificationOnlyStep),
+  );
+  const plan: CommanderDagPlan = answersSelfCapabilityQuestion
+    ? { ...normalizedPlan, steps: [buildSelfCapabilityAnswerStep(input.userGoal as string)] }
+    : normalizedPlan;
+
   const routeRequirements = input.userGoal
     ? inferCommanderRouteRequirements(input.userGoal).filter(
-        (requirement) => !isEquivalentSpecialistRoute(requirement.reason, normalizedPlan),
+        (requirement) => !isEquivalentSpecialistRoute(requirement.reason, plan),
       )
     : [];
   const routeAvailability = input.userGoal && !requiresClarification
@@ -113,7 +133,7 @@ export function compileCommanderPlan(
       )
     : [];
   const validationInput: PlanValidationInput = {
-    plan: normalizedPlan,
+    plan,
     availableAgents: input.availableAgents,
     availableTools: input.availableTools,
     existingSteps: input.existingSteps,
@@ -130,7 +150,12 @@ export function compileCommanderPlan(
   const diagnostics = validateCommanderPlan(validationInput);
 
   const errors = diagnostics.filter((d) => d.severity === "error");
-  const warnings = diagnostics.filter((d) => d.severity === "warning");
+  // Keep the substitution on the record: the plan that runs is not the plan the
+  // model produced, and that difference must be visible in the plan trace.
+  const warnings = [
+    ...diagnostics.filter((d) => d.severity === "warning"),
+    ...(answersSelfCapabilityQuestion ? [selfCapabilityAnswerDiagnostic(input.userGoal as string)] : []),
+  ];
 
   if (errors.length > 0) {
     return {
@@ -142,8 +167,55 @@ export function compileCommanderPlan(
 
   return {
     ok: true,
-    plan: normalizedPlan as CompiledCommanderPlan,
+    plan: plan as CompiledCommanderPlan,
     warnings,
+  };
+}
+
+function isClarificationOnlyStep(step: CommanderDagStep): boolean {
+  return step.assignedAgentKind === "commander" &&
+    (step.toolName === "commander.askUser" ||
+      step.capability === "clarification" ||
+      step.primaryCapability === "clarification");
+}
+
+/**
+ * The step that replaces a clarification-only plan for a self-capability
+ * question. Mirrors the shape the model produces on its own once it decides to
+ * answer ("answer-capabilities", Commander synthesis, direct response), so the
+ * executor's synthesis path and its verifier step behave identically.
+ */
+function buildSelfCapabilityAnswerStep(userGoal: string): CommanderDagStep {
+  const isChineseGoal = /[\u3400-\u9fff]/u.test(userGoal);
+  return {
+    id: "answer-capabilities",
+    title: isChineseGoal
+      ? "回答用户关于自身能力的问题"
+      : "Answer the user's question about own capabilities",
+    assignedAgentKind: "commander",
+    executionMode: "direct_response",
+    capability: "synthesis",
+    primaryCapability: "synthesis",
+    requiredCapabilities: [],
+    dependsOn: [],
+    successCriteria: isChineseGoal
+      ? "用户得到一份清晰、真实、不含未执行操作声明的能力说明，且没有任何工具调用或文件写入。"
+      : "The user receives an accurate capability description with no tool call or file write.",
+  };
+}
+
+function selfCapabilityAnswerDiagnostic(userGoal: string): PlanDiagnostic {
+  const isChineseGoal = /[\u3400-\u9fff]/u.test(userGoal);
+  return {
+    code: "SELF_CAPABILITY_ANSWER_SUBSTITUTED",
+    severity: "warning",
+    path: "steps",
+    message: isChineseGoal
+      ? "目标是在问助手自身能做什么：只澄清、不回答的计划已替换为一步指挥官直接回答。"
+      : "The goal asks about the assistant's own capabilities: a clarification-only plan was replaced with one Commander answer step.",
+    suggestedFix: isChineseGoal
+      ? "无需修复：直接回答能力问题，不要再问用户想要哪类任务。"
+      : "No fix needed: answer the capability question instead of asking which kind of task the user wants.",
   };
 }
 

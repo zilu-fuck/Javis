@@ -682,7 +682,7 @@ function getCommanderPlanRules(
       "- targetPath 必须是相对路径，不能是绝对路径。",
       "- 复杂构建/重构任务：requirements→design→tasks；简单或范围明确则跳过。",
       "- title/reasoning/步骤 title/choices/successCriteria 与 User goal 同语言。",
-      "- 目标含糊时仅建一个 Commander clarification 步骤，问一个阻塞问题，choices 给 2-4 个答案；答案进入 SharedContext 后重规划。",
+      "- 目标含糊时仅建一个 Commander clarification 步骤，问一个阻塞问题，choices 给 2-4 个答案；答案进入 SharedContext 后重规划。问助手自身能力（你会做什么）不算含糊：用 direct_response 直接回答。",
       ...(hasSelectedWorkspace
         ? ["- workspacePath 是已选工作区；不要替换。file.writeText 的 targetPath 仅填相对路径，例如“微博热搜.md”，禁止绝对路径。"]
         : []),
@@ -708,7 +708,7 @@ function getCommanderPlanRules(
     "- Any worker outputContextKey or user-visible synthesis requires at least one verifier/evidence_check step before the final answer; the verifier must consume a non-preloaded producer artifact (never userGoal/taskId alone).",
     "- For UI-change requests based on what is visible on screen, plan an explicit Computer -> Code handoff: Computer produces outputContextKey=\"uiEvidence\" with screenshot/UI facts, then Code consumes inputContextKeys=[\"uiEvidence\"] before proposing code changes.",
     "- All user-facing strings (title, reasoning, steps[].title, steps[].choices labels, and successCriteria) must use the same natural language as the User goal. If the User goal is Chinese, ask and label choices in Chinese.",
-    "- When the user goal is ambiguous (missing path, unclear scope, multiple valid interpretations), DO NOT guess. Ask exactly ONE blocking question at a time. Add a single step with capability=\"clarification\" and assignedAgentKind=\"commander\" BEFORE any other steps; put the one question in steps[].title. steps[].choices must be 2-4 possible answers to that one question, NOT a list of additional questions. The user's answer will be available in SharedContext for re-planning.",
+    "- When the user goal is ambiguous (missing path, unclear scope, multiple valid interpretations), DO NOT guess. Ask exactly ONE blocking question at a time. Add a single step with capability=\"clarification\" and assignedAgentKind=\"commander\" BEFORE any other steps; put the one question in steps[].title. steps[].choices must be 2-4 possible answers to that one question, NOT a list of additional questions. The user's answer will be available in SharedContext for re-planning. A question about your own capabilities ('what can you do') is NOT ambiguous: answer it with one Commander direct_response step instead of asking which kind of task the user wants.",
     ...(hasSelectedWorkspace
       ? ["- workspacePath is the user-selected project. Do not ask for a folder or substitute the Javis root; use it for required toolInput paths."]
       : []),

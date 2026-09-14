@@ -40,7 +40,8 @@ export type PlanDiagnosticCode =
   | "MISSING_REQUIRED_AGENT_ROUTE"
   | "MISSING_REQUIRED_ROUTE_TOOL"
   | "REQUIRED_ROUTE_UNAVAILABLE"
-  | "MISSING_REQUIRED_CLARIFICATION";
+  | "MISSING_REQUIRED_CLARIFICATION"
+  | "SELF_CAPABILITY_ANSWER_SUBSTITUTED";
 
 // --- Diagnostic --------------------------------------------------------------
 
