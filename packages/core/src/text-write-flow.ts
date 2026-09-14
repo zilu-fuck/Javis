@@ -1,5 +1,6 @@
 import type {
   FileTool,
+  VerifierTool,
   ModelUsage,
   PermissionRequest as ToolPermissionRequest,
   TextFileWritePlan,
@@ -18,12 +19,15 @@ import { appendLog, appendTaskLogEntry } from "./snapshot-utils";
 import type { TaskEventBus } from "./task-event-bus";
 import { DEFAULT_TASK_TIMEOUT_MS, isTaskCancelledError, isTaskStallError, TaskTimeoutError, throwIfTaskAborted, withStallWatchdog, withTaskTimeout } from "./task-wait";
 import { addModelUsage, createEmptyTokenUsageSummary } from "./token-usage";
+import { decideTextWriteContract } from "./text-write-contract";
+import { verifyTextWriteArtifact } from "./text-write-verification";
 
 interface TextWriteFlowOptions {
   controller: FlowController;
   eventBus?: TaskEventBus;
   fileTool: FileTool;
   webTool?: WebTool;
+  verifierTool?: VerifierTool;
   chatTool?: ChatTool;
   taskId: ID;
   userGoal: string;
@@ -78,6 +82,7 @@ export async function runTextWriteTask({
   eventBus,
   fileTool,
   webTool,
+  verifierTool,
   chatTool,
   taskId,
   userGoal,
@@ -97,8 +102,59 @@ export async function runTextWriteTask({
     snapshot = controller.getSnapshot();
   }
 
+  let contentPrepared = false;
+  let tokenUsage = createEmptyTokenUsageSummary();
+  // One ledger line per model call, so "what did the AI actually do" is readable
+  // without reading the provider's raw traffic. Deliberately references nothing
+  // declared later in this function: the decision call passes through here before
+  // the contract (and therefore the format) exists.
+  const modelCallLog: string[] = [];
+  const recordModelCall = (purpose: string, usage?: ModelUsage) => {
+    const resolved = usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+    tokenUsage = addModelUsage(tokenUsage, "commander", resolved);
+    const total = resolved.totalTokens ?? (resolved.inputTokens ?? 0) + (resolved.outputTokens ?? 0);
+    modelCallLog.push(`${purpose} tokens=${total}`);
+  };
+
+  const baseFormat = inferTextArtifactFormat(userGoal);
+  const baseTarget = resolveTextWriteTarget(userGoal, baseFormat);
+  // The Commander decides what to produce before anything else happens. The whole
+  // point is that the artifact is decided, not inferred: the regex path that used
+  // to run here is what turned an HTML request into a `.md` file.
+  emit({
+    ...snapshot,
+    status: "planning",
+    title: tr("Commander is deciding the artifact", "指挥官正在确认产物形态"),
+    commanderMessage: tr(
+      `Commander is deciding what to produce for: ${userGoal}`,
+      `指挥官先确认这次要产出什么：${userGoal}`,
+    ),
+  });
+  const contract = await decideTextWriteContract({
+    decisionInput: {
+      userGoal,
+      fallbackTargetPath: baseTarget.path,
+    },
+    chatTool,
+    locale: isChinese ? "zh-CN" : "en",
+    timeoutMs: taskTimeoutMs,
+    signal,
+    onUsage: (usage) => recordModelCall("artifact-contract", usage),
+  });
+  // Cancellation must return rather than throw: this flow is started
+  // fire-and-forget, so an escaping error here becomes an unhandled rejection.
+  if (signal?.aborted) return;
+  const artifactFormat = contract.format;
+  // The model's one-line justification is the only readable part of "why this
+  // artifact": reasoning tokens are live-only, so surface it here and keep it in
+  // the durable contract log instead of parsing it and dropping it.
+  const contractSummary = tr(
+    `Commander decided: ${artifactFormat.label} file "${contract.targetPath}"${contract.source === "fallback" ? " (decided by rule, not by the model)" : ""}.${contract.reasoning ? ` ${contract.reasoning}` : ""}`,
+    `指挥官判定：产出 ${artifactFormat.label} 文件「${contract.targetPath}」${contract.source === "fallback" ? "（由规则兜底，非模型决策）" : ""}。${contract.reasoning ?? ""}`,
+  );
+
   const plan = [
-    { id: "step-prepare-text", title: tr("Commander prepares Markdown content", "指挥官准备 Markdown 正文"), assignedAgentKind: "commander" as const, status: "pending" as const },
+    { id: "step-prepare-text", title: tr(`Commander decides the artifact and prepares ${artifactFormat.label} content`, `指挥官确认产物并准备 ${artifactFormat.label} 正文`), assignedAgentKind: "commander" as const, status: "pending" as const },
     { id: "step-preview-write", title: tr("File Agent creates a text write dry-run", "文件代理创建文本写入预览"), assignedAgentKind: "file" as const, status: "pending" as const },
     { id: "step-confirm-write", title: tr("User reviews the confirmed-write permission card", "用户审核确认写入授权卡片"), assignedAgentKind: "commander" as const, status: "pending" as const },
     { id: "step-write-text", title: tr("File Agent writes the approved text file", "文件代理写入已批准的文本文件"), assignedAgentKind: "file" as const, status: "pending" as const },
@@ -110,7 +166,7 @@ export async function runTextWriteTask({
     task: tr("Prepare text write workflow", "准备文本写入流程"),
     currentStepId: "step-prepare-text",
   });
-  agentTracker.setState("agent-file", { status: "queued", task: tr("Waiting for Markdown content", "等待 Markdown 正文") });
+  agentTracker.setState("agent-file", { status: "queued", task: tr(`Waiting for ${artifactFormat.label} content`, `等待 ${artifactFormat.label} 正文`) });
   agentTracker.setState("agent-verifier", { status: "queued", task: tr("Waiting for write result", "等待写入结果") });
 
   emit({
@@ -119,12 +175,12 @@ export async function runTextWriteTask({
     userGoal,
     status: "planning",
     commanderMessage: tr(
-      "Commander is preparing text content and will request confirmed-write approval before writing a file.",
-      "指挥官正在准备文本内容，写入文件前会请求确认写入授权。",
+      `${contractSummary} Commander is preparing the content and will request confirmed-write approval before writing the file.`,
+      `${contractSummary} 指挥官正在准备正文，写入文件前会请求确认写入授权。`,
     ),
     plan,
     agents: agentTracker.getSnapshots(),
-    tokenUsage: createEmptyTokenUsageSummary(),
+    tokenUsage,
     logs: [
       {
         id: `${taskId}-created`,
@@ -133,24 +189,25 @@ export async function runTextWriteTask({
         detail: "Desktop UI passed the text file write goal to Core.",
         userMessage: tr("Preparing the text file task.", "正在准备文本文件任务。"),
       },
+      {
+        id: `${taskId}-contract`,
+        kind: "event",
+        title: "text_write.contract",
+        detail: `contract source=${contract.source} format=${artifactFormat.extension} target=${contract.targetPath} requirements=${contract.requirements.length}${contract.reasoning ? ` reasoning=${contract.reasoning}` : ""}${contract.fallbackReason ? ` reason=${contract.fallbackReason}` : ""}`,
+        userMessage: contractSummary,
+      },
     ],
   });
 
   await controller.wait();
   if (signal?.aborted) return;
 
-  let contentPrepared = false;
-  let tokenUsage = createEmptyTokenUsageSummary();
-  const recordModelCall = (usage?: ModelUsage) => {
-    tokenUsage = addModelUsage(
-      tokenUsage,
-      "commander",
-      usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
-    );
-  };
   try {
-    const inferredTarget = inferMarkdownTarget(userGoal);
-    let targetPath = inferredTarget.path;
+    const inferredTarget = resolveTextWriteTarget(userGoal, artifactFormat);
+    // A decided contract owns the file name; only undecided contracts may be
+    // renamed from the generated content.
+    const decidedTarget = contract.source === "commander";
+    let targetPath = decidedTarget ? contract.targetPath : inferredTarget.path;
     const sources = await withTaskTimeout(
       () => collectWriteSources(userGoal, webTool),
       { label: "Text write source collection", timeoutMs: taskTimeoutMs, signal },
@@ -165,17 +222,19 @@ export async function runTextWriteTask({
       taskId,
       signal,
       taskTimeoutMs,
+      artifactFormat,
+      contract.requirements,
     );
     throwIfTaskAborted(signal, "Text write content generation");
     const content = generated.content;
-    if (!inferredTarget.explicit) {
-      targetPath = inferMarkdownTargetFromContent(content) ?? targetPath;
+    if (!decidedTarget && !inferredTarget.explicit) {
+      targetPath = inferTargetFromContent(content, artifactFormat) ?? targetPath;
     }
     contentPrepared = true;
 
     agentTracker.setState("agent-commander", {
       status: "completed",
-      task: tr("Markdown content prepared", "Markdown 正文已准备"),
+      task: tr(`${artifactFormat.label} content prepared`, `${artifactFormat.label} 正文已准备`),
     });
     agentTracker.setState("agent-file", {
       status: "running",
@@ -284,7 +343,7 @@ export async function runTextWriteTask({
     agentTracker.setState("agent-commander", {
       status: contentPrepared ? "completed" : "failed",
       task: contentPrepared
-        ? tr("Markdown content prepared", "Markdown 正文已准备")
+        ? tr(`${artifactFormat.label} content prepared`, `${artifactFormat.label} 正文已准备`)
         : tr("Text content generation failed", "文本内容生成失败"),
     });
     agentTracker.setState("agent-file", {
@@ -431,20 +490,49 @@ export async function runTextWriteTask({
         status: "completed",
         task: tr(`Wrote ${result.byteCount} bytes`, `已写入 ${result.byteCount} 字节`),
       });
+      // Verification must be earned: deterministic boundaries first, then the
+      // verifier agent's tool. Nothing is claimed on the write call alone.
+      const verification = await verifyTextWriteArtifact({
+        tr,
+        content,
+        format: artifactFormat,
+        targetPath: result.targetPath,
+        byteCount: result.byteCount,
+        requirements: contract.requirements,
+        ...(verifierTool ? { verifierTool } : {}),
+        taskId,
+      });
+      const verified = verification.status === "pass";
+      const verificationMessage = `${verification.summary} ${verification.detail}`.trim();
+      const verificationLabel = verified
+        ? tr("verified", "已验证")
+        : verification.status === "unavailable"
+          ? tr("not independently verified", "未独立验证")
+          : verification.status === "warn"
+            ? tr("verified with warnings", "验证有保留")
+            : tr("verification failed", "验证未通过");
       agentTracker.setState("agent-verifier", {
-        status: "completed",
-        task: tr("Verified write result", "已验证写入结果"),
+        status: verification.status === "fail" ? "failed" : "completed",
+        task: verificationMessage.slice(0, 200),
       });
 
       emit({
         ...snapshot,
-        title: tr("Text file written", "文本文件已写入"),
-        status: "completed",
+        title: verification.status === "fail"
+          ? tr("Text file written but verification failed", "文件已写入但校验未通过")
+          : tr("Text file written", "文本文件已写入"),
+        status: verification.status === "fail" ? "failed" : "completed",
         commanderMessage: tr(
-          `File Agent wrote ${result.targetPath}.`,
-          `文件代理已将内容写入 ${result.targetPath}。`,
+          `File Agent wrote ${result.targetPath}. ${verificationMessage}`,
+          `文件代理已将内容写入 ${result.targetPath}。${verificationMessage}`,
         ),
-        plan: markTextWriteStep(snapshot.plan, "step-write-text", "completed", "step-verify-write", "completed"),
+        plan: markTextWriteStep(
+          snapshot.plan,
+          "step-write-text",
+          "completed",
+          "step-verify-write",
+          verification.status === "fail" ? "failed" : "completed",
+        ),
         agents: agentTracker.getSnapshots(),
         documents: [{
           path: result.targetPath,
@@ -455,17 +543,30 @@ export async function runTextWriteTask({
           purpose: tr("Generated from the user's text file request.", "根据用户的文本文件请求生成。"),
         }],
         permissionRequest: resolvedRequest,
-        logs: appendLog(snapshot, {
+        logs: [
+          ...appendLog(snapshot, {
           id: `${taskId}-write-completed`,
           kind: "verification",
-          title: "task.completed",
-          detail: `file.writeText ${result.action} wrote ${result.byteCount} byte(s) to ${result.targetPath}.`,
-          userMessage: tr("Text file written successfully.", "文本文件已成功写入。"),
-        }),
-        verificationSummary: tr(
-          `verified: ${result.targetPath} was written after confirmed_write approval.`,
-          `已验证：${result.targetPath} 已在确认写入授权后完成写入。`,
-        ),
+          title: verified ? "task.verification_passed" : "task.verification_reported",
+          detail: [
+            `file.writeText ${result.action} wrote ${result.byteCount} byte(s) to ${result.targetPath}.`,
+            `verification=${verification.status}`,
+            `boundaries=${verification.boundaries.ok ? "ok" : verification.boundaries.failures.join("; ")}`,
+          ].join(" "),
+          userMessage: tr(
+            verified ? "Text file written and verified." : "Text file written; verification result recorded.",
+            verified ? "文本文件已写入并通过验证。" : "文本文件已写入，验证结论已记录。",
+          ),
+          }),
+          ...modelCallLog.map((line, index) => ({
+            id: `${taskId}-model-call-${index}`,
+            kind: "event" as const,
+            title: "agent.model_call",
+            detail: line,
+            userMessage: line,
+          })),
+        ],
+        verificationSummary: `${verificationLabel}：${result.targetPath} —— ${verificationMessage}`,
       });
     } catch (error) {
       if (signal?.aborted) return;
@@ -510,7 +611,7 @@ function markTextWriteStep(
   firstStepId: string | undefined,
   firstStatus: "completed" | "failed",
   secondStepId?: string,
-  secondStatus?: "running" | "completed",
+  secondStatus?: "running" | "completed" | "failed",
 ) {
   return plan.map((step) => {
     if (step.id === firstStepId) {
@@ -612,7 +713,7 @@ async function planTextWriteWithAvailableTarget({
   for (let attempt = 0; attempt < attemptCount; attempt += 1) {
     const candidatePath = attempt === 0
       ? targetPath
-      : appendMarkdownTargetSuffix(targetPath, attempt + 1);
+      : appendTextTargetSuffix(targetPath, attempt + 1);
     try {
       const plan = await withTaskTimeout(
         () => fileTool.planWriteText!({ targetPath: candidatePath, content }, taskId),
@@ -638,8 +739,9 @@ function isExistingTextTargetError(error: unknown): boolean {
   return detail.includes(TEXT_TARGET_EXISTS_ERROR);
 }
 
-function appendMarkdownTargetSuffix(targetPath: string, suffix: number): string {
-  const match = targetPath.match(/^(.*)(\.md)$/i);
+/** Adds the retry suffix before the extension, so every format keeps a valid name. */
+export function appendTextTargetSuffix(targetPath: string, suffix: number): string {
+  const match = targetPath.match(/^(.*?)(\.[A-Za-z0-9]+)$/);
   return match ? `${match[1]}-${suffix}${match[2]}` : `${targetPath}-${suffix}`;
 }
 
@@ -647,12 +749,14 @@ async function generateTextContent(
   userGoal: string,
   targetPath: string,
   sources: WebSearchResult[],
-  chatTool?: ChatTool,
-  recordModelCall: (usage?: ModelUsage) => void = () => undefined,
-  eventBus?: TaskEventBus,
-  taskId?: ID,
-  signal?: AbortSignal,
-  taskTimeoutMs?: number,
+  chatTool: ChatTool | undefined,
+  recordModelCall: (purpose: string, usage?: ModelUsage) => void,
+  eventBus: TaskEventBus | undefined,
+  taskId: ID | undefined,
+  signal: AbortSignal | undefined,
+  taskTimeoutMs: number | undefined,
+  format: TextArtifactFormat,
+  requirements: readonly string[] = [],
 ): Promise<{ content: string }> {
   if (!chatTool) {
     throw new Error("A configured text-generation model is required before a file write can be previewed.");
@@ -661,7 +765,7 @@ async function generateTextContent(
   const requestedLength = inferRequestedLength(userGoal);
   const locale = /[\u3400-\u9fff]/u.test(userGoal) ? "zh-CN" : "en";
   const generationTimeoutMs = resolveGenerationTimeoutMs(taskTimeoutMs, requestedLength);
-  const complete = async (prompt: string, temperature: number): Promise<GeneratedTextCall> => {
+  const complete = async (prompt: string, temperature: number, purpose: string): Promise<GeneratedTextCall> => {
     if (chatTool.stream && eventBus && taskId) {
       let streamedText = "";
       let tokenUsage: ModelUsage | undefined;
@@ -720,7 +824,7 @@ async function generateTextContent(
             },
           },
         );
-        recordModelCall(tokenUsage);
+        recordModelCall(purpose, tokenUsage);
         modelCallRecorded = true;
         eventBus.emit({
           kind: "agent.chunk_end",
@@ -729,12 +833,12 @@ async function generateTextContent(
           fullText: streamedText,
         });
         return {
-          content: normalizeGeneratedContent(streamedText),
+          content: normalizeGeneratedContent(streamedText, format),
           truncated: isTruncatedTextGeneration(finishReason),
         };
       } catch (error) {
         if (!modelCallRecorded) {
-          recordModelCall(tokenUsage);
+          recordModelCall(purpose, tokenUsage);
         }
         eventBus.emit({
           kind: "agent.chunk_end",
@@ -747,7 +851,7 @@ async function generateTextContent(
         // A stalled or timed-out generation that already produced a usable amount
         // of text is kept instead of failing the whole task. Production failed a
         // task at exactly the 180s mark and threw away the generated document.
-        const partial = normalizeGeneratedContent(streamedText);
+        const partial = normalizeGeneratedContent(streamedText, format);
         const interrupted = interruptedBy !== undefined || isTaskStallError(error) || error instanceof TaskTimeoutError;
         if (interrupted && hasUsablePartialContent(partial)) {
           return { content: partial, truncated: true, partial: true };
@@ -772,21 +876,22 @@ async function generateTextContent(
         { label: "Text content generation", timeoutMs: taskTimeoutMs, signal },
       );
     } catch (error) {
-      if (modelCallStarted) recordModelCall();
+      if (modelCallStarted) recordModelCall(purpose);
       throw error;
     }
-    recordModelCall(result.tokenUsage);
+    recordModelCall(purpose, result.tokenUsage);
     throwIfTaskAborted(signal, "Text content generation");
     return {
-      content: normalizeGeneratedContent(result.text),
+      content: normalizeGeneratedContent(result.text, format),
       truncated: isTruncatedTextGeneration(result.finishReason),
     };
   };
 
   let callCount = 1;
   const initialCall = await complete(
-    buildTextGenerationPrompt(userGoal, targetPath, sources, requestedLength),
+    buildTextGenerationPrompt(userGoal, targetPath, sources, format, requestedLength, requirements),
     /novel|story|poem|\u5c0f\u8bf4|\u6545\u4e8b|\u8bd7/i.test(userGoal) ? 0.7 : 0.3,
+    "content-generation",
   );
   let content = initialCall.content;
   let lastCallTruncated = initialCall.truncated;
@@ -816,6 +921,7 @@ async function generateTextContent(
           : undefined,
       ),
       0.7,
+      "content-continuation",
     );
     callCount += 1;
     lastCallTruncated = continuation.truncated;
@@ -838,11 +944,13 @@ function isTruncatedTextGeneration(finishReason?: string): boolean {
   return /^(?:length|max[_ -]?(?:tokens|output(?:[_ -]?tokens)?))$/iu.test(finishReason.trim());
 }
 
-function buildTextGenerationPrompt(
+export function buildTextGenerationPrompt(
   userGoal: string,
   targetPath: string,
   sources: WebSearchResult[],
+  format: TextArtifactFormat,
   requestedLength?: RequestedLength,
+  requirements: readonly string[] = [],
 ): string {
   const sourceText = sources.length > 0
     ? sources.map((source, index) => [
@@ -854,14 +962,33 @@ function buildTextGenerationPrompt(
   const lengthInstruction = requestedLength
     ? `The complete document must contain at least ${requestedLength.amount} ${requestedLength.unit}.`
     : "Use the length and level of detail requested by the user.";
+  // Markdown needs no shape hint; other formats do. A model left to its own
+  // devices wraps a page in prose and a fence (observed: an HTML request came
+  // back as a Chinese sentence plus an ```html block, despite the instruction
+  // below telling it not to fence).
+  const formatInstruction = format.markdown
+    ? []
+    : [
+        `The file must be a complete, standalone ${format.label} document that starts at its first character and ends at its last.`,
+        "Do not add commentary, an introduction, or a surrounding code fence.",
+        ...(format.extension === ".html" || format.extension === ".htm"
+          ? ["Start with <!DOCTYPE html> and end with </html>."]
+          : []),
+      ];
+  // Requirements the Commander decided are binding on the artifact, not advice.
+  const requirementInstruction = requirements.length > 0
+    ? `Requirements decided for this artifact:${requirements.map((entry) => `\n- ${entry}`).join("")}`
+    : undefined;
 
   return [
-    "You are generating the complete contents of a local Markdown file for the user.",
+    `You are generating the complete contents of a local ${format.label} file for the user.`,
     "Return ONLY the final file contents. Do not use an outer code fence.",
     "Do not mention execution, approval, file paths, prompts, or internal process.",
     "Do not repeat the request as a placeholder. Fully perform the requested writing task.",
     "Write in the same language as the user's request unless the request says otherwise.",
     lengthInstruction,
+    ...formatInstruction,
+    ...(requirementInstruction ? [requirementInstruction] : []),
     `Target file: ${targetPath}`,
     `User request: ${userGoal}`,
     `Available sources:\n${sourceText}`,
@@ -895,12 +1022,212 @@ function inferRequestedLength(userGoal: string): RequestedLength | undefined {
   };
 }
 
-function normalizeGeneratedContent(content: string): string {
-  return content
-    .trim()
-    .replace(/^```(?:markdown|md)?\s*\r?\n/i, "")
-    .replace(/\r?\n```\s*$/i, "")
-    .trim();
+/**
+ * A concrete text artifact this flow can produce. The format drives the target
+ * extension, the generation prompt, and how the model's output is cleaned up.
+ *
+ * The flow used to be Markdown-only: an HTML request was slugged into a `.md`
+ * target and the model was told to write Markdown, so the artifact could never
+ * match the request no matter how well the writing went.
+ */
+export interface TextArtifactFormat {
+  /** Canonical lowercase extension including the dot, e.g. ".html". */
+  extension: string;
+  /** Human-facing label used in prompts and status copy, e.g. "HTML". */
+  label: string;
+  /** Outer-fence languages the model may wrap this payload in. */
+  fenceLanguages: string[];
+  /**
+   * Markdown documents may legitimately contain fenced blocks, so cleanup for
+   * this family stays conservative: outer fence only, no boundary trimming.
+   */
+  markdown: boolean;
+}
+
+interface TextArtifactFormatSpec extends TextArtifactFormat {
+  /** Lowercase tokens that name this format inside a goal. */
+  tokens: readonly string[];
+}
+
+/** A goal that names no format keeps the original Markdown behavior. */
+export const DEFAULT_TEXT_ARTIFACT_FORMAT: TextArtifactFormat = {
+  extension: ".md",
+  label: "Markdown",
+  fenceLanguages: ["markdown", "md"],
+  markdown: true,
+};
+
+const TEXT_ARTIFACT_FORMAT_SPECS: readonly TextArtifactFormatSpec[] = [
+  { ...DEFAULT_TEXT_ARTIFACT_FORMAT, tokens: ["markdown", "md"] },
+  { extension: ".html", label: "HTML", fenceLanguages: ["html", "htm"], markdown: false, tokens: ["html", "html5"] },
+  { extension: ".htm", label: "HTML", fenceLanguages: ["html", "htm"], markdown: false, tokens: ["htm"] },
+  { extension: ".css", label: "CSS", fenceLanguages: ["css"], markdown: false, tokens: ["css"] },
+  { extension: ".js", label: "JavaScript", fenceLanguages: ["js", "javascript"], markdown: false, tokens: ["javascript", "js"] },
+  { extension: ".mjs", label: "JavaScript", fenceLanguages: ["js", "javascript"], markdown: false, tokens: ["mjs"] },
+  { extension: ".json", label: "JSON", fenceLanguages: ["json"], markdown: false, tokens: ["json"] },
+  { extension: ".svg", label: "SVG", fenceLanguages: ["svg", "xml"], markdown: false, tokens: ["svg"] },
+  { extension: ".txt", label: "text", fenceLanguages: [], markdown: false, tokens: ["txt"] },
+];
+
+/** Nouns that mark the preceding token as the artifact being requested. */
+const TEXT_ARTIFACT_NOUN_PATTERN =
+  "文件|文档|页面|网页|脚本|代码|表单|动画|file|document|page|script|code|form|animation";
+
+/**
+ * Nouns that mark the preceding token as the *topic* rather than the artifact:
+ * "写一份 JS 教程" asks for a document about JS, not a `.js` file. Over-detecting
+ * a format is worse than falling back to Markdown, because the payload would
+ * then be prose stored under a code extension.
+ */
+const TEXT_ARTIFACT_TOPIC_PATTERN =
+  "教程|指南|说明|介绍|入门|笔记|总结|分析|对比|清单|规范|约定|标准|最佳实践|原理|机制|陷阱|面试|区别|tutorial|guide|introduction|cheatsheet";
+
+/** Verbs that request an artifact ("创建一个 HTML" / "create an HTML file"). */
+const TEXT_ARTIFACT_CREATE_VERB_PATTERN =
+  "创建|新建|生成|制作|写|做|输出|导出|保存为?|create|generate|make|write|build|produce";
+
+const TEXT_ARTIFACT_MEASURE_WORD_PATTERN = "一个|一份|一张|一首|个|份|a|an|one";
+
+/** Longest first, so `html5` wins over `html` and `markdown` over `md`. */
+function buildTokenAlternation(tokens: readonly string[]): string {
+  return [...new Set(tokens)].sort((left, right) => right.length - left.length).join("|");
+}
+
+const TEXT_ARTIFACT_KEYWORD_ALTERNATION = buildTokenAlternation(
+  TEXT_ARTIFACT_FORMAT_SPECS.flatMap((spec) => [...spec.tokens]),
+);
+
+const TEXT_ARTIFACT_EXTENSION_ALTERNATION = buildTokenAlternation(
+  TEXT_ARTIFACT_FORMAT_SPECS.map((spec) => spec.extension.replace(/^\./u, "")),
+);
+
+const TEXT_ARTIFACT_FORMAT_BY_TOKEN = new Map<string, TextArtifactFormatSpec>(
+  TEXT_ARTIFACT_FORMAT_SPECS.flatMap((spec) => spec.tokens.map((token) => [token, spec] as const)),
+);
+
+/**
+ * Infers the artifact format a goal asks for. The first explicit signal wins, so
+ * "创建一个 HTML，内容是 SVG 动画" resolves to HTML rather than SVG.
+ */
+export function inferTextArtifactFormat(userGoal: string): TextArtifactFormat {
+  const spec = inferTextArtifactFormatSpec(userGoal);
+  if (!spec) return DEFAULT_TEXT_ARTIFACT_FORMAT;
+  return {
+    extension: spec.extension,
+    label: spec.label,
+    fenceLanguages: [...spec.fenceLanguages],
+    markdown: spec.markdown,
+  };
+}
+
+/**
+ * Resolves a format token reported by the model (e.g. "html") to a supported
+ * format. Returns undefined for anything outside the supported set, so a model
+ * cannot invent an extension the write path has no rules for.
+ */
+export function resolveTextArtifactFormatToken(token: string): TextArtifactFormat | undefined {
+  const spec = TEXT_ARTIFACT_FORMAT_BY_TOKEN.get(token.trim().toLowerCase());
+  if (!spec) return undefined;
+  return {
+    extension: spec.extension,
+    label: spec.label,
+    fenceLanguages: [...spec.fenceLanguages],
+    markdown: spec.markdown,
+  };
+}
+
+/** Every extension the flow can produce, for prompts and validation. */
+export function listTextArtifactExtensions(): string[] {
+  return TEXT_ARTIFACT_FORMAT_SPECS.map((spec) => spec.extension);
+}
+
+function inferTextArtifactFormatSpec(userGoal: string): TextArtifactFormatSpec | undefined {
+  // An explicit file name is the strongest signal: "report.json", "保存为 a.html".
+  const explicitPath = inferExplicitTargetPath(userGoal);
+  if (explicitPath) {
+    const extension = explicitPath.match(new RegExp(`\\.(${TEXT_ARTIFACT_EXTENSION_ALTERNATION})$`, "iu"))?.[1];
+    const spec = extension
+      ? TEXT_ARTIFACT_FORMAT_SPECS.find((candidate) => candidate.extension === `.${extension.toLowerCase()}`)
+      : undefined;
+    if (spec) return spec;
+  }
+
+  const candidates: Array<{ index: number; spec: TextArtifactFormatSpec }> = [];
+  const nounPattern = new RegExp(
+    `(?<token>${TEXT_ARTIFACT_KEYWORD_ALTERNATION})\\b[\\s、,，:：]*(?:${TEXT_ARTIFACT_NOUN_PATTERN})`,
+    "giu",
+  );
+  for (const found of userGoal.matchAll(nounPattern)) {
+    const spec = TEXT_ARTIFACT_FORMAT_BY_TOKEN.get(found.groups?.token?.toLowerCase() ?? "");
+    if (spec) candidates.push({ index: found.index ?? 0, spec });
+  }
+  const verbPattern = new RegExp(
+    `(?:${TEXT_ARTIFACT_CREATE_VERB_PATTERN})\\s*(?:${TEXT_ARTIFACT_MEASURE_WORD_PATTERN})?\\s*(?<token>${TEXT_ARTIFACT_KEYWORD_ALTERNATION})\\b`,
+    "giu",
+  );
+  for (const found of userGoal.matchAll(verbPattern)) {
+    const spec = TEXT_ARTIFACT_FORMAT_BY_TOKEN.get(found.groups?.token?.toLowerCase() ?? "");
+    if (!spec) continue;
+    const after = userGoal.slice((found.index ?? 0) + found[0].length);
+    if (new RegExp(`^[\\s、,，:：]*(?:${TEXT_ARTIFACT_TOPIC_PATTERN})`, "iu").test(after)) continue;
+    candidates.push({ index: found.index ?? 0, spec });
+  }
+  if (candidates.length === 0) return undefined;
+  candidates.sort((left, right) => left.index - right.index);
+  return candidates[0].spec;
+}
+
+export function normalizeGeneratedContent(
+  content: string,
+  format: TextArtifactFormat = DEFAULT_TEXT_ARTIFACT_FORMAT,
+): string {
+  const trimmed = content.trim();
+  if (format.markdown) {
+    // Only a fence that wraps the whole payload is unwrapped. Stripping the
+    // closing fence unconditionally used to eat the last fence of a markdown
+    // document that legitimately ends with a code block.
+    const withoutOpeningFence = trimmed.replace(/^```(?:markdown|md)?\s*\r?\n/i, "");
+    if (withoutOpeningFence === trimmed) return trimmed;
+    return withoutOpeningFence.replace(/\r?\n```\s*$/i, "").trim();
+  }
+  const unfenced = unwrapOuterFence(trimmed, format);
+  const bounded = format.extension === ".html" || format.extension === ".htm"
+    ? trimToHtmlDocument(unfenced)
+    : unfenced;
+  return bounded.trim();
+}
+
+/**
+ * Removes the code fence a model added around a payload that has no legitimate
+ * use for one. The fence must open with an empty or matching language and close
+ * before the end of the output; a prose introduction before it and a short
+ * closing remark after it are dropped, because neither belongs in the artifact.
+ */
+function unwrapOuterFence(content: string, format: TextArtifactFormat): string {
+  const opening = content.match(/^[\s\S]*?```([A-Za-z0-9.+#_-]*)[ \t]*\r?\n/u);
+  if (!opening) return content;
+  const language = opening[1].toLowerCase();
+  if (language !== "" && !format.fenceLanguages.includes(language)) return content;
+  const body = content.slice(opening[0].length);
+  const closing = body.match(/\r?\n[ \t]*```([ \t]*[\s\S]*)$/u);
+  if (!closing) return content;
+  const tail = closing[1].trim();
+  // A fenced payload that still contains a fence, or a long markup-bearing tail,
+  // is not a simple wrapper; leaving it untouched beats guessing.
+  if (tail.length > 160 || tail.includes("<") || tail.includes("```")) return content;
+  return body.slice(0, closing.index);
+}
+
+/** Cuts an HTML payload down to its document boundaries, dropping surrounding prose. */
+function trimToHtmlDocument(content: string): string {
+  const lower = content.toLowerCase();
+  const doctypeStart = lower.indexOf("<!doctype");
+  const htmlStart = lower.search(/<html[\s>]/u);
+  const start = doctypeStart >= 0 ? doctypeStart : htmlStart;
+  let result = start > 0 ? content.slice(start) : content;
+  const end = result.toLowerCase().lastIndexOf("</html>");
+  if (end >= 0) result = result.slice(0, end + "</html>".length);
+  return result;
 }
 
 function validateGeneratedContent(content: string, requestedLength?: RequestedLength): void {
@@ -926,40 +1253,82 @@ function measureGeneratedLength(content: string, unit: RequestedLength["unit"]):
   return content.replace(/\s/gu, "").length;
 }
 
-function inferMarkdownTarget(userGoal: string): { path: string; explicit: boolean } {
-  const quotedPath = userGoal.match(/["'`]([^"'`]+\.md)["'`]/i)?.[1];
-  if (quotedPath) return { path: quotedPath.trim(), explicit: true };
-  const namedPath = userGoal.match(
-    /(?:\u4fdd\u5b58\u4e3a?|\u6587\u4ef6\u540d(?:\u4e3a|\u662f)?|\u547d\u540d\u4e3a)\s*([^\\/\s"'`\uff0c,\u3002\uff1b;]+\.md)/iu,
-  )?.[1];
-  if (namedPath) return { path: namedPath.trim(), explicit: true };
-  const path = userGoal.match(/([A-Za-z]:[\\/][^\s"'`]+\.md|(?:\.{1,2}[\\/])?[^\s"'`]+\.md)/i)?.[1];
-  return path
-    ? { path: path.trim(), explicit: true }
-    : { path: inferMarkdownTargetFromGoal(userGoal), explicit: false };
+export interface TextWriteTarget {
+  /** Workspace-relative target path; never slugged when the goal named a file. */
+  path: string;
+  /** True when the goal itself named the destination file. */
+  explicit: boolean;
+  /** Artifact format inferred from the goal. */
+  format: TextArtifactFormat;
 }
 
-function inferMarkdownTargetFromContent(content: string): string | undefined {
+/**
+ * Resolves both the write target and the artifact format. The format decides the
+ * extension, so an HTML request can no longer land in a `.md` file.
+ */
+export function resolveTextWriteTarget(
+  userGoal: string,
+  format: TextArtifactFormat = inferTextArtifactFormat(userGoal),
+): TextWriteTarget {
+  const explicitPath = inferExplicitTargetPath(userGoal);
+  if (explicitPath) {
+    return { path: explicitPath, explicit: true, format };
+  }
+  return { path: inferTargetFromGoal(userGoal, format), explicit: false, format };
+}
+
+/**
+ * Explicit destinations are honoured for every supported text extension, not just
+ * `.md` — "保存为 report.html" used to be slugged into a `.md` name instead.
+ */
+function inferExplicitTargetPath(userGoal: string): string | undefined {
+  const quotedPath = userGoal.match(
+    new RegExp(String.raw`["'\x60]([^"'\x60]+\.(?:${TEXT_ARTIFACT_EXTENSION_ALTERNATION}))["'\x60]`, "iu"),
+  )?.[1];
+  if (quotedPath) return quotedPath.trim();
+  const namedPath = userGoal.match(
+    new RegExp(
+      String.raw`(?:保存为?|文件名(?:为|是)?|命名为)\s*([^\\/\s"'\x60，,。；;]+\.(?:${TEXT_ARTIFACT_EXTENSION_ALTERNATION}))`,
+      "iu",
+    ),
+  )?.[1];
+  if (namedPath) return namedPath.trim();
+  const path = userGoal.match(
+    new RegExp(
+      String.raw`([A-Za-z]:[\\/][^\s"'\x60]+\.(?:${TEXT_ARTIFACT_EXTENSION_ALTERNATION})|(?:\.{1,2}[\\/])?[^\s"'\x60]+\.(?:${TEXT_ARTIFACT_EXTENSION_ALTERNATION}))`,
+      "iu",
+    ),
+  )?.[1];
+  return path?.trim();
+}
+
+/**
+ * Derives a name from the first heading of the generated content. Markdown only:
+ * other formats have no heading convention, and a stray `#` in their payload must
+ * not rename the file.
+ */
+function inferTargetFromContent(content: string, format: TextArtifactFormat): string | undefined {
+  if (!format.markdown) return undefined;
   const heading = extractMarkdownHeading(content);
-  return heading ? buildMarkdownTarget(heading) : undefined;
+  return heading ? buildTextTarget(heading, format) : undefined;
 }
 
 function extractMarkdownHeading(content: string): string | undefined {
   return content.match(/^\s*#\s+(.+?)\s*#*\s*(?:\r?\n|$)/u)?.[1];
 }
 
-function inferMarkdownTargetFromGoal(userGoal: string): string {
+function inferTargetFromGoal(userGoal: string, format: TextArtifactFormat): string {
   const summarizedGoal = stripTargetPath(userGoal)
     .replace(/\d[\d,]{0,6}\s*(?:\u4e2a)?(?:\u5b57|\u6c49\u5b57|characters?|words?)(?:\u5de6\u53f3|\u4e0a\u4e0b|\u4ee5\u4e0a|\u4ee5\u5185)?/giu, " ")
     .replace(/\b(?:please|write|create|generate|save|export|as|to|a|an|the|markdown|md|file|document)\b/giu, " ")
     .replace(/(?:\u8bf7|\u5e2e\u6211|\u5199\u4e00(?:\u7bc7|\u4efd|\u4e2a)?|\u521b\u4f5c|\u751f\u6210|\u521b\u5efa|\u4fdd\u5b58\u4e3a?|\u5bfc\u51fa\u4e3a?|markdown|md|\u6587\u4ef6|\u6587\u6863)/giu, " ");
-  return buildMarkdownTarget(summarizedGoal) ?? "untitled-document.md";
+  return buildTextTarget(summarizedGoal, format) ?? `untitled-document${format.extension}`;
 }
 
-function buildMarkdownTarget(value: string): string | undefined {
+function buildTextTarget(value: string, format: TextArtifactFormat): string | undefined {
   const normalized = value
     .normalize("NFKC")
-    .replace(/\.md$/iu, "")
+    .replace(new RegExp(String.raw`\.(?:${TEXT_ARTIFACT_EXTENSION_ALTERNATION})$`, "iu"), "")
     .replace(/[`*_~\[\](){}<>:"/\\|?*\u0000-\u001f]/gu, " ")
     .replace(/[.,;!\u3002\uff0c\uff1b\uff01\uff1f\u3001\uff1a]+/gu, " ")
     .trim()
@@ -970,9 +1339,17 @@ function buildMarkdownTarget(value: string): string | undefined {
   const basename = Array.from(normalized).slice(0, 64).join("").replace(/[.\-_]+$/gu, "");
   if (!basename) return undefined;
   const windowsReservedName = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/iu.test(basename);
-  return `${windowsReservedName ? `document-${basename}` : basename}.md`;
+  return `${windowsReservedName ? `document-${basename}` : basename}${format.extension}`;
 }
 
 function stripTargetPath(userGoal: string): string {
-  return userGoal.replace(/["'`]?([A-Za-z]:[\\/][^\s"'`]+\.md|(?:\.{1,2}[\\/])?[^\s"'`]+\.md)["'`]?/gi, "").trim();
+  return userGoal
+    .replace(
+      new RegExp(
+        String.raw`["'\x60]?([A-Za-z]:[\\/][^\s"'\x60]+\.(?:${TEXT_ARTIFACT_EXTENSION_ALTERNATION})|(?:\.{1,2}[\\/])?[^\s"'\x60]+\.(?:${TEXT_ARTIFACT_EXTENSION_ALTERNATION}))["'\x60]?`,
+        "giu",
+      ),
+      "",
+    )
+    .trim();
 }

@@ -2788,7 +2788,8 @@ describe("createFileScanTaskRuntime", () => {
       expect.stringMatching(/^task-/),
     );
     expect(finalSnapshot.permissionRequest?.status).toBe("approved");
-    expect(finalSnapshot.verificationSummary).toContain("完成写入");
+    // Verification now reports what actually ran: nothing independent here.
+    expect(finalSnapshot.verificationSummary).toContain("未独立验证");
     expect(finalSnapshot.documents).toContainEqual(expect.objectContaining({
       path: "summary.md",
       heading: "AI news summary",
@@ -2836,13 +2837,18 @@ describe("createFileScanTaskRuntime", () => {
     const finalSnapshot = await waitForStatus(snapshots, "completed");
 
     expect(finalSnapshot.title).toBe("\u6587\u672c\u6587\u4ef6\u5df2\u5199\u5165");
-    expect(finalSnapshot.commanderMessage).toBe("\u6587\u4ef6\u4ee3\u7406\u5df2\u5c06\u5185\u5bb9\u5199\u5165 \u65f6\u5149\u4fee\u590d\u5e08.md。");
+    // The message now carries the verification result as well.
+    expect(finalSnapshot.commanderMessage).toContain("\u6587\u4ef6\u4ee3\u7406\u5df2\u5c06\u5185\u5bb9\u5199\u5165 \u65f6\u5149\u4fee\u590d\u5e08.md。");
     expect(finalSnapshot.documents).toContainEqual(expect.objectContaining({
       path: "\u65f6\u5149\u4fee\u590d\u5e08.md",
       heading: "\u65f6\u5149\u4fee\u590d\u5e08",
       purpose: "\u6839\u636e\u7528\u6237\u7684\u6587\u672c\u6587\u4ef6\u8bf7\u6c42\u751f\u6210。",
     }));
-    expect(finalSnapshot.logs.some((log) => log.userMessage === "\u6587\u672c\u6587\u4ef6\u5df2\u6210\u529f\u5199\u5165。")).toBe(true);
+    // The completion log now reports the verification outcome as well, so assert
+    // the stable part instead of one exact sentence.
+    expect(
+      finalSnapshot.logs.some((log) => log.userMessage?.includes("\u6587\u672c\u6587\u4ef6\u5df2\u5199\u5165")),
+    ).toBe(true);
 
     unsubscribe();
     runtime.dispose();
@@ -2877,6 +2883,10 @@ describe("createFileScanTaskRuntime", () => {
       return plan;
     });
     const complete = vi.fn()
+      // The Commander decides the artifact contract before any content is written.
+      .mockResolvedValueOnce({
+        text: JSON.stringify({ format: "md", fileName: "\u96fe\u6e2f.md", requirements: [] }),
+      })
       .mockResolvedValueOnce({ text: firstSection })
       .mockResolvedValueOnce({ text: secondSection });
     const runtime = createFileScanTaskRuntime({
@@ -2903,11 +2913,16 @@ describe("createFileScanTaskRuntime", () => {
     expect(commanderPlan).not.toHaveBeenCalled();
     expect(complete).toHaveBeenNthCalledWith(
       1,
+      expect.stringContaining("You decide the artifact contract"),
+      expect.objectContaining({ temperature: 0 }),
+    );
+    expect(complete).toHaveBeenNthCalledWith(
+      2,
       expect.stringContaining("Fully perform the requested writing task"),
       expect.objectContaining({ useMaxOutputTokens: true }),
     );
     expect(complete).toHaveBeenNthCalledWith(
-      2,
+      3,
       expect.stringContaining("Continue the document below"),
       expect.objectContaining({ useMaxOutputTokens: true }),
     );
@@ -2920,7 +2935,21 @@ describe("createFileScanTaskRuntime", () => {
       expect.stringMatching(/^task-/),
     );
     expect(finalSnapshot.permissionRequest?.status).toBe("approved");
-    expect(finalSnapshot.tokenUsage?.modelCalls).toBe(2);
+    expect(finalSnapshot.tokenUsage?.modelCalls).toBe(3);
+    // Transparency: every model call leaves one readable ledger line naming the
+    // phase that asked for it, so the task log answers "what did the AI do".
+    const modelCallLogs = finalSnapshot.logs.filter((log) => log.title === "agent.model_call");
+    expect(modelCallLogs).toHaveLength(3);
+    expect(modelCallLogs.map((log) => log.detail?.split(" ")[0])).toEqual([
+      "artifact-contract",
+      "content-generation",
+      "content-continuation",
+    ]);
+    expect(modelCallLogs.map((log) => log.detail?.split(" ")[0])).toEqual([
+      "artifact-contract",
+      "content-generation",
+      "content-continuation",
+    ]);
     const finalMessages = finalSnapshot.conversationMessages ?? [];
     expect(finalMessages.some((message) => message.kind === "permission_request")).toBe(true);
     expect(finalMessages[finalMessages.length - 1]).toMatchObject({
@@ -2933,7 +2962,12 @@ describe("createFileScanTaskRuntime", () => {
   });
 
   it("streams generated file content before requesting write approval", async () => {
-    const complete = vi.fn(async () => ({ text: "fallback should not run" }));
+    const complete = vi.fn(async (prompt: string) => {
+      if (prompt.includes("You decide the artifact contract")) {
+        return { text: JSON.stringify({ format: "md", fileName: "visible-draft.md", requirements: [] }) };
+      }
+      return { text: "fallback should not run" };
+    });
     let streamOptions: { maxTokens?: number; useMaxOutputTokens?: boolean } | undefined;
     async function* stream(
       _prompt: string,
@@ -2962,14 +2996,16 @@ describe("createFileScanTaskRuntime", () => {
     });
     const permissionSnapshot = await waitForStatus(snapshots, "waiting_permission");
 
-    expect(complete).not.toHaveBeenCalled();
+    // The decision is the only non-streaming call; content must still stream.
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(String(complete.mock.calls[0]?.[0])).toContain("You decide the artifact contract");
     expect(streamOptions).toMatchObject({ useMaxOutputTokens: true });
     expect(streamOptions?.maxTokens).toBeUndefined();
     expect(snapshots.some((item) =>
       item.isStreaming && item.streamingText?.includes("Visible draft")
     )).toBe(true);
     expect(permissionSnapshot.permissionRequest?.status).toBe("pending");
-    expect(permissionSnapshot.tokenUsage?.modelCalls).toBe(1);
+    expect(permissionSnapshot.tokenUsage?.modelCalls).toBe(2);
 
     runtime.resolvePermission("denied");
     await waitForStatus(snapshots, "completed");
@@ -2978,7 +3014,12 @@ describe("createFileScanTaskRuntime", () => {
   });
 
   it("continues a length-truncated stream before requesting write approval", async () => {
-    const complete = vi.fn(async () => ({ text: "fallback should not run" }));
+    const complete = vi.fn(async (prompt: string) => {
+      if (prompt.includes("You decide the artifact contract")) {
+        return { text: JSON.stringify({ format: "md", fileName: "streamed-story.md", requirements: [] }) };
+      }
+      return { text: "fallback should not run" };
+    });
     let streamCallCount = 0;
     async function* stream(
       _prompt: string,
@@ -3013,7 +3054,8 @@ describe("createFileScanTaskRuntime", () => {
     const permissionSnapshot = await waitForStatus(snapshots, "waiting_permission");
 
     expect(streamCallCount).toBe(2);
-    expect(complete).not.toHaveBeenCalled();
+    expect(complete).toHaveBeenCalledTimes(1);
+    expect(String(complete.mock.calls[0]?.[0])).toContain("You decide the artifact contract");
     expect(planWriteText).toHaveBeenCalledWith(
       expect.objectContaining({
         content: expect.stringContaining("\u5929\u4eae\u65f6，\u4ed6\u7ec8\u4e8e\u56de\u5230\u4e86\u5bb6。"),
@@ -3021,7 +3063,7 @@ describe("createFileScanTaskRuntime", () => {
       "task-truncated-streamed-text-write",
     );
     expect(permissionSnapshot.permissionRequest?.status).toBe("pending");
-    expect(permissionSnapshot.tokenUsage?.modelCalls).toBe(2);
+    expect(permissionSnapshot.tokenUsage?.modelCalls).toBe(3);
 
     runtime.resolvePermission("denied");
     await waitForStatus(snapshots, "completed");
@@ -3218,7 +3260,8 @@ describe("createFileScanTaskRuntime", () => {
 
     expect(finalSnapshot.title).toBe("文本内容生成失败");
     expect(finalSnapshot.permissionRequest).toBeUndefined();
-    expect(finalSnapshot.tokenUsage?.modelCalls).toBe(1);
+    // One contract decision plus the generation call that returned nothing.
+    expect(finalSnapshot.tokenUsage?.modelCalls).toBe(2);
     expect(planWriteText).not.toHaveBeenCalled();
     expect(writeText).not.toHaveBeenCalled();
 
@@ -3325,8 +3368,13 @@ describe("createFileScanTaskRuntime", () => {
     runtime.dispose();
   });
 
-  it("cancels a text write during initial planning without starting the model", async () => {
-    const complete = vi.fn(async () => ({ text: "# Content" }));
+  it("cancels a text write during initial planning without starting content generation", async () => {
+    const complete = vi.fn(async (prompt: string) => {
+      if (prompt.includes("You decide the artifact contract")) {
+        return { text: JSON.stringify({ format: "md", fileName: "cancelled.md", requirements: [] }) };
+      }
+      return { text: "# Content" };
+    });
     const planWriteText = vi.fn(async () => createTextWritePlan("javis-output.md"));
     const writeText = vi.fn(async () => createTextWriteResult("javis-output.md"));
     const runtime = createFileScanTaskRuntime({
@@ -3349,7 +3397,13 @@ describe("createFileScanTaskRuntime", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     expect(snapshots[snapshots.length - 1]?.status).toBe("cancelled");
-    expect(complete).not.toHaveBeenCalled();
+    // Planning legitimately asks the Commander to decide the artifact contract, so
+    // cancellation must prevent content generation rather than every model call.
+    expect(
+      complete.mock.calls.some((call) =>
+        String(call[0]).includes("Fully perform the requested writing task"),
+      ),
+    ).toBe(false);
     expect(planWriteText).not.toHaveBeenCalled();
     expect(writeText).not.toHaveBeenCalled();
 
@@ -3409,7 +3463,7 @@ describe("createFileScanTaskRuntime", () => {
     expect(snapshots.some((item) =>
       item.id === "task-cancelled-during-native-write" && item.status === "cancelled"
     )).toBe(false);
-    expect(finalSnapshot.verificationSummary).toContain("已在确认写入授权后完成写入");
+    expect(finalSnapshot.verificationSummary).toContain("未独立验证");
 
     unsubscribe();
     runtime.dispose();
@@ -3421,7 +3475,12 @@ describe("createFileScanTaskRuntime", () => {
     const writeStarted = new Promise<void>((resolve) => {
       markWriteStarted = resolve;
     });
-    const complete = vi.fn(async () => ({ text: "# Complete content" }));
+    const complete = vi.fn(async (prompt: string) => {
+      if (prompt.includes("You decide the artifact contract")) {
+        return { text: JSON.stringify({ format: "md", fileName: "javis-output.md", requirements: [] }) };
+      }
+      return { text: "# Complete content" };
+    });
     const writeText = vi.fn(() => {
       markWriteStarted();
       return new Promise<TextFileWriteResult>((resolve) => {
@@ -3452,12 +3511,12 @@ describe("createFileScanTaskRuntime", () => {
 
     expect(runtime.getSnapshot().id).toBe("task-native-write");
     expect(runtime.getSnapshot().status).toBe("running");
-    expect(complete).toHaveBeenCalledTimes(1);
+    expect(complete).toHaveBeenCalledTimes(2);
     expect(writeText).toHaveBeenCalledTimes(1);
 
     resolveWrite(createTextWriteResult("javis-output.md"));
     await vi.waitFor(() => {
-      expect(complete).toHaveBeenCalledTimes(2);
+      expect(complete).toHaveBeenCalledTimes(3);
       expect(runtime.getSnapshot()).toMatchObject({
         id: "task-native-write",
         userGoal: "same id replacement",
@@ -3505,14 +3564,19 @@ describe("createFileScanTaskRuntime", () => {
 
   it("does not preview or approve incomplete long-form content after the call limit", async () => {
     const complete = vi.fn(async (
-      _prompt: string,
+      prompt: string,
       _options?: {
         maxTokens?: number;
         useMaxOutputTokens?: boolean;
         temperature?: number;
         locale?: string;
       },
-    ) => ({ text: "\u4e0d\u8db3\u7684\u6b63\u6587" }));
+    ) => {
+      if (prompt.includes("You decide the artifact contract")) {
+        return { text: JSON.stringify({ format: "md", fileName: "javis-output.md", requirements: [] }) };
+      }
+      return { text: "\u4e0d\u8db3\u7684\u6b63\u6587" };
+    });
     const planWriteText = vi.fn(async () => createTextWritePlan("javis-output.md"));
     const writeText = vi.fn(async () => createTextWriteResult("javis-output.md"));
     const runtime = createFileScanTaskRuntime({
@@ -3529,11 +3593,17 @@ describe("createFileScanTaskRuntime", () => {
     runtime.start("\u5199\u4e00\u7bc7100000\u5b57\u7684\u5c0f\u8bf4\uff0c\u4fdd\u5b58\u4e3a md \u6587\u4ef6", { mode: "project" });
     const finalSnapshot = await waitForStatus(snapshots, "failed");
 
-    expect(complete).toHaveBeenCalledTimes(8);
-    expect(complete.mock.calls.every((call) => call[1]?.useMaxOutputTokens === true)).toBe(true);
+    expect(complete).toHaveBeenCalledTimes(9);
+    // The contract decision is the one call without a max-output budget; the eight
+    // content calls (initial + continuations) must all keep it.
+    const contentCalls = complete.mock.calls.filter(
+      (call) => !String(call[0]).includes("You decide the artifact contract"),
+    );
+    expect(contentCalls).toHaveLength(8);
+    expect(contentCalls.every((call) => call[1]?.useMaxOutputTokens === true)).toBe(true);
     expect(finalSnapshot.permissionRequest).toBeUndefined();
     expect(finalSnapshot.logs[finalSnapshot.logs.length - 1]?.detail).toContain("Generated content is incomplete");
-    expect(finalSnapshot.tokenUsage?.modelCalls).toBe(8);
+    expect(finalSnapshot.tokenUsage?.modelCalls).toBe(9);
     expect(planWriteText).not.toHaveBeenCalled();
     expect(writeText).not.toHaveBeenCalled();
 
